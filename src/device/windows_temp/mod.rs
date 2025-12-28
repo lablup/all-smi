@@ -77,7 +77,7 @@ fn detect_cpu_vendor() -> CpuVendor {
     use sysinfo::{CpuRefreshKind, System};
 
     let mut system = System::new();
-    system.refresh_cpu_specifics(CpuRefreshKind::new());
+    system.refresh_cpu_specifics(CpuRefreshKind::everything());
 
     let cpus = system.cpus();
     if cpus.is_empty() {

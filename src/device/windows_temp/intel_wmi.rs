@@ -20,19 +20,7 @@
 use super::{is_wmi_not_found_error, TemperatureResult};
 use once_cell::sync::OnceCell;
 use serde::Deserialize;
-use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use wmi::WMIConnection;
-
-/// Helper to get read lock, recovering from poisoned state.
-fn read_lock<T>(lock: &RwLock<T>) -> RwLockReadGuard<'_, T> {
-    lock.read().unwrap_or_else(|poisoned| poisoned.into_inner())
-}
-
-/// Helper to get write lock, recovering from poisoned state.
-fn write_lock<T>(lock: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
-    lock.write()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-}
 
 /// WMI structure for Intel thermal zone information.
 #[derive(Deserialize, Debug)]
@@ -45,17 +33,14 @@ struct IntelThermalZone {
     temperature: Option<u32>,
 }
 
-/// Cached Intel WMI connection state.
-struct IntelWmiState {
-    connection: WMIConnection,
-}
-
 /// Intel WMI temperature source.
+///
+/// Note: WMIConnection is not Send + Sync, so we cannot cache it.
+/// Instead, we cache only whether the Intel namespace is available,
+/// and create a new connection on each temperature query.
 pub struct IntelWmiSource {
-    /// Cached connection state
-    state: RwLock<Option<IntelWmiState>>,
-    /// Whether we've already tried to connect
-    connect_attempted: OnceCell<bool>,
+    /// Whether the Intel WMI namespace is available
+    namespace_available: OnceCell<bool>,
 }
 
 impl Default for IntelWmiSource {
@@ -68,22 +53,20 @@ impl IntelWmiSource {
     /// Create a new Intel WMI source.
     pub fn new() -> Self {
         Self {
-            state: RwLock::new(None),
-            connect_attempted: OnceCell::new(),
+            namespace_available: OnceCell::new(),
         }
     }
 
-    /// Attempt to connect to the Intel WMI namespace.
-    fn try_connect(&self) -> bool {
-        *self.connect_attempted.get_or_init(|| {
-            match WMIConnection::with_namespace_path("root\\Intel") {
-                Ok(conn) => {
-                    *write_lock(&self.state) = Some(IntelWmiState { connection: conn });
-                    true
-                }
-                Err(_) => false,
-            }
+    /// Check if the Intel WMI namespace is available.
+    fn is_namespace_available(&self) -> bool {
+        *self.namespace_available.get_or_init(|| {
+            WMIConnection::with_namespace_path("root\\Intel").is_ok()
         })
+    }
+
+    /// Create a new WMI connection to the Intel namespace.
+    fn create_connection(&self) -> Option<WMIConnection> {
+        WMIConnection::with_namespace_path("root\\Intel").ok()
     }
 
     /// Get temperature from Intel WMI.
@@ -94,15 +77,15 @@ impl IntelWmiSource {
     /// * `TemperatureResult::Error` - Transient error during query
     /// * `TemperatureResult::NoValidReading` - Query succeeded but returned invalid data
     pub fn get_temperature(&self) -> TemperatureResult {
-        // Try to connect if not already attempted
-        if !self.try_connect() {
+        // Check if namespace is available (cached)
+        if !self.is_namespace_available() {
             return TemperatureResult::NotFound;
         }
 
-        let state_guard = read_lock(&self.state);
-        let state = match state_guard.as_ref() {
-            Some(s) => s,
-            None => return TemperatureResult::NotFound,
+        // Create a new connection for this query
+        let connection = match self.create_connection() {
+            Some(conn) => conn,
+            None => return TemperatureResult::Error,
         };
 
         // Try different Intel thermal zone classes
@@ -113,7 +96,7 @@ impl IntelWmiSource {
         ];
 
         for query in queries {
-            let results: Result<Vec<IntelThermalZone>, _> = state.connection.raw_query(query);
+            let results: Result<Vec<IntelThermalZone>, _> = connection.raw_query(query);
 
             match results {
                 Ok(zones) if !zones.is_empty() => {

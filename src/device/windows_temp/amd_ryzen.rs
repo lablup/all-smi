@@ -148,7 +148,7 @@ impl AmdRyzenSource {
         for path in AMD_DLL_PATHS {
             // SAFETY: Loading a shared library is inherently unsafe.
             // We trust that the AMD DLL at the known paths is valid.
-            match unsafe { Library::new(path) } {
+            match unsafe { Library::new(*path) } {
                 Ok(lib) => {
                     // Try to initialize the platform
                     // SAFETY: We're calling the documented PlatformInit function.

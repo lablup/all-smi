@@ -26,19 +26,7 @@
 use super::{is_wmi_not_found_error, TemperatureResult};
 use once_cell::sync::OnceCell;
 use serde::Deserialize;
-use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use wmi::WMIConnection;
-
-/// Helper to get read lock, recovering from poisoned state.
-fn read_lock<T>(lock: &RwLock<T>) -> RwLockReadGuard<'_, T> {
-    lock.read().unwrap_or_else(|poisoned| poisoned.into_inner())
-}
-
-/// Helper to get write lock, recovering from poisoned state.
-fn write_lock<T>(lock: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
-    lock.write()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-}
 
 /// WMI structure for LibreHardwareMonitor sensor.
 #[derive(Deserialize, Debug)]
@@ -47,6 +35,9 @@ struct LhmSensor {
     /// Sensor name (e.g., "CPU Package", "CPU Core #1")
     name: Option<String>,
     /// Sensor type (e.g., "Temperature", "Voltage", "Clock")
+    /// Note: This field is required for WMI deserialization but not used in code
+    /// because we filter by SensorType='Temperature' in the query.
+    #[allow(dead_code)]
     sensor_type: Option<String>,
     /// Current sensor value
     value: Option<f32>,
@@ -55,17 +46,23 @@ struct LhmSensor {
     parent: Option<String>,
 }
 
-/// Cached LibreHardwareMonitor WMI connection state.
-struct LhmWmiState {
-    connection: WMIConnection,
+/// Which namespace is available for LibreHardwareMonitor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LhmNamespace {
+    /// LibreHardwareMonitor namespace (newer versions)
+    Libre,
+    /// OpenHardwareMonitor namespace (older versions)
+    Open,
 }
 
 /// LibreHardwareMonitor WMI temperature source.
+///
+/// Note: WMIConnection is not Send + Sync, so we cannot cache it.
+/// Instead, we cache only which namespace is available (if any),
+/// and create a new connection on each temperature query.
 pub struct LibreHardwareMonitorSource {
-    /// Cached connection state
-    state: RwLock<Option<LhmWmiState>>,
-    /// Whether we've already tried to connect
-    connect_attempted: OnceCell<bool>,
+    /// Which namespace is available (None if not available, never checked yet, or error)
+    available_namespace: OnceCell<Option<LhmNamespace>>,
 }
 
 impl Default for LibreHardwareMonitorSource {
@@ -78,31 +75,33 @@ impl LibreHardwareMonitorSource {
     /// Create a new LibreHardwareMonitor source.
     pub fn new() -> Self {
         Self {
-            state: RwLock::new(None),
-            connect_attempted: OnceCell::new(),
+            available_namespace: OnceCell::new(),
         }
     }
 
-    /// Attempt to connect to the LibreHardwareMonitor WMI namespace.
-    fn try_connect(&self) -> bool {
-        *self.connect_attempted.get_or_init(|| {
-            match WMIConnection::with_namespace_path("root\\LibreHardwareMonitor") {
-                Ok(conn) => {
-                    *write_lock(&self.state) = Some(LhmWmiState { connection: conn });
-                    true
-                }
-                Err(_) => {
-                    // Also try OpenHardwareMonitor namespace (older versions)
-                    match WMIConnection::with_namespace_path("root\\OpenHardwareMonitor") {
-                        Ok(conn) => {
-                            *write_lock(&self.state) = Some(LhmWmiState { connection: conn });
-                            true
-                        }
-                        Err(_) => false,
-                    }
-                }
+    /// Get the available namespace, checking both LibreHardwareMonitor and OpenHardwareMonitor.
+    fn get_available_namespace(&self) -> Option<LhmNamespace> {
+        *self.available_namespace.get_or_init(|| {
+            if WMIConnection::with_namespace_path("root\\LibreHardwareMonitor").is_ok() {
+                Some(LhmNamespace::Libre)
+            } else if WMIConnection::with_namespace_path("root\\OpenHardwareMonitor").is_ok() {
+                Some(LhmNamespace::Open)
+            } else {
+                None
             }
         })
+    }
+
+    /// Create a new WMI connection to the appropriate namespace.
+    fn create_connection(&self) -> Option<WMIConnection> {
+        match self.get_available_namespace()? {
+            LhmNamespace::Libre => {
+                WMIConnection::with_namespace_path("root\\LibreHardwareMonitor").ok()
+            }
+            LhmNamespace::Open => {
+                WMIConnection::with_namespace_path("root\\OpenHardwareMonitor").ok()
+            }
+        }
     }
 
     /// Get temperature from LibreHardwareMonitor WMI.
@@ -113,22 +112,22 @@ impl LibreHardwareMonitorSource {
     /// * `TemperatureResult::Error` - Transient error during query
     /// * `TemperatureResult::NoValidReading` - Query succeeded but returned invalid data
     pub fn get_temperature(&self) -> TemperatureResult {
-        // Try to connect if not already attempted
-        if !self.try_connect() {
+        // Check if any namespace is available (cached)
+        if self.get_available_namespace().is_none() {
             return TemperatureResult::NotFound;
         }
 
-        let state_guard = read_lock(&self.state);
-        let state = match state_guard.as_ref() {
-            Some(s) => s,
-            None => return TemperatureResult::NotFound,
+        // Create a new connection for this query
+        let connection = match self.create_connection() {
+            Some(conn) => conn,
+            None => return TemperatureResult::Error,
         };
 
         // Query for CPU temperature sensors
         let query =
             "SELECT Name, SensorType, Value, Parent FROM Sensor WHERE SensorType='Temperature'";
 
-        let results: Result<Vec<LhmSensor>, _> = state.connection.raw_query(query);
+        let results: Result<Vec<LhmSensor>, _> = connection.raw_query(query);
 
         match results {
             Ok(sensors) => {
