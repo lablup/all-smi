@@ -227,10 +227,7 @@ impl TemperatureManager {
 
     /// Check if a source is potentially available (not marked as permanently unavailable).
     fn is_source_potentially_available(&self, status: &RwLock<SourceAvailability>) -> bool {
-        match *read_lock(status) {
-            SourceAvailability::Unavailable => false,
-            _ => true,
-        }
+        !matches!(*read_lock(status), SourceAvailability::Unavailable)
     }
 
     /// Mark a source as available.

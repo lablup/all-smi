@@ -123,16 +123,10 @@ impl AmdWindowsGpuReader {
                 // Warn if the reported VRAM is suspiciously close to 4GB limit or 0
                 const FOUR_GB: u64 = 4 * 1024 * 1024 * 1024; // 4,294,967,296 bytes
                 if total_memory == 0 {
-                    eprintln!(
-                        "AMD GPU '{}': VRAM size unavailable (reported as 0)",
-                        name
-                    );
+                    eprintln!("AMD GPU '{name}': VRAM size unavailable (reported as 0)");
                 } else if total_memory >= FOUR_GB - (512 * 1024 * 1024) {
                     // If reported value is >= 3.5GB, it might be capped/wrapped for >4GB GPU
-                    eprintln!(
-                        "AMD GPU '{}': VRAM reported as {} bytes, may be inaccurate for >4GB GPUs due to WMI 32-bit limitation",
-                        name, total_memory
-                    );
+                    eprintln!("AMD GPU '{name}': VRAM reported as {total_memory} bytes, may be inaccurate for >4GB GPUs due to WMI 32-bit limitation");
                 }
 
                 // Build detail map
