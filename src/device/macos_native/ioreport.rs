@@ -475,7 +475,13 @@ impl IOReportChannelItem {
 }
 
 /// Iterator over IOReport sample channels
+///
+/// This struct takes ownership of the sample CFDictionaryRef and releases it
+/// when the iterator is dropped, preventing memory leaks.
 pub struct IOReportIterator {
+    /// The sample CFDictionary that owns the channel data.
+    /// Must be released when the iterator is dropped.
+    sample: CFDictionaryRef,
     channels: Vec<CFDictionaryRef>,
     index: usize,
 }
@@ -483,7 +489,22 @@ pub struct IOReportIterator {
 impl IOReportIterator {
     fn new(sample: CFDictionaryRef) -> Self {
         let channels = get_io_channels(sample);
-        Self { channels, index: 0 }
+        Self {
+            sample,
+            channels,
+            index: 0,
+        }
+    }
+}
+
+impl Drop for IOReportIterator {
+    fn drop(&mut self) {
+        // Release the sample dictionary to prevent memory leaks
+        if !self.sample.is_null() {
+            unsafe {
+                CFRelease(self.sample as *const c_void);
+            }
+        }
     }
 }
 
