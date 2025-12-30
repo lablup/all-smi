@@ -59,9 +59,9 @@ impl IntelWmiSource {
 
     /// Check if the Intel WMI namespace is available.
     fn is_namespace_available(&self) -> bool {
-        *self.namespace_available.get_or_init(|| {
-            WMIConnection::with_namespace_path("root\\Intel").is_ok()
-        })
+        *self
+            .namespace_available
+            .get_or_init(|| WMIConnection::with_namespace_path("root\\Intel").is_ok())
     }
 
     /// Create a new WMI connection to the Intel namespace.
