@@ -47,7 +47,7 @@ struct RblnMemoryInfo {
 #[derive(Debug, Deserialize)]
 struct RblnDevice {
     #[allow(dead_code)]
-    npu: String,
+    npu: u32,
     name: String,
     sid: String,
     uuid: String,
