@@ -22,10 +22,41 @@ use crate::device::GpuReader;
 use crate::utils::get_hostname;
 use chrono::Local;
 use once_cell::sync::Lazy;
+use serde::de::{self, Deserializer, Visitor};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
+
+/// Custom deserializer that accepts both string and integer for the `npu` field.
+/// This ensures backward compatibility across different SDK versions:
+/// - SDK 1.x: outputs `"npu": "0"` (string)
+/// - SDK 2.0.x: outputs `"npu": 0` (integer)
+fn deserialize_string_or_u32<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct StringOrU32Visitor;
+
+    impl<'de> Visitor<'de> for StringOrU32Visitor {
+        type Value = u32;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("a string or u32")
+        }
+
+        fn visit_u64<E: de::Error>(self, v: u64) -> Result<u32, E> {
+            u32::try_from(v).map_err(|_| E::custom(format!("u64 {v} out of range for u32")))
+        }
+
+        fn visit_str<E: de::Error>(self, v: &str) -> Result<u32, E> {
+            v.parse()
+                .map_err(|_| E::custom(format!("failed to parse '{v}' as u32")))
+        }
+    }
+
+    deserializer.deserialize_any(StringOrU32Visitor)
+}
 
 /// JSON structures for Rebellions device information
 #[derive(Debug, Deserialize)]
@@ -46,6 +77,7 @@ struct RblnMemoryInfo {
 
 #[derive(Debug, Deserialize)]
 struct RblnDevice {
+    #[serde(deserialize_with = "deserialize_string_or_u32")]
     #[allow(dead_code)]
     npu: u32,
     name: String,
