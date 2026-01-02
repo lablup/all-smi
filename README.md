@@ -380,6 +380,107 @@ make release
 make test
 ```
 
+## Library API
+
+`all-smi` can also be used as a Rust library for building custom monitoring tools or integrating hardware metrics into your applications.
+
+### Add Dependency
+
+Add to your `Cargo.toml`:
+
+```toml
+[dependencies]
+all-smi = "0.15"
+```
+
+### Basic Usage
+
+```rust
+use all_smi::{AllSmi, Result};
+
+fn main() -> Result<()> {
+    // Initialize with auto-detection
+    let smi = AllSmi::new()?;
+
+    // Get all GPU/NPU information
+    for gpu in smi.get_gpu_info() {
+        println!("{}: {}% utilization, {:.1}W",
+            gpu.name, gpu.utilization, gpu.power_consumption);
+    }
+
+    // Get CPU information
+    for cpu in smi.get_cpu_info() {
+        println!("{}: {:.1}% utilization", cpu.cpu_model, cpu.utilization);
+    }
+
+    // Get memory information
+    for mem in smi.get_memory_info() {
+        println!("Memory: {:.1}% used", mem.utilization);
+    }
+
+    Ok(())
+}
+```
+
+### Using the Prelude
+
+For convenience, import all common types:
+
+```rust
+use all_smi::prelude::*;
+
+fn main() -> Result<()> {
+    let smi = AllSmi::new()?;
+
+    // Types like GpuInfo, CpuInfo, MemoryInfo are available
+    let gpus: Vec<GpuInfo> = smi.get_gpu_info();
+    println!("Found {} GPU(s)", gpus.len());
+
+    Ok(())
+}
+```
+
+### Available Methods
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `get_gpu_info()` | `Vec<GpuInfo>` | GPU/NPU metrics (utilization, memory, temp, power) |
+| `get_cpu_info()` | `Vec<CpuInfo>` | CPU metrics (utilization, frequency, temp) |
+| `get_memory_info()` | `Vec<MemoryInfo>` | System memory metrics |
+| `get_process_info()` | `Vec<ProcessInfo>` | GPU process information |
+| `get_chassis_info()` | `Option<ChassisInfo>` | Node-level power and thermal info |
+
+### Configuration
+
+```rust
+use all_smi::{AllSmi, AllSmiConfig};
+
+let config = AllSmiConfig::new()
+    .sample_interval(500)  // 500ms sample interval
+    .verbose(true);        // Enable verbose warnings
+
+let smi = AllSmi::with_config(config)?;
+```
+
+### Thread Safety
+
+`AllSmi` is `Send + Sync` and can be safely shared across threads:
+
+```rust
+use std::sync::Arc;
+use std::thread;
+
+let smi = Arc::new(AllSmi::new()?);
+
+let smi_clone = smi.clone();
+thread::spawn(move || {
+    let gpus = smi_clone.get_gpu_info();
+    // ...
+});
+```
+
+For more examples, see `examples/library_usage.rs` in the repository.
+
 ## Development
 
 For development documentation including building from source, testing with mock servers, architecture details, and technology stack information, see [DEVELOPERS.md](DEVELOPERS.md).
