@@ -161,6 +161,7 @@ impl AllSmi {
     /// println!("Found {} GPU(s)", smi.get_gpu_info().len());
     /// # Ok::<(), all_smi::Error>(())
     /// ```
+    #[must_use = "AllSmi instance must be stored to access hardware information"]
     pub fn new() -> Result<Self> {
         Self::with_config(AllSmiConfig::default())
     }
@@ -174,6 +175,7 @@ impl AllSmi {
     /// # Errors
     ///
     /// Returns an error if platform initialization fails.
+    #[must_use = "AllSmi instance must be stored to access hardware information"]
     pub fn with_config(config: AllSmiConfig) -> Result<Self> {
         // Initialize platform-specific managers
         #[cfg(target_os = "macos")]
@@ -430,7 +432,13 @@ impl Drop for AllSmi {
     }
 }
 
-// Safety: AllSmi uses thread-safe readers
+// SAFETY: AllSmi is safe to send and share across threads because:
+// 1. All reader traits (GpuReader, CpuReader, MemoryReader, ChassisReader) require
+//    Send + Sync bounds, ensuring all stored readers are thread-safe
+// 2. The platform-specific managers (NativeMetricsManager on macOS, HlsmiManager on Linux)
+//    are designed to be accessed from any thread
+// 3. The initialization flags are only written during construction and only read during drop,
+//    with no concurrent access possible due to ownership semantics
 unsafe impl Send for AllSmi {}
 unsafe impl Sync for AllSmi {}
 

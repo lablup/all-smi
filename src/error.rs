@@ -85,7 +85,7 @@ pub enum Error {
 /// A specialized Result type for all-smi operations.
 ///
 /// This type alias simplifies error handling by using the library's
-/// unified [`Error`] type.
+/// unified [`enum@Error`] type.
 ///
 /// # Example
 ///
