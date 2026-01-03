@@ -25,7 +25,7 @@ reqwest = { version = "0.12", features = ["json"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
 regex = "1.12.2"
-sysinfo = "0.37.2"
+sysinfo = "0.33"  # Pinned for Rust 1.85 compatibility (Launchpad)
 anyhow = { version = "1.0.100", optional = true }
 hyper = { version = "1.8.1", features = ["full"] }
 hyper-util = { version = "0.1.18", features = ["full"] }
@@ -53,11 +53,11 @@ all-smi-ttkmd-if = "0.2.2"
 furiosa-smi-rs = { version = "2025.3.0", optional = true }
 cgroups-rs = "0.5.0"
 # Dynamic library loading for tpu_pjrt
-libloading = "0.9"
+libloading = "0.8"  # Pinned for Rust 1.85 compatibility (Launchpad)
 
 # AMD GPU support (glibc only, not compatible with musl static linking)
 [target.'cfg(all(target_os = "linux", not(target_env = "musl")))'.dependencies]
-libamdgpu_top = "0.11.0"
+libamdgpu_top = "0.10"  # Pinned for Rust 1.85 compatibility (Launchpad, 0.11 uses 2024 edition)
 
 [target.'cfg(target_env = "musl")'.dependencies]
 openssl = { version = "0.10.75", features = ["vendored"] }
@@ -68,7 +68,7 @@ openssl = { version = "0.10.75", features = ["vendored"] }
 # Windows-specific dependencies
 [target.'cfg(target_os = "windows")'.dependencies]
 wmi = "0.18"
-libloading = "0.9"
+libloading = "0.8"  # Pinned for Rust 1.85 compatibility (Launchpad)
 
 # macOS-specific dependencies
 [target.'cfg(target_os = "macos")'.dependencies]
