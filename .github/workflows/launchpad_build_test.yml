@@ -1,0 +1,188 @@
+# .github/workflows/launchpad_build_test.yml
+name: Launchpad Build Test
+
+# ═══════════════════════════════════════════════════════════════
+# Simulates the Launchpad PPA build environment to catch issues
+# before uploading to the actual PPA.
+#
+# Launchpad constraints:
+# - Ubuntu 22.04 (jammy) or 24.04 (noble) base
+# - No network access during build
+# - Uses system Rust from rust-1.85-all package
+# - Must use vendored dependencies
+# ═══════════════════════════════════════════════════════════════
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'src/**'
+      - 'debian/**'
+      - '.github/workflows/launchpad_build_test.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'src/**'
+      - 'debian/**'
+      - '.github/workflows/launchpad_build_test.yml'
+  workflow_dispatch:
+
+jobs:
+  test-launchpad-build:
+    name: Test Launchpad Build (${{ matrix.distro }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        distro: [jammy, noble]
+
+    steps:
+    # ───────────────────────────────────────────────────────────────
+    # Step 1: Checkout source code
+    # ───────────────────────────────────────────────────────────────
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    # ───────────────────────────────────────────────────────────────
+    # Step 2: Install Rust toolchain (for vendoring only)
+    # ───────────────────────────────────────────────────────────────
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+
+    # ───────────────────────────────────────────────────────────────
+    # Step 3: Vendor dependencies
+    # ───────────────────────────────────────────────────────────────
+    - name: Vendor Rust dependencies
+      run: |
+        # Vendor all dependencies for offline build
+        cargo vendor debian/vendor
+
+        # Create .cargo/config.toml to use vendored sources
+        mkdir -p .cargo
+        cat > .cargo/config.toml << 'EOF'
+        [source.crates-io]
+        replace-with = "vendored-sources"
+
+        [source.vendored-sources]
+        directory = "debian/vendor"
+        EOF
+
+        echo "Vendored dependencies: $(du -sh debian/vendor | cut -f1)"
+
+    # ───────────────────────────────────────────────────────────────
+    # Step 4: Build Docker image simulating Launchpad environment
+    # ───────────────────────────────────────────────────────────────
+    - name: Build Launchpad simulation image
+      run: |
+        cat > Dockerfile.launchpad << 'DOCKERFILE'
+        ARG DISTRO=noble
+        FROM ubuntu:${DISTRO}
+
+        # Install build dependencies (same as debian/control Build-Depends)
+        RUN apt-get update && apt-get install -y \
+            build-essential \
+            pkg-config \
+            libssl-dev \
+            protobuf-compiler \
+            cmake \
+            libdrm-dev \
+            curl \
+            ca-certificates \
+            && rm -rf /var/lib/apt/lists/*
+
+        # Install Rust 1.85 (simulating rust-1.85-all package)
+        # Note: Launchpad uses rust-1.85-all from Ubuntu repos
+        RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+            sh -s -- -y --default-toolchain 1.85.0
+        ENV PATH="/root/.cargo/bin:${PATH}"
+
+        # Create wrapper scripts to match rust-1.85-all package naming
+        # Note: Can't use symlinks because rustup uses argv[0] to determine proxy
+        RUN echo '#!/bin/bash\nexec /root/.cargo/bin/rustc "$@"' > /usr/bin/rustc-1.85 && \
+            chmod +x /usr/bin/rustc-1.85 && \
+            echo '#!/bin/bash\nexec /root/.cargo/bin/cargo "$@"' > /usr/bin/cargo-1.85 && \
+            chmod +x /usr/bin/cargo-1.85
+
+        WORKDIR /build
+        DOCKERFILE
+
+        docker build \
+          --build-arg DISTRO=${{ matrix.distro }} \
+          -t launchpad-sim:${{ matrix.distro }} \
+          -f Dockerfile.launchpad .
+
+    # ───────────────────────────────────────────────────────────────
+    # Step 5: Test offline build (simulating Launchpad)
+    # ───────────────────────────────────────────────────────────────
+    - name: Test offline build (network disabled)
+      run: |
+        echo "=== Testing Launchpad-like offline build ==="
+        echo "Distro: ${{ matrix.distro }}"
+        echo "Network: DISABLED (--network none)"
+        echo ""
+
+        # Run build in network-isolated container
+        docker run --rm \
+          --network none \
+          -v "${{ github.workspace }}:/build" \
+          -w /build \
+          launchpad-sim:${{ matrix.distro }} \
+          bash -c '
+            set -e
+
+            echo "=== Environment ==="
+            rustc-1.85 --version
+            cargo-1.85 --version
+            echo ""
+
+            echo "=== Verifying network is disabled ==="
+            if curl --connect-timeout 2 https://crates.io 2>/dev/null; then
+              echo "ERROR: Network should be disabled!"
+              exit 1
+            else
+              echo "Network is disabled (expected)"
+            fi
+            echo ""
+
+            echo "=== Verifying vendored dependencies ==="
+            if [ ! -d "debian/vendor" ]; then
+              echo "ERROR: debian/vendor not found!"
+              exit 1
+            fi
+            echo "Vendor directory: $(du -sh debian/vendor | cut -f1)"
+            echo ""
+
+            echo "=== Verifying .cargo/config.toml ==="
+            if [ ! -f ".cargo/config.toml" ]; then
+              echo "ERROR: .cargo/config.toml not found!"
+              exit 1
+            fi
+            cat .cargo/config.toml
+            echo ""
+
+            echo "=== Building with cargo-1.85 --frozen ==="
+            export CARGO_HOME=/build/debian/cargo
+            export CARGO_TARGET_DIR=/build/target
+            mkdir -p $CARGO_HOME
+
+            cargo-1.85 build --release --frozen
+
+            echo ""
+            echo "=== Build successful! ==="
+            ls -la target/release/all-smi
+            ./target/release/all-smi --version || true
+          '
+
+    # ───────────────────────────────────────────────────────────────
+    # Step 6: Cleanup
+    # ───────────────────────────────────────────────────────────────
+    - name: Cleanup
+      if: always()
+      run: |
+        # Clean up build artifacts to avoid permission issues
+        sudo rm -rf target debian/cargo debian/vendor .cargo
+        docker rmi launchpad-sim:${{ matrix.distro }} 2>/dev/null || true
