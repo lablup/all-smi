@@ -419,7 +419,7 @@ impl LocalCollector {
 
         // Determine if we should do a full refresh or selective refresh
         let cycle = self.refresh_cycle.fetch_add(1, Ordering::Relaxed);
-        let do_full_refresh = cycle.is_multiple_of(FULL_REFRESH_INTERVAL);
+        let do_full_refresh = cycle % FULL_REFRESH_INTERVAL == 0;
 
         // Read tracked PIDs for selective refresh (outside the closure)
         let tracked_pids_for_refresh: Vec<sysinfo::Pid> = if do_full_refresh {

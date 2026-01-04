@@ -50,6 +50,8 @@ impl<'a> ProcessMetricExporter<'a> {
     }
 }
 
+// Allow for Rust 1.85 compatibility (Launchpad)
+#[allow(clippy::needless_lifetimes)]
 impl<'a> MetricExporter for ProcessMetricExporter<'a> {
     fn export_metrics(&self) -> String {
         if self.process_info.is_empty() {
