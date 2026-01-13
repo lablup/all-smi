@@ -16,6 +16,7 @@ This document provides comprehensive documentation for using `all-smi` as a Rust
   - [ProcessInfo](#processinfo)
   - [CpuInfo](#cpuinfo)
   - [MemoryInfo](#memoryinfo)
+  - [StorageInfo](#storageinfo)
   - [ChassisInfo](#chassisinfo)
 - [Platform Support](#platform-support)
 - [Advanced Usage](#advanced-usage)
@@ -86,6 +87,20 @@ fn main() -> Result<()> {
             used_gb, total_gb, mem.utilization);
     }
 
+    // Query storage information
+    for storage in smi.get_storage_info() {
+        let total_gb = storage.total_bytes as f64 / 1024.0 / 1024.0 / 1024.0;
+        let available_gb = storage.available_bytes as f64 / 1024.0 / 1024.0 / 1024.0;
+        let used_gb = total_gb - available_gb;
+        let util = if storage.total_bytes > 0 {
+            ((storage.total_bytes - storage.available_bytes) as f64 / storage.total_bytes as f64) * 100.0
+        } else {
+            0.0
+        };
+        println!("{}: {:.1} GB / {:.1} GB ({:.1}%)",
+            storage.mount_point, used_gb, total_gb, util);
+    }
+
     Ok(())
 }
 ```
@@ -128,10 +143,12 @@ fn main() -> Result<()> {
 | `get_process_info()` | `Vec<ProcessInfo>` | Get GPU process information |
 | `get_cpu_info()` | `Vec<CpuInfo>` | Get CPU information |
 | `get_memory_info()` | `Vec<MemoryInfo>` | Get system memory information |
+| `get_storage_info()` | `Vec<StorageInfo>` | Get disk/storage information |
 | `get_chassis_info()` | `Option<ChassisInfo>` | Get chassis-level information |
 | `has_gpus()` | `bool` | Check if any GPUs are detected |
 | `has_cpu_monitoring()` | `bool` | Check if CPU monitoring is available |
 | `has_memory_monitoring()` | `bool` | Check if memory monitoring is available |
+| `has_storage_monitoring()` | `bool` | Check if storage monitoring is available |
 | `gpu_reader_count()` | `usize` | Get number of GPU reader types |
 
 ### Configuration
@@ -501,6 +518,59 @@ fn print_memory_info() -> Result<()> {
 | `swap_free_bytes` | `u64` | Free swap space |
 | `utilization` | `f64` | Memory utilization percentage |
 
+### StorageInfo
+
+Contains disk/storage information for mounted filesystems.
+
+```rust
+use all_smi::{AllSmi, Result};
+
+fn print_storage_info() -> Result<()> {
+    let smi = AllSmi::new()?;
+
+    for storage in smi.get_storage_info() {
+        // Convert to human-readable units
+        let to_gb = |bytes: u64| bytes as f64 / 1024.0 / 1024.0 / 1024.0;
+
+        // Mount point identification
+        println!("Mount Point: {}", storage.mount_point);
+        println!("Index: {}", storage.index);
+
+        // Space metrics
+        let total_gb = to_gb(storage.total_bytes);
+        let available_gb = to_gb(storage.available_bytes);
+        let used_gb = total_gb - available_gb;
+        let utilization = if storage.total_bytes > 0 {
+            ((storage.total_bytes - storage.available_bytes) as f64
+                / storage.total_bytes as f64) * 100.0
+        } else {
+            0.0
+        };
+
+        println!("Total: {:.1} GB", total_gb);
+        println!("Used: {:.1} GB ({:.1}%)", used_gb, utilization);
+        println!("Available: {:.1} GB", available_gb);
+
+        // Host identification (for remote monitoring)
+        println!("Host ID: {}", storage.host_id);
+        println!("Hostname: {}", storage.hostname);
+    }
+
+    Ok(())
+}
+```
+
+#### StorageInfo Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `mount_point` | `String` | The filesystem mount point (e.g., "/", "/home") |
+| `total_bytes` | `u64` | Total disk space in bytes |
+| `available_bytes` | `u64` | Available disk space in bytes |
+| `host_id` | `String` | Host identifier for remote monitoring |
+| `hostname` | `String` | DNS hostname of the server |
+| `index` | `u32` | Index for ordering multiple disks |
+
 ### ChassisInfo
 
 Contains system-wide chassis and node-level information.
@@ -629,10 +699,11 @@ use all_smi::prelude::*;
 fn main() -> Result<()> {
     let smi = AllSmi::new()?;
 
-    // All types are available: GpuInfo, CpuInfo, MemoryInfo, etc.
+    // All types are available: GpuInfo, CpuInfo, MemoryInfo, StorageInfo, etc.
     let gpus: Vec<GpuInfo> = smi.get_gpu_info();
     let cpus: Vec<CpuInfo> = smi.get_cpu_info();
     let memory: Vec<MemoryInfo> = smi.get_memory_info();
+    let storage: Vec<StorageInfo> = smi.get_storage_info();
     let chassis: Option<ChassisInfo> = smi.get_chassis_info();
 
     Ok(())
@@ -730,6 +801,7 @@ fn main() -> Result<()> {
     let gpu_readers: Vec<Box<dyn GpuReader>> = get_gpu_readers();
     let cpu_readers: Vec<Box<dyn CpuReader>> = get_cpu_readers();
     let memory_readers: Vec<Box<dyn MemoryReader>> = get_memory_readers();
+    let storage_reader: Box<dyn StorageReader> = create_storage_reader();
     let chassis_reader: Box<dyn ChassisReader> = create_chassis_reader();
 
     // Use readers directly
@@ -737,6 +809,11 @@ fn main() -> Result<()> {
         for gpu in reader.get_gpu_info() {
             println!("{}: {}%", gpu.name, gpu.utilization);
         }
+    }
+
+    // Use storage reader directly
+    for storage in storage_reader.get_storage_info() {
+        println!("{}: {} bytes available", storage.mount_point, storage.available_bytes);
     }
 
     Ok(())
@@ -800,6 +877,21 @@ fn main() -> Result<()> {
             let total_gb = mem.total_bytes as f64 / 1024.0 / 1024.0 / 1024.0;
             println!("RAM: {:6.2} GB / {:6.2} GB ({:5.1}%)",
                 used_gb, total_gb, mem.utilization);
+        }
+
+        println!("\n=== Storage Status ===");
+        for storage in smi.get_storage_info() {
+            let total_gb = storage.total_bytes as f64 / 1024.0 / 1024.0 / 1024.0;
+            let available_gb = storage.available_bytes as f64 / 1024.0 / 1024.0 / 1024.0;
+            let used_gb = total_gb - available_gb;
+            let util = if storage.total_bytes > 0 {
+                ((storage.total_bytes - storage.available_bytes) as f64
+                    / storage.total_bytes as f64) * 100.0
+            } else {
+                0.0
+            };
+            println!("{}: {:6.2} GB / {:6.2} GB ({:5.1}%)",
+                storage.mount_point, used_gb, total_gb, util);
         }
 
         println!("\n=== System Power ===");
@@ -867,6 +959,7 @@ fn main() -> Result<()> {
     let gpus = smi.get_gpu_info();
     let cpus = smi.get_cpu_info();
     let memory = smi.get_memory_info();
+    let storage = smi.get_storage_info();
     let chassis = smi.get_chassis_info();
 
     let report = json!({
@@ -874,6 +967,7 @@ fn main() -> Result<()> {
         "gpus": gpus,
         "cpus": cpus,
         "memory": memory,
+        "storage": storage,
         "chassis": chassis,
     });
 
@@ -896,6 +990,7 @@ struct Thresholds {
     gpu_mem_pct: f64,
     cpu_util: f64,
     mem_util: f64,
+    storage_util: f64,
 }
 
 fn check_thresholds(smi: &AllSmi, thresholds: &Thresholds) -> Vec<String> {
@@ -938,6 +1033,18 @@ fn check_thresholds(smi: &AllSmi, thresholds: &Thresholds) -> Vec<String> {
         }
     }
 
+    // Check storage thresholds
+    for storage in smi.get_storage_info() {
+        if storage.total_bytes > 0 {
+            let util = ((storage.total_bytes - storage.available_bytes) as f64
+                / storage.total_bytes as f64) * 100.0;
+            if util > thresholds.storage_util {
+                alerts.push(format!("ALERT: Storage {} utilization {:.1}% > {:.1}%",
+                    storage.mount_point, util, thresholds.storage_util));
+            }
+        }
+    }
+
     alerts
 }
 
@@ -950,6 +1057,7 @@ fn main() -> Result<()> {
         gpu_mem_pct: 90.0,
         cpu_util: 95.0,
         mem_util: 90.0,
+        storage_util: 85.0,
     };
 
     let alerts = check_thresholds(&smi, &thresholds);
