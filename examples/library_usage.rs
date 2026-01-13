@@ -225,6 +225,38 @@ fn main() -> Result<()> {
     println!();
 
     // ==========================================================================
+    // Storage Information
+    // ==========================================================================
+    println!("--- Storage Information ---");
+    let storage = smi.get_storage_info();
+
+    if storage.is_empty() {
+        println!("  No storage devices detected.");
+    } else {
+        println!("Found {} storage device(s):\n", storage.len());
+
+        for s in &storage {
+            let used_bytes = s.total_bytes - s.available_bytes;
+            let usage_percent = if s.total_bytes > 0 {
+                (used_bytes as f64 / s.total_bytes as f64) * 100.0
+            } else {
+                0.0
+            };
+
+            let total_gb = s.total_bytes as f64 / 1024.0 / 1024.0 / 1024.0;
+            let available_gb = s.available_bytes as f64 / 1024.0 / 1024.0 / 1024.0;
+            let used_gb = used_bytes as f64 / 1024.0 / 1024.0 / 1024.0;
+
+            println!("  [{}] {}", s.index, s.mount_point);
+            println!(
+                "      Total: {:.1} GB, Used: {:.1} GB, Available: {:.1} GB ({:.1}% used)",
+                total_gb, used_gb, available_gb, usage_percent
+            );
+        }
+    }
+    println!();
+
+    // ==========================================================================
     // Summary
     // ==========================================================================
     println!("--- Summary ---");
@@ -232,6 +264,7 @@ fn main() -> Result<()> {
     println!("  Has GPUs: {}", smi.has_gpus());
     println!("  Has CPU monitoring: {}", smi.has_cpu_monitoring());
     println!("  Has memory monitoring: {}", smi.has_memory_monitoring());
+    println!("  Has storage monitoring: {}", smi.has_storage_monitoring());
 
     Ok(())
 }

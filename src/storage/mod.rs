@@ -13,3 +13,8 @@
 // limitations under the License.
 
 pub mod info;
+pub mod reader;
+
+// Re-export commonly used items
+pub use info::StorageInfo;
+pub use reader::{create_storage_reader, LocalStorageReader, StorageReader};

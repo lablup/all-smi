@@ -60,10 +60,15 @@ pub use crate::device::MemoryInfo;
 // Core data types - Chassis
 pub use crate::device::{ChassisInfo, FanInfo, PsuInfo, PsuStatus};
 
+// Core data types - Storage
+pub use crate::storage::StorageInfo;
+
 // Traits for advanced usage
 pub use crate::device::{ChassisReader, CpuReader, GpuReader, MemoryReader};
+pub use crate::storage::StorageReader;
 
 // Factory functions for advanced usage
 pub use crate::device::{
     create_chassis_reader, get_cpu_readers, get_gpu_readers, get_memory_readers,
 };
+pub use crate::storage::create_storage_reader;

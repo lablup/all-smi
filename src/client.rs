@@ -55,6 +55,7 @@ use crate::device::{
     ChassisReader, CpuInfo, CpuReader, GpuInfo, GpuReader, MemoryInfo, MemoryReader, ProcessInfo,
 };
 use crate::error::Result;
+use crate::storage::{create_storage_reader, StorageInfo, StorageReader};
 
 #[cfg(target_os = "macos")]
 use crate::device::macos_native::{
@@ -133,6 +134,7 @@ pub struct AllSmi {
     cpu_readers: Vec<Box<dyn CpuReader>>,
     memory_readers: Vec<Box<dyn MemoryReader>>,
     chassis_reader: Box<dyn ChassisReader>,
+    storage_reader: Box<dyn StorageReader>,
     #[cfg(target_os = "macos")]
     _macos_initialized: bool,
     #[cfg(target_os = "linux")]
@@ -214,12 +216,14 @@ impl AllSmi {
         let cpu_readers = get_cpu_readers();
         let memory_readers = get_memory_readers();
         let chassis_reader = create_chassis_reader();
+        let storage_reader = create_storage_reader();
 
         Ok(AllSmi {
             gpu_readers,
             cpu_readers,
             memory_readers,
             chassis_reader,
+            storage_reader,
             #[cfg(target_os = "macos")]
             _macos_initialized: macos_initialized,
             #[cfg(target_os = "linux")]
@@ -379,6 +383,38 @@ impl AllSmi {
         self.chassis_reader.get_chassis_info()
     }
 
+    /// Get information about storage devices.
+    ///
+    /// Returns a vector of [`StorageInfo`] structs containing metrics for each
+    /// detected storage device. The information includes mount point, total space,
+    /// available space, and host identification.
+    ///
+    /// Returns an empty vector if storage information is not available.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use all_smi::AllSmi;
+    ///
+    /// let smi = AllSmi::new()?;
+    /// for storage in smi.get_storage_info() {
+    ///     let used_bytes = storage.total_bytes - storage.available_bytes;
+    ///     let usage_percent = if storage.total_bytes > 0 {
+    ///         (used_bytes as f64 / storage.total_bytes as f64) * 100.0
+    ///     } else {
+    ///         0.0
+    ///     };
+    ///     let total_gb = storage.total_bytes as f64 / 1024.0 / 1024.0 / 1024.0;
+    ///     let available_gb = storage.available_bytes as f64 / 1024.0 / 1024.0 / 1024.0;
+    ///     println!("{}: {:.1} GB / {:.1} GB ({:.1}% used)",
+    ///         storage.mount_point, available_gb, total_gb, usage_percent);
+    /// }
+    /// # Ok::<(), all_smi::Error>(())
+    /// ```
+    pub fn get_storage_info(&self) -> Vec<StorageInfo> {
+        self.storage_reader.get_storage_info()
+    }
+
     /// Get the number of detected GPU readers.
     ///
     /// This returns the number of reader types, not the number of GPUs.
@@ -414,6 +450,15 @@ impl AllSmi {
     /// Check if memory monitoring is available.
     pub fn has_memory_monitoring(&self) -> bool {
         !self.memory_readers.is_empty()
+    }
+
+    /// Check if storage monitoring is available.
+    ///
+    /// This always returns `true` as storage monitoring is available on all
+    /// supported platforms through the `sysinfo` crate.
+    pub fn has_storage_monitoring(&self) -> bool {
+        // Storage monitoring is always available via sysinfo
+        true
     }
 }
 
@@ -530,6 +575,30 @@ mod tests {
         let _ = smi.get_memory_info();
         let _ = smi.get_process_info();
         let _ = smi.get_chassis_info();
+        let _ = smi.get_storage_info();
+    }
+
+    #[test]
+    fn test_storage_info() {
+        let smi = AllSmi::new().unwrap();
+
+        // Storage monitoring should always be available
+        assert!(smi.has_storage_monitoring());
+
+        // Get storage info and verify basic properties
+        let storage_info = smi.get_storage_info();
+
+        // Storage info should be returned (may be empty in some CI environments)
+        for storage in &storage_info {
+            // Mount point should not be empty
+            assert!(!storage.mount_point.is_empty());
+
+            // Available bytes should not exceed total bytes
+            assert!(storage.available_bytes <= storage.total_bytes);
+
+            // Hostname should not be empty
+            assert!(!storage.hostname.is_empty());
+        }
     }
 
     #[test]
