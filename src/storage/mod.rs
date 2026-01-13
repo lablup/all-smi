@@ -12,9 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! Storage monitoring module.
+//!
+//! This module provides storage/disk information reading capabilities
+//! for local system monitoring.
+
 pub mod info;
 pub mod reader;
 
-// Re-export commonly used items
+// Re-export commonly used items for the public library API.
+// These exports are used by the prelude module and external library users,
+// even though internal code may import from submodules directly.
+#[allow(unused_imports)]
 pub use info::StorageInfo;
+#[allow(unused_imports)]
 pub use reader::{create_storage_reader, LocalStorageReader, StorageReader};

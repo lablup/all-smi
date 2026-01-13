@@ -299,6 +299,7 @@ http://gpu-node3:9090
   - Keyboard: Arrow keys, Page Up/Down, Tab switching
   - Mouse: Click column headers to sort (process view)
   - Sorting: 'd' (default), 'u' (utilization), 'g' (GPU memory), 'p' (PID), 'm' (memory), 'c' (CPU)
+  - Filtering: 'f' (toggle GPU process filter - show only processes with GPU memory usage)
   - Interface: '1'/'h' (help), 'q' (quit), ESC (close help)
 - **Visual Design:**
   - Color-coded status: Green (≤60%), Yellow (60-80%), Red (>80%)
