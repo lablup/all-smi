@@ -351,13 +351,18 @@ impl SortCriteria {
             SortCriteria::Pid => a.pid.cmp(&b.pid),
             SortCriteria::User => a.user.cmp(&b.user).then_with(|| a.pid.cmp(&b.pid)),
             SortCriteria::Priority => a.priority.cmp(&b.priority).then_with(|| a.pid.cmp(&b.pid)),
-            SortCriteria::Nice => a.nice_value.cmp(&b.nice_value).then_with(|| a.pid.cmp(&b.pid)),
-            SortCriteria::VirtualMemory => {
-                a.memory_vms.cmp(&b.memory_vms).then_with(|| a.pid.cmp(&b.pid))
-            }
-            SortCriteria::ResidentMemory => {
-                a.memory_rss.cmp(&b.memory_rss).then_with(|| a.pid.cmp(&b.pid))
-            }
+            SortCriteria::Nice => a
+                .nice_value
+                .cmp(&b.nice_value)
+                .then_with(|| a.pid.cmp(&b.pid)),
+            SortCriteria::VirtualMemory => a
+                .memory_vms
+                .cmp(&b.memory_vms)
+                .then_with(|| a.pid.cmp(&b.pid)),
+            SortCriteria::ResidentMemory => a
+                .memory_rss
+                .cmp(&b.memory_rss)
+                .then_with(|| a.pid.cmp(&b.pid)),
             SortCriteria::State => a.state.cmp(&b.state).then_with(|| a.pid.cmp(&b.pid)),
             SortCriteria::CpuPercent => a
                 .cpu_percent
@@ -374,9 +379,10 @@ impl SortCriteria {
                 .partial_cmp(&b.gpu_utilization)
                 .unwrap_or(Ordering::Equal)
                 .then_with(|| a.pid.cmp(&b.pid)),
-            SortCriteria::GpuMemoryUsage => {
-                a.used_memory.cmp(&b.used_memory).then_with(|| a.pid.cmp(&b.pid))
-            }
+            SortCriteria::GpuMemoryUsage => a
+                .used_memory
+                .cmp(&b.used_memory)
+                .then_with(|| a.pid.cmp(&b.pid)),
             SortCriteria::CpuTime => a.cpu_time.cmp(&b.cpu_time).then_with(|| a.pid.cmp(&b.pid)),
             SortCriteria::Command => a.command.cmp(&b.command).then_with(|| a.pid.cmp(&b.pid)),
             // For GPU-related sorting or default, sort by PID

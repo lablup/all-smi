@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::borrow::Cow;
 use std::collections::HashSet;
 use std::io::{stdout, Write};
 use std::sync::Arc;
@@ -30,6 +31,7 @@ use tokio::sync::Mutex;
 use crate::app_state::AppState;
 use crate::cli::ViewArgs;
 use crate::common::config::AppConfig;
+use crate::device::ProcessInfo;
 use crate::ui::buffer::{BufferWriter, DifferentialRenderer};
 use crate::ui::dashboard::{draw_dashboard_items, draw_system_view};
 use crate::ui::layout::LayoutCalculator;
@@ -858,20 +860,22 @@ impl UiLoop {
             let current_user = whoami::username();
 
             // Apply GPU filter if enabled
-            let filtered_processes: Vec<_> = if state.gpu_filter_enabled {
-                state
-                    .process_info
-                    .iter()
-                    .filter(|p| p.used_memory > 0)
-                    .cloned()
-                    .collect()
+            let processes_to_display: Cow<'_, [ProcessInfo]> = if state.gpu_filter_enabled {
+                Cow::Owned(
+                    state
+                        .process_info
+                        .iter()
+                        .filter(|p| p.used_memory > 0)
+                        .cloned()
+                        .collect(),
+                )
             } else {
-                state.process_info.clone()
+                Cow::Borrowed(&state.process_info)
             };
 
             print_process_info(
                 buffer,
-                &filtered_processes,
+                &processes_to_display,
                 state.selected_process_index,
                 state.start_index,
                 available_rows,
