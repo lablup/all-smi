@@ -134,6 +134,13 @@ pub fn print_function_keys<W: Write>(
         crate::app_state::SortCriteria::Temperature => "Sort:Temp",
     };
 
+    // Get GPU filter indicator
+    let filter_indicator = if state.gpu_filter_enabled {
+        "Filter:GPU"
+    } else {
+        ""
+    };
+
     let function_keys = if is_remote {
         // Remote mode: only GPU sorting
         format!(
@@ -141,7 +148,11 @@ pub fn print_function_keys<W: Write>(
         )
     } else {
         // Local mode: both process and GPU sorting
-        format!("h:Help q:Exit c:CPU Cores ←→:Tabs ↑↓:Scroll PgUp/PgDn:Page p:PID m:Memory d:Default u:Util g:GPU-Mem [{sort_indicator}]")
+        if state.gpu_filter_enabled {
+            format!("h:Help q:Exit c:CPU Cores f:Filter ←→:Scroll ↑↓:Scroll p:PID m:Memory g:GPU-Mem [{sort_indicator}] [{filter_indicator}]")
+        } else {
+            format!("h:Help q:Exit c:CPU Cores f:Filter ←→:Scroll ↑↓:Scroll p:PID m:Memory g:GPU-Mem [{sort_indicator}]")
+        }
     };
 
     let truncated_keys = if display_width(&function_keys) > cols as usize {

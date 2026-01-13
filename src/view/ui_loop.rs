@@ -58,6 +58,7 @@ pub struct UiLoop {
     previous_selected_process_index: usize,
     previous_process_horizontal_scroll_offset: usize,
     previous_tab_scroll_offset: usize,
+    previous_gpu_filter_enabled: bool,
     #[cfg(target_os = "linux")]
     hlsmi_notified: bool,
     #[cfg(target_os = "linux")]
@@ -86,6 +87,7 @@ impl UiLoop {
             previous_selected_process_index: 0,
             previous_process_horizontal_scroll_offset: 0,
             previous_tab_scroll_offset: 0,
+            previous_gpu_filter_enabled: false,
             #[cfg(target_os = "linux")]
             hlsmi_notified: false,
             #[cfg(target_os = "linux")]
@@ -179,6 +181,7 @@ impl UiLoop {
                 || state.loading != self.previous_loading
                 || state.current_tab != self.previous_tab
                 || state.show_per_core_cpu != self.previous_show_per_core_cpu
+                || state.gpu_filter_enabled != self.previous_gpu_filter_enabled
                 || self.resize_occurred;
 
             // Check if data has changed (used for skipping expensive rendering when idle)
@@ -260,6 +263,7 @@ impl UiLoop {
             self.previous_loading = state.loading;
             self.previous_tab = state.current_tab;
             self.previous_show_per_core_cpu = state.show_per_core_cpu;
+            self.previous_gpu_filter_enabled = state.gpu_filter_enabled;
             self.last_rendered_data_version = state.data_version;
             self.previous_gpu_scroll_offset = state.gpu_scroll_offset;
             self.previous_storage_scroll_offset = state.storage_scroll_offset;
@@ -853,9 +857,21 @@ impl UiLoop {
             // Get current user for process coloring
             let current_user = whoami::username();
 
+            // Apply GPU filter if enabled
+            let filtered_processes: Vec<_> = if state.gpu_filter_enabled {
+                state
+                    .process_info
+                    .iter()
+                    .filter(|p| p.used_memory > 0)
+                    .cloned()
+                    .collect()
+            } else {
+                state.process_info.clone()
+            };
+
             print_process_info(
                 buffer,
-                &state.process_info,
+                &filtered_processes,
                 state.selected_process_index,
                 state.start_index,
                 available_rows,

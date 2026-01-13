@@ -232,6 +232,7 @@ mod tests {
             is_local_mode: false, // Test state assumes remote mode
             runtime_environment: crate::utils::RuntimeEnvironment::detect(),
             data_version: 0,
+            gpu_filter_enabled: false,
         }
     }
 

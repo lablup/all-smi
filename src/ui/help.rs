@@ -175,6 +175,7 @@ fn render_shortcuts_section(
         ("Display Control:", "", "header"),
         ("  H", "Toggle this help screen", "shortcut"),
         ("  C", "Toggle per-core CPU display", "shortcut"),
+        ("  F", "Toggle GPU process filter", "shortcut"),
         ("  Q", "Exit application", "shortcut"),
         ("  ESC", "Close help or exit", "shortcut"),
         ("", "", ""),
@@ -235,6 +236,14 @@ fn render_shortcuts_section(
     // Add current sort status
     let sort_status = get_current_sort_status(&state.sort_criteria);
     right_column.push(("  Sort mode:", &sort_status, "status"));
+
+    // Add filter status
+    let filter_status = if state.gpu_filter_enabled {
+        "GPU Only"
+    } else {
+        "All Processes"
+    };
+    right_column.push(("  Filter:", filter_status, "status"));
 
     // Handle special rows
     match line_idx {

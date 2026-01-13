@@ -122,6 +122,8 @@ pub struct AppState {
     pub runtime_environment: RuntimeEnvironment,
     /// Version counter that increments when data changes, used to detect if re-render is needed
     pub data_version: u64,
+    /// Filter to show only GPU processes (processes with used_memory > 0)
+    pub gpu_filter_enabled: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -213,6 +215,7 @@ impl AppState {
             is_local_mode: true, // Default to local mode
             runtime_environment: RuntimeEnvironment::detect(),
             data_version: 0,
+            gpu_filter_enabled: false, // GPU filter disabled by default
         }
     }
 
@@ -346,27 +349,36 @@ impl SortCriteria {
     ) -> Ordering {
         let base_ordering = match self {
             SortCriteria::Pid => a.pid.cmp(&b.pid),
-            SortCriteria::User => a.user.cmp(&b.user),
-            SortCriteria::Priority => a.priority.cmp(&b.priority),
-            SortCriteria::Nice => a.nice_value.cmp(&b.nice_value),
-            SortCriteria::VirtualMemory => a.memory_vms.cmp(&b.memory_vms),
-            SortCriteria::ResidentMemory => a.memory_rss.cmp(&b.memory_rss),
-            SortCriteria::State => a.state.cmp(&b.state),
+            SortCriteria::User => a.user.cmp(&b.user).then_with(|| a.pid.cmp(&b.pid)),
+            SortCriteria::Priority => a.priority.cmp(&b.priority).then_with(|| a.pid.cmp(&b.pid)),
+            SortCriteria::Nice => a.nice_value.cmp(&b.nice_value).then_with(|| a.pid.cmp(&b.pid)),
+            SortCriteria::VirtualMemory => {
+                a.memory_vms.cmp(&b.memory_vms).then_with(|| a.pid.cmp(&b.pid))
+            }
+            SortCriteria::ResidentMemory => {
+                a.memory_rss.cmp(&b.memory_rss).then_with(|| a.pid.cmp(&b.pid))
+            }
+            SortCriteria::State => a.state.cmp(&b.state).then_with(|| a.pid.cmp(&b.pid)),
             SortCriteria::CpuPercent => a
                 .cpu_percent
                 .partial_cmp(&b.cpu_percent)
-                .unwrap_or(Ordering::Equal),
+                .unwrap_or(Ordering::Equal)
+                .then_with(|| a.pid.cmp(&b.pid)),
             SortCriteria::MemoryPercent => a
                 .memory_percent
                 .partial_cmp(&b.memory_percent)
-                .unwrap_or(Ordering::Equal),
+                .unwrap_or(Ordering::Equal)
+                .then_with(|| a.pid.cmp(&b.pid)),
             SortCriteria::GpuPercent => a
                 .gpu_utilization
                 .partial_cmp(&b.gpu_utilization)
-                .unwrap_or(Ordering::Equal),
-            SortCriteria::GpuMemoryUsage => a.used_memory.cmp(&b.used_memory),
-            SortCriteria::CpuTime => a.cpu_time.cmp(&b.cpu_time),
-            SortCriteria::Command => a.command.cmp(&b.command),
+                .unwrap_or(Ordering::Equal)
+                .then_with(|| a.pid.cmp(&b.pid)),
+            SortCriteria::GpuMemoryUsage => {
+                a.used_memory.cmp(&b.used_memory).then_with(|| a.pid.cmp(&b.pid))
+            }
+            SortCriteria::CpuTime => a.cpu_time.cmp(&b.cpu_time).then_with(|| a.pid.cmp(&b.pid)),
+            SortCriteria::Command => a.command.cmp(&b.command).then_with(|| a.pid.cmp(&b.pid)),
             // For GPU-related sorting or default, sort by PID
             _ => a.pid.cmp(&b.pid),
         };
