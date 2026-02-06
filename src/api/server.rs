@@ -115,6 +115,7 @@ pub async fn run_api_mode(args: &ApiArgs) {
         let gpu_readers = get_gpu_readers();
         let cpu_readers = get_cpu_readers();
         let memory_readers = get_memory_readers();
+        let mut disks = Disks::new_with_refreshed_list();
         loop {
             let all_gpu_info = gpu_readers
                 .iter()
@@ -140,8 +141,9 @@ pub async fn run_api_mode(args: &ApiArgs) {
                 Vec::new()
             };
 
-            // Collect disk/storage info (cached in state to avoid per-request collection)
-            let storage_info = collect_storage_info();
+            // Refresh disk info in-place instead of creating a new Disks instance
+            disks.refresh(true);
+            let storage_info = collect_storage_info_from(&disks);
 
             let mut state = state_clone.write().await;
             state.gpu_info = all_gpu_info;
@@ -409,14 +411,13 @@ fn cleanup_socket(path: &std::path::Path) {
     }
 }
 
-/// Collect storage/disk information
-/// This is called in the background task and cached in AppState
-fn collect_storage_info() -> Vec<StorageInfo> {
+/// Collect storage/disk information from a pre-existing Disks instance.
+/// The caller is responsible for calling `refresh_list()` before this function.
+fn collect_storage_info_from(disks: &Disks) -> Vec<StorageInfo> {
     let mut storage_info = Vec::new();
-    let disks = Disks::new_with_refreshed_list();
     let hostname = get_hostname();
 
-    let mut filtered_disks = filter_docker_aware_disks(&disks);
+    let mut filtered_disks = filter_docker_aware_disks(disks);
     filtered_disks.sort_by(|a, b| {
         a.mount_point()
             .to_string_lossy()

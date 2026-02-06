@@ -37,6 +37,10 @@ pub struct NvidiaGpuReader {
     cuda_version: OnceLock<String>,
     /// Cached static device information per device index
     device_static_info: OnceLock<HashMap<u32, DeviceStaticInfo>>,
+    /// Cached NVML handle (initialized once, reused across calls)
+    nvml: Mutex<Option<Nvml>>,
+    /// Cached System instance for process info (reused across calls)
+    system: Mutex<System>,
 }
 
 impl Default for NvidiaGpuReader {
@@ -51,6 +55,8 @@ impl NvidiaGpuReader {
             driver_version: OnceLock::new(),
             cuda_version: OnceLock::new(),
             device_static_info: OnceLock::new(),
+            nvml: Mutex::new(Nvml::init().ok()),
+            system: Mutex::new(System::new()),
         }
     }
 
@@ -78,6 +84,35 @@ impl NvidiaGpuReader {
             .clone()
     }
 
+    /// Execute a closure with a reference to the cached NVML handle.
+    /// Reinitializes the handle if it was previously unavailable or became invalid.
+    fn with_nvml<F, T>(&self, f: F) -> Result<T, NvmlError>
+    where
+        F: FnOnce(&Nvml) -> T,
+    {
+        let mut guard = self.nvml.lock().map_err(|_| NvmlError::Unknown)?;
+        // Try to use existing handle first
+        if let Some(ref nvml) = *guard {
+            // Validate the handle is still usable by querying device count
+            if nvml.device_count().is_ok() {
+                return Ok(f(nvml));
+            }
+            // Handle is stale, drop and reinitialize below
+        }
+        // Initialize or reinitialize
+        match Nvml::init() {
+            Ok(nvml) => {
+                let result = f(&nvml);
+                *guard = Some(nvml);
+                Ok(result)
+            }
+            Err(e) => {
+                *guard = None;
+                Err(e)
+            }
+        }
+    }
+
     /// Get cached static device info for all devices, initializing if needed
     fn get_device_static_info(&self, nvml: &Nvml) -> &HashMap<u32, DeviceStaticInfo> {
         self.device_static_info.get_or_init(|| {
@@ -101,6 +136,17 @@ impl NvidiaGpuReader {
             }
             device_info_map
         })
+    }
+
+    /// Get GPU processes using cached NVML handle, falling back to nvidia-smi
+    fn get_gpu_processes_cached(&self) -> (Vec<ProcessInfo>, HashSet<u32>) {
+        match self.with_nvml(get_gpu_processes_nvml) {
+            Ok(result) => result,
+            Err(e) => {
+                set_nvml_status(e);
+                get_gpu_processes_nvidia_smi()
+            }
+        }
     }
 
     /// Get GPU info using NVML with cached static values
@@ -165,14 +211,14 @@ impl NvidiaGpuReader {
 
 impl GpuReader for NvidiaGpuReader {
     fn get_gpu_info(&self) -> Vec<GpuInfo> {
-        // Try NVML first
-        match Nvml::init() {
-            Ok(nvml) => {
+        // Try cached NVML handle first
+        match self.with_nvml(|nvml| self.get_gpu_info_nvml(nvml)) {
+            Ok(info) => {
                 // Clear any previous error status on success
                 if let Ok(mut status) = NVML_STATUS.lock() {
                     *status = None;
                 }
-                self.get_gpu_info_nvml(&nvml)
+                info
             }
             Err(e) => {
                 // Store the error status for notification
@@ -183,10 +229,10 @@ impl GpuReader for NvidiaGpuReader {
     }
 
     fn get_process_info(&self) -> Vec<ProcessInfo> {
-        // Create a lightweight system instance and only refresh what we need
         use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, UpdateKind};
-        let mut system = System::new();
-        // Refresh processes with user information
+
+        // Reuse the cached System instance
+        let mut system = self.system.lock().unwrap_or_else(|e| e.into_inner());
         system.refresh_processes_specifics(
             ProcessesToUpdate::All,
             true,
@@ -194,8 +240,8 @@ impl GpuReader for NvidiaGpuReader {
         );
         system.refresh_memory();
 
-        // Get GPU processes and PIDs
-        let (gpu_processes, gpu_pids) = get_gpu_processes();
+        // Get GPU processes and PIDs using cached NVML handle
+        let (gpu_processes, gpu_pids) = self.get_gpu_processes_cached();
 
         // Get all system processes
         let mut all_processes = get_all_processes(&system, &gpu_pids);
@@ -228,19 +274,6 @@ pub fn get_nvml_status_message() -> Option<String> {
         status.clone()
     } else {
         None
-    }
-}
-
-// Helper function to get GPU processes
-fn get_gpu_processes() -> (Vec<ProcessInfo>, HashSet<u32>) {
-    // Try NVML first
-    match Nvml::init() {
-        Ok(nvml) => get_gpu_processes_nvml(&nvml),
-        Err(e) => {
-            // Store the error status for notification
-            set_nvml_status(e);
-            get_gpu_processes_nvidia_smi()
-        }
     }
 }
 
