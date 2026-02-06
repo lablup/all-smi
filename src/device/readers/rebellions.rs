@@ -38,6 +38,8 @@ where
 {
     struct StringOrU32Visitor;
 
+    // Allow for Rust 1.85 compatibility (Launchpad)
+    #[allow(clippy::needless_lifetimes)]
     impl<'de> Visitor<'de> for StringOrU32Visitor {
         type Value = u32;
 

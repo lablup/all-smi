@@ -307,6 +307,8 @@ impl<'a> GpuMetricExporter<'a> {
     }
 }
 
+// Allow for Rust 1.85 compatibility (Launchpad)
+#[allow(clippy::needless_lifetimes)]
 impl<'a> MetricExporter for GpuMetricExporter<'a> {
     fn export_metrics(&self) -> String {
         let mut builder = MetricBuilder::new();

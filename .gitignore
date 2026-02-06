@@ -67,3 +67,4 @@ __pycache__/
 # Project maintenance (custom)
 *.md
 .*
+!.github/

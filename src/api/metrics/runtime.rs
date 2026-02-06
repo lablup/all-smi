@@ -30,6 +30,8 @@ impl<'a> RuntimeMetricExporter<'a> {
     }
 }
 
+// Allow for Rust 1.85 compatibility (Launchpad)
+#[allow(clippy::needless_lifetimes)]
 impl<'a> MetricExporter for RuntimeMetricExporter<'a> {
     fn export_metrics(&self) -> String {
         let mut output = String::new();
