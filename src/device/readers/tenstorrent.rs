@@ -16,7 +16,7 @@ use crate::device::process_list::{get_all_processes, merge_gpu_processes};
 use crate::device::readers::common_cache::{DetailBuilder, DeviceStaticInfo};
 use crate::device::types::{GpuInfo, ProcessInfo};
 use crate::device::GpuReader;
-use crate::utils::get_hostname;
+use crate::utils::{get_hostname, with_global_system};
 use all_smi_luwen_core;
 use all_smi_luwen_if::chip::{Chip, ChipImpl, Telemetry};
 use all_smi_luwen_if::ChipDetectOptions;
@@ -25,7 +25,6 @@ use chrono::Local;
 use once_cell::sync::Lazy;
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
-use sysinfo::System;
 
 /// Collection method for Tenstorrent NPU metrics
 #[derive(Debug, Clone, Copy)]
@@ -196,21 +195,23 @@ impl GpuReader for TenstorrentReader {
     }
 
     fn get_process_info(&self) -> Vec<ProcessInfo> {
-        // Create system instance and refresh processes
         use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, UpdateKind};
-        let mut system = System::new();
-        system.refresh_processes_specifics(
-            ProcessesToUpdate::All,
-            true,
-            ProcessRefreshKind::everything().with_user(UpdateKind::Always),
-        );
-        system.refresh_memory();
 
         // Get NPU processes (currently empty for Tenstorrent)
         let (npu_processes, npu_pids) = self.get_npu_processes();
 
-        // Get all system processes
-        let mut all_processes = get_all_processes(&system, &npu_pids);
+        // Use global system instance to avoid file descriptor leak
+        let mut all_processes = with_global_system(|system| {
+            system.refresh_processes_specifics(
+                ProcessesToUpdate::All,
+                true,
+                ProcessRefreshKind::everything().with_user(UpdateKind::Always),
+            );
+            system.refresh_memory();
+
+            // Get all system processes
+            get_all_processes(system, &npu_pids)
+        });
 
         // Merge NPU information
         merge_gpu_processes(&mut all_processes, npu_processes);

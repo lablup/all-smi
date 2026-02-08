@@ -17,12 +17,11 @@ use crate::device::process_list::{get_all_processes, merge_gpu_processes};
 use crate::device::readers::common_cache::{DetailBuilder, DeviceStaticInfo};
 use crate::device::types::{GpuInfo, ProcessInfo};
 use crate::device::GpuReader;
-use crate::utils::{get_hostname, hz_to_mhz, millicelsius_to_celsius};
+use crate::utils::{get_hostname, hz_to_mhz, millicelsius_to_celsius, with_global_system};
 use chrono::Local;
 use std::collections::HashSet;
 use std::fs;
 use std::sync::OnceLock;
-use sysinfo::System;
 
 pub struct NvidiaJetsonGpuReader {
     /// Cached static device information (fetched only once)
@@ -171,22 +170,23 @@ impl GpuReader for NvidiaJetsonGpuReader {
     }
 
     fn get_process_info(&self) -> Vec<ProcessInfo> {
-        // Create a lightweight system instance and only refresh what we need
         use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, UpdateKind};
-        let mut system = System::new();
-        // Refresh processes with user information
-        system.refresh_processes_specifics(
-            ProcessesToUpdate::All,
-            true,
-            ProcessRefreshKind::everything().with_user(UpdateKind::Always),
-        );
-        system.refresh_memory();
 
         // Get GPU processes and PIDs
         let (gpu_processes, gpu_pids) = get_gpu_processes();
 
-        // Get all system processes
-        let mut all_processes = get_all_processes(&system, &gpu_pids);
+        // Use global system instance to avoid file descriptor leak
+        let mut all_processes = with_global_system(|system| {
+            system.refresh_processes_specifics(
+                ProcessesToUpdate::All,
+                true,
+                ProcessRefreshKind::everything().with_user(UpdateKind::Always),
+            );
+            system.refresh_memory();
+
+            // Get all system processes
+            get_all_processes(system, &gpu_pids)
+        });
 
         // Merge GPU information into the process list
         merge_gpu_processes(&mut all_processes, gpu_processes);
@@ -258,41 +258,42 @@ fn get_gpu_processes() -> (Vec<ProcessInfo>, HashSet<u32>) {
             "cuda",
         ];
 
-        let mut system = System::new();
-        system.refresh_memory();
-        for (pid, process) in system.processes() {
-            let process_name = process.name().to_string_lossy().to_lowercase();
-            for gpu_name in &gpu_process_names {
-                if process_name.contains(gpu_name) {
-                    let pid_u32 = pid.as_u32();
-                    gpu_pids.insert(pid_u32);
+        with_global_system(|system| {
+            system.refresh_memory();
+            for (pid, process) in system.processes() {
+                let process_name = process.name().to_string_lossy().to_lowercase();
+                for gpu_name in &gpu_process_names {
+                    if process_name.contains(gpu_name) {
+                        let pid_u32 = pid.as_u32();
+                        gpu_pids.insert(pid_u32);
 
-                    gpu_processes.push(ProcessInfo {
-                        device_id: 0,
-                        device_uuid: "JetsonGPU".to_string(),
-                        pid: pid_u32,
-                        process_name: String::new(), // Will be filled by sysinfo
-                        used_memory: 0, // Can't determine GPU memory usage without nvidia-smi
-                        cpu_percent: 0.0, // Will be filled by sysinfo
-                        memory_percent: 0.0, // Will be filled by sysinfo
-                        memory_rss: 0,  // Will be filled by sysinfo
-                        memory_vms: 0,  // Will be filled by sysinfo
-                        user: String::new(), // Will be filled by sysinfo
-                        state: String::new(), // Will be filled by sysinfo
-                        start_time: String::new(), // Will be filled by sysinfo
-                        cpu_time: 0,    // Will be filled by sysinfo
-                        command: String::new(), // Will be filled by sysinfo
-                        ppid: 0,        // Will be filled by sysinfo
-                        threads: 0,     // Will be filled by sysinfo
-                        uses_gpu: true,
-                        priority: 0,          // Will be filled by sysinfo
-                        nice_value: 0,        // Will be filled by sysinfo
-                        gpu_utilization: 0.0, // Can't determine per-process GPU utilization
-                    });
-                    break;
+                        gpu_processes.push(ProcessInfo {
+                            device_id: 0,
+                            device_uuid: "JetsonGPU".to_string(),
+                            pid: pid_u32,
+                            process_name: String::new(), // Will be filled by sysinfo
+                            used_memory: 0, // Can't determine GPU memory usage without nvidia-smi
+                            cpu_percent: 0.0, // Will be filled by sysinfo
+                            memory_percent: 0.0, // Will be filled by sysinfo
+                            memory_rss: 0,  // Will be filled by sysinfo
+                            memory_vms: 0,  // Will be filled by sysinfo
+                            user: String::new(), // Will be filled by sysinfo
+                            state: String::new(), // Will be filled by sysinfo
+                            start_time: String::new(), // Will be filled by sysinfo
+                            cpu_time: 0,    // Will be filled by sysinfo
+                            command: String::new(), // Will be filled by sysinfo
+                            ppid: 0,        // Will be filled by sysinfo
+                            threads: 0,     // Will be filled by sysinfo
+                            uses_gpu: true,
+                            priority: 0,          // Will be filled by sysinfo
+                            nice_value: 0,        // Will be filled by sysinfo
+                            gpu_utilization: 0.0, // Can't determine per-process GPU utilization
+                        });
+                        break;
+                    }
                 }
             }
-        }
+        });
     }
 
     (gpu_processes, gpu_pids)

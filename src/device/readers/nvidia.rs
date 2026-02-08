@@ -18,14 +18,13 @@ use crate::device::process_list::{get_all_processes, merge_gpu_processes};
 use crate::device::readers::common_cache::{DetailBuilder, DeviceStaticInfo, MAX_DEVICES};
 use crate::device::types::{GpuInfo, ProcessInfo};
 use crate::device::GpuReader;
-use crate::utils::get_hostname;
+use crate::utils::{get_hostname, with_global_system};
 use chrono::Local;
 use nvml_wrapper::enums::device::UsedGpuMemory;
 use nvml_wrapper::error::NvmlError;
 use nvml_wrapper::{cuda_driver_version_major, cuda_driver_version_minor, Nvml};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
-use sysinfo::System;
 
 // Global status for NVML error messages
 static NVML_STATUS: Mutex<Option<String>> = Mutex::new(None);
@@ -39,8 +38,6 @@ pub struct NvidiaGpuReader {
     device_static_info: OnceLock<HashMap<u32, DeviceStaticInfo>>,
     /// Cached NVML handle (initialized once, reused across calls)
     nvml: Mutex<Option<Nvml>>,
-    /// Cached System instance for process info (reused across calls)
-    system: Mutex<System>,
 }
 
 impl Default for NvidiaGpuReader {
@@ -56,7 +53,6 @@ impl NvidiaGpuReader {
             cuda_version: OnceLock::new(),
             device_static_info: OnceLock::new(),
             nvml: Mutex::new(Nvml::init().ok()),
-            system: Mutex::new(System::new()),
         }
     }
 
@@ -231,20 +227,21 @@ impl GpuReader for NvidiaGpuReader {
     fn get_process_info(&self) -> Vec<ProcessInfo> {
         use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, UpdateKind};
 
-        // Reuse the cached System instance
-        let mut system = self.system.lock().unwrap_or_else(|e| e.into_inner());
-        system.refresh_processes_specifics(
-            ProcessesToUpdate::All,
-            true,
-            ProcessRefreshKind::everything().with_user(UpdateKind::Always),
-        );
-        system.refresh_memory();
-
         // Get GPU processes and PIDs using cached NVML handle
         let (gpu_processes, gpu_pids) = self.get_gpu_processes_cached();
 
-        // Get all system processes
-        let mut all_processes = get_all_processes(&system, &gpu_pids);
+        // Use global system instance to avoid file descriptor leak
+        let mut all_processes = with_global_system(|system| {
+            system.refresh_processes_specifics(
+                ProcessesToUpdate::All,
+                true,
+                ProcessRefreshKind::everything().with_user(UpdateKind::Always),
+            );
+            system.refresh_memory();
+
+            // Get all system processes
+            get_all_processes(system, &gpu_pids)
+        });
 
         // Merge GPU information into the process list
         merge_gpu_processes(&mut all_processes, gpu_processes);
