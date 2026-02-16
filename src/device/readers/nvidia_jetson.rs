@@ -176,7 +176,7 @@ impl GpuReader for NvidiaJetsonGpuReader {
         let (gpu_processes, gpu_pids) = get_gpu_processes();
 
         // Use global system instance to avoid file descriptor leak
-        let mut all_processes = with_global_system(|system| {
+        let all_processes = with_global_system(|system| {
             system.refresh_processes_specifics(
                 ProcessesToUpdate::All,
                 true,
@@ -188,10 +188,8 @@ impl GpuReader for NvidiaJetsonGpuReader {
             get_all_processes(system, &gpu_pids)
         });
 
-        // Merge GPU information into the process list
-        merge_gpu_processes(&mut all_processes, gpu_processes);
-
-        all_processes
+        // Merge GPU information into the process list while preserving per-device rows.
+        merge_gpu_processes(all_processes, gpu_processes)
     }
 }
 

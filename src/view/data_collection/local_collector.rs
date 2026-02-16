@@ -359,8 +359,7 @@ impl LocalCollector {
         let _ = status_handler.await;
 
         // Merge GPU processes into main process list
-        let mut all_processes_merged = all_processes;
-        merge_gpu_processes(&mut all_processes_merged, gpu_processes);
+        let mut all_processes_merged = merge_gpu_processes(all_processes, gpu_processes);
 
         // Sort by CPU usage descending and limit to top MAX_DISPLAY_PROCESSES
         all_processes_merged.sort_by(|a, b| {
@@ -430,7 +429,7 @@ impl LocalCollector {
 
         let gpu_pids: HashSet<u32> = gpu_processes.iter().map(|p| p.pid).collect();
         let process_cache = Arc::clone(&self.process_cache);
-        let mut all_processes = with_global_system(|system| {
+        let all_processes = with_global_system(|system| {
             use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, UpdateKind};
             // OPTIMIZATION: Only refresh fields we actually need
             // - CPU usage for cpu_percent
@@ -461,7 +460,7 @@ impl LocalCollector {
             let mut cache = process_cache.write().unwrap();
             update_process_cache(system, &gpu_pids, &mut cache)
         });
-        merge_gpu_processes(&mut all_processes, gpu_processes);
+        let mut all_processes = merge_gpu_processes(all_processes, gpu_processes);
 
         // Sort by CPU usage descending and limit to top MAX_DISPLAY_PROCESSES
         all_processes.sort_by(|a, b| {

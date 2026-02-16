@@ -201,7 +201,7 @@ impl GpuReader for TenstorrentReader {
         let (npu_processes, npu_pids) = self.get_npu_processes();
 
         // Use global system instance to avoid file descriptor leak
-        let mut all_processes = with_global_system(|system| {
+        let all_processes = with_global_system(|system| {
             system.refresh_processes_specifics(
                 ProcessesToUpdate::All,
                 true,
@@ -213,10 +213,8 @@ impl GpuReader for TenstorrentReader {
             get_all_processes(system, &npu_pids)
         });
 
-        // Merge NPU information
-        merge_gpu_processes(&mut all_processes, npu_processes);
-
-        all_processes
+        // Merge NPU information while preserving per-device rows.
+        merge_gpu_processes(all_processes, npu_processes)
     }
 }
 
