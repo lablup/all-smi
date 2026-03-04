@@ -1,3 +1,13 @@
+all-smi (0.17.3-0) jammy; urgency=medium
+
+  * Fix multi-GPU process duplication by adding get_gpu_processes trait method
+  * Preserve per-device rows for multi-GPU PID attribution
+  * Prevent double-merge in local collector process collection
+  * Upgrade breaking dependencies (rand 0.10, reqwest 0.13, sysinfo 0.38, whoami 2)
+  * Fix protoc download with --fail and retry for transient errors
+
+ -- Jeongkyu Shin <inureyes@gmail.com>  Tue, 04 Mar 2026 00:00:00 +0000
+
 all-smi (0.17.2-0) jammy; urgency=medium
 
   * Fix file descriptor leaks in Jetson, Tenstorrent, and NVIDIA readers
