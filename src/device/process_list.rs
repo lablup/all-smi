@@ -258,20 +258,151 @@ fn get_process_priority_nice(pid: u32) -> (i32, i32) {
     (20, 0)
 }
 
-/// Merge GPU process information with system process list
-pub fn merge_gpu_processes(all_processes: &mut [ProcessInfo], gpu_processes: Vec<ProcessInfo>) {
-    // Create a map of GPU processes by PID
-    let gpu_map: std::collections::HashMap<u32, ProcessInfo> =
-        gpu_processes.into_iter().map(|p| (p.pid, p)).collect();
+/// Merge GPU process information with system process list while preserving per-device rows.
+pub fn merge_gpu_processes(
+    all_processes: Vec<ProcessInfo>,
+    gpu_processes: Vec<ProcessInfo>,
+) -> Vec<ProcessInfo> {
+    // PID-only merge is invalid for multi-GPU workloads because one PID can have
+    // multiple independent GPU contexts. Key by (PID, device UUID) instead.
+    let mut gpu_map: HashMap<(u32, String), ProcessInfo> = HashMap::new();
+    for gpu_process in gpu_processes {
+        let key = (gpu_process.pid, gpu_process.device_uuid.clone());
 
-    // Update matching processes with GPU information
-    for process in all_processes.iter_mut() {
-        if let Some(gpu_process) = gpu_map.get(&process.pid) {
-            process.device_id = gpu_process.device_id;
-            process.device_uuid = gpu_process.device_uuid.clone();
-            process.used_memory = gpu_process.used_memory;
-            process.gpu_utilization = gpu_process.gpu_utilization;
-            process.uses_gpu = true;
+        // NVML/CLI sources can report overlapping rows for the same (PID, device).
+        // Use max() defensively to avoid inflating memory/utilization by double-counting.
+        gpu_map
+            .entry(key)
+            .and_modify(|existing| {
+                existing.used_memory = existing.used_memory.max(gpu_process.used_memory);
+                existing.gpu_utilization =
+                    existing.gpu_utilization.max(gpu_process.gpu_utilization);
+            })
+            .or_insert(gpu_process);
+    }
+
+    let process_by_pid: HashMap<u32, ProcessInfo> = all_processes
+        .into_iter()
+        .map(|process| (process.pid, process))
+        .collect();
+
+    let mut merged = Vec::new();
+    let mut pids_with_gpu_rows: HashSet<u32> = HashSet::new();
+
+    for ((_pid, _device_uuid), gpu_process) in gpu_map {
+        pids_with_gpu_rows.insert(gpu_process.pid);
+        if let Some(base) = process_by_pid.get(&gpu_process.pid) {
+            let mut merged_row = base.clone();
+            merged_row.device_id = gpu_process.device_id;
+            merged_row.device_uuid = gpu_process.device_uuid.clone();
+            merged_row.used_memory = gpu_process.used_memory;
+            merged_row.gpu_utilization = gpu_process.gpu_utilization;
+            merged_row.uses_gpu = true;
+            merged.push(merged_row);
+        } else {
+            merged.push(gpu_process);
         }
+    }
+
+    // Keep baseline rows that did not receive any GPU-attributed row.
+    for process in process_by_pid.values() {
+        if !pids_with_gpu_rows.contains(&process.pid) {
+            merged.push(process.clone());
+        }
+    }
+
+    // Stable ordering for deterministic API output and tests.
+    merged.sort_by(|a, b| {
+        a.pid
+            .cmp(&b.pid)
+            .then_with(|| a.device_uuid.cmp(&b.device_uuid))
+    });
+    merged
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn process(pid: u32, device_uuid: &str, used_memory: u64, uses_gpu: bool) -> ProcessInfo {
+        ProcessInfo {
+            device_id: 0,
+            device_uuid: device_uuid.to_string(),
+            pid,
+            process_name: format!("proc-{pid}"),
+            used_memory,
+            cpu_percent: 1.0,
+            memory_percent: 1.0,
+            memory_rss: 1024,
+            memory_vms: 2048,
+            user: "user".to_string(),
+            state: "S".to_string(),
+            start_time: "0".to_string(),
+            cpu_time: 0,
+            command: "cmd".to_string(),
+            ppid: 1,
+            threads: 1,
+            uses_gpu,
+            priority: 0,
+            nice_value: 0,
+            gpu_utilization: 0.0,
+        }
+    }
+
+    #[test]
+    fn multi_gpu_pid_preserved_as_multiple_rows() {
+        let all_processes = vec![process(123, "GPU", 0, true)];
+        let gpu_processes = vec![
+            process(123, "GPU-A", 1024, true),
+            process(123, "GPU-B", 2048, true),
+        ];
+
+        let merged = merge_gpu_processes(all_processes, gpu_processes);
+
+        assert_eq!(merged.len(), 2);
+        assert!(merged
+            .iter()
+            .any(|p| p.pid == 123 && p.device_uuid == "GPU-A" && p.used_memory == 1024));
+        assert!(merged
+            .iter()
+            .any(|p| p.pid == 123 && p.device_uuid == "GPU-B" && p.used_memory == 2048));
+    }
+
+    #[test]
+    fn duplicate_same_pid_device_coalesced() {
+        let all_processes = vec![process(123, "GPU", 0, true)];
+        let mut gpu_a_low = process(123, "GPU-A", 1024, true);
+        gpu_a_low.gpu_utilization = 10.0;
+        let mut gpu_a_high = process(123, "GPU-A", 2048, true);
+        gpu_a_high.gpu_utilization = 20.0;
+
+        let merged = merge_gpu_processes(all_processes, vec![gpu_a_low, gpu_a_high]);
+
+        assert_eq!(merged.len(), 1);
+        let row = &merged[0];
+        assert_eq!(row.device_uuid, "GPU-A");
+        assert_eq!(row.used_memory, 2048);
+        assert_eq!(row.gpu_utilization, 20.0);
+    }
+
+    #[test]
+    fn non_gpu_processes_preserved() {
+        let non_gpu = process(999, "", 0, false);
+        let merged = merge_gpu_processes(vec![non_gpu.clone()], Vec::new());
+
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].pid, 999);
+        assert!(!merged[0].uses_gpu);
+    }
+
+    #[test]
+    fn gpu_row_without_baseline_process_still_emitted() {
+        let orphan_gpu = process(777, "GPU-ORPHAN", 4096, true);
+        let merged = merge_gpu_processes(Vec::new(), vec![orphan_gpu.clone()]);
+
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].pid, 777);
+        assert_eq!(merged[0].device_uuid, "GPU-ORPHAN");
+        assert_eq!(merged[0].used_memory, 4096);
     }
 }

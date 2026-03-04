@@ -231,7 +231,7 @@ impl GpuReader for NvidiaGpuReader {
         let (gpu_processes, gpu_pids) = self.get_gpu_processes_cached();
 
         // Use global system instance to avoid file descriptor leak
-        let mut all_processes = with_global_system(|system| {
+        let all_processes = with_global_system(|system| {
             system.refresh_processes_specifics(
                 ProcessesToUpdate::All,
                 true,
@@ -243,10 +243,12 @@ impl GpuReader for NvidiaGpuReader {
             get_all_processes(system, &gpu_pids)
         });
 
-        // Merge GPU information into the process list
-        merge_gpu_processes(&mut all_processes, gpu_processes);
+        // Merge GPU information into the process list while preserving per-device rows.
+        merge_gpu_processes(all_processes, gpu_processes)
+    }
 
-        all_processes
+    fn get_gpu_processes(&self) -> (Vec<ProcessInfo>, HashSet<u32>) {
+        self.get_gpu_processes_cached()
     }
 }
 
@@ -276,7 +278,7 @@ pub fn get_nvml_status_message() -> Option<String> {
 
 // Get GPU processes using NVML
 fn get_gpu_processes_nvml(nvml: &Nvml) -> (Vec<ProcessInfo>, HashSet<u32>) {
-    let mut gpu_processes = Vec::new();
+    let mut gpu_process_map: HashMap<(u32, String), ProcessInfo> = HashMap::new();
     let mut gpu_pids = HashSet::new();
 
     if let Ok(device_count) = nvml.device_count() {
@@ -297,7 +299,7 @@ fn get_gpu_processes_nvml(nvml: &Nvml) -> (Vec<ProcessInfo>, HashSet<u32>) {
                                 proc.pid,
                                 proc.used_gpu_memory,
                             );
-                            gpu_processes.push(process_info);
+                            merge_nvml_process_entry(&mut gpu_process_map, process_info);
                         }
                     }
                 }
@@ -305,7 +307,7 @@ fn get_gpu_processes_nvml(nvml: &Nvml) -> (Vec<ProcessInfo>, HashSet<u32>) {
                 // Also check graphics processes
                 if let Ok(processes) = device.running_graphics_processes() {
                     for proc in processes {
-                        if proc.pid > 0 && !gpu_pids.contains(&proc.pid) {
+                        if proc.pid > 0 {
                             gpu_pids.insert(proc.pid);
                             let process_info = create_base_process_info(
                                 device_index as usize,
@@ -313,7 +315,7 @@ fn get_gpu_processes_nvml(nvml: &Nvml) -> (Vec<ProcessInfo>, HashSet<u32>) {
                                 proc.pid,
                                 proc.used_gpu_memory,
                             );
-                            gpu_processes.push(process_info);
+                            merge_nvml_process_entry(&mut gpu_process_map, process_info);
                         }
                     }
                 }
@@ -321,7 +323,25 @@ fn get_gpu_processes_nvml(nvml: &Nvml) -> (Vec<ProcessInfo>, HashSet<u32>) {
         }
     }
 
-    (gpu_processes, gpu_pids)
+    (gpu_process_map.into_values().collect(), gpu_pids)
+}
+
+fn merge_nvml_process_entry(
+    gpu_process_map: &mut HashMap<(u32, String), ProcessInfo>,
+    process_info: ProcessInfo,
+) {
+    // A single PID can validly appear on multiple GPUs. We key by (pid, device_uuid)
+    // so we preserve per-device attribution instead of collapsing by PID.
+    let key = (process_info.pid, process_info.device_uuid.clone());
+
+    // NVML can report overlapping compute/graphics rows for the same (pid, device).
+    // Use max memory as a conservative merge to avoid double-counting inflation.
+    gpu_process_map
+        .entry(key)
+        .and_modify(|existing| {
+            existing.used_memory = existing.used_memory.max(process_info.used_memory);
+        })
+        .or_insert(process_info);
 }
 
 // Helper to create base ProcessInfo
@@ -586,4 +606,56 @@ fn get_gpu_processes_nvidia_smi() -> (Vec<ProcessInfo>, HashSet<u32>) {
 // Helper to parse memory values
 fn parse_memory_value(value: &str) -> u64 {
     value.parse::<u64>().unwrap_or(0) * BYTES_PER_MB // Convert MB to bytes
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_process(pid: u32, device_uuid: &str, used_memory: u64) -> ProcessInfo {
+        ProcessInfo {
+            device_id: 0,
+            device_uuid: device_uuid.to_string(),
+            pid,
+            process_name: String::new(),
+            used_memory,
+            cpu_percent: 0.0,
+            memory_percent: 0.0,
+            memory_rss: 0,
+            memory_vms: 0,
+            user: String::new(),
+            state: String::new(),
+            start_time: String::new(),
+            cpu_time: 0,
+            command: String::new(),
+            ppid: 0,
+            threads: 0,
+            uses_gpu: true,
+            priority: 0,
+            nice_value: 0,
+            gpu_utilization: 0.0,
+        }
+    }
+
+    #[test]
+    fn merge_nvml_process_entry_preserves_pid_on_multiple_devices() {
+        let mut process_map = HashMap::new();
+        merge_nvml_process_entry(&mut process_map, test_process(123, "GPU-A", 1024));
+        merge_nvml_process_entry(&mut process_map, test_process(123, "GPU-B", 2048));
+
+        assert_eq!(process_map.len(), 2);
+        assert!(process_map.contains_key(&(123, "GPU-A".to_string())));
+        assert!(process_map.contains_key(&(123, "GPU-B".to_string())));
+    }
+
+    #[test]
+    fn merge_nvml_process_entry_coalesces_duplicate_pid_device_with_max_memory() {
+        let mut process_map = HashMap::new();
+        merge_nvml_process_entry(&mut process_map, test_process(123, "GPU-A", 1024));
+        merge_nvml_process_entry(&mut process_map, test_process(123, "GPU-A", 4096));
+
+        assert_eq!(process_map.len(), 1);
+        let row = process_map.get(&(123, "GPU-A".to_string())).unwrap();
+        assert_eq!(row.used_memory, 4096);
+    }
 }
