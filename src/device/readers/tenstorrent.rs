@@ -216,6 +216,10 @@ impl GpuReader for TenstorrentReader {
         // Merge NPU information while preserving per-device rows.
         merge_gpu_processes(all_processes, npu_processes)
     }
+
+    fn get_gpu_processes(&self) -> (Vec<ProcessInfo>, HashSet<u32>) {
+        self.get_npu_processes()
+    }
 }
 
 // Helper functions

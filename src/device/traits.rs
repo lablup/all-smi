@@ -13,10 +13,25 @@
 // limitations under the License.
 
 use crate::device::{ChassisInfo, CpuInfo, GpuInfo, MemoryInfo, ProcessInfo};
+use std::collections::HashSet;
 
 pub trait GpuReader: Send + Sync {
     fn get_gpu_info(&self) -> Vec<GpuInfo>;
     fn get_process_info(&self) -> Vec<ProcessInfo>;
+
+    /// Return only raw GPU/NPU process entries and their PIDs, without
+    /// system-wide process enumeration.  The collector uses this to avoid
+    /// a redundant second call to `merge_gpu_processes`.
+    fn get_gpu_processes(&self) -> (Vec<ProcessInfo>, HashSet<u32>) {
+        let processes = self.get_process_info();
+        let pids = processes
+            .iter()
+            .filter(|p| p.uses_gpu)
+            .map(|p| p.pid)
+            .collect();
+        let gpu_only = processes.into_iter().filter(|p| p.uses_gpu).collect();
+        (gpu_only, pids)
+    }
 }
 
 pub trait CpuReader: Send + Sync {

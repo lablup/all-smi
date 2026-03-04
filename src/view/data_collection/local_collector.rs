@@ -241,7 +241,7 @@ impl LocalCollector {
             all_gpu_info,
             all_cpu_info,
             all_memory_info,
-            gpu_processes,
+            gpu_processes_result,
             all_processes,
             all_storage_info,
             all_chassis_info,
@@ -289,14 +289,17 @@ impl LocalCollector {
                         .await;
                     info
                 },
-                // GPU process collection (lightweight)
+                // GPU process collection (lightweight - raw GPU processes only)
                 async move {
                     let readers = gpu_readers_2.read().await;
-                    let processes = readers
-                        .iter()
-                        .flat_map(|reader| reader.get_process_info())
-                        .collect::<Vec<ProcessInfo>>();
-                    processes
+                    let mut all_gpu_procs = Vec::new();
+                    let mut all_gpu_pids = HashSet::new();
+                    for reader in readers.iter() {
+                        let (procs, pids) = reader.get_gpu_processes();
+                        all_gpu_procs.extend(procs);
+                        all_gpu_pids.extend(pids);
+                    }
+                    (all_gpu_procs, all_gpu_pids)
                 },
                 // Full process collection - use spawn_blocking to avoid blocking tokio runtime
                 async move {
@@ -358,7 +361,8 @@ impl LocalCollector {
         drop(status_tx);
         let _ = status_handler.await;
 
-        // Merge GPU processes into main process list
+        // Merge raw GPU processes into main process list
+        let (gpu_processes, _gpu_pids) = gpu_processes_result;
         let mut all_processes_merged = merge_gpu_processes(all_processes, gpu_processes);
 
         // Sort by CPU usage descending and limit to top MAX_DISPLAY_PROCESSES
@@ -411,10 +415,13 @@ impl LocalCollector {
             .flat_map(|reader| reader.get_memory_info())
             .collect();
 
-        let gpu_processes: Vec<ProcessInfo> = gpu_readers
-            .iter()
-            .flat_map(|reader| reader.get_process_info())
-            .collect();
+        let mut gpu_processes = Vec::new();
+        let mut gpu_pids = HashSet::new();
+        for reader in gpu_readers.iter() {
+            let (procs, pids) = reader.get_gpu_processes();
+            gpu_processes.extend(procs);
+            gpu_pids.extend(pids);
+        }
 
         // Determine if we should do a full refresh or selective refresh
         let cycle = self.refresh_cycle.fetch_add(1, Ordering::Relaxed);
@@ -426,8 +433,6 @@ impl LocalCollector {
         } else {
             self.tracked_pids.read().await.clone()
         };
-
-        let gpu_pids: HashSet<u32> = gpu_processes.iter().map(|p| p.pid).collect();
         let process_cache = Arc::clone(&self.process_cache);
         let all_processes = with_global_system(|system| {
             use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, UpdateKind};

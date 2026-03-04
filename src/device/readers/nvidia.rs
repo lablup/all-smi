@@ -246,6 +246,10 @@ impl GpuReader for NvidiaGpuReader {
         // Merge GPU information into the process list while preserving per-device rows.
         merge_gpu_processes(all_processes, gpu_processes)
     }
+
+    fn get_gpu_processes(&self) -> (Vec<ProcessInfo>, HashSet<u32>) {
+        self.get_gpu_processes_cached()
+    }
 }
 
 // Helper function to set NVML status
