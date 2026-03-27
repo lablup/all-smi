@@ -28,7 +28,7 @@ use std::sync::OnceLock;
 
 // Import furiosa-smi-rs if available on Linux
 #[cfg(all(target_os = "linux", feature = "furiosa-smi-rs"))]
-use furiosa_smi_rs::{list_devices, Device};
+use furiosa_smi_rs::list_devices;
 
 /// Collection method for Furiosa NPU metrics
 #[derive(Debug, Clone, Copy)]
@@ -41,15 +41,21 @@ pub enum CollectionMethod {
 }
 
 /// JSON structures for furiosa-smi outputs
+/// Supports both legacy (Warboy) format with --output flag
+/// and RNGD format with --format flag
 #[derive(Debug, Deserialize)]
 struct FuriosaSmiInfoJson {
+    /// Warboy uses numeric "index" (e.g., "0"), RNGD omits this field
+    #[serde(default)]
+    #[allow(dead_code)]
     index: String,
     arch: String,
-    #[allow(dead_code)]
     dev_name: String,
     device_uuid: String,
     device_sn: String,
     firmware: String,
+    /// Warboy has pert version, RNGD omits this field
+    #[serde(default)]
     pert: String,
     temperature: String,
     power: String,
@@ -61,16 +67,38 @@ struct FuriosaSmiInfoJson {
 
 #[derive(Debug, Deserialize)]
 struct FuriosaSmiStatusJson {
+    /// Warboy uses "index", RNGD omits this field
+    #[serde(default)]
+    #[allow(dead_code)]
     index: String,
     #[allow(dead_code)]
     arch: String,
-    #[allow(dead_code)]
     device: String,
     #[allow(dead_code)]
     liveness: String,
+    /// Warboy only
+    #[serde(default)]
     #[allow(dead_code)]
     cores: Vec<FuriosaCoreInfo>,
+    /// RNGD provides per-device memory info
+    #[serde(default)]
+    memory: Option<FuriosaStatusMemory>,
     pe_utilizations: Vec<FuriosaPeUtilization>,
+}
+
+/// Memory info from RNGD status output
+#[derive(Debug, Deserialize)]
+struct FuriosaStatusMemory {
+    #[serde(alias = "DRAM")]
+    dram: Option<FuriosaDramInfo>,
+}
+
+#[derive(Debug, Deserialize)]
+struct FuriosaDramInfo {
+    used_size: u64,
+    total_size: u64,
+    #[allow(dead_code)]
+    used_ratio: f64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -84,14 +112,27 @@ struct FuriosaCoreInfo {
 struct FuriosaPeUtilization {
     #[allow(dead_code)]
     pe_core: u32,
+    /// RNGD has pe_occupancy field
+    #[serde(default)]
+    #[allow(dead_code)]
+    pe_occupancy: bool,
+    /// Warboy uses "utilization", RNGD uses "pe_utilization"
+    #[serde(alias = "pe_utilization")]
     utilization: f64,
 }
 
 #[derive(Debug, Deserialize)]
 struct FuriosaPsOutputJson {
+    /// Warboy uses "npu", RNGD uses "dev_name"
+    #[serde(alias = "dev_name")]
     npu: String,
     pid: u32,
+    /// Warboy uses "cmd", RNGD uses "cmdline"
+    #[serde(alias = "cmdline")]
     cmd: String,
+    /// Warboy has memory field, RNGD omits it
+    #[serde(default)]
+    #[allow(dead_code)]
     memory: String,
 }
 
@@ -133,11 +174,8 @@ impl FuriosaNpuReader {
             let mut device_info_map = HashMap::new();
 
             // Get device info to extract static fields
-            if let Ok(output) =
-                execute_command_default("furiosa-smi", &["info", "--output", "json"])
-            {
-                if let Ok(devices) = serde_json::from_str::<Vec<FuriosaSmiInfoJson>>(&output.stdout)
-                {
+            if let Some(stdout) = furiosa_smi_json("info") {
+                if let Ok(devices) = serde_json::from_str::<Vec<FuriosaSmiInfoJson>>(&stdout) {
                     // Use common MAX_DEVICES constant
                     const MAX_DEVICES: usize = crate::device::readers::common_cache::MAX_DEVICES;
                     let devices_to_process: Vec<_> =
@@ -145,20 +183,25 @@ impl FuriosaNpuReader {
 
                     for device in devices_to_process {
                         // Build detail HashMap using DetailBuilder
-                        let detail = DetailBuilder::new()
+                        let mut builder = DetailBuilder::new()
                             .insert("serial_number", &device.device_sn)
                             .insert("firmware_version", &device.firmware)
-                            .insert("pert_version", &device.pert)
                             .insert("pci_bdf", &device.pci_bdf)
                             .insert("pci_dev", &device.pci_dev)
                             .insert("architecture", device.arch.to_uppercase())
                             .insert("core_count", "8")
                             .insert("pe_count", "64K")
                             .insert("memory_bandwidth", "1.63TB/s")
-                            .insert("on_chip_sram", "256MB")
-                            // Add unified AI acceleration library labels
-                            .insert_lib_info("PERT", Some(&device.pert))
-                            .build();
+                            .insert("on_chip_sram", "256MB");
+
+                        // Only add pert_version if available (Warboy has it, RNGD may not)
+                        if !device.pert.is_empty() {
+                            builder = builder
+                                .insert("pert_version", &device.pert)
+                                .insert_lib_info("PERT", Some(&device.pert));
+                        }
+
+                        let detail = builder.build();
 
                         let static_info = DeviceStaticInfo::with_details(
                             format!("Furiosa {}", device.arch.to_uppercase()),
@@ -166,7 +209,8 @@ impl FuriosaNpuReader {
                             detail,
                         );
 
-                        device_info_map.insert(device.index.clone(), static_info);
+                        // Use dev_name as key (e.g., "npu0") for both Warboy and RNGD
+                        device_info_map.insert(device.dev_name.clone(), static_info);
                     }
                 }
             }
@@ -275,35 +319,25 @@ impl FuriosaNpuReader {
         // Get cached static info first (this will call furiosa-smi info once)
         let static_info_map = self.get_device_static_info_cli();
 
-        // Get status for utilization (dynamic data)
-        let status_output =
-            match execute_command_default("furiosa-smi", &["status", "--output", "json"]) {
-                Ok(output) => output,
-                Err(_) => return Vec::new(),
-            };
+        // Get status for utilization and memory (dynamic data)
+        let status_stdout = match furiosa_smi_json("status") {
+            Some(stdout) => stdout,
+            None => return Vec::new(),
+        };
 
         let status_list: Vec<FuriosaSmiStatusJson> =
-            serde_json::from_str(&status_output.stdout).unwrap_or_default();
+            serde_json::from_str(&status_stdout).unwrap_or_default();
 
         // Also need to get info for dynamic fields (temperature, power, frequency, governor)
-        let info_output =
-            match execute_command_default("furiosa-smi", &["info", "--output", "json"]) {
-                Ok(output) => output,
-                Err(_) => return Vec::new(),
-            };
+        let info_stdout = match furiosa_smi_json("info") {
+            Some(stdout) => stdout,
+            None => return Vec::new(),
+        };
 
-        let devices: Vec<FuriosaSmiInfoJson> = match serde_json::from_str(&info_output.stdout) {
+        let devices: Vec<FuriosaSmiInfoJson> = match serde_json::from_str(&info_stdout) {
             Ok(devices) => devices,
             Err(_) => return Vec::new(),
         };
-
-        // Get memory usage
-        let ps_output = execute_command_default("furiosa-smi", &["ps", "--output", "json"])
-            .map(|o| o.stdout)
-            .unwrap_or_default();
-        let processes: Vec<FuriosaPsOutputJson> =
-            serde_json::from_str(&ps_output).unwrap_or_default();
-        let device_memory_usage = calculate_device_memory_usage(&processes);
 
         let time = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
         let hostname = get_hostname();
@@ -311,29 +345,23 @@ impl FuriosaNpuReader {
         devices
             .into_iter()
             .filter_map(|device| {
-                // Get cached static info for this device
-                let static_info = static_info_map.get(&device.index)?;
-                let status = status_list.iter().find(|s| s.index == device.index);
-                create_gpu_info_from_cli_cached(
-                    static_info,
-                    &device,
-                    status,
-                    &device_memory_usage,
-                    &time,
-                    &hostname,
-                )
+                // Use dev_name (e.g., "npu0") as the lookup key
+                let static_info = static_info_map.get(&device.dev_name)?;
+                // Match status by device field (RNGD) which also uses dev_name format
+                let status = status_list.iter().find(|s| s.device == device.dev_name);
+                create_gpu_info_from_cli_cached(static_info, &device, status, &time, &hostname)
             })
             .collect()
     }
 
     /// Get process info using furiosa-smi ps
     fn get_process_info_internal(&self) -> Vec<ProcessInfo> {
-        let output = match execute_command_default("furiosa-smi", &["ps", "--output", "json"]) {
-            Ok(output) => output,
-            Err(_) => return Vec::new(),
+        let stdout = match furiosa_smi_json("ps") {
+            Some(stdout) => stdout,
+            None => return Vec::new(),
         };
 
-        let processes: Vec<FuriosaPsOutputJson> = match serde_json::from_str(&output.stdout) {
+        let processes: Vec<FuriosaPsOutputJson> = match serde_json::from_str(&stdout) {
             Ok(procs) => procs,
             Err(_) => return Vec::new(),
         };
@@ -357,22 +385,41 @@ impl GpuReader for FuriosaNpuReader {
 
 // Helper functions
 
-fn calculate_device_memory_usage(processes: &[FuriosaPsOutputJson]) -> HashMap<String, u64> {
-    let mut device_memory_usage: HashMap<String, u64> = HashMap::new();
+/// Cached JSON flag: "--format" for RNGD, "--output" for Warboy.
+/// Detected once on first successful call.
+static FURIOSA_JSON_FLAG: OnceLock<&str> = OnceLock::new();
 
-    for proc in processes {
-        let memory_bytes = parse_memory_mb_to_bytes(&proc.memory).unwrap_or_else(|| {
-            eprintln!(
-                "Failed to parse memory for process {}: {}",
-                proc.pid, proc.memory
-            );
-            0
-        });
-
-        *device_memory_usage.entry(proc.npu.clone()).or_insert(0) += memory_bytes;
+/// Run furiosa-smi subcommand with JSON output.
+/// Auto-detects and caches the correct flag (--format for RNGD, --output for Warboy).
+/// On the first call the probe result is reused to avoid a redundant command execution.
+fn furiosa_smi_json(subcommand: &str) -> Option<String> {
+    // Fast path: flag already detected, just run the command.
+    if let Some(flag) = FURIOSA_JSON_FLAG.get() {
+        let output = execute_command_default("furiosa-smi", &[subcommand, flag, "json"]).ok()?;
+        return if output.status == 0 && !output.stdout.is_empty() {
+            Some(output.stdout)
+        } else {
+            None
+        };
     }
 
-    device_memory_usage
+    // Slow path (first call only): probe with --format first (RNGD), then --output (Warboy).
+    // Reuse the successful probe result directly instead of discarding it.
+    if let Ok(output) = execute_command_default("furiosa-smi", &[subcommand, "--format", "json"]) {
+        if output.status == 0 && !output.stdout.is_empty() {
+            let _ = FURIOSA_JSON_FLAG.set("--format");
+            return Some(output.stdout);
+        }
+    }
+
+    // Fall back to --output (Warboy)
+    let _ = FURIOSA_JSON_FLAG.set("--output");
+    let output = execute_command_default("furiosa-smi", &[subcommand, "--output", "json"]).ok()?;
+    if output.status == 0 && !output.stdout.is_empty() {
+        Some(output.stdout)
+    } else {
+        None
+    }
 }
 
 /// Create GpuInfo from CLI data using cached static info
@@ -380,7 +427,6 @@ fn create_gpu_info_from_cli_cached(
     static_info: &DeviceStaticInfo,
     device: &FuriosaSmiInfoJson,
     status: Option<&FuriosaSmiStatusJson>,
-    device_memory_usage: &HashMap<String, u64>,
     time: &str,
     hostname: &str,
 ) -> Option<GpuInfo> {
@@ -419,8 +465,16 @@ fn create_gpu_info_from_cli_cached(
         })
         .unwrap_or(0.0);
 
-    let device_name = format!("npu{}", device.index);
-    let used_memory = device_memory_usage.get(&device_name).copied().unwrap_or(0);
+    // Get memory from status (RNGD provides per-device DRAM info), fall back to constant
+    let (used_memory, total_memory) = match status.and_then(|s| s.memory.as_ref()) {
+        Some(mem) => {
+            let dram = mem.dram.as_ref();
+            let used = dram.map_or(0, |d| d.used_size);
+            let total = dram.map_or(FURIOSA_HBM3_MEMORY_BYTES, |d| d.total_size);
+            (used, total)
+        }
+        None => (0, FURIOSA_HBM3_MEMORY_BYTES),
+    };
 
     Some(GpuInfo {
         uuid: static_info
@@ -439,7 +493,7 @@ fn create_gpu_info_from_cli_cached(
         tensorcore_utilization: None,
         temperature,
         used_memory,
-        total_memory: FURIOSA_HBM3_MEMORY_BYTES,
+        total_memory,
         frequency,
         power_consumption: power,
         gpu_core_count: None,
@@ -447,88 +501,34 @@ fn create_gpu_info_from_cli_cached(
     })
 }
 
-#[allow(dead_code)]
-fn create_gpu_info_from_cli(
-    device: &FuriosaSmiInfoJson,
-    status: Option<&FuriosaSmiStatusJson>,
-    device_memory_usage: &HashMap<String, u64>,
-    time: &str,
-    hostname: &str,
-) -> Option<GpuInfo> {
-    let mut detail = HashMap::new();
+/// Extract the first device name from an RNGD ps dev_name string.
+/// RNGD format: "npu4:[0, 7], npu5:[0, 7], npu6:[0, 7], npu7:[0, 7]"
+/// Legacy format: "npu0"
+fn extract_first_device_name(dev_name: &str) -> &str {
+    // Split on ':' to get the first device name prefix (e.g., "npu4" from "npu4:[0, 7], ...")
+    // If no ':', the whole string is the device name (legacy format)
+    dev_name.split(':').next().unwrap_or(dev_name).trim()
+}
 
-    // Add device details
-    crate::extract_struct_fields!(detail, device, {
-        "serial_number" => device_sn,
-        "firmware_version" => firmware,
-        "pert_version" => pert,
-        "governor" => governor,
-        "pci_bdf" => pci_bdf,
-        "pci_dev" => pci_dev
-    });
-    detail.insert("architecture".to_string(), device.arch.to_uppercase());
-    detail.insert("core_count".to_string(), "8".to_string());
-    detail.insert("pe_count".to_string(), "64K".to_string());
-    detail.insert("memory_bandwidth".to_string(), "1.63TB/s".to_string());
-    detail.insert("on_chip_sram".to_string(), "256MB".to_string());
+/// Helper to compute average PE utilization from CoreUtilization (RS API)
+#[cfg(all(target_os = "linux", feature = "furiosa-smi-rs"))]
+fn compute_avg_pe_utilization(utilization: &furiosa_smi_rs::CoreUtilization) -> f64 {
+    let pe_utils = utilization.pe_utilization();
+    if pe_utils.is_empty() {
+        return 0.0;
+    }
+    let sum: f64 = pe_utils.iter().map(|pe| pe.pe_usage_percentage()).sum();
+    sum / pe_utils.len() as f64
+}
 
-    // Add unified AI acceleration library labels
-    detail.insert("lib_name".to_string(), "PERT".to_string());
-    detail.insert("lib_version".to_string(), device.pert.clone());
-
-    let temperature = parse_temperature(&device.temperature).unwrap_or_else(|| {
-        eprintln!("Failed to parse temperature: {}", device.temperature);
-        0
-    });
-    let power = parse_power(&device.power).unwrap_or_else(|| {
-        eprintln!("Failed to parse power: {}", device.power);
-        0.0
-    });
-    let frequency = parse_frequency_mhz(&device.core_clock).unwrap_or_else(|| {
-        eprintln!("Failed to parse frequency: {}", device.core_clock);
-        0
-    });
-
-    let utilization = status
-        .and_then(|s| {
-            s.pe_utilizations
-                .iter()
-                .map(|pe| pe.utilization)
-                .max_by(|a, b| {
-                    // Safe comparison handling NaN values
-                    match (a.is_nan(), b.is_nan()) {
-                        (true, true) => std::cmp::Ordering::Equal,
-                        (true, false) => std::cmp::Ordering::Less,
-                        (false, true) => std::cmp::Ordering::Greater,
-                        (false, false) => a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal),
-                    }
-                })
-        })
-        .unwrap_or(0.0);
-
-    let device_name = format!("npu{}", device.index);
-    let used_memory = device_memory_usage.get(&device_name).copied().unwrap_or(0);
-
-    Some(GpuInfo {
-        uuid: device.device_uuid.clone(),
-        time: time.to_string(),
-        name: format!("Furiosa {}", device.arch.to_uppercase()),
-        device_type: "NPU".to_string(),
-        host_id: hostname.to_string(),
-        hostname: hostname.to_string(),
-        instance: hostname.to_string(),
-        utilization,
-        ane_utilization: 0.0,
-        dla_utilization: None,
-        tensorcore_utilization: None,
-        temperature,
-        used_memory,
-        total_memory: FURIOSA_HBM3_MEMORY_BYTES,
-        frequency,
-        power_consumption: power,
-        gpu_core_count: None,
-        detail,
-    })
+/// Helper to get the first PE frequency in MHz from CoreFrequency (RS API)
+#[cfg(all(target_os = "linux", feature = "furiosa-smi-rs"))]
+fn first_pe_frequency_mhz(core_freq: &furiosa_smi_rs::CoreFrequency) -> u32 {
+    core_freq
+        .pe_frequency()
+        .first()
+        .map(|pf| pf.frequency())
+        .unwrap_or(0)
 }
 
 /// Create GpuInfo from RS API data using cached static info
@@ -543,25 +543,14 @@ fn create_gpu_info_from_device_2025_cached(
     time: &str,
     hostname: &str,
 ) -> Option<GpuInfo> {
+    let freq_mhz = first_pe_frequency_mhz(core_freq);
+
     // Clone static detail and add dynamic fields
     let mut detail = static_info.detail.clone();
-    detail.insert("governor".to_string(), format!("{:?}", governor));
-    detail.insert(
-        "frequency".to_string(),
-        format!("{}MHz", core_freq.0), // CoreFrequency is a tuple struct
-    );
+    detail.insert("governor".to_string(), format!("{governor}"));
+    detail.insert("frequency".to_string(), format!("{freq_mhz}MHz"));
 
-    // Calculate average PE utilization from core utilization
-    let avg_util = if !utilization.pe_utilizations.is_empty() {
-        let sum: f64 = utilization
-            .pe_utilizations
-            .iter()
-            .map(|pe| pe.utilization as f64)
-            .sum();
-        sum / utilization.pe_utilizations.len() as f64
-    } else {
-        0.0
-    };
+    let avg_util = compute_avg_pe_utilization(utilization);
 
     // TODO: Get memory info - not directly available in 2025.3.0 API
     let (used_memory, total_memory) = (0u64, FURIOSA_HBM3_MEMORY_BYTES);
@@ -580,10 +569,11 @@ fn create_gpu_info_from_device_2025_cached(
         utilization: avg_util,
         ane_utilization: 0.0,
         dla_utilization: None,
-        temperature: temperature.0 as u32, // DeviceTemperature is a tuple struct
+        tensorcore_utilization: None,
+        temperature: temperature.soc_peak() as u32,
         used_memory,
         total_memory,
-        frequency: core_freq.0,
+        frequency: freq_mhz,
         power_consumption: *power,
         gpu_core_count,
         detail,
@@ -602,6 +592,7 @@ fn create_gpu_info_from_device_2025(
     time: &str,
     hostname: &str,
 ) -> Option<GpuInfo> {
+    let freq_mhz = first_pe_frequency_mhz(core_freq);
     let mut detail = HashMap::new();
 
     // Add device details from DeviceInfo using 2025.3.0 API methods
@@ -616,27 +607,14 @@ fn create_gpu_info_from_device_2025(
     detail.insert("numa_node".to_string(), info.numa_node().to_string());
 
     // Add performance details
-    detail.insert("governor".to_string(), format!("{:?}", governor));
-    detail.insert(
-        "frequency".to_string(),
-        format!("{}MHz", core_freq.0), // CoreFrequency is a tuple struct
-    );
+    detail.insert("governor".to_string(), format!("{governor}"));
+    detail.insert("frequency".to_string(), format!("{freq_mhz}MHz"));
 
     // Add unified AI acceleration library labels using PERT version
     detail.insert("lib_name".to_string(), "PERT".to_string());
     detail.insert("lib_version".to_string(), info.pert_version().to_string());
 
-    // Calculate average PE utilization from core utilization
-    let avg_util = if !utilization.pe_utilizations.is_empty() {
-        let sum: f64 = utilization
-            .pe_utilizations
-            .iter()
-            .map(|pe| pe.utilization as f64)
-            .sum();
-        sum / utilization.pe_utilizations.len() as f64
-    } else {
-        0.0
-    };
+    let avg_util = compute_avg_pe_utilization(utilization);
 
     // TODO: Get memory info - not directly available in 2025.3.0 API
     let (used_memory, total_memory) = (0u64, FURIOSA_HBM3_MEMORY_BYTES);
@@ -652,10 +630,11 @@ fn create_gpu_info_from_device_2025(
         utilization: avg_util,
         ane_utilization: 0.0,
         dla_utilization: None,
-        temperature: temperature.0 as u32, // DeviceTemperature is a tuple struct
+        tensorcore_utilization: None,
+        temperature: temperature.soc_peak() as u32,
         used_memory,
         total_memory,
-        frequency: core_freq.0,
+        frequency: freq_mhz,
         power_consumption: *power,
         gpu_core_count: Some(info.core_num()),
         detail,
@@ -663,17 +642,19 @@ fn create_gpu_info_from_device_2025(
 }
 
 fn create_process_info_from_ps(proc: &FuriosaPsOutputJson) -> ProcessInfo {
-    let device_id = parse_device_id(&proc.npu).unwrap_or_else(|| {
+    // Extract the first device name from potentially complex RNGD format
+    let first_device = extract_first_device_name(&proc.npu);
+    let device_id = parse_device_id(first_device).unwrap_or_else(|| {
         eprintln!("Failed to parse device ID: {}", proc.npu);
         0
     });
-    let used_memory = parse_memory_mb_to_bytes(&proc.memory).unwrap_or_else(|| {
-        eprintln!(
-            "Failed to parse memory for process {}: {}",
-            proc.pid, proc.memory
-        );
+
+    // Parse memory when available (Warboy provides it, RNGD does not)
+    let used_memory = if proc.memory.is_empty() {
         0
-    });
+    } else {
+        parse_memory_mb_to_bytes(&proc.memory).unwrap_or(0)
+    };
 
     ProcessInfo {
         device_id,
@@ -705,4 +686,42 @@ fn extract_process_name(cmd: &str) -> String {
         .and_then(|path| path.split('/').next_back())
         .unwrap_or("unknown")
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_extract_first_device_name_rngd_format() {
+        assert_eq!(
+            extract_first_device_name("npu4:[0, 7], npu5:[0, 7]"),
+            "npu4"
+        );
+    }
+
+    #[test]
+    fn test_extract_first_device_name_legacy_format() {
+        assert_eq!(extract_first_device_name("npu0"), "npu0");
+    }
+
+    #[test]
+    fn test_extract_first_device_name_single_rngd() {
+        assert_eq!(extract_first_device_name("npu2:[0, 3]"), "npu2");
+    }
+
+    #[test]
+    fn test_extract_process_name_full_path() {
+        assert_eq!(extract_process_name("/usr/bin/python3 train.py"), "python3");
+    }
+
+    #[test]
+    fn test_extract_process_name_simple() {
+        assert_eq!(extract_process_name("train"), "train");
+    }
+
+    #[test]
+    fn test_extract_process_name_empty() {
+        assert_eq!(extract_process_name(""), "unknown");
+    }
 }

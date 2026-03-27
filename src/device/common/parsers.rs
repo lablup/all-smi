@@ -14,16 +14,21 @@
 
 // Common parsing utilities with proper error handling
 
-/// Parse a temperature string (e.g., "45C" or "45°C") into u32
+/// Parse a temperature string (e.g., "45C", "45°C", or "41.33°C") into u32
+/// Handles both integer and decimal temperature values
 /// Returns None if parsing fails
 pub fn parse_temperature(temp_str: &str) -> Option<u32> {
-    temp_str
+    let cleaned = temp_str
         .trim_end_matches(['C', '°', ' '].as_ref())
         .split('/')
         .next()?
-        .trim()
+        .trim();
+
+    // Try integer first, then float (for decimal temperatures like "41.33")
+    cleaned
         .parse::<u32>()
         .ok()
+        .or_else(|| cleaned.parse::<f64>().ok().map(|f| f.round() as u32))
 }
 
 /// Parse a power string (e.g., "150W" or "150.5W") into f64
@@ -103,6 +108,8 @@ mod tests {
         assert_eq!(parse_temperature("45C"), Some(45));
         assert_eq!(parse_temperature("45°C"), Some(45));
         assert_eq!(parse_temperature("45/90C"), Some(45));
+        assert_eq!(parse_temperature("41.33°C"), Some(41));
+        assert_eq!(parse_temperature("37.99°C"), Some(38));
         assert_eq!(parse_temperature("invalid"), None);
     }
 
