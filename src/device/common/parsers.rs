@@ -28,7 +28,7 @@ pub fn parse_temperature(temp_str: &str) -> Option<u32> {
     cleaned
         .parse::<u32>()
         .ok()
-        .or_else(|| cleaned.parse::<f64>().ok().map(|f| f as u32))
+        .or_else(|| cleaned.parse::<f64>().ok().map(|f| f.round() as u32))
 }
 
 /// Parse a power string (e.g., "150W" or "150.5W") into f64
@@ -109,7 +109,7 @@ mod tests {
         assert_eq!(parse_temperature("45°C"), Some(45));
         assert_eq!(parse_temperature("45/90C"), Some(45));
         assert_eq!(parse_temperature("41.33°C"), Some(41));
-        assert_eq!(parse_temperature("37.99°C"), Some(37));
+        assert_eq!(parse_temperature("37.99°C"), Some(38));
         assert_eq!(parse_temperature("invalid"), None);
     }
 

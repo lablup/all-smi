@@ -397,20 +397,32 @@ static FURIOSA_JSON_FLAG: OnceLock<&str> = OnceLock::new();
 
 /// Run furiosa-smi subcommand with JSON output.
 /// Auto-detects and caches the correct flag (--format for RNGD, --output for Warboy).
+/// On the first call the probe result is reused to avoid a redundant command execution.
 fn furiosa_smi_json(subcommand: &str) -> Option<String> {
-    let flag = FURIOSA_JSON_FLAG.get_or_init(|| {
-        // Probe with --format first (RNGD)
-        if let Ok(output) =
-            execute_command_default("furiosa-smi", &[subcommand, "--format", "json"])
-        {
-            if output.status == 0 {
-                return "--format";
-            }
-        }
-        "--output"
-    });
+    // Fast path: flag already detected, just run the command.
+    if let Some(flag) = FURIOSA_JSON_FLAG.get() {
+        let output = execute_command_default("furiosa-smi", &[subcommand, flag, "json"]).ok()?;
+        return if output.status == 0 && !output.stdout.is_empty() {
+            Some(output.stdout)
+        } else {
+            None
+        };
+    }
 
-    let output = execute_command_default("furiosa-smi", &[subcommand, flag, "json"]).ok()?;
+    // Slow path (first call only): probe with --format first (RNGD), then --output (Warboy).
+    // Reuse the successful probe result directly instead of discarding it.
+    if let Ok(output) =
+        execute_command_default("furiosa-smi", &[subcommand, "--format", "json"])
+    {
+        if output.status == 0 && !output.stdout.is_empty() {
+            let _ = FURIOSA_JSON_FLAG.set("--format");
+            return Some(output.stdout);
+        }
+    }
+
+    // Fall back to --output (Warboy)
+    let _ = FURIOSA_JSON_FLAG.set("--output");
+    let output = execute_command_default("furiosa-smi", &[subcommand, "--output", "json"]).ok()?;
     if output.status == 0 && !output.stdout.is_empty() {
         Some(output.stdout)
     } else {
@@ -682,4 +694,42 @@ fn extract_process_name(cmd: &str) -> String {
         .and_then(|path| path.split('/').next_back())
         .unwrap_or("unknown")
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_extract_first_device_name_rngd_format() {
+        assert_eq!(
+            extract_first_device_name("npu4:[0, 7], npu5:[0, 7]"),
+            "npu4"
+        );
+    }
+
+    #[test]
+    fn test_extract_first_device_name_legacy_format() {
+        assert_eq!(extract_first_device_name("npu0"), "npu0");
+    }
+
+    #[test]
+    fn test_extract_first_device_name_single_rngd() {
+        assert_eq!(extract_first_device_name("npu2:[0, 3]"), "npu2");
+    }
+
+    #[test]
+    fn test_extract_process_name_full_path() {
+        assert_eq!(extract_process_name("/usr/bin/python3 train.py"), "python3");
+    }
+
+    #[test]
+    fn test_extract_process_name_simple() {
+        assert_eq!(extract_process_name("train"), "train");
+    }
+
+    #[test]
+    fn test_extract_process_name_empty() {
+        assert_eq!(extract_process_name(""), "unknown");
+    }
 }
