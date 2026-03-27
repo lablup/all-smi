@@ -110,12 +110,15 @@ pub mod device;
 pub mod parsing;
 
 /// Application state management.
+#[cfg(feature = "cli")]
 pub mod app_state;
 
 /// Command-line interface definitions.
+#[cfg(feature = "cli")]
 pub mod cli;
 
 /// Network client for remote monitoring.
+#[cfg(feature = "cli")]
 pub mod network;
 
 /// Storage monitoring.
@@ -125,6 +128,7 @@ pub mod storage;
 pub mod traits;
 
 /// Terminal UI components.
+#[cfg(feature = "cli")]
 pub mod ui;
 
 /// Utility functions.

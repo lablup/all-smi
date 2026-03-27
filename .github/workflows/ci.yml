@@ -86,6 +86,9 @@ jobs:
       - name: Build binary
         run: cargo build --release --bin all-smi
 
+      - name: Build library-only (no default features)
+        run: cargo build --no-default-features --lib
+
   docker-check:
     name: Docker Build Check
     runs-on: ubuntu-latest

@@ -14,4 +14,5 @@
 
 pub mod config;
 pub mod error_handling;
+#[cfg(feature = "cli")]
 pub mod progress_bar;
