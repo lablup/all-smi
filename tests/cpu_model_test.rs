@@ -1,3 +1,5 @@
+#![cfg(feature = "cli")]
+
 use all_smi::device::CpuPlatformType;
 use all_smi::network::metrics_parser::MetricsParser;
 use regex::Regex;

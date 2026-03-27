@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use crate::common::config::AppConfig;
+#[cfg(feature = "cli")]
 use crossterm::style::Color;
 use std::env;
 use std::fs;
@@ -45,6 +46,7 @@ impl ContainerRuntime {
         }
     }
 
+    #[cfg(feature = "cli")]
     pub fn brand_color(&self) -> Color {
         match self {
             ContainerRuntime::Docker => Color::Rgb {
@@ -288,6 +290,7 @@ impl VirtualizationType {
         }
     }
 
+    #[cfg(feature = "cli")]
     pub fn brand_color(&self) -> Color {
         match self {
             VirtualizationType::VMware => Color::Rgb {
@@ -633,6 +636,7 @@ impl RuntimeEnvironment {
 
     /// Get the display name and color for the runtime environment
     /// Prioritizes container environment over VM if both are detected
+    #[cfg(feature = "cli")]
     pub fn display_info(&self) -> Option<(&str, Color)> {
         if self.container.is_containerized() {
             match self.container.runtime {

@@ -102,9 +102,11 @@ impl EnvConfig {
     }
 }
 
-/// UI Theme configuration
+/// UI Theme configuration (requires `cli` feature for crossterm color support)
+#[cfg(feature = "cli")]
 pub struct ThemeConfig;
 
+#[cfg(feature = "cli")]
 impl ThemeConfig {
     pub fn progress_bar_color(fill_ratio: f64) -> crossterm::style::Color {
         use crossterm::style::Color;
@@ -196,6 +198,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "cli")]
     fn test_progress_bar_color_thresholds() {
         use crossterm::style::Color;
 
@@ -217,6 +220,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "cli")]
     fn test_utilization_color_thresholds() {
         use crossterm::style::Color;
 
@@ -288,7 +292,14 @@ mod tests {
 
         assert_eq!(EnvConfig::retry_delay(0), 0);
         assert_eq!(EnvConfig::retry_delay(1000), 50000);
+    }
 
+    #[test]
+    #[cfg(all(
+        feature = "cli",
+        not(all(target_os = "macos", target_arch = "aarch64"))
+    ))]
+    fn test_non_apple_silicon_theme_boundary_values() {
         use crossterm::style::Color;
         assert_eq!(
             ThemeConfig::progress_bar_color(f64::NEG_INFINITY),
