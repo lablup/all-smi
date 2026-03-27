@@ -15,7 +15,7 @@
 use crate::device::common::constants::FURIOSA_HBM3_MEMORY_BYTES;
 use crate::device::common::execute_command_default;
 use crate::device::common::parsers::{
-    parse_device_id, parse_frequency_mhz, parse_power, parse_temperature,
+    parse_device_id, parse_frequency_mhz, parse_memory_mb_to_bytes, parse_power, parse_temperature,
 };
 use crate::device::readers::common_cache::{DetailBuilder, DeviceStaticInfo};
 use crate::device::types::{GpuInfo, ProcessInfo};
@@ -391,22 +391,31 @@ impl GpuReader for FuriosaNpuReader {
 
 // Helper functions
 
+/// Cached JSON flag: "--format" for RNGD, "--output" for Warboy.
+/// Detected once on first successful call.
+static FURIOSA_JSON_FLAG: OnceLock<&str> = OnceLock::new();
+
 /// Run furiosa-smi subcommand with JSON output.
-/// Tries RNGD format (--format json) first, falls back to legacy (--output json).
+/// Auto-detects and caches the correct flag (--format for RNGD, --output for Warboy).
 fn furiosa_smi_json(subcommand: &str) -> Option<String> {
-    // Try RNGD format first (--format json)
-    if let Ok(output) = execute_command_default("furiosa-smi", &[subcommand, "--format", "json"]) {
-        if output.status == 0 && !output.stdout.is_empty() {
-            return Some(output.stdout);
+    let flag = FURIOSA_JSON_FLAG.get_or_init(|| {
+        // Probe with --format first (RNGD)
+        if let Ok(output) =
+            execute_command_default("furiosa-smi", &[subcommand, "--format", "json"])
+        {
+            if output.status == 0 {
+                return "--format";
+            }
         }
+        "--output"
+    });
+
+    let output = execute_command_default("furiosa-smi", &[subcommand, flag, "json"]).ok()?;
+    if output.status == 0 && !output.stdout.is_empty() {
+        Some(output.stdout)
+    } else {
+        None
     }
-    // Fall back to legacy format (--output json)
-    if let Ok(output) = execute_command_default("furiosa-smi", &[subcommand, "--output", "json"]) {
-        if output.status == 0 && !output.stdout.is_empty() {
-            return Some(output.stdout);
-        }
-    }
-    None
 }
 
 /// Create GpuInfo from CLI data using cached static info
@@ -636,12 +645,19 @@ fn create_process_info_from_ps(proc: &FuriosaPsOutputJson) -> ProcessInfo {
         0
     });
 
+    // Parse memory when available (Warboy provides it, RNGD does not)
+    let used_memory = if proc.memory.is_empty() {
+        0
+    } else {
+        parse_memory_mb_to_bytes(&proc.memory).unwrap_or(0)
+    };
+
     ProcessInfo {
         device_id,
         device_uuid: proc.npu.clone(),
         pid: proc.pid,
         process_name: extract_process_name(&proc.cmd),
-        used_memory: 0,
+        used_memory,
         cpu_percent: 0.0,
         memory_percent: 0.0,
         memory_rss: 0,
