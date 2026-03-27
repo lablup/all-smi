@@ -349,13 +349,7 @@ impl FuriosaNpuReader {
                 let static_info = static_info_map.get(&device.dev_name)?;
                 // Match status by device field (RNGD) which also uses dev_name format
                 let status = status_list.iter().find(|s| s.device == device.dev_name);
-                create_gpu_info_from_cli_cached(
-                    static_info,
-                    &device,
-                    status,
-                    &time,
-                    &hostname,
-                )
+                create_gpu_info_from_cli_cached(static_info, &device, status, &time, &hostname)
             })
             .collect()
     }
@@ -411,9 +405,7 @@ fn furiosa_smi_json(subcommand: &str) -> Option<String> {
 
     // Slow path (first call only): probe with --format first (RNGD), then --output (Warboy).
     // Reuse the successful probe result directly instead of discarding it.
-    if let Ok(output) =
-        execute_command_default("furiosa-smi", &[subcommand, "--format", "json"])
-    {
+    if let Ok(output) = execute_command_default("furiosa-smi", &[subcommand, "--format", "json"]) {
         if output.status == 0 && !output.stdout.is_empty() {
             let _ = FURIOSA_JSON_FLAG.set("--format");
             return Some(output.stdout);
