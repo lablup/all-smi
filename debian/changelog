@@ -1,3 +1,17 @@
+all-smi (0.17.4-0) jammy; urgency=medium
+
+  * Feature-gate CLI/TUI dependencies behind `cli` feature for lighter library builds
+  * Make clap, crossterm, axum, tower-http optional (activated by `cli` feature)
+  * Make hyper, hyper-util, rand optional (activated by `mock` feature)
+  * Add `--no-default-features` build check to CI
+  * Fix Furiosa RNGD support for latest SDK & driver APIs (v2026.1.0)
+  * Add dual JSON format support for Furiosa CLI (--format json / --output json)
+  * Read actual per-device DRAM usage instead of hardcoded memory constant
+  * Handle decimal temperatures from RNGD devices
+  * Cache detected JSON flag to avoid repeated failed process spawns
+
+ -- Jeongkyu Shin <inureyes@gmail.com>  Sat, 29 Mar 2026 00:00:00 +0000
+
 all-smi (0.17.3-0) jammy; urgency=medium
 
   * Fix multi-GPU process duplication by adding get_gpu_processes trait method
