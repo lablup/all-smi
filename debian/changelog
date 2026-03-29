@@ -1,3 +1,11 @@
+all-smi (0.17.5-0) jammy; urgency=medium
+
+  * Bump dependencies including nvml-wrapper 0.12 and fix yanked uds_windows
+  * Update tokio 1.50, chrono 0.4.44, clap 4.6, libamdgpu_top 0.11.2
+  * Update 58 transitive dependencies to latest compatible versions
+
+ -- Jeongkyu Shin <inureyes@gmail.com>  Sat, 29 Mar 2026 00:00:00 +0000
+
 all-smi (0.17.4-0) jammy; urgency=medium
 
   * Feature-gate CLI/TUI dependencies behind `cli` feature for lighter library builds
