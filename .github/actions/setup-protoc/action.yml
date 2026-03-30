@@ -14,7 +14,7 @@ runs:
   steps:
     - name: Restore protoc cache
       id: cache-protoc
-      uses: actions/cache@v4
+      uses: actions/cache@v5
       with:
         path: ~/.local/protoc-${{ inputs.version }}
         key: ${{ runner.os }}-protoc-${{ inputs.version }}-${{ inputs.platform }}
