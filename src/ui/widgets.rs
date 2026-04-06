@@ -292,3 +292,234 @@ impl BarSegment {
         Self::new(value, Color::Yellow).with_label("cache")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui::buffer::BufferWriter;
+
+    // Helper: render a bar into a BufferWriter and strip ANSI escape sequences
+    // so we can inspect the visible character content.
+    fn strip_ansi(s: &str) -> String {
+        // Very simple stripper: remove ESC [ ... m sequences
+        let mut out = String::with_capacity(s.len());
+        let mut chars = s.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == '\x1b' {
+                // consume until 'm' or end
+                for nc in chars.by_ref() {
+                    if nc == 'm' {
+                        break;
+                    }
+                }
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    }
+
+    // -----------------------------------------------------------------------
+    // draw_bar: basic rendering properties
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_draw_bar_zero_value_produces_output() {
+        let mut bw = BufferWriter::new();
+        draw_bar(&mut bw, "CPU", 0.0, 100.0, 40, None);
+        let raw = bw.get_buffer();
+        assert!(!raw.is_empty(), "draw_bar should produce non-empty output");
+    }
+
+    #[test]
+    fn test_draw_bar_full_value_produces_output() {
+        let mut bw = BufferWriter::new();
+        draw_bar(&mut bw, "MEM", 100.0, 100.0, 40, None);
+        let raw = bw.get_buffer();
+        assert!(!raw.is_empty());
+    }
+
+    #[test]
+    fn test_draw_bar_label_appears_in_output() {
+        let mut bw = BufferWriter::new();
+        draw_bar(&mut bw, "GPU", 50.0, 100.0, 40, None);
+        let visible = strip_ansi(bw.get_buffer());
+        assert!(
+            visible.contains("GPU"),
+            "Label 'GPU' should appear in bar output; got: {visible:?}"
+        );
+    }
+
+    #[test]
+    fn test_draw_bar_brackets_present() {
+        let mut bw = BufferWriter::new();
+        draw_bar(&mut bw, "CPU", 25.0, 100.0, 40, None);
+        let visible = strip_ansi(bw.get_buffer());
+        assert!(visible.contains('['), "Opening bracket missing");
+        assert!(visible.contains(']'), "Closing bracket missing");
+    }
+
+    #[test]
+    fn test_draw_bar_percentage_text_shown() {
+        // When no show_text is provided the bar renders a percentage.
+        let mut bw = BufferWriter::new();
+        draw_bar(&mut bw, "CPU", 50.0, 100.0, 40, None);
+        let visible = strip_ansi(bw.get_buffer());
+        // 50.0 / 100.0 * 100 = 50.0 -> should contain "50.0%"
+        assert!(
+            visible.contains("50.0%"),
+            "Percentage text missing; got: {visible:?}"
+        );
+    }
+
+    #[test]
+    fn test_draw_bar_custom_text_overrides_percent() {
+        let mut bw = BufferWriter::new();
+        draw_bar(&mut bw, "CPU", 50.0, 100.0, 40, Some("8.0GB".to_string()));
+        let visible = strip_ansi(bw.get_buffer());
+        assert!(
+            visible.contains("8.0GB"),
+            "Custom text missing; got: {visible:?}"
+        );
+        assert!(
+            !visible.contains('%'),
+            "Percentage should not appear when custom text is set"
+        );
+    }
+
+    #[test]
+    fn test_draw_bar_long_label_trimmed() {
+        // Labels longer than 5 chars should be trimmed to 5
+        let mut bw = BufferWriter::new();
+        draw_bar(&mut bw, "TOOLONG", 0.0, 100.0, 40, None);
+        let visible = strip_ansi(bw.get_buffer());
+        // Only first 5 chars "TOOLO" should appear
+        assert!(
+            visible.contains("TOOLO"),
+            "Trimmed label missing; got: {visible:?}"
+        );
+        assert!(
+            !visible.contains("TOOLONG"),
+            "Full untrimmed label should not appear; got: {visible:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // draw_bar: batching reduces escape sequence count
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_draw_bar_batches_segments() {
+        // For a long bar, the batched implementation should produce significantly
+        // fewer escape sequences than one-per-character.
+        // We count ESC occurrences in the raw output.
+        let mut bw = BufferWriter::new();
+        draw_bar(&mut bw, "CPU", 50.0, 100.0, 120, None);
+        let raw = bw.get_buffer();
+
+        let esc_count = raw.chars().filter(|&c| c == '\x1b').count();
+        // Available bar width = 120 - 9 = 111 chars.
+        // An unbatched implementation would emit 1 escape per char ≈ 111 + overhead.
+        // The batched version should emit far fewer. We use 20 as a conservative upper bound.
+        assert!(
+            esc_count <= 20,
+            "Too many escape sequences ({esc_count}); batching may not be working"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // draw_bar_multi: basic rendering properties
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_draw_bar_multi_empty_segments_produces_output() {
+        let mut bw = BufferWriter::new();
+        draw_bar_multi(&mut bw, "MEM", &[], 100.0, 40, None);
+        let raw = bw.get_buffer();
+        assert!(!raw.is_empty());
+    }
+
+    #[test]
+    fn test_draw_bar_multi_single_segment() {
+        let mut bw = BufferWriter::new();
+        let segments = vec![BarSegment::memory_used(40.0)];
+        draw_bar_multi(&mut bw, "MEM", &segments, 100.0, 40, None);
+        let visible = strip_ansi(bw.get_buffer());
+        assert!(visible.contains("MEM"), "Label missing");
+        assert!(visible.contains('['), "Opening bracket missing");
+        assert!(visible.contains(']'), "Closing bracket missing");
+    }
+
+    #[test]
+    fn test_draw_bar_multi_multiple_segments() {
+        let mut bw = BufferWriter::new();
+        let segments = vec![
+            BarSegment::memory_used(30.0),
+            BarSegment::memory_buffers(10.0),
+            BarSegment::memory_cache(20.0),
+        ];
+        draw_bar_multi(&mut bw, "MEM", &segments, 100.0, 40, None);
+        let raw = bw.get_buffer();
+        assert!(!raw.is_empty());
+        let visible = strip_ansi(raw);
+        assert!(visible.contains("MEM"));
+    }
+
+    #[test]
+    fn test_draw_bar_multi_batches_segments() {
+        // Same escape-sequence batching test for draw_bar_multi.
+        let mut bw = BufferWriter::new();
+        let segments = vec![
+            BarSegment::memory_used(25.0),
+            BarSegment::memory_buffers(10.0),
+            BarSegment::memory_cache(15.0),
+        ];
+        draw_bar_multi(&mut bw, "MEM", &segments, 100.0, 120, None);
+        let raw = bw.get_buffer();
+        let esc_count = raw.chars().filter(|&c| c == '\x1b').count();
+        // Available bar width = 111 chars, 3 segments: expect far fewer than 111 escapes.
+        assert!(
+            esc_count <= 30,
+            "Too many escape sequences ({esc_count}) in draw_bar_multi; batching may not be working"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // draw_bar throughput: hot-path measurement
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_draw_bar_throughput() {
+        let mut bw = BufferWriter::new();
+        let start = std::time::Instant::now();
+        for i in 0..1000 {
+            bw.reset();
+            draw_bar(&mut bw, "CPU", (i % 101) as f64, 100.0, 80, None);
+        }
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed.as_millis() < 1000,
+            "draw_bar throughput too slow: {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn test_draw_bar_multi_throughput() {
+        let mut bw = BufferWriter::new();
+        let segments = vec![
+            BarSegment::memory_used(30.0),
+            BarSegment::memory_buffers(10.0),
+            BarSegment::memory_cache(20.0),
+        ];
+        let start = std::time::Instant::now();
+        for _ in 0..1000 {
+            bw.reset();
+            draw_bar_multi(&mut bw, "MEM", &segments, 100.0, 80, None);
+        }
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed.as_millis() < 1000,
+            "draw_bar_multi throughput too slow: {elapsed:?}"
+        );
+    }
+}

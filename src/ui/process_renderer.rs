@@ -633,3 +633,167 @@ fn format_cpu_time(seconds: u64) -> Cow<'static, str> {
         Cow::Owned(format!("{}:{:02}:{secs:02}", minutes / 60, minutes % 60))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -----------------------------------------------------------------------
+    // write_memory_size: correctness
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_write_memory_size_zero() {
+        let mut buf = String::new();
+        write_memory_size(&mut buf, 0);
+        assert_eq!(buf, "0");
+    }
+
+    #[test]
+    fn test_write_memory_size_bytes() {
+        let mut buf = String::new();
+        write_memory_size(&mut buf, 512);
+        assert_eq!(buf, "512");
+    }
+
+    #[test]
+    fn test_write_memory_size_kilobytes() {
+        let mut buf = String::new();
+        write_memory_size(&mut buf, 4 * 1024);
+        assert_eq!(buf, "4K");
+    }
+
+    #[test]
+    fn test_write_memory_size_megabytes() {
+        let mut buf = String::new();
+        write_memory_size(&mut buf, 256 * 1024 * 1024);
+        assert_eq!(buf, "256M");
+    }
+
+    #[test]
+    fn test_write_memory_size_gigabytes() {
+        let mut buf = String::new();
+        write_memory_size(&mut buf, 8 * 1024 * 1024 * 1024);
+        assert_eq!(buf, "8G");
+    }
+
+    #[test]
+    fn test_write_memory_size_terabytes() {
+        let mut buf = String::new();
+        // 2TB = 2048 GB
+        write_memory_size(&mut buf, 2 * 1024 * 1024 * 1024 * 1024);
+        assert_eq!(buf, "2T");
+    }
+
+    #[test]
+    fn test_write_memory_size_reuses_buffer() {
+        // Verify the buffer is appended to, not replaced
+        let mut buf = String::from("prefix-");
+        write_memory_size(&mut buf, 1024 * 1024);
+        assert_eq!(buf, "prefix-1M");
+    }
+
+    // -----------------------------------------------------------------------
+    // format_cpu_time: correctness and Cow allocation behavior
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_format_cpu_time_zero_borrows() {
+        let result = format_cpu_time(0);
+        assert!(matches!(result, Cow::Borrowed(_)));
+        assert_eq!(&*result, "0:00:00");
+    }
+
+    #[test]
+    fn test_format_cpu_time_long_running_borrows() {
+        // More than 365 days should return the borrowed "0:00:00"
+        let result = format_cpu_time(366 * 24 * 3600);
+        assert!(matches!(result, Cow::Borrowed(_)));
+        assert_eq!(&*result, "0:00:00");
+    }
+
+    #[test]
+    fn test_format_cpu_time_minutes_only() {
+        // 90 seconds = 1 minute 30 seconds, no hours
+        let result = format_cpu_time(90);
+        assert!(matches!(result, Cow::Owned(_)));
+        assert_eq!(&*result, "0:01:30");
+    }
+
+    #[test]
+    fn test_format_cpu_time_with_hours() {
+        // 3661 seconds = 1 hour, 1 minute, 1 second
+        let result = format_cpu_time(3661);
+        assert!(matches!(result, Cow::Owned(_)));
+        assert_eq!(&*result, "1:01:01");
+    }
+
+    #[test]
+    fn test_format_cpu_time_exact_one_hour() {
+        let result = format_cpu_time(3600);
+        assert_eq!(&*result, "1:00:00");
+    }
+
+    #[test]
+    fn test_format_cpu_time_just_below_limit() {
+        // 365 days exactly: should NOT be suppressed (must be > 365*24*3600)
+        let at_limit = 365 * 24 * 3600;
+        let result = format_cpu_time(at_limit);
+        assert!(matches!(result, Cow::Owned(_)));
+    }
+
+    // -----------------------------------------------------------------------
+    // RowFormatter: scratch buffer reuse
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_row_formatter_clear_retains_capacity() {
+        let mut rf = RowFormatter::new();
+        rf.buf.push_str("some content longer than initial");
+        let cap_before = rf.buf.capacity();
+        rf.clear();
+        assert!(rf.buf.is_empty());
+        assert_eq!(rf.buf.capacity(), cap_before);
+    }
+
+    #[test]
+    fn test_row_formatter_initial_capacity() {
+        let rf = RowFormatter::new();
+        assert!(rf.buf.capacity() >= 512);
+    }
+
+    // -----------------------------------------------------------------------
+    // format_cpu_time throughput: hot-path allocation measurement
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_format_cpu_time_zero_throughput() {
+        // The zero-seconds case must be zero-allocation (Cow::Borrowed).
+        // Verify it completes quickly for the hot path.
+        let start = std::time::Instant::now();
+        for _ in 0..100_000 {
+            let r = format_cpu_time(0);
+            assert!(matches!(r, Cow::Borrowed(_)));
+        }
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed.as_millis() < 500,
+            "format_cpu_time(0) throughput too slow: {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn test_write_memory_size_throughput() {
+        // 100k calls with mixed inputs should complete quickly
+        let start = std::time::Instant::now();
+        for i in 0..100_000u64 {
+            let mut buf = String::with_capacity(8);
+            write_memory_size(&mut buf, i * 1024);
+        }
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed.as_millis() < 500,
+            "write_memory_size throughput too slow: {elapsed:?}"
+        );
+    }
+}
