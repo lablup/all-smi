@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 
 use crate::app_state::AppState;
 use crate::cli::ViewArgs;
@@ -27,11 +27,32 @@ pub use super::data_collection::{
 
 pub struct DataCollector {
     app_state: Arc<Mutex<AppState>>,
+    /// Optional notification handle to wake the UI loop when data changes.
+    data_notify: Option<Arc<Notify>>,
 }
 
 impl DataCollector {
+    #[allow(dead_code)] // Available for callers that do not need event-driven wakeups
     pub fn new(app_state: Arc<Mutex<AppState>>) -> Self {
-        Self { app_state }
+        Self {
+            app_state,
+            data_notify: None,
+        }
+    }
+
+    /// Create a data collector with a notification handle for event-driven UI wakeups.
+    pub fn with_notify(app_state: Arc<Mutex<AppState>>, notify: Arc<Notify>) -> Self {
+        Self {
+            app_state,
+            data_notify: Some(notify),
+        }
+    }
+
+    /// Signal the UI loop that new data is available.
+    fn notify_ui(&self) {
+        if let Some(ref notify) = self.data_notify {
+            notify.notify_one();
+        }
     }
 
     pub async fn run_local_mode(&self, args: ViewArgs) {
@@ -83,6 +104,7 @@ impl DataCollector {
             collector
                 .update_state(self.app_state.clone(), data, &config)
                 .await;
+            self.notify_ui();
 
             if first_iteration {
                 first_iteration = false;
@@ -199,6 +221,7 @@ impl DataCollector {
                     collector
                         .update_state(self.app_state.clone(), data, &config)
                         .await;
+                    self.notify_ui();
                 }
                 Err(e) => {
                     eprintln!("Error collecting remote data: {e}");
