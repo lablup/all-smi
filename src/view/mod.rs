@@ -15,6 +15,8 @@
 pub mod data_collection;
 pub mod data_collector;
 pub mod event_handler;
+pub mod frame_renderer;
+pub mod render_snapshot;
 pub mod runner;
 pub mod terminal_manager;
 pub mod ui_events;
