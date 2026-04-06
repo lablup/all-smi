@@ -1,3 +1,10 @@
+all-smi (0.17.6-0) jammy; urgency=medium
+
+  * Bump hyper 1.9, nvml-wrapper 0.12.1, libamdgpu_top 0.11.3 and transitive deps
+  * Bump GitHub Actions to Node.js 24 compatible versions
+
+ -- Jeongkyu Shin <inureyes@gmail.com>  Sun, 06 Apr 2026 00:00:00 +0000
+
 all-smi (0.17.5-0) jammy; urgency=medium
 
   * Bump dependencies including nvml-wrapper 0.12 and fix yanked uds_windows

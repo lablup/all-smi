@@ -527,6 +527,7 @@ See the [LICENSE](./LICENSE) file for details.
 ## Changelog
 
 ### Recent Updates
+- **v0.17.6 (2026/04/06):** Bump hyper 1.9, nvml-wrapper 0.12.1, libamdgpu_top 0.11.3 and update GitHub Actions to Node.js 24
 - **v0.17.5 (2026/03/29):** Bump dependencies including nvml-wrapper 0.12 and fix yanked uds_windows
 - **v0.17.4 (2026/03/29):** Feature-gate CLI/TUI deps behind `cli` feature for lighter library builds, fix Furiosa RNGD support for latest SDK & driver APIs
 - **v0.17.3 (2026/03/04):** Fix multi-GPU process duplication, upgrade breaking dependencies (rand, reqwest, sysinfo, whoami)
