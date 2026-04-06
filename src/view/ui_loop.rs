@@ -16,17 +16,16 @@ use std::borrow::Cow;
 use std::collections::HashSet;
 use std::io::{stdout, Write};
 use std::sync::Arc;
-use std::time::Duration;
 
 use chrono::Local;
 use crossterm::{
     cursor,
-    event::{self, Event},
+    event::Event,
     queue,
     style::{Color, Print},
     terminal::size,
 };
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 
 use crate::app_state::AppState;
 use crate::cli::ViewArgs;
@@ -42,6 +41,7 @@ use crate::ui::renderer::{
 use crate::ui::tabs::draw_tabs;
 use crate::ui::text::print_colored_text;
 use crate::view::event_handler::handle_key_event;
+use crate::view::ui_events::{UiEvent, UiEventCoordinator};
 
 pub struct UiLoop {
     app_state: Arc<Mutex<AppState>>,
@@ -61,6 +61,8 @@ pub struct UiLoop {
     previous_process_horizontal_scroll_offset: usize,
     previous_tab_scroll_offset: usize,
     previous_gpu_filter_enabled: bool,
+    /// Event coordinator for event-driven wakeups
+    event_coordinator: UiEventCoordinator,
     #[cfg(target_os = "linux")]
     hlsmi_notified: bool,
     #[cfg(target_os = "linux")]
@@ -70,9 +72,14 @@ pub struct UiLoop {
 }
 
 impl UiLoop {
-    pub fn new(app_state: Arc<Mutex<AppState>>) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new(
+        app_state: Arc<Mutex<AppState>>,
+        data_notify: Arc<Notify>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let differential_renderer =
             DifferentialRenderer::new().map_err(|_| "Failed to create differential renderer")?;
+
+        let event_coordinator = UiEventCoordinator::new(data_notify);
 
         Ok(Self {
             app_state,
@@ -90,6 +97,7 @@ impl UiLoop {
             previous_process_horizontal_scroll_offset: 0,
             previous_tab_scroll_offset: 0,
             previous_gpu_filter_enabled: false,
+            event_coordinator,
             #[cfg(target_os = "linux")]
             hlsmi_notified: false,
             #[cfg(target_os = "linux")]
@@ -100,6 +108,12 @@ impl UiLoop {
     }
 
     pub async fn run(&mut self, args: &ViewArgs) -> Result<(), Box<dyn std::error::Error>> {
+        // Start the background terminal event reader
+        self.event_coordinator.spawn_terminal_reader();
+
+        // Track whether we need to render after processing events
+        let mut needs_render = true; // Render once at startup
+
         loop {
             // Check hl-smi initialization on Linux (periodic check for performance)
             #[cfg(target_os = "linux")]
@@ -136,47 +150,67 @@ impl UiLoop {
                     }
                 }
             }
-            // Handle events with timeout
-            if let Ok(has_event) =
-                event::poll(Duration::from_millis(AppConfig::EVENT_POLL_TIMEOUT_MS))
-            {
-                if has_event {
-                    match event::read() {
-                        Ok(Event::Key(key_event)) => {
-                            let mut state = self.app_state.lock().await;
-                            let should_break = handle_key_event(key_event, &mut state, args).await;
-                            if should_break {
-                                break;
-                            }
-                            drop(state);
+
+            // If nothing needs rendering, wait for the next event (fully async sleep)
+            if !needs_render {
+                match self.event_coordinator.next_event().await {
+                    UiEvent::TerminalInput(Event::Key(key_event)) => {
+                        let mut state = self.app_state.lock().await;
+                        let should_break = handle_key_event(key_event, &mut state, args).await;
+                        if should_break {
+                            break;
                         }
-                        Ok(Event::Mouse(mouse_event)) => {
-                            let mut state = self.app_state.lock().await;
-                            let should_break = crate::view::event_handler::handle_mouse_event(
-                                mouse_event,
-                                &mut state,
-                                args,
-                            )
-                            .await;
-                            if should_break {
-                                break;
-                            }
-                            drop(state);
+                        drop(state);
+                        needs_render = true;
+                    }
+                    UiEvent::TerminalInput(Event::Mouse(mouse_event)) => {
+                        let mut state = self.app_state.lock().await;
+                        let should_break = crate::view::event_handler::handle_mouse_event(
+                            mouse_event,
+                            &mut state,
+                            args,
+                        )
+                        .await;
+                        if should_break {
+                            break;
                         }
-                        Ok(Event::Resize(_width, _height)) => {
-                            // Force a re-render on terminal resize
-                            self.differential_renderer.force_clear().ok();
-                            self.resize_occurred = true;
-                        }
-                        _ => {
-                            // Ignore other event types (focus, paste)
-                        }
+                        drop(state);
+                        needs_render = true;
+                    }
+                    UiEvent::TerminalInput(_) => {
+                        // Ignore other terminal event types (focus, paste)
+                    }
+                    UiEvent::Resize(_w, _h) => {
+                        self.differential_renderer.force_clear().ok();
+                        self.resize_occurred = true;
+                        needs_render = true;
+                    }
+                    UiEvent::DataReady => {
+                        needs_render = true;
+                    }
+                    UiEvent::TerminalClosed => {
+                        // Terminal reader exited -- shut down gracefully
+                        break;
+                    }
+                    UiEvent::AnimationTick => {
+                        needs_render = true;
                     }
                 }
             }
 
-            // Update display with throttling
+            if !needs_render {
+                continue;
+            }
+
+            // Acquire state for rendering decisions
             let mut state = self.app_state.lock().await;
+
+            // Activate animation ticks only when there are animated elements visible
+            let animations_needed = state.loading
+                || !state.device_name_scroll_offsets.is_empty()
+                || !state.is_local_mode;
+            self.event_coordinator
+                .set_animations_active(animations_needed);
 
             // Check if we need to force clear due to mode change or tab change
             let force_clear = state.show_help != self.previous_show_help
@@ -197,21 +231,17 @@ impl UiLoop {
                     != self.previous_process_horizontal_scroll_offset
                 || state.tab_scroll_offset != self.previous_tab_scroll_offset;
 
-            // Check if enough time has passed for rendering (throttle to prevent visual artifacts)
+            // Throttle rendering to prevent visual artifacts from too-frequent updates
             let now = std::time::Instant::now();
             let time_to_render = now.duration_since(self.last_render_time).as_millis()
                 >= AppConfig::MIN_RENDER_INTERVAL_MS as u128;
 
-            // Only render if there's something worth rendering
-            // Note: We always render when time_to_render is true to ensure smooth
-            // text scrolling animations. DifferentialRenderer's hash check will
-            // skip actual rendering if content is unchanged.
+            // Only render if there is something worth rendering
             let should_render = force_clear
                 || self.resize_occurred
                 || (time_to_render && (data_changed || scroll_changed));
 
-            // Update scroll offsets for long text (controlled by SCROLL_UPDATE_FREQUENCY)
-            // This runs independently of should_render to keep animations smooth
+            // Update scroll offsets for long text (marquee animation)
             if time_to_render {
                 state.frame_counter += 1;
                 #[allow(clippy::modulo_one)]
@@ -221,11 +251,15 @@ impl UiLoop {
             }
 
             if !should_render && !time_to_render {
+                // Nothing to render yet, but we were woken up -- go back to waiting
+                needs_render = false;
                 drop(state);
-                continue; // Skip if nothing changed and not time to render yet
+                continue;
             }
 
             self.last_render_time = now;
+            // Mark render consumed so we go back to waiting after this iteration
+            needs_render = false;
 
             let (cols, rows) = match size() {
                 Ok((c, r)) => (c, r),

@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 
 use crate::app_state::AppState;
 use crate::cli::{LocalArgs, ViewArgs};
@@ -32,6 +32,9 @@ pub async fn run_local_mode(args: &LocalArgs) {
     let app_state = Arc::new(Mutex::new(initial_state));
     startup_profiler.checkpoint("AppState initialized");
 
+    // Create shared notification handle for collector -> UI wakeups
+    let data_notify = Arc::new(Notify::new());
+
     // Initialize terminal
     let _terminal_manager = match TerminalManager::new() {
         Ok(manager) => manager,
@@ -42,8 +45,9 @@ pub async fn run_local_mode(args: &LocalArgs) {
     };
     startup_profiler.checkpoint("Terminal initialized");
 
-    // Start data collection in background
-    let data_collector = DataCollector::new(Arc::clone(&app_state));
+    // Start data collection in background with notification handle
+    let data_collector =
+        DataCollector::with_notify(Arc::clone(&app_state), Arc::clone(&data_notify));
     let view_args = ViewArgs {
         hosts: None,
         hostfile: None,
@@ -54,8 +58,8 @@ pub async fn run_local_mode(args: &LocalArgs) {
     });
     startup_profiler.checkpoint("Data collector spawned");
 
-    // Run UI loop
-    let mut ui_loop = match UiLoop::new(app_state) {
+    // Run UI loop with the same notification handle
+    let mut ui_loop = match UiLoop::new(app_state, data_notify) {
         Ok(ui_loop) => ui_loop,
         Err(e) => {
             eprintln!("Failed to initialize UI: {e}");
@@ -84,6 +88,9 @@ pub async fn run_view_mode(args: &ViewArgs) {
     initial_state.is_local_mode = false;
     let app_state = Arc::new(Mutex::new(initial_state));
 
+    // Create shared notification handle for collector -> UI wakeups
+    let data_notify = Arc::new(Notify::new());
+
     // Initialize terminal
     let _terminal_manager = match TerminalManager::new() {
         Ok(manager) => manager,
@@ -93,8 +100,9 @@ pub async fn run_view_mode(args: &ViewArgs) {
         }
     };
 
-    // Start data collection in background
-    let data_collector = DataCollector::new(Arc::clone(&app_state));
+    // Start data collection in background with notification handle
+    let data_collector =
+        DataCollector::with_notify(Arc::clone(&app_state), Arc::clone(&data_notify));
     let args_clone = args.clone();
     tokio::spawn(async move {
         let hosts = args_clone.hosts.clone().unwrap_or_default();
@@ -106,8 +114,8 @@ pub async fn run_view_mode(args: &ViewArgs) {
             .await;
     });
 
-    // Run UI loop
-    let mut ui_loop = match UiLoop::new(app_state) {
+    // Run UI loop with the same notification handle
+    let mut ui_loop = match UiLoop::new(app_state, data_notify) {
         Ok(ui_loop) => ui_loop,
         Err(e) => {
             eprintln!("Failed to initialize UI: {e}");

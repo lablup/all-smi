@@ -21,8 +21,16 @@ impl AppConfig {
     // Optimized for CPU efficiency: 10 FPS is sufficient for monitoring tools
     // This significantly reduces CPU usage while maintaining smooth visuals
     pub const MIN_RENDER_INTERVAL_MS: u64 = 100; // ~10 FPS (was 33ms/30 FPS)
+    #[allow(dead_code)] // Retained for configuration reference; replaced by TERMINAL_READER_POLL_MS in event-driven model
     pub const EVENT_POLL_TIMEOUT_MS: u64 = 100; // Poll every 100ms (was 50ms)
     pub const SCROLL_UPDATE_FREQUENCY: u64 = 1; // Every N frames for text scrolling (1 = every 100ms at 10 FPS)
+
+    // Event-driven UI constants
+    /// Animation tick interval in milliseconds (loading indicator, marquee scroll, clock)
+    pub const ANIMATION_TICK_MS: u64 = 200;
+    /// Poll timeout for the dedicated terminal reader task (ms).
+    /// Short enough to detect shutdown promptly, long enough to avoid busy-spinning.
+    pub const TERMINAL_READER_POLL_MS: u64 = 50;
 
     // Network Configuration
     pub const BACKEND_AI_DEFAULT_PORT: u16 = 9090;
