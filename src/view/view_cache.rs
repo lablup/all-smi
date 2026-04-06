@@ -113,6 +113,12 @@ pub struct ViewCache {
     pub process_list: Option<CachedProcessList>,
 }
 
+impl Default for ViewCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ViewCache {
     /// Create an empty cache. All entries will be computed on the first call
     /// to `update()`.
@@ -169,22 +175,26 @@ impl ViewCache {
             return false;
         }
 
-        // Build filtered + sorted index list
-        let is_all_tab = snapshot.current_tab < snapshot.tabs.len()
-            && snapshot.tabs[snapshot.current_tab] == "All";
-
-        let mut indices: Vec<usize> = if is_all_tab {
-            (0..snapshot.gpu_info.len()).collect()
-        } else {
-            let tab_name = &snapshot.tabs[snapshot.current_tab];
-            snapshot
-                .gpu_info
-                .iter()
-                .enumerate()
-                .filter(|(_, info)| info.host_id == *tab_name)
-                .map(|(i, _)| i)
-                .collect()
-        };
+        // Build filtered + sorted index list.
+        // Guard against current_tab being out of bounds (defensive) --
+        // show all GPUs in that case rather than panicking.
+        let mut indices: Vec<usize> =
+            if let Some(tab_name) = snapshot.tabs.get(snapshot.current_tab) {
+                if tab_name == "All" {
+                    (0..snapshot.gpu_info.len()).collect()
+                } else {
+                    snapshot
+                        .gpu_info
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, info)| info.host_id == *tab_name)
+                        .map(|(i, _)| i)
+                        .collect()
+                }
+            } else {
+                // Out-of-bounds tab index: show all (defensive)
+                (0..snapshot.gpu_info.len()).collect()
+            };
 
         // Sort by the current criteria
         let criteria = snapshot.sort_criteria;

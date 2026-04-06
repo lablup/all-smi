@@ -191,20 +191,25 @@ impl FrameRenderer {
             cached_indices = indices;
             cached_indices
         } else {
-            // Fallback: filter + sort inline (only reached when cache is None)
-            let is_all_tab = snapshot.current_tab < snapshot.tabs.len()
-                && snapshot.tabs[snapshot.current_tab] == "All";
-            let mut indices: Vec<usize> = if is_all_tab {
-                (0..snapshot.gpu_info.len()).collect()
-            } else {
-                snapshot
-                    .gpu_info
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, info)| info.host_id == snapshot.tabs[snapshot.current_tab])
-                    .map(|(i, _)| i)
-                    .collect()
-            };
+            // Fallback: filter + sort inline (only reached when cache is None).
+            // Use .get() to guard against out-of-bounds current_tab.
+            let mut indices: Vec<usize> =
+                if let Some(tab_name) = snapshot.tabs.get(snapshot.current_tab) {
+                    if tab_name == "All" {
+                        (0..snapshot.gpu_info.len()).collect()
+                    } else {
+                        snapshot
+                            .gpu_info
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, info)| info.host_id == *tab_name)
+                            .map(|(i, _)| i)
+                            .collect()
+                    }
+                } else {
+                    // Out-of-bounds tab index: show all (defensive)
+                    (0..snapshot.gpu_info.len()).collect()
+                };
             indices.sort_by(|&a, &b| {
                 snapshot
                     .sort_criteria
