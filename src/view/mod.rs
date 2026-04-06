@@ -21,5 +21,6 @@ pub mod runner;
 pub mod terminal_manager;
 pub mod ui_events;
 pub mod ui_loop;
+pub mod view_cache;
 
 pub use runner::*;

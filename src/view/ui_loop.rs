@@ -27,6 +27,7 @@ use crate::view::event_handler::handle_key_event;
 use crate::view::frame_renderer::FrameRenderer;
 use crate::view::render_snapshot::{RenderDecisions, RenderSnapshot};
 use crate::view::ui_events::{UiEvent, UiEventCoordinator};
+use crate::view::view_cache::ViewCache;
 
 pub struct UiLoop {
     app_state: Arc<Mutex<AppState>>,
@@ -46,6 +47,8 @@ pub struct UiLoop {
     previous_process_horizontal_scroll_offset: usize,
     previous_tab_scroll_offset: usize,
     previous_gpu_filter_enabled: bool,
+    /// Cached derived view data (sorted GPU lists, filtered host subsets, etc.)
+    view_cache: ViewCache,
     /// Event coordinator for event-driven wakeups
     event_coordinator: UiEventCoordinator,
     #[cfg(target_os = "linux")]
@@ -82,6 +85,7 @@ impl UiLoop {
             previous_process_horizontal_scroll_offset: 0,
             previous_tab_scroll_offset: 0,
             previous_gpu_filter_enabled: false,
+            view_cache: ViewCache::new(),
             event_coordinator,
             #[cfg(target_os = "linux")]
             hlsmi_notified: false,
@@ -257,9 +261,15 @@ impl UiLoop {
                 break;
             }
 
-            if decisions.force_clear && self.differential_renderer.force_clear().is_err() {
-                break;
+            if decisions.force_clear {
+                self.view_cache.invalidate_all();
+                if self.differential_renderer.force_clear().is_err() {
+                    break;
+                }
             }
+
+            // Update derived view cache (only recomputes stale entries)
+            self.view_cache.update(&snapshot);
 
             // Assemble frame content from the snapshot (no lock held)
             let content = if snapshot.show_help {
@@ -268,7 +278,7 @@ impl UiLoop {
                 let is_remote = args.hosts.is_some() || args.hostfile.is_some();
                 FrameRenderer::render_loading(&snapshot, is_remote, cols, rows)
             } else {
-                FrameRenderer::render_main(&snapshot, args, cols, rows)
+                FrameRenderer::render_main(&snapshot, args, cols, rows, Some(&self.view_cache))
             };
 
             // Use differential rendering to update only changed lines

@@ -40,6 +40,7 @@ use crate::ui::renderer::{
 use crate::ui::tabs::draw_tabs;
 use crate::ui::text::print_colored_text;
 use crate::view::render_snapshot::RenderSnapshot;
+use crate::view::view_cache::ViewCache;
 
 /// Stateless frame renderer that operates on a `RenderSnapshot`.
 ///
@@ -76,7 +77,16 @@ impl FrameRenderer {
     }
 
     /// Render main content (the primary monitoring view) from the snapshot.
-    pub fn render_main(snapshot: &RenderSnapshot, args: &ViewArgs, cols: u16, rows: u16) -> String {
+    ///
+    /// When a `ViewCache` is provided, pre-computed sorted/filtered indices
+    /// are used instead of re-sorting and re-filtering on every frame.
+    pub fn render_main(
+        snapshot: &RenderSnapshot,
+        args: &ViewArgs,
+        cols: u16,
+        rows: u16,
+        cache: Option<&ViewCache>,
+    ) -> String {
         let width = cols as usize;
         let mut buffer = BufferWriter::new();
 
@@ -146,16 +156,16 @@ impl FrameRenderer {
         let is_remote = args.hosts.is_some() || args.hostfile.is_some();
 
         // Render chassis information (node-level metrics)
-        Self::render_chassis_section(&mut buffer, snapshot, width);
+        Self::render_chassis_section(&mut buffer, snapshot, width, cache);
 
         // Render GPU information (reuse the single view_state for layout calculation)
-        Self::render_gpu_section(&mut buffer, snapshot, &view_state, args, cols, rows);
+        Self::render_gpu_section(&mut buffer, snapshot, &view_state, args, cols, rows, cache);
 
         // Render other device information based on mode
         if is_remote {
-            Self::render_remote_devices(&mut buffer, snapshot, width);
+            Self::render_remote_devices(&mut buffer, snapshot, width, cache);
         } else {
-            Self::render_local_devices(&mut buffer, snapshot, cols, rows);
+            Self::render_local_devices(&mut buffer, snapshot, cols, rows, cache);
         }
 
         // Add function keys to main content view
@@ -171,21 +181,43 @@ impl FrameRenderer {
         args: &ViewArgs,
         cols: u16,
         rows: u16,
+        cache: Option<&ViewCache>,
     ) {
-        let mut gpu_info_to_display: Vec<_> = if snapshot.current_tab < snapshot.tabs.len()
-            && snapshot.tabs[snapshot.current_tab] == "All"
-        {
-            snapshot.gpu_info.iter().collect()
+        // Use cached sorted indices when available, otherwise fall back to
+        // the previous per-frame filter + sort path.
+        let cached_indices;
+        let fallback_indices;
+        let display_indices: &[usize] = if let Some(indices) = cache.and_then(|c| c.gpu_indices()) {
+            cached_indices = indices;
+            cached_indices
         } else {
-            snapshot
-                .gpu_info
-                .iter()
-                .filter(|info| info.host_id == snapshot.tabs[snapshot.current_tab])
-                .collect()
+            // Fallback: filter + sort inline (only reached when cache is None).
+            // Use .get() to guard against out-of-bounds current_tab.
+            let mut indices: Vec<usize> =
+                if let Some(tab_name) = snapshot.tabs.get(snapshot.current_tab) {
+                    if tab_name == "All" {
+                        (0..snapshot.gpu_info.len()).collect()
+                    } else {
+                        snapshot
+                            .gpu_info
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, info)| info.host_id == *tab_name)
+                            .map(|(i, _)| i)
+                            .collect()
+                    }
+                } else {
+                    // Out-of-bounds tab index: show all (defensive)
+                    (0..snapshot.gpu_info.len()).collect()
+                };
+            indices.sort_by(|&a, &b| {
+                snapshot
+                    .sort_criteria
+                    .sort_gpus(&snapshot.gpu_info[a], &snapshot.gpu_info[b])
+            });
+            fallback_indices = indices;
+            &fallback_indices
         };
-
-        // Sort GPUs based on current sort criteria
-        gpu_info_to_display.sort_by(|a, b| snapshot.sort_criteria.sort_gpus(a, b));
 
         // Calculate content area and GPU display parameters using the shared
         // view_state from render_main, avoiding a second as_app_state() call.
@@ -196,14 +228,15 @@ impl FrameRenderer {
 
         // Display GPUs with scrolling
         let start_gpu_index = snapshot.gpu_scroll_offset;
-        let end_gpu_index = (start_gpu_index + max_gpu_items).min(gpu_info_to_display.len());
+        let end_gpu_index = (start_gpu_index + max_gpu_items).min(display_indices.len());
 
-        for (i, gpu_info) in gpu_info_to_display
+        for (i, &gpu_idx) in display_indices
             .iter()
             .enumerate()
             .skip(start_gpu_index)
-            .take(end_gpu_index - start_gpu_index)
+            .take(end_gpu_index.saturating_sub(start_gpu_index))
         {
+            let gpu_info = &snapshot.gpu_info[gpu_idx];
             let device_name_scroll_offset = snapshot
                 .device_name_scroll_offsets
                 .get(&gpu_info.uuid)
@@ -226,16 +259,37 @@ impl FrameRenderer {
         }
     }
 
-    fn render_chassis_section(buffer: &mut BufferWriter, snapshot: &RenderSnapshot, width: usize) {
+    fn render_chassis_section(
+        buffer: &mut BufferWriter,
+        snapshot: &RenderSnapshot,
+        width: usize,
+        cache: Option<&ViewCache>,
+    ) {
         if snapshot.chassis_info.is_empty() {
             return;
         }
 
-        // Filter chassis info based on mode and current tab
+        // Use cached chassis indices when available
+        if let Some(hd) = cache.and_then(|c| c.host_device_indices()) {
+            if hd.chassis_indices.is_empty() {
+                return;
+            }
+            for (i, &idx) in hd.chassis_indices.iter().enumerate() {
+                let chassis = &snapshot.chassis_info[idx];
+                let hostname_scroll_offset = snapshot
+                    .host_id_scroll_offsets
+                    .get(&chassis.host_id)
+                    .copied()
+                    .unwrap_or(0);
+                print_chassis_info(buffer, i, chassis, width, hostname_scroll_offset);
+            }
+            return;
+        }
+
+        // Fallback: filter inline (only reached when cache is None)
         let chassis_to_display: Vec<_> = if snapshot.is_local_mode {
             snapshot.chassis_info.iter().collect()
         } else if snapshot.current_tab == 0 {
-            // Remote mode, "All" tab - don't show individual chassis
             return;
         } else if snapshot.current_tab < snapshot.tabs.len() {
             let current_host = &snapshot.tabs[snapshot.current_tab];
@@ -254,102 +308,130 @@ impl FrameRenderer {
                 .get(&chassis.host_id)
                 .copied()
                 .unwrap_or(0);
-
             print_chassis_info(buffer, i, chassis, width, hostname_scroll_offset);
         }
     }
 
-    fn render_remote_devices(buffer: &mut BufferWriter, snapshot: &RenderSnapshot, width: usize) {
-        if snapshot.current_tab > 0 && snapshot.current_tab < snapshot.tabs.len() {
-            let current_hostname = &snapshot.tabs[snapshot.current_tab];
-
-            // Check connection status for the current node
-            let is_connected =
-                if let Some(host_id) = snapshot.hostname_to_host_id.get(current_hostname) {
-                    snapshot
-                        .connection_status
-                        .get(host_id)
-                        .map(|status| status.is_connected)
-                        .unwrap_or(false)
-                } else {
-                    snapshot
-                        .connection_status
-                        .get(current_hostname)
-                        .map(|status| status.is_connected)
-                        .unwrap_or(true)
-                };
-
-            if !is_connected {
-                Self::render_disconnection_notification(buffer, current_hostname, width);
-                return;
-            }
-
-            // CPU information for specific host
-            let cpu_info_to_display: Vec<_> = snapshot
-                .cpu_info
-                .iter()
-                .filter(|info| info.host_id == *current_hostname)
-                .collect();
-
-            for (i, cpu_info) in cpu_info_to_display.iter().enumerate() {
-                let cpu_name_scroll_offset = snapshot
-                    .cpu_name_scroll_offsets
-                    .get(&format!("{}-{}", cpu_info.hostname, cpu_info.cpu_model))
-                    .copied()
-                    .unwrap_or(0);
-                let hostname_scroll_offset = snapshot
-                    .host_id_scroll_offsets
-                    .get(&cpu_info.host_id)
-                    .copied()
-                    .unwrap_or(0);
-                print_cpu_info(
-                    buffer,
-                    i,
-                    cpu_info,
-                    width,
-                    snapshot.show_per_core_cpu,
-                    cpu_name_scroll_offset,
-                    hostname_scroll_offset,
-                );
-            }
-
-            // Memory information for specific host
-            let memory_info_to_display: Vec<_> = snapshot
-                .memory_info
-                .iter()
-                .filter(|info| info.host_id == *current_hostname)
-                .collect();
-
-            for (i, memory_info) in memory_info_to_display.iter().enumerate() {
-                let hostname_scroll_offset = snapshot
-                    .host_id_scroll_offsets
-                    .get(&memory_info.host_id)
-                    .copied()
-                    .unwrap_or(0);
-                print_memory_info(buffer, i, memory_info, width, hostname_scroll_offset);
-            }
-
-            // Storage information for specific host
-            let storage_info_to_display: Vec<_> = snapshot
-                .storage_info
-                .iter()
-                .filter(|info| info.host_id == *current_hostname)
-                .collect();
-
-            let visible_storage = storage_info_to_display
-                .iter()
-                .skip(snapshot.storage_scroll_offset)
-                .take(10);
-
-            for (i, storage_info) in visible_storage.enumerate() {
-                let hostname_scroll_offset = snapshot
-                    .host_id_scroll_offsets
-                    .get(&storage_info.host_id)
-                    .copied()
-                    .unwrap_or(0);
-                print_storage_info(buffer, i, storage_info, width, hostname_scroll_offset);
-            }
+    fn render_remote_devices(
+        buffer: &mut BufferWriter,
+        snapshot: &RenderSnapshot,
+        width: usize,
+        cache: Option<&ViewCache>,
+    ) {
+        if snapshot.current_tab == 0 || snapshot.current_tab >= snapshot.tabs.len() {
+            return;
         }
+
+        let current_hostname = &snapshot.tabs[snapshot.current_tab];
+
+        // Check connection status for the current node
+        let is_connected = if let Some(host_id) = snapshot.hostname_to_host_id.get(current_hostname)
+        {
+            snapshot
+                .connection_status
+                .get(host_id)
+                .map(|status| status.is_connected)
+                .unwrap_or(false)
+        } else {
+            snapshot
+                .connection_status
+                .get(current_hostname)
+                .map(|status| status.is_connected)
+                .unwrap_or(true)
+        };
+
+        if !is_connected {
+            Self::render_disconnection_notification(buffer, current_hostname, width);
+            return;
+        }
+
+        // Resolve host-device indices: use cache when available, otherwise
+        // build a temporary index list from an inline filter.
+        let fallback_cpu;
+        let fallback_mem;
+        let fallback_stor;
+        let (cpu_idx, mem_idx, stor_idx) = if let Some(hd) =
+            cache.and_then(|c| c.host_device_indices())
+        {
+            (
+                hd.cpu_indices.as_slice(),
+                hd.memory_indices.as_slice(),
+                hd.storage_indices.as_slice(),
+            )
+        } else {
+            fallback_cpu =
+                Self::filter_indices(&snapshot.cpu_info, |c| c.host_id == *current_hostname);
+            fallback_mem =
+                Self::filter_indices(&snapshot.memory_info, |m| m.host_id == *current_hostname);
+            fallback_stor =
+                Self::filter_indices(&snapshot.storage_info, |s| s.host_id == *current_hostname);
+            (
+                fallback_cpu.as_slice(),
+                fallback_mem.as_slice(),
+                fallback_stor.as_slice(),
+            )
+        };
+
+        // CPU
+        for (i, &idx) in cpu_idx.iter().enumerate() {
+            let cpu_info = &snapshot.cpu_info[idx];
+            let cpu_name_scroll_offset = snapshot
+                .cpu_name_scroll_offsets
+                .get(&format!("{}-{}", cpu_info.hostname, cpu_info.cpu_model))
+                .copied()
+                .unwrap_or(0);
+            let hostname_scroll_offset = snapshot
+                .host_id_scroll_offsets
+                .get(&cpu_info.host_id)
+                .copied()
+                .unwrap_or(0);
+            print_cpu_info(
+                buffer,
+                i,
+                cpu_info,
+                width,
+                snapshot.show_per_core_cpu,
+                cpu_name_scroll_offset,
+                hostname_scroll_offset,
+            );
+        }
+
+        // Memory
+        for (i, &idx) in mem_idx.iter().enumerate() {
+            let memory_info = &snapshot.memory_info[idx];
+            let hostname_scroll_offset = snapshot
+                .host_id_scroll_offsets
+                .get(&memory_info.host_id)
+                .copied()
+                .unwrap_or(0);
+            print_memory_info(buffer, i, memory_info, width, hostname_scroll_offset);
+        }
+
+        // Storage with scroll offset
+        for (i, &idx) in stor_idx
+            .iter()
+            .skip(snapshot.storage_scroll_offset)
+            .take(10)
+            .enumerate()
+        {
+            let storage_info = &snapshot.storage_info[idx];
+            let hostname_scroll_offset = snapshot
+                .host_id_scroll_offsets
+                .get(&storage_info.host_id)
+                .copied()
+                .unwrap_or(0);
+            print_storage_info(buffer, i, storage_info, width, hostname_scroll_offset);
+        }
+    }
+
+    /// Collect indices of elements matching a predicate.
+    fn filter_indices<T>(items: &[T], predicate: impl Fn(&T) -> bool) -> Vec<usize> {
+        items
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| predicate(item))
+            .map(|(i, _)| i)
+            .collect()
     }
 
     fn render_disconnection_notification(buffer: &mut BufferWriter, hostname: &str, width: usize) {
@@ -437,6 +519,7 @@ impl FrameRenderer {
         snapshot: &RenderSnapshot,
         cols: u16,
         rows: u16,
+        cache: Option<&ViewCache>,
     ) {
         let width = cols as usize;
 
@@ -498,19 +581,27 @@ impl FrameRenderer {
             // Get current user for process coloring
             let current_user = whoami::username().unwrap_or_default();
 
-            // Apply GPU filter if enabled
-            let processes_to_display: Cow<'_, [ProcessInfo]> = if snapshot.gpu_filter_enabled {
-                Cow::Owned(
-                    snapshot
-                        .process_info
-                        .iter()
-                        .filter(|p| p.used_memory > 0)
-                        .cloned()
-                        .collect(),
-                )
-            } else {
-                Cow::Borrowed(&snapshot.process_info)
-            };
+            // Use cached GPU-filtered process list when available, avoiding
+            // a per-frame clone of the entire process vector.
+            let processes_to_display: Cow<'_, [ProcessInfo]> =
+                if let Some(pl) = cache.and_then(|c| c.process_display_list()) {
+                    match &pl.filtered {
+                        Some(filtered) => Cow::Borrowed(filtered.as_slice()),
+                        None => Cow::Borrowed(&snapshot.process_info),
+                    }
+                } else if snapshot.gpu_filter_enabled {
+                    // Fallback: filter inline (only when cache is None)
+                    Cow::Owned(
+                        snapshot
+                            .process_info
+                            .iter()
+                            .filter(|p| p.used_memory > 0)
+                            .cloned()
+                            .collect(),
+                    )
+                } else {
+                    Cow::Borrowed(&snapshot.process_info)
+                };
 
             print_process_info(
                 buffer,
@@ -596,7 +687,7 @@ mod tests {
     fn test_render_main_does_not_panic_empty_state() {
         let snapshot = make_snapshot();
         let args = make_local_args();
-        let output = FrameRenderer::render_main(&snapshot, &args, 80, 24);
+        let output = FrameRenderer::render_main(&snapshot, &args, 80, 24, None);
         // Header must be present.
         assert!(output.contains("all-smi"));
     }
@@ -605,7 +696,7 @@ mod tests {
     fn test_render_main_contains_header_timestamp() {
         let snapshot = make_snapshot();
         let args = make_local_args();
-        let output = FrameRenderer::render_main(&snapshot, &args, 120, 40);
+        let output = FrameRenderer::render_main(&snapshot, &args, 120, 40, None);
         // The header includes the current year which is deterministic for the test run.
         assert!(output.contains("all-smi - 20"));
     }
@@ -614,7 +705,7 @@ mod tests {
     fn test_render_main_contains_version() {
         let snapshot = make_snapshot();
         let args = make_local_args();
-        let output = FrameRenderer::render_main(&snapshot, &args, 80, 24);
+        let output = FrameRenderer::render_main(&snapshot, &args, 80, 24, None);
         let version = env!("CARGO_PKG_VERSION");
         assert!(output.contains(version));
     }
