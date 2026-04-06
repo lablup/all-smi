@@ -188,6 +188,10 @@ impl UiLoop {
                     UiEvent::DataReady => {
                         needs_render = true;
                     }
+                    UiEvent::TerminalClosed => {
+                        // Terminal reader exited -- shut down gracefully
+                        break;
+                    }
                     UiEvent::AnimationTick => {
                         needs_render = true;
                     }

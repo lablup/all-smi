@@ -37,6 +37,9 @@ pub enum UiEvent {
     DataReady,
     /// An animation tick fired (for loading indicator, marquee scroll, clock)
     AnimationTick,
+    /// The terminal reader task has exited (terminal closed or error).
+    /// The UI loop should shut down gracefully.
+    TerminalClosed,
 }
 
 /// Manages all event sources and delivers them through a unified channel.
@@ -45,8 +48,10 @@ pub enum UiEvent {
 /// (since crossterm uses synchronous I/O) and combines it with async notification
 /// sources in a `tokio::select!` loop.
 pub struct UiEventCoordinator {
-    /// Sender for terminal events from the blocking reader task
-    term_tx: mpsc::Sender<Event>,
+    /// Sender passed to the terminal reader task.
+    /// Stored as `Option` so we can `take()` it in `spawn_terminal_reader`,
+    /// ensuring no extra sender keeps the channel open after the reader exits.
+    term_tx: Option<mpsc::Sender<Event>>,
     /// Receiver for terminal events
     term_rx: mpsc::Receiver<Event>,
     /// Notification from data collectors when new data is available
@@ -73,7 +78,7 @@ impl UiEventCoordinator {
         animation_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         Self {
-            term_tx,
+            term_tx: Some(term_tx),
             term_rx,
             data_notify,
             animation_interval,
@@ -85,10 +90,16 @@ impl UiEventCoordinator {
     ///
     /// This must be called once before entering the event loop. The task reads
     /// crossterm events in a blocking context and forwards them through the
-    /// channel. It exits automatically when the sender is dropped (i.e., when
-    /// the coordinator is dropped).
-    pub fn spawn_terminal_reader(&self) {
-        let tx = self.term_tx.clone();
+    /// channel. It exits automatically when the channel is closed.
+    ///
+    /// The sender is *moved* into the spawned task so that the channel closes
+    /// naturally when the reader exits, allowing `next_event()` to detect
+    /// terminal loss via `TerminalClosed`.
+    pub fn spawn_terminal_reader(&mut self) {
+        let tx = self
+            .term_tx
+            .take()
+            .expect("spawn_terminal_reader must be called exactly once");
         tokio::task::spawn_blocking(move || {
             Self::terminal_reader_loop(tx);
         });
@@ -142,13 +153,19 @@ impl UiEventCoordinator {
     /// This is the main select point. It sleeps efficiently until one of the
     /// registered sources has something to deliver. When multiple sources fire
     /// simultaneously, `tokio::select!` picks one at random, ensuring fairness.
+    ///
+    /// Returns `TerminalClosed` when the terminal reader task has exited,
+    /// signalling that the UI loop should shut down.
     pub async fn next_event(&mut self) -> UiEvent {
         tokio::select! {
-            // Branch 1: terminal input/resize from the blocking reader
-            Some(evt) = self.term_rx.recv() => {
-                match evt {
-                    Event::Resize(w, h) => UiEvent::Resize(w, h),
-                    other => UiEvent::TerminalInput(other),
+            // Branch 1: terminal input/resize from the blocking reader.
+            // When the channel closes (reader exited), recv() returns None
+            // and we signal TerminalClosed for graceful shutdown.
+            result = self.term_rx.recv() => {
+                match result {
+                    Some(Event::Resize(w, h)) => UiEvent::Resize(w, h),
+                    Some(other) => UiEvent::TerminalInput(other),
+                    None => UiEvent::TerminalClosed,
                 }
             }
 
