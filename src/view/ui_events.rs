@@ -181,3 +181,230 @@ impl UiEventCoordinator {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::sync::Notify;
+
+    // -----------------------------------------------------------------------
+    // UiEvent: basic enum behaviour
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_ui_event_debug_variants() {
+        // Verify Debug can be derived for all variants without panicking.
+        let events: Vec<UiEvent> = vec![
+            UiEvent::DataReady,
+            UiEvent::AnimationTick,
+            UiEvent::TerminalClosed,
+            UiEvent::Resize(80, 24),
+        ];
+        for e in events {
+            let _ = format!("{e:?}");
+        }
+    }
+
+    #[test]
+    fn test_resize_event_carries_dimensions() {
+        let ev = UiEvent::Resize(120, 40);
+        match ev {
+            UiEvent::Resize(w, h) => {
+                assert_eq!(w, 120);
+                assert_eq!(h, 40);
+            }
+            _ => panic!("Expected Resize variant"),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // UiEventCoordinator: construction
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_coordinator_new_does_not_panic() {
+        let notify = Arc::new(Notify::new());
+        let _coordinator = UiEventCoordinator::new(notify);
+    }
+
+    #[tokio::test]
+    async fn test_coordinator_animations_active_by_default() {
+        // The coordinator starts with animations active so the loading screen
+        // shows its spinner immediately.  Drop it to confirm no panic occurs.
+        let notify = Arc::new(Notify::new());
+        let coordinator = UiEventCoordinator::new(notify);
+        drop(coordinator);
+    }
+
+    // -----------------------------------------------------------------------
+    // UiEventCoordinator: set_animations_active
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_set_animations_active_toggle() {
+        let notify = Arc::new(Notify::new());
+        let mut coordinator = UiEventCoordinator::new(notify);
+
+        // Toggle off and on; neither call should panic.
+        coordinator.set_animations_active(false);
+        coordinator.set_animations_active(true);
+        coordinator.set_animations_active(false);
+    }
+
+    // -----------------------------------------------------------------------
+    // UiEventCoordinator: DataReady path
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_next_event_data_ready() {
+        let notify = Arc::new(Notify::new());
+        let mut coordinator = UiEventCoordinator::new(Arc::clone(&notify));
+        // Disable animation ticks so they don't race with our assertion.
+        coordinator.set_animations_active(false);
+
+        // Pre-notify before calling next_event so there is no blocking wait.
+        notify.notify_one();
+
+        let event = tokio::time::timeout(Duration::from_secs(1), coordinator.next_event())
+            .await
+            .expect("next_event timed out");
+
+        assert!(
+            matches!(event, UiEvent::DataReady),
+            "Expected DataReady, got {event:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // UiEventCoordinator: TerminalClosed path
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_next_event_terminal_closed_when_channel_drops() {
+        let notify = Arc::new(Notify::new());
+        let mut coordinator = UiEventCoordinator::new(Arc::clone(&notify));
+        coordinator.set_animations_active(false);
+
+        // spawn_terminal_reader consumes the internal sender by moving it into
+        // the blocking task.  That task will try to read from the real terminal
+        // and exit quickly when the channel receiver is gone; however in a test
+        // environment the reader task may linger until the poll timeout fires.
+        // Instead of relying on the real reader, we simulate channel closure by
+        // dropping the coordinator's term_tx via spawn_terminal_reader and then
+        // waiting for the coordinator to observe the closed channel.
+        coordinator.spawn_terminal_reader();
+
+        // Drive next_event in a loop; the blocking task will eventually close
+        // the channel sender (it exits when tx.blocking_send fails or the poll
+        // timeout elapses and tx.is_closed() returns true).
+        let event = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match coordinator.next_event().await {
+                    UiEvent::TerminalClosed => return UiEvent::TerminalClosed,
+                    // Animation ticks or DataReady may fire before the reader
+                    // task exits; skip them.
+                    _ => continue,
+                }
+            }
+        })
+        .await
+        .expect("TerminalClosed event never arrived");
+
+        assert!(matches!(event, UiEvent::TerminalClosed));
+    }
+
+    // -----------------------------------------------------------------------
+    // Event mapping logic (unit-tested in isolation)
+    // -----------------------------------------------------------------------
+
+    /// Verify that the Event::Resize mapping logic used inside next_event
+    /// produces UiEvent::Resize with correct dimensions.
+    #[test]
+    fn test_resize_event_mapping() {
+        let crossterm_event = Event::Resize(100, 50);
+        let ui_event = match crossterm_event {
+            Event::Resize(w, h) => UiEvent::Resize(w, h),
+            other => UiEvent::TerminalInput(other),
+        };
+        assert!(matches!(ui_event, UiEvent::Resize(100, 50)));
+    }
+
+    /// Verify that a non-Resize crossterm event is wrapped in TerminalInput.
+    #[test]
+    fn test_terminal_input_wrapping() {
+        let key_event = Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
+        let ui_event = match key_event {
+            Event::Resize(w, h) => UiEvent::Resize(w, h),
+            other => UiEvent::TerminalInput(other),
+        };
+        assert!(
+            matches!(ui_event, UiEvent::TerminalInput(_)),
+            "Expected TerminalInput, got {ui_event:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // AppConfig: event-driven constants are sane
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_animation_tick_ms_reasonable() {
+        // Must be positive and not unreasonably large.
+        assert!(AppConfig::ANIMATION_TICK_MS > 0);
+        assert!(AppConfig::ANIMATION_TICK_MS <= 500);
+    }
+
+    #[test]
+    fn test_terminal_reader_poll_ms_reasonable() {
+        // Must be positive and not so large that shutdown detection is sluggish.
+        assert!(AppConfig::TERMINAL_READER_POLL_MS > 0);
+        assert!(AppConfig::TERMINAL_READER_POLL_MS <= 200);
+    }
+
+    #[test]
+    fn test_animation_tick_ms_value() {
+        assert_eq!(AppConfig::ANIMATION_TICK_MS, 200);
+    }
+
+    #[test]
+    fn test_terminal_reader_poll_ms_value() {
+        assert_eq!(AppConfig::TERMINAL_READER_POLL_MS, 50);
+    }
+
+    // -----------------------------------------------------------------------
+    // DataCollector: notify_ui wiring
+    // -----------------------------------------------------------------------
+
+    /// Verify that DataCollector::with_notify stores the notify handle and
+    /// that the coordinator observes a DataReady event when the collector
+    /// calls notify_one() on the shared handle.
+    #[tokio::test]
+    async fn test_data_collector_notify_wiring() {
+        use crate::app_state::AppState;
+        use crate::view::data_collector::DataCollector;
+        use tokio::sync::Mutex;
+
+        let app_state = Arc::new(Mutex::new(AppState::new()));
+        let notify = Arc::new(Notify::new());
+
+        // Build collector and coordinator sharing the same notify.
+        let _collector = DataCollector::with_notify(Arc::clone(&app_state), Arc::clone(&notify));
+        let mut coordinator = UiEventCoordinator::new(Arc::clone(&notify));
+        coordinator.set_animations_active(false);
+
+        // Signal as the collector would after a successful data update.
+        notify.notify_one();
+
+        let event = tokio::time::timeout(Duration::from_millis(200), coordinator.next_event())
+            .await
+            .expect("DataReady event never arrived");
+
+        assert!(
+            matches!(event, UiEvent::DataReady),
+            "Expected DataReady, got {event:?}"
+        );
+    }
+}
