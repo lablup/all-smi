@@ -85,22 +85,51 @@ pub fn draw_bar<W: Write>(
     let text_len = display_text.len();
     let text_pos = available_bar_width.saturating_sub(text_len);
 
-    // Print the bar with embedded text using filled vertical lines
-    for i in 0..available_bar_width {
-        if i >= text_pos && i < text_pos + text_len {
-            // Print text character
-            let char_index = i - text_pos;
-            if let Some(ch) = display_text.chars().nth(char_index) {
-                // Always use white for text to ensure readability
-                print_colored_text(stdout, &ch.to_string(), Color::Grey, None, None);
-            }
-        } else if i < filled_width {
-            // Print filled area with shorter vertical lines in load color
-            print_colored_text(stdout, "▬", color, None, None);
-        } else {
-            // Print empty line segments
-            print_colored_text(stdout, "─", Color::DarkGrey, None, None);
-        }
+    // Build the bar content in batches to reduce terminal escape sequences.
+    // Instead of calling print_colored_text per character, we accumulate
+    // consecutive runs of the same type and emit them as a single call.
+
+    // Phase 1: filled segment before text overlay (if any)
+    let filled_before_text = filled_width.min(text_pos);
+    if filled_before_text > 0 {
+        print_colored_text(stdout, &"▬".repeat(filled_before_text), color, None, None);
+    }
+
+    // Phase 2: empty segment between filled area and text overlay (if any)
+    let empty_before_text = text_pos.saturating_sub(filled_width);
+    if empty_before_text > 0 {
+        print_colored_text(
+            stdout,
+            &"─".repeat(empty_before_text),
+            Color::DarkGrey,
+            None,
+            None,
+        );
+    }
+
+    // Phase 3: text overlay region
+    if text_len > 0 {
+        print_colored_text(stdout, &display_text, Color::Grey, None, None);
+    }
+
+    // Phase 4: filled segment after text overlay (if any)
+    let after_text_start = text_pos + text_len;
+    let filled_after_text = filled_width.saturating_sub(after_text_start);
+    if filled_after_text > 0 {
+        print_colored_text(stdout, &"▬".repeat(filled_after_text), color, None, None);
+    }
+
+    // Phase 5: empty segment after everything
+    let total_used = after_text_start + filled_after_text;
+    let empty_after = available_bar_width.saturating_sub(total_used);
+    if empty_after > 0 {
+        print_colored_text(
+            stdout,
+            &"─".repeat(empty_after),
+            Color::DarkGrey,
+            None,
+            None,
+        );
     }
 
     print_colored_text(stdout, "]", Color::White, None, None);
@@ -166,29 +195,50 @@ pub fn draw_bar_multi<W: Write>(
         }
     }
 
-    // Print the bar with segments
-    for i in 0..available_bar_width {
-        if i >= text_pos && i < text_pos + text_len {
-            // Print text character
-            let char_index = i - text_pos;
-            if let Some(ch) = display_text.chars().nth(char_index) {
-                print_colored_text(stdout, &ch.to_string(), Color::Grey, None, None);
+    // Build the bar content in batches to reduce terminal escape sequences.
+    // We emit consecutive runs of the same segment/empty type as single calls.
+
+    // Classify each position into a region type, then batch consecutive same-type runs.
+    // Region types: Segment(color), Empty, Text
+    let text_end = text_pos + text_len;
+    let mut pos = 0;
+
+    while pos < available_bar_width {
+        if pos >= text_pos && pos < text_end {
+            // Text overlay region -- emit all text chars at once
+            print_colored_text(stdout, &display_text, Color::Grey, None, None);
+            pos = text_end;
+            continue;
+        }
+
+        // Find which segment this position belongs to
+        let seg_match = segment_positions
+            .iter()
+            .find(|seg| pos >= seg.0 && pos < seg.1);
+
+        if let Some(&(_, end, color)) = seg_match {
+            // Batch the entire segment run up to text_pos or segment end
+            let run_end = end.min(text_pos).min(available_bar_width);
+            let run_len = run_end.saturating_sub(pos);
+            if run_len > 0 {
+                print_colored_text(stdout, &"▬".repeat(run_len), color, None, None);
+                pos += run_len;
+            } else {
+                // Segment ends exactly at or before this position
+                pos = end;
             }
         } else {
-            // Find which segment this position belongs to
-            let mut printed = false;
-            for &(start, end, color) in &segment_positions {
-                if i >= start && i < end {
-                    print_colored_text(stdout, "▬", color, None, None);
-                    printed = true;
-                    break;
-                }
-            }
-
-            if !printed {
-                // Print empty line segments
-                print_colored_text(stdout, "─", Color::DarkGrey, None, None);
-            }
+            // Empty region -- batch until the next segment, text, or end
+            let next_boundary = segment_positions
+                .iter()
+                .filter_map(|seg| if seg.0 > pos { Some(seg.0) } else { None })
+                .min()
+                .unwrap_or(available_bar_width)
+                .min(text_pos)
+                .min(available_bar_width);
+            let run_len = next_boundary.saturating_sub(pos).max(1);
+            print_colored_text(stdout, &"─".repeat(run_len), Color::DarkGrey, None, None);
+            pos += run_len;
         }
     }
 

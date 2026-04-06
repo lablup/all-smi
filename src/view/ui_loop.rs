@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::collections::HashSet;
-use std::io::{stdout, Write};
+use std::io::Write;
 use std::sync::Arc;
 
 use crossterm::{cursor, event::Event, queue, terminal::size};
@@ -100,6 +100,17 @@ impl UiLoop {
         // Start the background terminal event reader
         self.event_coordinator.spawn_terminal_reader();
 
+        // Hide cursor once at session start. The cursor is restored in
+        // TerminalManager::drop() (LeaveAlternateScreen resets it).
+        // This avoids per-frame Hide/Show churn.
+        {
+            let mut stdout = std::io::stdout();
+            if queue!(stdout, cursor::Hide).is_err() {
+                return Err("Failed to hide cursor".into());
+            }
+            stdout.flush().ok();
+        }
+
         // Track whether we need to render after processing events
         let mut needs_render = true; // Render once at startup
 
@@ -137,7 +148,8 @@ impl UiLoop {
                     UiEvent::TerminalInput(_) => {
                         // Ignore other terminal event types (focus, paste)
                     }
-                    UiEvent::Resize(_w, _h) => {
+                    UiEvent::Resize(w, h) => {
+                        self.differential_renderer.update_dimensions(w, h);
                         self.differential_renderer.force_clear().ok();
                         self.resize_occurred = true;
                         needs_render = true;
@@ -256,11 +268,6 @@ impl UiLoop {
                 Err(_) => return Err("Failed to get terminal size".into()),
             };
 
-            let mut stdout = stdout();
-            if queue!(stdout, cursor::Hide).is_err() {
-                break;
-            }
-
             if decisions.force_clear {
                 self.view_cache.invalidate_all();
                 if self.differential_renderer.force_clear().is_err() {
@@ -281,19 +288,13 @@ impl UiLoop {
                 FrameRenderer::render_main(&snapshot, args, cols, rows, Some(&self.view_cache))
             };
 
-            // Use differential rendering to update only changed lines
+            // Use differential rendering to update only changed lines.
+            // Terminal dimensions are passed in to avoid a redundant size() syscall.
             if self
                 .differential_renderer
-                .render_differential(&content)
+                .render_differential(&content, cols, rows)
                 .is_err()
             {
-                break;
-            }
-
-            if queue!(stdout, cursor::Show).is_err() {
-                break;
-            }
-            if stdout.flush().is_err() {
                 break;
             }
         }

@@ -37,17 +37,34 @@ impl GpuRenderer {
     }
 }
 
-/// Helper function to format hostname with scrolling
+/// Helper function to format hostname with scrolling.
+///
+/// For short hostnames (<= 9 chars) this returns a padded view without
+/// allocating an extended scroll string. For long hostnames the scrolling
+/// window is computed with a single allocation.
 pub(crate) fn format_hostname_with_scroll(hostname: &str, scroll_offset: usize) -> String {
     if hostname.len() > 9 {
         let scroll_len = hostname.len() + 3;
         let start_pos = scroll_offset % scroll_len;
-        let extended_hostname = format!("{hostname}   {hostname}");
-        extended_hostname
-            .chars()
-            .skip(start_pos)
-            .take(9)
-            .collect::<String>()
+
+        // Build the scroll window directly into a pre-sized String.
+        // The extended pattern is: "<hostname>   <hostname>" (duplicated with 3-space gap).
+        let mut result = String::with_capacity(9);
+        let extended_len = hostname.len() * 2 + 3;
+        let mut idx = start_pos;
+        while result.len() < 9 && idx < extended_len {
+            let effective_idx = idx % extended_len;
+            let ch = if effective_idx < hostname.len() {
+                hostname.as_bytes()[effective_idx] as char
+            } else if effective_idx < hostname.len() + 3 {
+                ' '
+            } else {
+                hostname.as_bytes()[effective_idx - hostname.len() - 3] as char
+            };
+            result.push(ch);
+            idx += 1;
+        }
+        result
     } else {
         // Always return 9 characters, left-aligned with space padding
         format!("{hostname:<9}")
