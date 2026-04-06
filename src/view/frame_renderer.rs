@@ -1,0 +1,686 @@
+// Copyright 2025 Lablup Inc. and Jeongkyu Shin
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//! Frame content assembly operating on a `RenderSnapshot`.
+//!
+//! All methods here are pure functions: they read the snapshot and produce
+//! a `String` (or write into a `BufferWriter`) without touching shared state.
+//! This means the `AppState` mutex is not held during any of this work.
+
+use std::borrow::Cow;
+use std::io::Write;
+
+use chrono::Local;
+use crossterm::{
+    queue,
+    style::{Color, Print},
+};
+
+use crate::app_state::AppState;
+use crate::cli::ViewArgs;
+use crate::device::ProcessInfo;
+use crate::ui::buffer::BufferWriter;
+use crate::ui::dashboard::{draw_dashboard_items, draw_system_view};
+use crate::ui::layout::LayoutCalculator;
+use crate::ui::renderer::{
+    print_chassis_info, print_cpu_info, print_function_keys, print_gpu_info,
+    print_loading_indicator, print_memory_info, print_process_info, print_storage_info,
+};
+use crate::ui::tabs::draw_tabs;
+use crate::ui::text::print_colored_text;
+use crate::view::render_snapshot::RenderSnapshot;
+
+/// Stateless frame renderer that operates on a `RenderSnapshot`.
+///
+/// This struct holds no mutable state of its own. Each method takes an
+/// immutable snapshot and returns the assembled frame content as a `String`.
+pub struct FrameRenderer;
+
+impl FrameRenderer {
+    /// Render help popup content from the snapshot.
+    pub fn render_help(snapshot: &RenderSnapshot, args: &ViewArgs, cols: u16, rows: u16) -> String {
+        let is_remote = args.hosts.is_some() || args.hostfile.is_some();
+        let view_state = snapshot.as_app_state();
+        crate::ui::help::generate_help_popup_content(cols, rows, &view_state, is_remote)
+    }
+
+    /// Render loading screen content from the snapshot.
+    pub fn render_loading(
+        snapshot: &RenderSnapshot,
+        is_remote: bool,
+        cols: u16,
+        rows: u16,
+    ) -> String {
+        let mut buffer = BufferWriter::new();
+        let view_state = snapshot.as_app_state();
+        print_function_keys(&mut buffer, cols, rows, &view_state, is_remote);
+        print_loading_indicator(
+            &mut buffer,
+            cols,
+            rows,
+            snapshot.frame_counter,
+            &snapshot.startup_status_lines,
+        );
+        buffer.get_buffer().to_string()
+    }
+
+    /// Render main content (the primary monitoring view) from the snapshot.
+    pub fn render_main(snapshot: &RenderSnapshot, args: &ViewArgs, cols: u16, rows: u16) -> String {
+        let width = cols as usize;
+        let mut buffer = BufferWriter::new();
+
+        // Reconstruct AppState view once for all downstream UI functions that
+        // still accept `&AppState`. This single allocation is shared across
+        // the header, dashboard, tabs, GPU layout, and function-key bar.
+        let view_state = snapshot.as_app_state();
+
+        // Write time/date header to buffer first
+        let current_time = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+        let version = env!("CARGO_PKG_VERSION");
+        let header_text = format!("all-smi - {current_time}");
+        let version_text = format!("v{version}");
+
+        // Get runtime environment info
+        let runtime_shield =
+            if let Some((name, color)) = snapshot.runtime_environment.display_info() {
+                let shield_content = format!(" {name} ");
+                let shield_len = shield_content.len();
+                Some((shield_content, color, shield_len))
+            } else {
+                None
+            };
+
+        // Calculate spacing to right-align version, accounting for runtime shield
+        let total_width = cols as usize;
+        let runtime_shield_len = runtime_shield
+            .as_ref()
+            .map(|(_, _, len)| len + 1)
+            .unwrap_or(0);
+        let content_length = header_text.len() + runtime_shield_len + version_text.len();
+        let spacing = if total_width > content_length {
+            " ".repeat(total_width - content_length)
+        } else {
+            " ".to_string()
+        };
+
+        // Print header with runtime environment shield
+        print_colored_text(&mut buffer, &header_text, Color::White, None, None);
+
+        if let Some((shield_content, shield_color, _)) = runtime_shield {
+            print_colored_text(&mut buffer, " ", Color::White, None, None);
+            print_colored_text(
+                &mut buffer,
+                &shield_content,
+                Color::Black,
+                Some(shield_color),
+                None,
+            );
+        }
+
+        print_colored_text(
+            &mut buffer,
+            &format!("{spacing}{version_text}\r\n"),
+            Color::White,
+            None,
+            None,
+        );
+
+        // Write remaining header content to buffer
+        print_colored_text(&mut buffer, "Cluster Overview\r\n", Color::Cyan, None, None);
+        draw_system_view(&mut buffer, &view_state, cols);
+
+        draw_dashboard_items(&mut buffer, &view_state, cols);
+        draw_tabs(&mut buffer, &view_state, cols);
+
+        let is_remote = args.hosts.is_some() || args.hostfile.is_some();
+
+        // Render chassis information (node-level metrics)
+        Self::render_chassis_section(&mut buffer, snapshot, width);
+
+        // Render GPU information (reuse the single view_state for layout calculation)
+        Self::render_gpu_section(&mut buffer, snapshot, &view_state, args, cols, rows);
+
+        // Render other device information based on mode
+        if is_remote {
+            Self::render_remote_devices(&mut buffer, snapshot, width);
+        } else {
+            Self::render_local_devices(&mut buffer, snapshot, cols, rows);
+        }
+
+        // Add function keys to main content view
+        print_function_keys(&mut buffer, cols, rows, &view_state, is_remote);
+
+        buffer.get_buffer().to_string()
+    }
+
+    fn render_gpu_section(
+        buffer: &mut BufferWriter,
+        snapshot: &RenderSnapshot,
+        view_state: &AppState,
+        args: &ViewArgs,
+        cols: u16,
+        rows: u16,
+    ) {
+        let mut gpu_info_to_display: Vec<_> = if snapshot.current_tab < snapshot.tabs.len()
+            && snapshot.tabs[snapshot.current_tab] == "All"
+        {
+            snapshot.gpu_info.iter().collect()
+        } else {
+            snapshot
+                .gpu_info
+                .iter()
+                .filter(|info| info.host_id == snapshot.tabs[snapshot.current_tab])
+                .collect()
+        };
+
+        // Sort GPUs based on current sort criteria
+        gpu_info_to_display.sort_by(|a, b| snapshot.sort_criteria.sort_gpus(a, b));
+
+        // Calculate content area and GPU display parameters using the shared
+        // view_state from render_main, avoiding a second as_app_state() call.
+        let content_area = LayoutCalculator::calculate_content_area(view_state, cols, rows);
+        let gpu_display_params =
+            LayoutCalculator::calculate_gpu_display_params(view_state, args, &content_area);
+        let max_gpu_items = gpu_display_params.max_items;
+
+        // Display GPUs with scrolling
+        let start_gpu_index = snapshot.gpu_scroll_offset;
+        let end_gpu_index = (start_gpu_index + max_gpu_items).min(gpu_info_to_display.len());
+
+        for (i, gpu_info) in gpu_info_to_display
+            .iter()
+            .enumerate()
+            .skip(start_gpu_index)
+            .take(end_gpu_index - start_gpu_index)
+        {
+            let device_name_scroll_offset = snapshot
+                .device_name_scroll_offsets
+                .get(&gpu_info.uuid)
+                .copied()
+                .unwrap_or(0);
+            let hostname_scroll_offset = snapshot
+                .host_id_scroll_offsets
+                .get(&gpu_info.host_id)
+                .copied()
+                .unwrap_or(0);
+
+            print_gpu_info(
+                buffer,
+                i,
+                gpu_info,
+                cols as usize,
+                device_name_scroll_offset,
+                hostname_scroll_offset,
+            );
+        }
+    }
+
+    fn render_chassis_section(buffer: &mut BufferWriter, snapshot: &RenderSnapshot, width: usize) {
+        if snapshot.chassis_info.is_empty() {
+            return;
+        }
+
+        // Filter chassis info based on mode and current tab
+        let chassis_to_display: Vec<_> = if snapshot.is_local_mode {
+            snapshot.chassis_info.iter().collect()
+        } else if snapshot.current_tab == 0 {
+            // Remote mode, "All" tab - don't show individual chassis
+            return;
+        } else if snapshot.current_tab < snapshot.tabs.len() {
+            let current_host = &snapshot.tabs[snapshot.current_tab];
+            snapshot
+                .chassis_info
+                .iter()
+                .filter(|c| c.host_id == *current_host || c.hostname == *current_host)
+                .collect()
+        } else {
+            snapshot.chassis_info.iter().collect()
+        };
+
+        for (i, chassis) in chassis_to_display.iter().enumerate() {
+            let hostname_scroll_offset = snapshot
+                .host_id_scroll_offsets
+                .get(&chassis.host_id)
+                .copied()
+                .unwrap_or(0);
+
+            print_chassis_info(buffer, i, chassis, width, hostname_scroll_offset);
+        }
+    }
+
+    fn render_remote_devices(buffer: &mut BufferWriter, snapshot: &RenderSnapshot, width: usize) {
+        if snapshot.current_tab > 0 && snapshot.current_tab < snapshot.tabs.len() {
+            let current_hostname = &snapshot.tabs[snapshot.current_tab];
+
+            // Check connection status for the current node
+            let is_connected =
+                if let Some(host_id) = snapshot.hostname_to_host_id.get(current_hostname) {
+                    snapshot
+                        .connection_status
+                        .get(host_id)
+                        .map(|status| status.is_connected)
+                        .unwrap_or(false)
+                } else {
+                    snapshot
+                        .connection_status
+                        .get(current_hostname)
+                        .map(|status| status.is_connected)
+                        .unwrap_or(true)
+                };
+
+            if !is_connected {
+                Self::render_disconnection_notification(buffer, current_hostname, width);
+                return;
+            }
+
+            // CPU information for specific host
+            let cpu_info_to_display: Vec<_> = snapshot
+                .cpu_info
+                .iter()
+                .filter(|info| info.host_id == *current_hostname)
+                .collect();
+
+            for (i, cpu_info) in cpu_info_to_display.iter().enumerate() {
+                let cpu_name_scroll_offset = snapshot
+                    .cpu_name_scroll_offsets
+                    .get(&format!("{}-{}", cpu_info.hostname, cpu_info.cpu_model))
+                    .copied()
+                    .unwrap_or(0);
+                let hostname_scroll_offset = snapshot
+                    .host_id_scroll_offsets
+                    .get(&cpu_info.host_id)
+                    .copied()
+                    .unwrap_or(0);
+                print_cpu_info(
+                    buffer,
+                    i,
+                    cpu_info,
+                    width,
+                    snapshot.show_per_core_cpu,
+                    cpu_name_scroll_offset,
+                    hostname_scroll_offset,
+                );
+            }
+
+            // Memory information for specific host
+            let memory_info_to_display: Vec<_> = snapshot
+                .memory_info
+                .iter()
+                .filter(|info| info.host_id == *current_hostname)
+                .collect();
+
+            for (i, memory_info) in memory_info_to_display.iter().enumerate() {
+                let hostname_scroll_offset = snapshot
+                    .host_id_scroll_offsets
+                    .get(&memory_info.host_id)
+                    .copied()
+                    .unwrap_or(0);
+                print_memory_info(buffer, i, memory_info, width, hostname_scroll_offset);
+            }
+
+            // Storage information for specific host
+            let storage_info_to_display: Vec<_> = snapshot
+                .storage_info
+                .iter()
+                .filter(|info| info.host_id == *current_hostname)
+                .collect();
+
+            let visible_storage = storage_info_to_display
+                .iter()
+                .skip(snapshot.storage_scroll_offset)
+                .take(10);
+
+            for (i, storage_info) in visible_storage.enumerate() {
+                let hostname_scroll_offset = snapshot
+                    .host_id_scroll_offsets
+                    .get(&storage_info.host_id)
+                    .copied()
+                    .unwrap_or(0);
+                print_storage_info(buffer, i, storage_info, width, hostname_scroll_offset);
+            }
+        }
+    }
+
+    fn render_disconnection_notification(buffer: &mut BufferWriter, hostname: &str, width: usize) {
+        writeln!(buffer).unwrap();
+        writeln!(buffer).unwrap();
+
+        let box_width = width.saturating_sub(4).min(60);
+        // Ensure minimum box width for the border characters
+        if box_width < 6 {
+            return;
+        }
+        let margin = width.saturating_sub(box_width) / 2;
+        let margin_str = " ".repeat(margin);
+
+        // Top border
+        write!(buffer, "{margin_str}").unwrap();
+        print_colored_text(buffer, "\u{250c}", Color::Red, None, None);
+        print_colored_text(
+            buffer,
+            &"\u{2500}".repeat(box_width.saturating_sub(2)),
+            Color::Red,
+            None,
+            None,
+        );
+        print_colored_text(buffer, "\u{2510}", Color::Red, None, None);
+        writeln!(buffer).unwrap();
+
+        // Content rows: title, blank, hostname, status, blank
+        let rows: &[(&str, Color)] = &[
+            ("CONNECTION LOST", Color::Red),
+            ("", Color::White),
+            (&format!("Node: {hostname}"), Color::Yellow),
+            ("Unable to retrieve node information", Color::DarkGrey),
+            ("", Color::White),
+        ];
+        // Inner width available for text content (between "| " and " |")
+        let inner_width = box_width.saturating_sub(4);
+        for (text, color) in rows {
+            write!(buffer, "{margin_str}").unwrap();
+            if text.is_empty() {
+                // Empty row
+                print_colored_text(buffer, "\u{2502}", Color::Red, None, None);
+                print_colored_text(
+                    buffer,
+                    &" ".repeat(box_width.saturating_sub(2)),
+                    Color::White,
+                    None,
+                    None,
+                );
+                print_colored_text(buffer, "\u{2502}", Color::Red, None, None);
+            } else {
+                // Truncate text if it exceeds available inner width
+                let display_text: Cow<'_, str> = if text.len() > inner_width {
+                    Cow::Owned(text.chars().take(inner_width).collect())
+                } else {
+                    Cow::Borrowed(text)
+                };
+                let pad_left = inner_width.saturating_sub(display_text.len()) / 2;
+                let pad_right = inner_width.saturating_sub(pad_left + display_text.len());
+                print_colored_text(buffer, "\u{2502} ", Color::Red, None, None);
+                print_colored_text(buffer, &" ".repeat(pad_left), Color::White, None, None);
+                print_colored_text(buffer, &display_text, *color, None, None);
+                print_colored_text(buffer, &" ".repeat(pad_right), Color::White, None, None);
+                print_colored_text(buffer, " \u{2502}", Color::Red, None, None);
+            }
+            writeln!(buffer).unwrap();
+        }
+
+        // Bottom border
+        write!(buffer, "{margin_str}").unwrap();
+        print_colored_text(buffer, "\u{2514}", Color::Red, None, None);
+        print_colored_text(
+            buffer,
+            &"\u{2500}".repeat(box_width.saturating_sub(2)),
+            Color::Red,
+            None,
+            None,
+        );
+        print_colored_text(buffer, "\u{2518}", Color::Red, None, None);
+        writeln!(buffer).unwrap();
+    }
+
+    fn render_local_devices(
+        buffer: &mut BufferWriter,
+        snapshot: &RenderSnapshot,
+        cols: u16,
+        rows: u16,
+    ) {
+        let width = cols as usize;
+
+        // CPU information for local mode
+        for (i, cpu_info) in snapshot.cpu_info.iter().enumerate() {
+            let cpu_name_scroll_offset = snapshot
+                .cpu_name_scroll_offsets
+                .get(&format!("{}-{}", cpu_info.hostname, cpu_info.cpu_model))
+                .copied()
+                .unwrap_or(0);
+            let hostname_scroll_offset = snapshot
+                .host_id_scroll_offsets
+                .get(&cpu_info.host_id)
+                .copied()
+                .unwrap_or(0);
+            print_cpu_info(
+                buffer,
+                i,
+                cpu_info,
+                width,
+                snapshot.show_per_core_cpu,
+                cpu_name_scroll_offset,
+                hostname_scroll_offset,
+            );
+        }
+
+        // Memory information for local mode
+        for (i, memory_info) in snapshot.memory_info.iter().enumerate() {
+            let hostname_scroll_offset = snapshot
+                .host_id_scroll_offsets
+                .get(&memory_info.host_id)
+                .copied()
+                .unwrap_or(0);
+            print_memory_info(buffer, i, memory_info, width, hostname_scroll_offset);
+        }
+
+        // Storage information for local mode
+        for (i, storage_info) in snapshot.storage_info.iter().enumerate() {
+            let hostname_scroll_offset = snapshot
+                .host_id_scroll_offsets
+                .get(&storage_info.host_id)
+                .copied()
+                .unwrap_or(0);
+            print_storage_info(buffer, i, storage_info, width, hostname_scroll_offset);
+        }
+
+        // Process information for local mode (if available)
+        if !snapshot.process_info.is_empty() {
+            let lines_used = buffer.line_count();
+
+            // Add a blank line before process list
+            queue!(buffer, Print("\r\n")).unwrap();
+
+            // Reserve 1 line for function keys at the bottom
+            let function_key_rows = 1;
+
+            let available_rows = rows.saturating_sub(lines_used as u16 + 1 + function_key_rows);
+
+            // Get current user for process coloring
+            let current_user = whoami::username().unwrap_or_default();
+
+            // Apply GPU filter if enabled
+            let processes_to_display: Cow<'_, [ProcessInfo]> = if snapshot.gpu_filter_enabled {
+                Cow::Owned(
+                    snapshot
+                        .process_info
+                        .iter()
+                        .filter(|p| p.used_memory > 0)
+                        .cloned()
+                        .collect(),
+                )
+            } else {
+                Cow::Borrowed(&snapshot.process_info)
+            };
+
+            print_process_info(
+                buffer,
+                &processes_to_display,
+                snapshot.selected_process_index,
+                snapshot.start_index,
+                available_rows,
+                cols,
+                snapshot.process_horizontal_scroll_offset,
+                &current_user,
+                &snapshot.sort_criteria,
+                &snapshot.sort_direction,
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app_state::AppState;
+    use crate::view::render_snapshot::RenderSnapshot;
+
+    fn make_local_args() -> ViewArgs {
+        ViewArgs {
+            hosts: None,
+            hostfile: None,
+            interval: None,
+        }
+    }
+
+    fn make_snapshot() -> RenderSnapshot {
+        let state = AppState::new();
+        RenderSnapshot::capture(&state)
+    }
+
+    // -----------------------------------------------------------------------
+    // FrameRenderer: construction
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_frame_renderer_is_zero_sized() {
+        // FrameRenderer is a unit struct; assert it holds no state.
+        assert_eq!(std::mem::size_of::<FrameRenderer>(), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // render_loading: smoke tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_render_loading_does_not_panic() {
+        let snapshot = make_snapshot();
+        let output = FrameRenderer::render_loading(&snapshot, false, 80, 24);
+        // Loading screen must produce some output even when state is empty.
+        assert!(!output.is_empty());
+    }
+
+    #[test]
+    fn test_render_loading_remote_does_not_panic() {
+        let snapshot = make_snapshot();
+        let output = FrameRenderer::render_loading(&snapshot, true, 80, 24);
+        assert!(!output.is_empty());
+    }
+
+    #[test]
+    fn test_render_loading_with_startup_status_lines() {
+        let mut state = AppState::new();
+        state
+            .startup_status_lines
+            .push("Connecting to GPUs...".to_string());
+        let snapshot = RenderSnapshot::capture(&state);
+        // Should not panic and produce output with the status line.
+        let output = FrameRenderer::render_loading(&snapshot, false, 80, 24);
+        assert!(!output.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // render_main: smoke tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_render_main_does_not_panic_empty_state() {
+        let snapshot = make_snapshot();
+        let args = make_local_args();
+        let output = FrameRenderer::render_main(&snapshot, &args, 80, 24);
+        // Header must be present.
+        assert!(output.contains("all-smi"));
+    }
+
+    #[test]
+    fn test_render_main_contains_header_timestamp() {
+        let snapshot = make_snapshot();
+        let args = make_local_args();
+        let output = FrameRenderer::render_main(&snapshot, &args, 120, 40);
+        // The header includes the current year which is deterministic for the test run.
+        assert!(output.contains("all-smi - 20"));
+    }
+
+    #[test]
+    fn test_render_main_contains_version() {
+        let snapshot = make_snapshot();
+        let args = make_local_args();
+        let output = FrameRenderer::render_main(&snapshot, &args, 80, 24);
+        let version = env!("CARGO_PKG_VERSION");
+        assert!(output.contains(version));
+    }
+
+    // -----------------------------------------------------------------------
+    // render_disconnection_notification: box geometry
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_disconnection_notification_width_too_narrow_produces_no_box() {
+        // width=9 → box_width = min(9-4, 60) = 5 which is < 6, so nothing is rendered
+        // (only the two leading blank lines appear).
+        let mut buffer = BufferWriter::new();
+        FrameRenderer::render_disconnection_notification(&mut buffer, "node1", 9);
+        let output = buffer.get_buffer().to_string();
+        // The box should NOT be rendered; the output must not contain the box corner.
+        assert!(!output.contains('\u{250c}'));
+    }
+
+    #[test]
+    fn test_disconnection_notification_normal_width_contains_hostname() {
+        let mut buffer = BufferWriter::new();
+        FrameRenderer::render_disconnection_notification(&mut buffer, "my-node", 80);
+        let output = buffer.get_buffer().to_string();
+        assert!(output.contains("my-node"));
+        assert!(output.contains("CONNECTION LOST"));
+    }
+
+    #[test]
+    fn test_disconnection_notification_box_max_width_capped_at_60() {
+        // With a very wide terminal (200 cols) the box should be capped at 60 chars.
+        let mut buffer = BufferWriter::new();
+        FrameRenderer::render_disconnection_notification(&mut buffer, "node1", 200);
+        let output = buffer.get_buffer().to_string();
+        // The box top border is: "─" repeated (box_width-2) times, capped at 58 for width=200.
+        // Count the number of consecutive box-drawing horizontal lines.
+        let horizontal_line_count = output.matches('\u{2500}').count();
+        // max box_width = 60, so max horizontal lines per border = 58
+        // Two borders (top + bottom) → at most 116.
+        assert!(horizontal_line_count <= 116);
+        // But there must be at least some lines (it renders).
+        assert!(horizontal_line_count > 0);
+    }
+
+    #[test]
+    fn test_disconnection_notification_long_hostname_is_truncated() {
+        // A hostname that exceeds inner_width (box_width - 4) should be truncated.
+        let long_hostname = "a".repeat(200);
+        let mut buffer = BufferWriter::new();
+        FrameRenderer::render_disconnection_notification(&mut buffer, &long_hostname, 80);
+        let output = buffer.get_buffer().to_string();
+        // "Node: " prefix plus some of the hostname must appear, but not all 200 'a's.
+        assert!(output.contains("Node: "));
+        assert!(!output.contains(&long_hostname));
+    }
+
+    // -----------------------------------------------------------------------
+    // render_help: smoke test
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_render_help_does_not_panic() {
+        let snapshot = make_snapshot();
+        let args = make_local_args();
+        let output = FrameRenderer::render_help(&snapshot, &args, 80, 24);
+        // Help popup must produce output.
+        assert!(!output.is_empty());
+    }
+}
