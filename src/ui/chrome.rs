@@ -155,8 +155,10 @@ pub fn print_function_keys<W: Write>(
         }
     };
 
+    // Truncate function keys to terminal width. This runs once per frame
+    // so a potential allocation here is acceptable.
     let truncated_keys = if display_width(&function_keys) > cols as usize {
-        truncate_to_width(&function_keys, cols as usize)
+        truncate_to_width(&function_keys, cols as usize).into_owned()
     } else {
         function_keys
     };
@@ -176,7 +178,7 @@ pub fn print_function_keys<W: Write>(
     let final_function_keys = if display_width(&truncated_keys) > available_space {
         truncate_to_width(&truncated_keys, available_space)
     } else {
-        truncated_keys
+        std::borrow::Cow::Borrowed(truncated_keys.as_str())
     };
 
     // Print function keys

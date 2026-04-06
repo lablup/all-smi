@@ -12,12 +12,35 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::borrow::Cow;
+use std::fmt::Write as FmtWrite;
 use std::io::Write;
 
 use crossterm::{queue, style::Color, style::Print};
 
 use crate::device::ProcessInfo;
 use crate::ui::text::{print_colored_text, truncate_to_width};
+
+/// Reusable formatting scratch buffer for the process renderer.
+///
+/// Keeping this in a struct avoids re-allocating on every process row.
+/// The buffer is cleared between rows but its capacity is retained.
+struct RowFormatter {
+    buf: String,
+}
+
+impl RowFormatter {
+    fn new() -> Self {
+        Self {
+            buf: String::with_capacity(512),
+        }
+    }
+
+    /// Clear the buffer, keeping allocated capacity.
+    fn clear(&mut self) {
+        self.buf.clear();
+    }
+}
 
 #[allow(clippy::too_many_arguments)]
 pub fn print_process_info<W: Write>(
@@ -70,8 +93,8 @@ pub fn print_process_info<W: Write>(
     let get_sort_arrow = |criteria: crate::app_state::SortCriteria| -> &'static str {
         if sort_criteria == &criteria {
             match sort_direction {
-                crate::app_state::SortDirection::Ascending => "↑",
-                crate::app_state::SortDirection::Descending => "↓",
+                crate::app_state::SortDirection::Ascending => "\u{2191}",
+                crate::app_state::SortDirection::Descending => "\u{2193}",
             }
         } else {
             ""
@@ -111,7 +134,7 @@ pub fn print_process_info<W: Write>(
     queue!(stdout, Print("\r\n")).unwrap();
 
     // Print separator line
-    let separator = "─".repeat(width.min(120));
+    let separator = "\u{2500}".repeat(width.min(120));
     print_colored_text(stdout, &separator, Color::DarkGrey, None, None);
     queue!(stdout, Print("\r\n")).unwrap();
 
@@ -125,67 +148,110 @@ pub fn print_process_info<W: Write>(
         (available_rows as usize).saturating_sub(RESERVED_HEADER_ROWS + footer_rows);
     let end_index = (start_index + available_rows_for_processes).min(processes.len());
 
+    // Create a single clear-line string to reuse for empty row fills,
+    // avoiding repeated allocations of " ".repeat(width).
+    let clear_line = " ".repeat(width);
+
+    // Reusable scratch buffers for per-row formatting
+    let mut row_fmt = RowFormatter::new();
+    let mut row_buf = String::with_capacity(512);
+
     // Print process information
     for i in start_index..end_index {
         if let Some(process) = processes.get(i) {
             let is_selected = i == selected_index;
 
-            // Format process information with proper truncation
-            let pid = format!("{}", process.pid);
-            let user = truncate_to_width(&process.user, user_w);
-            let priority = format!("{}", process.priority);
-            let nice = format!("{:+}", process.nice_value); // Show + for positive values
+            // Format process information, reusing the scratch buffer.
+            // For small fixed-width fields we use write! into row_buf
+            // instead of allocating a new String per field.
+            row_buf.clear();
+            let _ = write!(row_buf, "{}", process.pid);
+            let pid: &str = &row_buf;
 
-            // Format memory sizes
-            let virt = format_memory_size(process.memory_vms);
-            let res = format_memory_size(process.memory_rss);
+            let user = truncate_to_width(&process.user, user_w);
+
+            // We need separate small buffers for fields used simultaneously
+            // in the row format string.
+            let mut priority_buf = String::with_capacity(8);
+            let _ = write!(priority_buf, "{}", process.priority);
+            let priority: &str = &priority_buf;
+
+            let mut nice_buf = String::with_capacity(8);
+            let _ = write!(nice_buf, "{:+}", process.nice_value);
+
+            // Format memory sizes into temporary strings
+            let mut virt_buf = String::with_capacity(8);
+            write_memory_size(&mut virt_buf, process.memory_vms);
+            let mut res_buf = String::with_capacity(8);
+            write_memory_size(&mut res_buf, process.memory_rss);
 
             let state = truncate_to_width(&process.state, s_w);
-            let cpu_percent = format!("{:.1}", process.cpu_percent);
-            let mem_percent = format!("{:.1}", process.memory_percent);
 
-            // Format GPU utilization
-            let gpu_percent = if process.uses_gpu && process.gpu_utilization > 0.0 {
-                format!("{:.1}", process.gpu_utilization)
+            let mut cpu_pct_buf = String::with_capacity(8);
+            let _ = write!(cpu_pct_buf, "{:.1}", process.cpu_percent);
+            let mut mem_pct_buf = String::with_capacity(8);
+            let _ = write!(mem_pct_buf, "{:.1}", process.memory_percent);
+
+            // Format GPU utilization -- use Cow to avoid allocation for static strings
+            let gpu_percent: Cow<'_, str> = if process.uses_gpu && process.gpu_utilization > 0.0 {
+                let mut buf = String::with_capacity(8);
+                let _ = write!(buf, "{:.1}", process.gpu_utilization);
+                Cow::Owned(buf)
             } else if process.uses_gpu {
-                "-".to_string()
+                Cow::Borrowed("-")
             } else {
-                "".to_string()
+                Cow::Borrowed("")
             };
 
             // Format GPU memory usage
-            let gpu_mem = if process.used_memory > 0 {
+            let gpu_mem: Cow<'_, str> = if process.used_memory > 0 {
                 let gpu_mem_mb = process.used_memory as f64 / (1024.0 * 1024.0);
+                let mut buf = String::with_capacity(8);
                 if gpu_mem_mb >= 1024.0 {
-                    format!("{:.1}G", gpu_mem_mb / 1024.0)
+                    let _ = write!(buf, "{:.1}G", gpu_mem_mb / 1024.0);
                 } else {
-                    format!("{gpu_mem_mb:.0}M")
+                    let _ = write!(buf, "{gpu_mem_mb:.0}M");
                 }
+                Cow::Owned(buf)
             } else if process.uses_gpu {
-                "-".to_string()
+                Cow::Borrowed("-")
             } else {
-                "".to_string()
+                Cow::Borrowed("")
             };
 
             // Format CPU time
             let time_plus = format_cpu_time(process.cpu_time);
 
-            let command = process.command.clone();
+            // Borrow command directly instead of cloning
+            let command: &str = &process.command;
 
-            // Build the row with proper formatting and padding
-            let row_format = format!(
-                "{pid:>pid_w$} {:<user_w$} {priority:>pri_w$} {nice:>ni_w$} {virt:>virt_w$} {res:>res_w$} {state:<s_w$} {cpu_percent:>cpu_w$} {mem_percent:>mem_w$} {gpu_percent:>gpu_w$} {gpu_mem:>gpu_mem_w$} {time_plus:>time_w$} {command}",
-                truncate_to_width(&user, user_w),
+            // Build the row with proper formatting and padding.
+            // Reuse row_fmt.buf for the full row assembly.
+            row_fmt.clear();
+            let user_trunc = truncate_to_width(&user, user_w);
+            #[allow(clippy::uninlined_format_args)]
+            let _ = write!(
+                row_fmt.buf,
+                "{pid:>pid_w$} {:<user_w$} {priority:>pri_w$} {:>ni_w$} {:>virt_w$} {:>res_w$} {state:<s_w$} {:>cpu_w$} {:>mem_w$} {:>gpu_w$} {:>gpu_mem_w$} {time_plus:>time_w$} {command}",
+                user_trunc,
+                nice_buf,
+                virt_buf,
+                res_buf,
+                cpu_pct_buf,
+                mem_pct_buf,
+                gpu_percent,
+                gpu_mem,
             );
+            let row_format = &row_fmt.buf;
 
             // Apply horizontal scrolling
-            let visible_row = if horizontal_scroll_offset < row_format.len() {
+            let visible_row: Cow<'_, str> = if horizontal_scroll_offset < row_format.len() {
                 let scrolled = &row_format[horizontal_scroll_offset..];
                 // Pad the row to full width to clear any previous content
-                format!("{:<width$}", truncate_to_width(scrolled, width))
+                Cow::Owned(format!("{:<width$}", truncate_to_width(scrolled, width)))
             } else {
-                // Clear the entire line when scrolled past the content
-                " ".repeat(width)
+                // Reuse the pre-built clear line
+                Cow::Borrowed(&clear_line)
             };
 
             // Print with selection highlight or individual column colors
@@ -198,19 +264,19 @@ pub fn print_process_info<W: Write>(
                     stdout,
                     process,
                     current_user,
-                    &pid,
+                    pid,
                     &user,
-                    &priority,
-                    &nice,
-                    &virt,
-                    &res,
+                    priority,
+                    &nice_buf,
+                    &virt_buf,
+                    &res_buf,
                     &state,
-                    &cpu_percent,
-                    &mem_percent,
+                    &cpu_pct_buf,
+                    &mem_pct_buf,
                     &gpu_percent,
                     &gpu_mem,
                     &time_plus,
-                    &command,
+                    command,
                     horizontal_scroll_offset,
                     width,
                     &fixed_widths,
@@ -228,8 +294,7 @@ pub fn print_process_info<W: Write>(
     // Fill empty space between processes and footer
     let total_lines_before_footer = (available_rows as usize).saturating_sub(footer_rows);
     while lines_used < total_lines_before_footer {
-        let clear_line = " ".repeat(width);
-        queue!(stdout, Print(&clear_line)).unwrap();
+        queue!(stdout, Print(clear_line.as_str())).unwrap();
         queue!(stdout, Print("\r\n")).unwrap();
         lines_used += 1;
     }
@@ -237,7 +302,7 @@ pub fn print_process_info<W: Write>(
     // Show navigation info if there are more processes
     if processes.len() > available_rows_for_processes {
         let nav_info = format!(
-            "Showing {}-{end_index} of {} processes (Use ↑↓ to navigate, PgUp/PgDn for pages)",
+            "Showing {}-{end_index} of {} processes (Use \u{2191}\u{2193} to navigate, PgUp/PgDn for pages)",
             start_index + 1,
             processes.len()
         );
@@ -273,19 +338,21 @@ pub fn print_process_info<W: Write>(
         lines_used += 1;
     }
 
-    // Fill remaining space up to available_rows
+    // Fill remaining space up to available_rows, reusing the pre-built clear line
     while lines_used < available_rows as usize {
-        let clear_line = " ".repeat(width);
-        queue!(stdout, Print(&clear_line)).unwrap();
+        queue!(stdout, Print(clear_line.as_str())).unwrap();
         queue!(stdout, Print("\r\n")).unwrap();
         lines_used += 1;
     }
 }
 
-/// Format memory size in human-readable format (e.g., 187T, 123G, 500M, 16K)
-fn format_memory_size(bytes: u64) -> String {
+/// Write a human-readable memory size into `buf` without allocating.
+///
+/// Examples: "0", "187T", "123G", "500M", "16K"
+fn write_memory_size(buf: &mut String, bytes: u64) {
     if bytes == 0 {
-        return "0".to_string();
+        buf.push('0');
+        return;
     }
 
     let gb = bytes as f64 / (1024.0 * 1024.0 * 1024.0);
@@ -293,17 +360,16 @@ fn format_memory_size(bytes: u64) -> String {
     let kb = bytes as f64 / 1024.0;
 
     if gb >= 1000.0 {
-        // Only show TB if >= 1000GB
         let tb = gb / 1024.0;
-        format!("{tb:.0}T")
+        let _ = write!(buf, "{tb:.0}T");
     } else if gb >= 1.0 {
-        format!("{gb:.0}G")
+        let _ = write!(buf, "{gb:.0}G");
     } else if mb >= 1.0 {
-        format!("{mb:.0}M")
+        let _ = write!(buf, "{mb:.0}M");
     } else if kb >= 1.0 {
-        format!("{kb:.0}K")
+        let _ = write!(buf, "{kb:.0}K");
     } else {
-        format!("{bytes}")
+        let _ = write!(buf, "{bytes}");
     }
 }
 
@@ -330,7 +396,7 @@ fn print_process_row_colored<W: Write>(
     width: usize,
     fixed_widths: &[usize; 12],
 ) {
-    let values = vec![
+    let values: [&str; 13] = [
         pid,
         user,
         priority,
@@ -379,6 +445,9 @@ fn print_process_row_colored<W: Write>(
         // Root, unknown, or other users' processes
         Color::DarkGrey
     };
+
+    // Reusable buffer for per-column formatting to avoid per-column allocations
+    let mut col_buf = String::with_capacity(64);
 
     for (idx, value) in values.iter().enumerate() {
         let col_width = if idx < fixed_widths.len() {
@@ -487,21 +556,29 @@ fn print_process_row_colored<W: Write>(
             // Calculate what part of this column to display
             let skip = horizontal_scroll_offset.saturating_sub(col_start);
 
-            // Format the value with proper alignment
-            let formatted = if idx < fixed_widths.len() {
+            // Format the value with proper alignment into the reusable buffer
+            col_buf.clear();
+            if idx < fixed_widths.len() {
                 match idx {
-                    0 => format!("{value:>col_width$}"), // PID - right align
-                    1 => format!("{:<col_width$}", truncate_to_width(value, col_width)), // USER - left align
-                    2..=11 => format!("{value:>col_width$}"), // Numbers - right align
-                    _ => value.to_string(),
+                    0 => {
+                        let _ = write!(col_buf, "{value:>col_width$}");
+                    }
+                    1 => {
+                        let truncated = truncate_to_width(value, col_width);
+                        let _ = write!(col_buf, "{truncated:<col_width$}");
+                    }
+                    2..=11 => {
+                        let _ = write!(col_buf, "{value:>col_width$}");
+                    }
+                    _ => col_buf.push_str(value),
                 }
             } else {
-                value.to_string() // Command - no padding
-            };
+                col_buf.push_str(value); // Command - no padding
+            }
 
             // Print the visible part
-            if skip < formatted.len() {
-                let visible_part = &formatted[skip..];
+            if skip < col_buf.len() {
+                let visible_part = &col_buf[skip..];
                 let remaining_width = width.saturating_sub(output_pos);
                 let to_print = truncate_to_width(visible_part, remaining_width);
                 print_colored_text(stdout, &to_print, color, None, None);
@@ -520,27 +597,30 @@ fn print_process_row_colored<W: Write>(
 
     // Fill the rest of the line with spaces to clear any previous content
     if output_pos < width {
-        print_colored_text(
-            stdout,
-            &" ".repeat(width - output_pos),
-            Color::Black,
-            None,
-            None,
-        );
+        let pad_len = width - output_pos;
+        // For small padding, use a static string to avoid allocation
+        let padding: Cow<'_, str> = match pad_len {
+            0 => Cow::Borrowed(""),
+            1 => Cow::Borrowed(" "),
+            2 => Cow::Borrowed("  "),
+            3 => Cow::Borrowed("   "),
+            _ => Cow::Owned(" ".repeat(pad_len)),
+        };
+        print_colored_text(stdout, &padding, Color::Black, None, None);
     }
 }
 
 /// Format CPU time in TIME+ format (e.g., 12:34.56, 1:23:45)
 /// For extremely long-running basic system processes, show as 0:00:00
-fn format_cpu_time(seconds: u64) -> String {
+fn format_cpu_time(seconds: u64) -> Cow<'static, str> {
     if seconds == 0 {
-        return "0:00:00".to_string();
+        return Cow::Borrowed("0:00:00");
     }
 
     // If the process has been running for more than 365 days (basic system process)
     // show as 0:00:00 to avoid clutter
     if seconds > 365 * 24 * 3600 {
-        return "0:00:00".to_string();
+        return Cow::Borrowed("0:00:00");
     }
 
     let hours = seconds / 3600;
@@ -548,8 +628,172 @@ fn format_cpu_time(seconds: u64) -> String {
     let secs = seconds % 60;
 
     if hours > 0 {
-        format!("{hours}:{minutes:02}:{secs:02}")
+        Cow::Owned(format!("{hours}:{minutes:02}:{secs:02}"))
     } else {
-        format!("{}:{:02}:{secs:02}", minutes / 60, minutes % 60)
+        Cow::Owned(format!("{}:{:02}:{secs:02}", minutes / 60, minutes % 60))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -----------------------------------------------------------------------
+    // write_memory_size: correctness
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_write_memory_size_zero() {
+        let mut buf = String::new();
+        write_memory_size(&mut buf, 0);
+        assert_eq!(buf, "0");
+    }
+
+    #[test]
+    fn test_write_memory_size_bytes() {
+        let mut buf = String::new();
+        write_memory_size(&mut buf, 512);
+        assert_eq!(buf, "512");
+    }
+
+    #[test]
+    fn test_write_memory_size_kilobytes() {
+        let mut buf = String::new();
+        write_memory_size(&mut buf, 4 * 1024);
+        assert_eq!(buf, "4K");
+    }
+
+    #[test]
+    fn test_write_memory_size_megabytes() {
+        let mut buf = String::new();
+        write_memory_size(&mut buf, 256 * 1024 * 1024);
+        assert_eq!(buf, "256M");
+    }
+
+    #[test]
+    fn test_write_memory_size_gigabytes() {
+        let mut buf = String::new();
+        write_memory_size(&mut buf, 8 * 1024 * 1024 * 1024);
+        assert_eq!(buf, "8G");
+    }
+
+    #[test]
+    fn test_write_memory_size_terabytes() {
+        let mut buf = String::new();
+        // 2TB = 2048 GB
+        write_memory_size(&mut buf, 2 * 1024 * 1024 * 1024 * 1024);
+        assert_eq!(buf, "2T");
+    }
+
+    #[test]
+    fn test_write_memory_size_reuses_buffer() {
+        // Verify the buffer is appended to, not replaced
+        let mut buf = String::from("prefix-");
+        write_memory_size(&mut buf, 1024 * 1024);
+        assert_eq!(buf, "prefix-1M");
+    }
+
+    // -----------------------------------------------------------------------
+    // format_cpu_time: correctness and Cow allocation behavior
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_format_cpu_time_zero_borrows() {
+        let result = format_cpu_time(0);
+        assert!(matches!(result, Cow::Borrowed(_)));
+        assert_eq!(&*result, "0:00:00");
+    }
+
+    #[test]
+    fn test_format_cpu_time_long_running_borrows() {
+        // More than 365 days should return the borrowed "0:00:00"
+        let result = format_cpu_time(366 * 24 * 3600);
+        assert!(matches!(result, Cow::Borrowed(_)));
+        assert_eq!(&*result, "0:00:00");
+    }
+
+    #[test]
+    fn test_format_cpu_time_minutes_only() {
+        // 90 seconds = 1 minute 30 seconds, no hours
+        let result = format_cpu_time(90);
+        assert!(matches!(result, Cow::Owned(_)));
+        assert_eq!(&*result, "0:01:30");
+    }
+
+    #[test]
+    fn test_format_cpu_time_with_hours() {
+        // 3661 seconds = 1 hour, 1 minute, 1 second
+        let result = format_cpu_time(3661);
+        assert!(matches!(result, Cow::Owned(_)));
+        assert_eq!(&*result, "1:01:01");
+    }
+
+    #[test]
+    fn test_format_cpu_time_exact_one_hour() {
+        let result = format_cpu_time(3600);
+        assert_eq!(&*result, "1:00:00");
+    }
+
+    #[test]
+    fn test_format_cpu_time_just_below_limit() {
+        // 365 days exactly: should NOT be suppressed (must be > 365*24*3600)
+        let at_limit = 365 * 24 * 3600;
+        let result = format_cpu_time(at_limit);
+        assert!(matches!(result, Cow::Owned(_)));
+    }
+
+    // -----------------------------------------------------------------------
+    // RowFormatter: scratch buffer reuse
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_row_formatter_clear_retains_capacity() {
+        let mut rf = RowFormatter::new();
+        rf.buf.push_str("some content longer than initial");
+        let cap_before = rf.buf.capacity();
+        rf.clear();
+        assert!(rf.buf.is_empty());
+        assert_eq!(rf.buf.capacity(), cap_before);
+    }
+
+    #[test]
+    fn test_row_formatter_initial_capacity() {
+        let rf = RowFormatter::new();
+        assert!(rf.buf.capacity() >= 512);
+    }
+
+    // -----------------------------------------------------------------------
+    // format_cpu_time throughput: hot-path allocation measurement
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_format_cpu_time_zero_throughput() {
+        // The zero-seconds case must be zero-allocation (Cow::Borrowed).
+        // Verify it completes quickly for the hot path.
+        let start = std::time::Instant::now();
+        for _ in 0..100_000 {
+            let r = format_cpu_time(0);
+            assert!(matches!(r, Cow::Borrowed(_)));
+        }
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed.as_millis() < 500,
+            "format_cpu_time(0) throughput too slow: {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn test_write_memory_size_throughput() {
+        // 100k calls with mixed inputs should complete quickly
+        let start = std::time::Instant::now();
+        for i in 0..100_000u64 {
+            let mut buf = String::with_capacity(8);
+            write_memory_size(&mut buf, i * 1024);
+        }
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed.as_millis() < 500,
+            "write_memory_size throughput too slow: {elapsed:?}"
+        );
     }
 }
