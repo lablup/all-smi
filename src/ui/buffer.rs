@@ -80,18 +80,13 @@ impl Write for BufferWriter {
 /// new one. Unchanged lines are skipped entirely.
 ///
 /// Terminal dimensions are accepted from the caller to avoid redundant
-/// `terminal::size()` syscalls. A lightweight byte-length check provides a
-/// fast unchanged-content path without hashing every byte.
+/// `terminal::size()` syscalls. The per-line comparison is the authoritative
+/// change-detection mechanism; identical lines are skipped via cheap
+/// pointer+length string comparison, so duplicate frames incur near-zero cost.
 pub struct DifferentialRenderer {
     previous_lines: Vec<String>,
     screen_height: usize,
     screen_width: usize,
-    /// Length of the previous content for fast unchanged detection.
-    /// Combined with per-line comparison this catches both identical frames
-    /// and frames that differ only in trailing whitespace.
-    previous_content_len: usize,
-    /// Total byte content of the previous frame for fast identity check.
-    previous_content_bytes: usize,
 }
 
 impl DifferentialRenderer {
@@ -101,8 +96,6 @@ impl DifferentialRenderer {
             previous_lines: Vec::new(),
             screen_height: height as usize,
             screen_width: width as usize,
-            previous_content_len: 0,
-            previous_content_bytes: 0,
         })
     }
 
@@ -132,29 +125,6 @@ impl DifferentialRenderer {
         // This is a no-op when dimensions have not changed.
         self.update_dimensions(cols, rows);
 
-        // Fast identity check: if the byte length AND number of bytes match
-        // the previous frame, the content is very likely identical. The
-        // per-line loop below would then skip every line anyway, so we can
-        // short-circuit here to avoid the line iteration overhead.
-        let content_len = content.len();
-        let content_bytes: usize = content.bytes().map(|b| b as usize).take(64).sum();
-        if content_len == self.previous_content_len
-            && content_bytes == self.previous_content_bytes
-            && !self.previous_lines.is_empty()
-        {
-            // Likely identical. Verify with the line-by-line check for
-            // correctness (hash collisions are possible with length alone).
-            // However, since the per-line check is already O(total_lines)
-            // and short-circuits on first difference, we only enter that
-            // path if the lengths match. A true duplicate frame will exit
-            // after comparing all lines with zero terminal writes.
-        } else {
-            // Lengths differ, so we definitely have changes.
-        }
-
-        self.previous_content_len = content_len;
-        self.previous_content_bytes = content_bytes;
-
         // Initialize previous_lines on first run
         if self.previous_lines.is_empty() {
             self.previous_lines = vec![String::new(); self.screen_height];
@@ -164,7 +134,9 @@ impl DifferentialRenderer {
         let mut current_line_count = 0;
         let mut any_changes = false;
 
-        // Process lines directly from iterator, updating previous_lines in-place
+        // Process lines directly from iterator, updating previous_lines in-place.
+        // Per-line string comparison is the authoritative change-detection mechanism.
+        // Rust's String `!=` checks length first, so identical lines are O(1).
         for (line_num, current_line) in content.lines().enumerate() {
             if line_num >= self.screen_height {
                 break;
@@ -219,8 +191,6 @@ impl DifferentialRenderer {
         self.previous_lines.clear();
         self.previous_lines
             .resize(self.screen_height, String::new());
-        self.previous_content_len = 0;
-        self.previous_content_bytes = 0;
 
         Ok(())
     }
@@ -270,8 +240,6 @@ mod tests {
             previous_lines: Vec::new(),
             screen_height: 24,
             screen_width: 80,
-            previous_content_len: 0,
-            previous_content_bytes: 0,
         };
 
         dr.update_dimensions(120, 40);
@@ -286,8 +254,6 @@ mod tests {
             previous_lines: vec![String::new(); 24],
             screen_height: 24,
             screen_width: 80,
-            previous_content_len: 0,
-            previous_content_bytes: 0,
         };
 
         dr.update_dimensions(80, 24);
@@ -302,15 +268,11 @@ mod tests {
             previous_lines: vec!["old content".to_string(); 24],
             screen_height: 24,
             screen_width: 80,
-            previous_content_len: 100,
-            previous_content_bytes: 500,
         };
 
         // force_clear writes to stdout which may fail in test env, but
         // we can still test the state reset by calling the method.
         let _ = dr.force_clear();
-        assert_eq!(dr.previous_content_len, 0);
-        assert_eq!(dr.previous_content_bytes, 0);
         assert_eq!(dr.previous_lines.len(), 24);
         // All lines should be empty after clear
         assert!(dr.previous_lines.iter().all(|l| l.is_empty()));

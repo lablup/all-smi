@@ -217,15 +217,22 @@ pub fn draw_bar_multi<W: Write>(
             .find(|seg| pos >= seg.0 && pos < seg.1);
 
         if let Some(&(_, end, color)) = seg_match {
-            // Batch the entire segment run up to text_pos or segment end
-            let run_end = end.min(text_pos).min(available_bar_width);
+            // Batch the entire segment run up to text_pos or segment end.
+            // When text_pos is behind or at pos (text already emitted),
+            // use the segment end directly instead.
+            let run_end = if text_pos > pos {
+                end.min(text_pos).min(available_bar_width)
+            } else {
+                end.min(available_bar_width)
+            };
             let run_len = run_end.saturating_sub(pos);
             if run_len > 0 {
                 print_colored_text(stdout, &"▬".repeat(run_len), color, None, None);
                 pos += run_len;
             } else {
-                // Segment ends exactly at or before this position
-                pos = end;
+                // Segment ends at or before this position; advance past it
+                // to guarantee forward progress.
+                pos = end.max(pos + 1);
             }
         } else {
             // Empty region -- batch until the next segment, text, or end
