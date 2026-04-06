@@ -527,3 +527,160 @@ impl FrameRenderer {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app_state::AppState;
+    use crate::view::render_snapshot::RenderSnapshot;
+
+    fn make_local_args() -> ViewArgs {
+        ViewArgs {
+            hosts: None,
+            hostfile: None,
+            interval: None,
+        }
+    }
+
+    fn make_snapshot() -> RenderSnapshot {
+        let state = AppState::new();
+        RenderSnapshot::capture(&state)
+    }
+
+    // -----------------------------------------------------------------------
+    // FrameRenderer: construction
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_frame_renderer_is_zero_sized() {
+        // FrameRenderer is a unit struct; assert it holds no state.
+        assert_eq!(std::mem::size_of::<FrameRenderer>(), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // render_loading: smoke tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_render_loading_does_not_panic() {
+        let snapshot = make_snapshot();
+        let output = FrameRenderer::render_loading(&snapshot, false, 80, 24);
+        // Loading screen must produce some output even when state is empty.
+        assert!(!output.is_empty());
+    }
+
+    #[test]
+    fn test_render_loading_remote_does_not_panic() {
+        let snapshot = make_snapshot();
+        let output = FrameRenderer::render_loading(&snapshot, true, 80, 24);
+        assert!(!output.is_empty());
+    }
+
+    #[test]
+    fn test_render_loading_with_startup_status_lines() {
+        let mut state = AppState::new();
+        state
+            .startup_status_lines
+            .push("Connecting to GPUs...".to_string());
+        let snapshot = RenderSnapshot::capture(&state);
+        // Should not panic and produce output with the status line.
+        let output = FrameRenderer::render_loading(&snapshot, false, 80, 24);
+        assert!(!output.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // render_main: smoke tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_render_main_does_not_panic_empty_state() {
+        let snapshot = make_snapshot();
+        let args = make_local_args();
+        let output = FrameRenderer::render_main(&snapshot, &args, 80, 24);
+        // Header must be present.
+        assert!(output.contains("all-smi"));
+    }
+
+    #[test]
+    fn test_render_main_contains_header_timestamp() {
+        let snapshot = make_snapshot();
+        let args = make_local_args();
+        let output = FrameRenderer::render_main(&snapshot, &args, 120, 40);
+        // The header includes the current year which is deterministic for the test run.
+        assert!(output.contains("all-smi - 20"));
+    }
+
+    #[test]
+    fn test_render_main_contains_version() {
+        let snapshot = make_snapshot();
+        let args = make_local_args();
+        let output = FrameRenderer::render_main(&snapshot, &args, 80, 24);
+        let version = env!("CARGO_PKG_VERSION");
+        assert!(output.contains(version));
+    }
+
+    // -----------------------------------------------------------------------
+    // render_disconnection_notification: box geometry
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_disconnection_notification_width_too_narrow_produces_no_box() {
+        // width=9 → box_width = min(9-4, 60) = 5 which is < 6, so nothing is rendered
+        // (only the two leading blank lines appear).
+        let mut buffer = BufferWriter::new();
+        FrameRenderer::render_disconnection_notification(&mut buffer, "node1", 9);
+        let output = buffer.get_buffer().to_string();
+        // The box should NOT be rendered; the output must not contain the box corner.
+        assert!(!output.contains('\u{250c}'));
+    }
+
+    #[test]
+    fn test_disconnection_notification_normal_width_contains_hostname() {
+        let mut buffer = BufferWriter::new();
+        FrameRenderer::render_disconnection_notification(&mut buffer, "my-node", 80);
+        let output = buffer.get_buffer().to_string();
+        assert!(output.contains("my-node"));
+        assert!(output.contains("CONNECTION LOST"));
+    }
+
+    #[test]
+    fn test_disconnection_notification_box_max_width_capped_at_60() {
+        // With a very wide terminal (200 cols) the box should be capped at 60 chars.
+        let mut buffer = BufferWriter::new();
+        FrameRenderer::render_disconnection_notification(&mut buffer, "node1", 200);
+        let output = buffer.get_buffer().to_string();
+        // The box top border is: "─" repeated (box_width-2) times, capped at 58 for width=200.
+        // Count the number of consecutive box-drawing horizontal lines.
+        let horizontal_line_count = output.matches('\u{2500}').count();
+        // max box_width = 60, so max horizontal lines per border = 58
+        // Two borders (top + bottom) → at most 116.
+        assert!(horizontal_line_count <= 116);
+        // But there must be at least some lines (it renders).
+        assert!(horizontal_line_count > 0);
+    }
+
+    #[test]
+    fn test_disconnection_notification_long_hostname_is_truncated() {
+        // A hostname that exceeds inner_width (box_width - 4) should be truncated.
+        let long_hostname = "a".repeat(200);
+        let mut buffer = BufferWriter::new();
+        FrameRenderer::render_disconnection_notification(&mut buffer, &long_hostname, 80);
+        let output = buffer.get_buffer().to_string();
+        // "Node: " prefix plus some of the hostname must appear, but not all 200 'a's.
+        assert!(output.contains("Node: "));
+        assert!(!output.contains(&long_hostname));
+    }
+
+    // -----------------------------------------------------------------------
+    // render_help: smoke test
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_render_help_does_not_panic() {
+        let snapshot = make_snapshot();
+        let args = make_local_args();
+        let output = FrameRenderer::render_help(&snapshot, &args, 80, 24);
+        // Help popup must produce output.
+        assert!(!output.is_empty());
+    }
+}
