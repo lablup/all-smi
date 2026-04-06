@@ -55,7 +55,9 @@ impl AppConfig {
     pub const PROGRESS_BAR_TEXT_WIDTH: usize = 8;
     #[allow(dead_code)] // Future UI configuration
     pub const DASHBOARD_ITEM_WIDTH: usize = 15;
+    #[allow(dead_code)] // Default terminal fallback values for future use
     pub const DEFAULT_TERMINAL_WIDTH: u16 = 80;
+    #[allow(dead_code)] // Default terminal fallback values for future use
     pub const DEFAULT_TERMINAL_HEIGHT: u16 = 24;
 
     // Memory and Performance

@@ -27,8 +27,8 @@ use crossterm::{
     style::{Color, Print},
 };
 
+use crate::app_state::AppState;
 use crate::cli::ViewArgs;
-use crate::common::config::AppConfig;
 use crate::device::ProcessInfo;
 use crate::ui::buffer::BufferWriter;
 use crate::ui::dashboard::{draw_dashboard_items, draw_system_view};
@@ -80,7 +80,9 @@ impl FrameRenderer {
         let width = cols as usize;
         let mut buffer = BufferWriter::new();
 
-        // Reconstruct AppState view for downstream UI functions
+        // Reconstruct AppState view once for all downstream UI functions that
+        // still accept `&AppState`. This single allocation is shared across
+        // the header, dashboard, tabs, GPU layout, and function-key bar.
         let view_state = snapshot.as_app_state();
 
         // Write time/date header to buffer first
@@ -146,14 +148,14 @@ impl FrameRenderer {
         // Render chassis information (node-level metrics)
         Self::render_chassis_section(&mut buffer, snapshot, width);
 
-        // Render GPU information
-        Self::render_gpu_section(&mut buffer, snapshot, args, cols, rows);
+        // Render GPU information (reuse the single view_state for layout calculation)
+        Self::render_gpu_section(&mut buffer, snapshot, &view_state, args, cols, rows);
 
         // Render other device information based on mode
         if is_remote {
             Self::render_remote_devices(&mut buffer, snapshot, width);
         } else {
-            Self::render_local_devices(&mut buffer, snapshot, width);
+            Self::render_local_devices(&mut buffer, snapshot, cols, rows);
         }
 
         // Add function keys to main content view
@@ -165,6 +167,7 @@ impl FrameRenderer {
     fn render_gpu_section(
         buffer: &mut BufferWriter,
         snapshot: &RenderSnapshot,
+        view_state: &AppState,
         args: &ViewArgs,
         cols: u16,
         rows: u16,
@@ -184,11 +187,11 @@ impl FrameRenderer {
         // Sort GPUs based on current sort criteria
         gpu_info_to_display.sort_by(|a, b| snapshot.sort_criteria.sort_gpus(a, b));
 
-        // Calculate content area and GPU display parameters
-        let view_state = snapshot.as_app_state();
-        let content_area = LayoutCalculator::calculate_content_area(&view_state, cols, rows);
+        // Calculate content area and GPU display parameters using the shared
+        // view_state from render_main, avoiding a second as_app_state() call.
+        let content_area = LayoutCalculator::calculate_content_area(view_state, cols, rows);
         let gpu_display_params =
-            LayoutCalculator::calculate_gpu_display_params(&view_state, args, &content_area);
+            LayoutCalculator::calculate_gpu_display_params(view_state, args, &content_area);
         let max_gpu_items = gpu_display_params.max_items;
 
         // Display GPUs with scrolling
@@ -353,8 +356,12 @@ impl FrameRenderer {
         writeln!(buffer).unwrap();
         writeln!(buffer).unwrap();
 
-        let box_width = (width - 4).min(60);
-        let margin = (width - box_width) / 2;
+        let box_width = width.saturating_sub(4).min(60);
+        // Ensure minimum box width for the border characters
+        if box_width < 6 {
+            return;
+        }
+        let margin = width.saturating_sub(box_width) / 2;
         let margin_str = " ".repeat(margin);
 
         // Top border
@@ -362,7 +369,7 @@ impl FrameRenderer {
         print_colored_text(buffer, "\u{250c}", Color::Red, None, None);
         print_colored_text(
             buffer,
-            &"\u{2500}".repeat(box_width - 2),
+            &"\u{2500}".repeat(box_width.saturating_sub(2)),
             Color::Red,
             None,
             None,
@@ -378,19 +385,33 @@ impl FrameRenderer {
             ("Unable to retrieve node information", Color::DarkGrey),
             ("", Color::White),
         ];
+        // Inner width available for text content (between "| " and " |")
+        let inner_width = box_width.saturating_sub(4);
         for (text, color) in rows {
             write!(buffer, "{margin_str}").unwrap();
             if text.is_empty() {
                 // Empty row
                 print_colored_text(buffer, "\u{2502}", Color::Red, None, None);
-                print_colored_text(buffer, &" ".repeat(box_width - 2), Color::White, None, None);
+                print_colored_text(
+                    buffer,
+                    &" ".repeat(box_width.saturating_sub(2)),
+                    Color::White,
+                    None,
+                    None,
+                );
                 print_colored_text(buffer, "\u{2502}", Color::Red, None, None);
             } else {
-                let pad_left = (box_width - 4 - text.len()) / 2;
-                let pad_right = box_width - 4 - pad_left - text.len();
+                // Truncate text if it exceeds available inner width
+                let display_text: Cow<'_, str> = if text.len() > inner_width {
+                    Cow::Owned(text.chars().take(inner_width).collect())
+                } else {
+                    Cow::Borrowed(text)
+                };
+                let pad_left = inner_width.saturating_sub(display_text.len()) / 2;
+                let pad_right = inner_width.saturating_sub(pad_left + display_text.len());
                 print_colored_text(buffer, "\u{2502} ", Color::Red, None, None);
                 print_colored_text(buffer, &" ".repeat(pad_left), Color::White, None, None);
-                print_colored_text(buffer, text, *color, None, None);
+                print_colored_text(buffer, &display_text, *color, None, None);
                 print_colored_text(buffer, &" ".repeat(pad_right), Color::White, None, None);
                 print_colored_text(buffer, " \u{2502}", Color::Red, None, None);
             }
@@ -402,7 +423,7 @@ impl FrameRenderer {
         print_colored_text(buffer, "\u{2514}", Color::Red, None, None);
         print_colored_text(
             buffer,
-            &"\u{2500}".repeat(box_width - 2),
+            &"\u{2500}".repeat(box_width.saturating_sub(2)),
             Color::Red,
             None,
             None,
@@ -411,7 +432,14 @@ impl FrameRenderer {
         writeln!(buffer).unwrap();
     }
 
-    fn render_local_devices(buffer: &mut BufferWriter, snapshot: &RenderSnapshot, width: usize) {
+    fn render_local_devices(
+        buffer: &mut BufferWriter,
+        snapshot: &RenderSnapshot,
+        cols: u16,
+        rows: u16,
+    ) {
+        let width = cols as usize;
+
         // CPU information for local mode
         for (i, cpu_info) in snapshot.cpu_info.iter().enumerate() {
             let cpu_name_scroll_offset = snapshot
@@ -457,14 +485,6 @@ impl FrameRenderer {
 
         // Process information for local mode (if available)
         if !snapshot.process_info.is_empty() {
-            let (cols, rows) = match crossterm::terminal::size() {
-                Ok((c, r)) => (c, r),
-                Err(_) => (
-                    AppConfig::DEFAULT_TERMINAL_WIDTH,
-                    AppConfig::DEFAULT_TERMINAL_HEIGHT,
-                ),
-            };
-
             let lines_used = buffer.line_count();
 
             // Add a blank line before process list
