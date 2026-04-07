@@ -73,7 +73,7 @@ impl CpuMetrics {
         }
 
         // Update Apple Silicon specific metrics
-        if let (Some(ref mut p_util), Some(ref mut e_util)) =
+        if let (Some(p_util), Some(e_util)) =
             (&mut self.p_core_utilization, &mut self.e_core_utilization)
         {
             let p_delta = rng.random_range(-4.0..4.0);
@@ -83,7 +83,7 @@ impl CpuMetrics {
         }
 
         // Update P/E cluster frequencies for Apple Silicon
-        if let (Some(ref mut p_freq), Some(ref mut e_freq)) = (
+        if let (Some(p_freq), Some(e_freq)) = (
             &mut self.p_cluster_frequency_mhz,
             &mut self.e_cluster_frequency_mhz,
         ) {
@@ -113,26 +113,23 @@ impl CpuMetrics {
             }
 
             // Update P-core and E-core utilization for Apple Silicon
-            if let (Some(p_count), Some(e_count), Some(ref mut p_util), Some(ref mut e_util)) = (
+            if let (Some(p_count), Some(e_count), Some(p_util), Some(e_util)) = (
                 self.p_core_count,
                 self.e_core_count,
                 &mut self.p_core_utilization,
                 &mut self.e_core_utilization,
-            ) {
-                if p_count > 0
-                    && e_count > 0
-                    && self.per_core_utilization.len() >= (p_count + e_count) as usize
-                {
-                    *p_util = self.per_core_utilization[..p_count as usize]
-                        .iter()
-                        .sum::<f32>()
-                        / p_count as f32;
-                    *e_util = self.per_core_utilization
-                        [p_count as usize..(p_count + e_count) as usize]
-                        .iter()
-                        .sum::<f32>()
-                        / e_count as f32;
-                }
+            ) && p_count > 0
+                && e_count > 0
+                && self.per_core_utilization.len() >= (p_count + e_count) as usize
+            {
+                *p_util = self.per_core_utilization[..p_count as usize]
+                    .iter()
+                    .sum::<f32>()
+                    / p_count as f32;
+                *e_util = self.per_core_utilization[p_count as usize..(p_count + e_count) as usize]
+                    .iter()
+                    .sum::<f32>()
+                    / e_count as f32;
             }
         }
     }

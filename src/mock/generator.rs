@@ -23,10 +23,10 @@ use rand::{RngExt, rng};
 pub fn extract_gpu_memory_gb(gpu_name: &str) -> u64 {
     if let Some(gb_pos) = gpu_name.find("GB") {
         let before_gb = &gpu_name[..gb_pos];
-        if let Some(space_pos) = before_gb.rfind(' ') {
-            if let Ok(gb) = before_gb[space_pos + 1..].parse::<u64>() {
-                return gb;
-            }
+        if let Some(space_pos) = before_gb.rfind(' ')
+            && let Ok(gb) = before_gb[space_pos + 1..].parse::<u64>()
+        {
+            return gb;
         }
         // Try to find number right before GB
         let mut end = gb_pos;
