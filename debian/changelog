@@ -1,3 +1,16 @@
+all-smi (0.18.0-0) jammy; urgency=medium
+
+  * Reduce TUI idle CPU with event-driven UI wakeups
+  * Snapshot AppState before rendering to shorten critical section
+  * Cache derived TUI view data to avoid per-frame sorting and cloning
+  * Trim hot-path rendering overhead in TUI frame assembly and diff pipeline
+  * Fix scroll calculation to use actual visible process rows
+  * Fix render throttle bypass for cursor/scroll input to restore responsiveness
+  * Keep periodic refresh tick active so idle TUI stays alive
+  * Add protobuf-devel to Fedora/RHEL build prerequisites in documentation
+
+ -- Jeongkyu Shin <inureyes@gmail.com>  Mon, 07 Apr 2026 00:00:00 +0000
+
 all-smi (0.17.6-0) jammy; urgency=medium
 
   * Bump hyper 1.9, nvml-wrapper 0.12.1, libamdgpu_top 0.11.3 and transitive deps
