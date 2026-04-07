@@ -13,6 +13,8 @@
 // limitations under the License.
 
 #[cfg(target_os = "linux")]
+use cgroups_rs::fs::Cgroup;
+#[cfg(target_os = "linux")]
 use cgroups_rs::fs::cpu::CpuController;
 #[cfg(target_os = "linux")]
 use cgroups_rs::fs::cpuset::CpuSetController;
@@ -20,8 +22,6 @@ use cgroups_rs::fs::cpuset::CpuSetController;
 use cgroups_rs::fs::hierarchies;
 #[cfg(target_os = "linux")]
 use cgroups_rs::fs::memory::MemController;
-#[cfg(target_os = "linux")]
-use cgroups_rs::fs::Cgroup;
 
 use once_cell::sync::Lazy;
 use std::fs;
@@ -239,12 +239,12 @@ impl ContainerInfo {
                     // In cgroups v2, check if we're in a non-root cgroup
                     if let Ok(cgroup_path) = fs::read_to_string("/proc/self/cgroup") {
                         // In cgroups v2, format is "0::/path"
-                        if let Some(line) = cgroup_path.lines().find(|l| l.starts_with("0::")) {
-                            if let Some(path) = line.strip_prefix("0::") {
-                                // If path is not "/" we're in a container
-                                if path != "/" && !path.is_empty() {
-                                    return true;
-                                }
+                        if let Some(line) = cgroup_path.lines().find(|l| l.starts_with("0::"))
+                            && let Some(path) = line.strip_prefix("0::")
+                        {
+                            // If path is not "/" we're in a container
+                            if path != "/" && !path.is_empty() {
+                                return true;
                             }
                         }
                     }
@@ -262,11 +262,7 @@ impl ContainerInfo {
         let cgroup = Cgroup::load(h, "self");
 
         // Check if the cgroup actually exists before returning
-        if cgroup.exists() {
-            Some(cgroup)
-        } else {
-            None
-        }
+        if cgroup.exists() { Some(cgroup) } else { None }
     }
 
     #[cfg(target_os = "linux")]
@@ -318,16 +314,16 @@ impl ContainerInfo {
         }
 
         // Try cgroups v1
-        if cpu_quota.is_none() {
-            if let Ok(content) = fs::read_to_string("/sys/fs/cgroup/cpu/cpu.cfs_quota_us") {
-                cpu_quota = content.trim().parse::<i64>().ok();
-            }
+        if cpu_quota.is_none()
+            && let Ok(content) = fs::read_to_string("/sys/fs/cgroup/cpu/cpu.cfs_quota_us")
+        {
+            cpu_quota = content.trim().parse::<i64>().ok();
         }
 
-        if cpu_period.is_none() {
-            if let Ok(content) = fs::read_to_string("/sys/fs/cgroup/cpu/cpu.cfs_period_us") {
-                cpu_period = content.trim().parse::<u64>().ok();
-            }
+        if cpu_period.is_none()
+            && let Ok(content) = fs::read_to_string("/sys/fs/cgroup/cpu/cpu.cfs_period_us")
+        {
+            cpu_period = content.trim().parse::<u64>().ok();
         }
 
         // Get CPU shares
@@ -346,22 +342,22 @@ impl ContainerInfo {
 
     #[cfg(target_os = "linux")]
     fn get_cpuset_cpus(cgroup: &Option<Cgroup>) -> Option<Vec<u32>> {
-        if let Some(cg) = cgroup {
-            if let Some(cpuset_controller) = cg.controller_of::<CpuSetController>() {
-                let cpus_info = cpuset_controller.cpuset();
-                let cpus = cpus_info.cpus;
-                // Convert Vec<(u64, u64)> to a string representation
-                let mut ranges = Vec::new();
-                for (start, end) in cpus {
-                    if start == end {
-                        ranges.push(start.to_string());
-                    } else {
-                        ranges.push(format!("{start}-{end}"));
-                    }
+        if let Some(cg) = cgroup
+            && let Some(cpuset_controller) = cg.controller_of::<CpuSetController>()
+        {
+            let cpus_info = cpuset_controller.cpuset();
+            let cpus = cpus_info.cpus;
+            // Convert Vec<(u64, u64)> to a string representation
+            let mut ranges = Vec::new();
+            for (start, end) in cpus {
+                if start == end {
+                    ranges.push(start.to_string());
+                } else {
+                    ranges.push(format!("{start}-{end}"));
                 }
-                let cpus_str = ranges.join(",");
-                return Self::parse_cpuset_range(&cpus_str);
             }
+            let cpus_str = ranges.join(",");
+            return Self::parse_cpuset_range(&cpus_str);
         }
 
         // Fallback to filesystem
@@ -396,13 +392,12 @@ impl ContainerInfo {
             if part.contains('-') {
                 // Range like "0-3"
                 let range_parts: Vec<&str> = part.split('-').collect();
-                if range_parts.len() == 2 {
-                    if let (Ok(start), Ok(end)) =
+                if range_parts.len() == 2
+                    && let (Ok(start), Ok(end)) =
                         (range_parts[0].parse::<u32>(), range_parts[1].parse::<u32>())
-                    {
-                        for cpu in start..=end {
-                            cpus.push(cpu);
-                        }
+                {
+                    for cpu in start..=end {
+                        cpus.push(cpu);
                     }
                 }
             } else {
@@ -413,11 +408,7 @@ impl ContainerInfo {
             }
         }
 
-        if cpus.is_empty() {
-            None
-        } else {
-            Some(cpus)
-        }
+        if cpus.is_empty() { None } else { Some(cpus) }
     }
 
     fn calculate_effective_cpus(
@@ -472,11 +463,11 @@ impl ContainerInfo {
         if let Ok(content) = fs::read_to_string("/sys/fs/cgroup/cpu.stat") {
             let mut _usage_usec = 0u64;
             for line in content.lines() {
-                if line.starts_with("usage_usec") {
-                    if let Some(value) = line.split_whitespace().nth(1) {
-                        _usage_usec = value.parse().unwrap_or(0);
-                        break;
-                    }
+                if line.starts_with("usage_usec")
+                    && let Some(value) = line.split_whitespace().nth(1)
+                {
+                    _usage_usec = value.parse().unwrap_or(0);
+                    break;
                 }
             }
 
@@ -503,24 +494,24 @@ impl ContainerInfo {
         let mut memory_swap_limit = None;
         let mut memory_usage = None;
 
-        if let Some(cg) = cgroup {
-            if let Some(mem_controller) = cg.controller_of::<MemController>() {
-                let mem_stat = mem_controller.memory_stat();
-                // cgroups-rs returns i64, but we need u64
-                if mem_stat.limit_in_bytes > 0 && mem_stat.limit_in_bytes < i64::MAX {
-                    memory_limit = Some(mem_stat.limit_in_bytes as u64);
-                }
+        if let Some(cg) = cgroup
+            && let Some(mem_controller) = cg.controller_of::<MemController>()
+        {
+            let mem_stat = mem_controller.memory_stat();
+            // cgroups-rs returns i64, but we need u64
+            if mem_stat.limit_in_bytes > 0 && mem_stat.limit_in_bytes < i64::MAX {
+                memory_limit = Some(mem_stat.limit_in_bytes as u64);
+            }
 
-                memory_usage = Some(mem_stat.usage_in_bytes);
+            memory_usage = Some(mem_stat.usage_in_bytes);
 
-                if mem_stat.soft_limit_in_bytes > 0 && mem_stat.soft_limit_in_bytes < i64::MAX {
-                    memory_soft_limit = Some(mem_stat.soft_limit_in_bytes as u64);
-                }
+            if mem_stat.soft_limit_in_bytes > 0 && mem_stat.soft_limit_in_bytes < i64::MAX {
+                memory_soft_limit = Some(mem_stat.soft_limit_in_bytes as u64);
+            }
 
-                let swap_stat = mem_controller.memswap();
-                if swap_stat.limit_in_bytes > 0 && swap_stat.limit_in_bytes < i64::MAX {
-                    memory_swap_limit = Some(swap_stat.limit_in_bytes as u64);
-                }
+            let swap_stat = mem_controller.memswap();
+            if swap_stat.limit_in_bytes > 0 && swap_stat.limit_in_bytes < i64::MAX {
+                memory_swap_limit = Some(swap_stat.limit_in_bytes as u64);
             }
         }
 
@@ -575,43 +566,41 @@ impl ContainerInfo {
         }
 
         // Try cgroups v1 if v2 didn't work
-        if memory_limit.is_none() {
-            if let Ok(content) = fs::read_to_string("/sys/fs/cgroup/memory/memory.limit_in_bytes") {
-                let limit = content.trim().parse::<u64>().unwrap_or(0);
-                // cgroups v1 uses a very large number to indicate no limit
-                if limit < 9223372036854771712 {
-                    // Less than 8 EiB
-                    memory_limit = Some(limit);
-                }
+        if memory_limit.is_none()
+            && let Ok(content) = fs::read_to_string("/sys/fs/cgroup/memory/memory.limit_in_bytes")
+        {
+            let limit = content.trim().parse::<u64>().unwrap_or(0);
+            // cgroups v1 uses a very large number to indicate no limit
+            if limit < 9223372036854771712 {
+                // Less than 8 EiB
+                memory_limit = Some(limit);
             }
         }
 
-        if memory_soft_limit.is_none() {
-            if let Ok(content) =
+        if memory_soft_limit.is_none()
+            && let Ok(content) =
                 fs::read_to_string("/sys/fs/cgroup/memory/memory.soft_limit_in_bytes")
-            {
-                let limit = content.trim().parse::<u64>().unwrap_or(0);
-                if limit < 9223372036854771712 {
-                    memory_soft_limit = Some(limit);
-                }
+        {
+            let limit = content.trim().parse::<u64>().unwrap_or(0);
+            if limit < 9223372036854771712 {
+                memory_soft_limit = Some(limit);
             }
         }
 
-        if memory_swap_limit.is_none() {
-            if let Ok(content) =
+        if memory_swap_limit.is_none()
+            && let Ok(content) =
                 fs::read_to_string("/sys/fs/cgroup/memory/memory.memsw.limit_in_bytes")
-            {
-                let limit = content.trim().parse::<u64>().unwrap_or(0);
-                if limit < 9223372036854771712 {
-                    memory_swap_limit = Some(limit);
-                }
+        {
+            let limit = content.trim().parse::<u64>().unwrap_or(0);
+            if limit < 9223372036854771712 {
+                memory_swap_limit = Some(limit);
             }
         }
 
-        if memory_usage.is_none() {
-            if let Ok(content) = fs::read_to_string("/sys/fs/cgroup/memory/memory.usage_in_bytes") {
-                memory_usage = content.trim().parse::<u64>().ok();
-            }
+        if memory_usage.is_none()
+            && let Ok(content) = fs::read_to_string("/sys/fs/cgroup/memory/memory.usage_in_bytes")
+        {
+            memory_usage = content.trim().parse::<u64>().ok();
         }
 
         (
@@ -647,17 +636,17 @@ impl ContainerInfo {
         {
             // Direct filesystem read is most efficient
             // Try cgroups v2 first
-            if let Ok(content) = fs::read_to_string("/sys/fs/cgroup/memory.current") {
-                if let Ok(usage) = content.trim().parse::<u64>() {
-                    return Some(usage);
-                }
+            if let Ok(content) = fs::read_to_string("/sys/fs/cgroup/memory.current")
+                && let Ok(usage) = content.trim().parse::<u64>()
+            {
+                return Some(usage);
             }
 
             // Try cgroups v1
-            if let Ok(content) = fs::read_to_string("/sys/fs/cgroup/memory/memory.usage_in_bytes") {
-                if let Ok(usage) = content.trim().parse::<u64>() {
-                    return Some(usage);
-                }
+            if let Ok(content) = fs::read_to_string("/sys/fs/cgroup/memory/memory.usage_in_bytes")
+                && let Ok(usage) = content.trim().parse::<u64>()
+            {
+                return Some(usage);
             }
         }
 
@@ -673,18 +662,18 @@ impl ContainerInfo {
         let mut stats = MemoryStats::default();
 
         #[cfg(target_os = "linux")]
-        if let Some(ref cg) = self.cgroup {
-            if let Some(mem_controller) = cg.controller_of::<MemController>() {
-                let mem_stat = mem_controller.memory_stat();
-                // Map the MemoryStat fields to our MemoryStats
-                stats.anon_bytes = mem_stat.stat.rss; // RSS is roughly anonymous memory
-                stats.file_bytes = mem_stat.stat.cache; // Cache is file-backed memory
-                stats.file_mapped_bytes = mem_stat.stat.mapped_file;
-                stats.file_dirty_bytes = mem_stat.stat.dirty;
-                stats.file_writeback_bytes = mem_stat.stat.writeback;
-                // Note: kernel_stack, slab, and sock are not directly available in MemoryStat
-                return Some(stats);
-            }
+        if let Some(ref cg) = self.cgroup
+            && let Some(mem_controller) = cg.controller_of::<MemController>()
+        {
+            let mem_stat = mem_controller.memory_stat();
+            // Map the MemoryStat fields to our MemoryStats
+            stats.anon_bytes = mem_stat.stat.rss; // RSS is roughly anonymous memory
+            stats.file_bytes = mem_stat.stat.cache; // Cache is file-backed memory
+            stats.file_mapped_bytes = mem_stat.stat.mapped_file;
+            stats.file_dirty_bytes = mem_stat.stat.dirty;
+            stats.file_writeback_bytes = mem_stat.stat.writeback;
+            // Note: kernel_stack, slab, and sock are not directly available in MemoryStat
+            return Some(stats);
         }
 
         // Fallback to filesystem
@@ -692,19 +681,19 @@ impl ContainerInfo {
         if let Ok(content) = fs::read_to_string("/sys/fs/cgroup/memory.stat") {
             for line in content.lines() {
                 let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.len() == 2 {
-                    if let Ok(value) = parts[1].parse::<u64>() {
-                        match parts[0] {
-                            "anon" => stats.anon_bytes = value,
-                            "file" => stats.file_bytes = value,
-                            "kernel_stack" => stats.kernel_stack_bytes = value,
-                            "slab" => stats.slab_bytes = value,
-                            "sock" => stats.sock_bytes = value,
-                            "file_mapped" => stats.file_mapped_bytes = value,
-                            "file_dirty" => stats.file_dirty_bytes = value,
-                            "file_writeback" => stats.file_writeback_bytes = value,
-                            _ => {}
-                        }
+                if parts.len() == 2
+                    && let Ok(value) = parts[1].parse::<u64>()
+                {
+                    match parts[0] {
+                        "anon" => stats.anon_bytes = value,
+                        "file" => stats.file_bytes = value,
+                        "kernel_stack" => stats.kernel_stack_bytes = value,
+                        "slab" => stats.slab_bytes = value,
+                        "sock" => stats.sock_bytes = value,
+                        "file_mapped" => stats.file_mapped_bytes = value,
+                        "file_dirty" => stats.file_dirty_bytes = value,
+                        "file_writeback" => stats.file_writeback_bytes = value,
+                        _ => {}
                     }
                 }
             }
@@ -715,16 +704,16 @@ impl ContainerInfo {
         if let Ok(content) = fs::read_to_string("/sys/fs/cgroup/memory/memory.stat") {
             for line in content.lines() {
                 let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.len() == 2 {
-                    if let Ok(value) = parts[1].parse::<u64>() {
-                        match parts[0] {
-                            "rss" => stats.anon_bytes = value,
-                            "cache" => stats.file_bytes = value,
-                            "mapped_file" => stats.file_mapped_bytes = value,
-                            "dirty" => stats.file_dirty_bytes = value,
-                            "writeback" => stats.file_writeback_bytes = value,
-                            _ => {}
-                        }
+                if parts.len() == 2
+                    && let Ok(value) = parts[1].parse::<u64>()
+                {
+                    match parts[0] {
+                        "rss" => stats.anon_bytes = value,
+                        "cache" => stats.file_bytes = value,
+                        "mapped_file" => stats.file_mapped_bytes = value,
+                        "dirty" => stats.file_dirty_bytes = value,
+                        "writeback" => stats.file_writeback_bytes = value,
+                        _ => {}
                     }
                 }
             }
@@ -789,16 +778,14 @@ pub fn parse_cpu_stat_with_container_limits(
 
     // Track which cores are active
     for line in lines.iter() {
-        if line.starts_with("cpu") && !line.starts_with("cpu ") {
-            if let Some(cpu_num_str) = line.split_whitespace().next() {
-                if let Some(cpu_num_str) = cpu_num_str.strip_prefix("cpu") {
-                    if let Ok(core_id) = cpu_num_str.parse::<u32>() {
-                        if allowed_cpus.contains(&core_id) {
-                            active_cores.push(core_id);
-                        }
-                    }
-                }
-            }
+        if line.starts_with("cpu")
+            && !line.starts_with("cpu ")
+            && let Some(cpu_num_str) = line.split_whitespace().next()
+            && let Some(cpu_num_str) = cpu_num_str.strip_prefix("cpu")
+            && let Ok(core_id) = cpu_num_str.parse::<u32>()
+            && allowed_cpus.contains(&core_id)
+        {
+            active_cores.push(core_id);
         }
     }
 

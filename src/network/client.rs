@@ -189,10 +189,10 @@ impl NetworkClient {
             }
 
             // Check port is in reasonable range (port 0 is invalid)
-            if let Some(port) = url.port() {
-                if port == 0 {
-                    return Err(format!("Invalid port number: {port}"));
-                }
+            if let Some(port) = url.port()
+                && port == 0
+            {
+                return Err(format!("Invalid port number: {port}"));
             }
         } else {
             return Err("Missing host in URL".to_string());
@@ -315,7 +315,7 @@ impl NetworkClient {
                 let url = match Self::validate_and_build_url(&host) {
                     Ok(u) => u,
                     Err(e) => {
-                        return Some((host, String::new(), Some(format!("Invalid URL: {e}"))))
+                        return Some((host, String::new(), Some(format!("Invalid URL: {e}"))));
                     }
                 };
 

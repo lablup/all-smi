@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use all_smi::device::common::command_executor::{
-    execute_command, execute_command_default, CommandOptions,
+    CommandOptions, execute_command, execute_command_default,
 };
 use all_smi::device::common::error_handling::DeviceError;
 use all_smi::device::common::json_parser::{

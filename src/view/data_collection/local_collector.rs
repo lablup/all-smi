@@ -14,8 +14,8 @@
 
 use async_trait::async_trait;
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 use sysinfo::Disks;
 use tokio::sync::{Mutex, RwLock};
@@ -28,12 +28,11 @@ use crate::app_state::AppState;
 #[cfg(target_os = "linux")]
 use crate::device::platform_detection::has_tenstorrent;
 use crate::device::{
-    create_chassis_reader, get_cpu_readers, get_gpu_readers, get_memory_readers,
+    ChassisInfo, ChassisReader, CpuInfo, CpuReader, GpuInfo, GpuReader, MemoryInfo, MemoryReader,
+    ProcessInfo, create_chassis_reader, get_cpu_readers, get_gpu_readers, get_memory_readers,
     get_nvml_status_message,
     platform_detection::has_nvidia,
     process_list::{merge_gpu_processes, update_process_cache},
-    ChassisInfo, ChassisReader, CpuInfo, CpuReader, GpuInfo, GpuReader, MemoryInfo, MemoryReader,
-    ProcessInfo,
 };
 
 #[cfg(target_os = "linux")]
@@ -541,44 +540,42 @@ impl LocalCollector {
         state.notifications.update();
 
         // Only check NVML status if we're trying to monitor NVIDIA devices
-        if has_nvidia() {
-            if let Some(nvml_message) = get_nvml_status_message() {
-                if !state.nvml_notification_shown {
-                    if let Err(e) = state.notifications.warning(nvml_message) {
-                        eprintln!("Failed to show NVML notification: {e}");
-                    }
-                    state.nvml_notification_shown = true;
-                }
+        if has_nvidia()
+            && let Some(nvml_message) = get_nvml_status_message()
+            && !state.nvml_notification_shown
+        {
+            if let Err(e) = state.notifications.warning(nvml_message) {
+                eprintln!("Failed to show NVML notification: {e}");
             }
+            state.nvml_notification_shown = true;
         }
 
         // Only check Tenstorrent status if we're trying to monitor Tenstorrent devices
         #[cfg(target_os = "linux")]
-        if has_tenstorrent() {
-            if let Some(tt_message) = get_tenstorrent_status_message() {
-                if !state.tenstorrent_notification_shown {
-                    if let Err(e) = state.notifications.warning(tt_message) {
-                        eprintln!("Failed to show Tenstorrent notification: {e}");
-                    }
-                    state.tenstorrent_notification_shown = true;
-                }
+        if has_tenstorrent()
+            && let Some(tt_message) = get_tenstorrent_status_message()
+            && !state.tenstorrent_notification_shown
+        {
+            if let Err(e) = state.notifications.warning(tt_message) {
+                eprintln!("Failed to show Tenstorrent notification: {e}");
             }
+            state.tenstorrent_notification_shown = true;
         }
 
         // Google TPU status (Initializing / Failed)
         #[cfg(target_os = "linux")]
-        if has_google_tpu() {
-            if let Some(msg) = get_tpu_status_message() {
-                // If initializing, allow repeated updates (it will be "Initializing...")
-                // If failed, show error once.
-                if msg.contains("Initializing") {
-                    let _ = state.notifications.status(msg);
-                } else if (msg.contains("failed") || msg.contains("error"))
-                    && !state.tpu_notification_shown
-                {
-                    let _ = state.notifications.error(msg);
-                    state.tpu_notification_shown = true;
-                }
+        if has_google_tpu()
+            && let Some(msg) = get_tpu_status_message()
+        {
+            // If initializing, allow repeated updates (it will be "Initializing...")
+            // If failed, show error once.
+            if msg.contains("Initializing") {
+                let _ = state.notifications.status(msg);
+            } else if (msg.contains("failed") || msg.contains("error"))
+                && !state.tpu_notification_shown
+            {
+                let _ = state.notifications.error(msg);
+                state.tpu_notification_shown = true;
             }
         }
     }

@@ -41,16 +41,16 @@ pub fn scan_sysfs_tpus() -> Vec<SysfsTpuInfo> {
 
     // 1. Try /sys/class/accel (Standard driver)
     let accel_path = Path::new("/sys/class/accel");
-    if accel_path.exists() {
-        if let Ok(entries) = fs::read_dir(accel_path) {
-            let mut accel_entries: Vec<_> = entries.flatten().map(|e| e.path()).collect();
+    if accel_path.exists()
+        && let Ok(entries) = fs::read_dir(accel_path)
+    {
+        let mut accel_entries: Vec<_> = entries.flatten().map(|e| e.path()).collect();
 
-            accel_entries.sort();
+        accel_entries.sort();
 
-            for (idx, path) in accel_entries.iter().enumerate() {
-                if let Some(info) = parse_accel_device(path, idx as u32) {
-                    devices.push(info);
-                }
+        for (idx, path) in accel_entries.iter().enumerate() {
+            if let Some(info) = parse_accel_device(path, idx as u32) {
+                devices.push(info);
             }
         }
     }
@@ -58,17 +58,17 @@ pub fn scan_sysfs_tpus() -> Vec<SysfsTpuInfo> {
     // 2. If no accel devices found, try scanning PCI bus directly (VFIO/Passthrough)
     if devices.is_empty() {
         let pci_path = Path::new("/sys/bus/pci/devices");
-        if pci_path.exists() {
-            if let Ok(entries) = fs::read_dir(pci_path) {
-                let mut pci_entries: Vec<_> = entries.flatten().map(|e| e.path()).collect();
-                pci_entries.sort();
+        if pci_path.exists()
+            && let Ok(entries) = fs::read_dir(pci_path)
+        {
+            let mut pci_entries: Vec<_> = entries.flatten().map(|e| e.path()).collect();
+            pci_entries.sort();
 
-                let mut index = 0;
-                for path in pci_entries {
-                    if let Some(info) = parse_pci_device(&path, index) {
-                        devices.push(info);
-                        index += 1;
-                    }
+            let mut index = 0;
+            for path in pci_entries {
+                if let Some(info) = parse_pci_device(&path, index) {
+                    devices.push(info);
+                    index += 1;
                 }
             }
         }
@@ -179,10 +179,10 @@ fn read_temperature(device_dir: &Path) -> Option<f64> {
     if let Ok(entries) = fs::read_dir(hwmon_dir) {
         for entry in entries.flatten() {
             let temp_input = entry.path().join("temp1_input");
-            if temp_input.exists() {
-                if let Some(val) = read_sysfs_int(&temp_input) {
-                    return Some(val as f64 / 1000.0);
-                }
+            if temp_input.exists()
+                && let Some(val) = read_sysfs_int(&temp_input)
+            {
+                return Some(val as f64 / 1000.0);
             }
         }
     }

@@ -51,11 +51,11 @@
 //! ```
 
 use crate::device::{
-    create_chassis_reader, get_cpu_readers, get_gpu_readers, get_memory_readers, ChassisInfo,
-    ChassisReader, CpuInfo, CpuReader, GpuInfo, GpuReader, MemoryInfo, MemoryReader, ProcessInfo,
+    ChassisInfo, ChassisReader, CpuInfo, CpuReader, GpuInfo, GpuReader, MemoryInfo, MemoryReader,
+    ProcessInfo, create_chassis_reader, get_cpu_readers, get_gpu_readers, get_memory_readers,
 };
 use crate::error::Result;
-use crate::storage::{create_storage_reader, StorageInfo, StorageReader};
+use crate::storage::{StorageInfo, StorageReader, create_storage_reader};
 
 #[cfg(target_os = "macos")]
 use crate::device::macos_native::{

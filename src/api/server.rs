@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use axum::{routing::get, Router};
+use axum::{Router, routing::get};
 use std::time::Duration;
 use sysinfo::Disks;
 use tokio::net::TcpListener;
@@ -26,7 +26,7 @@ use std::path::PathBuf;
 #[cfg(unix)]
 use tokio::net::UnixListener;
 
-use crate::api::handlers::{metrics_handler, SharedState};
+use crate::api::handlers::{SharedState, metrics_handler};
 use crate::app_state::AppState;
 use crate::cli::ApiArgs;
 use crate::device::{get_cpu_readers, get_gpu_readers, get_memory_readers};
@@ -42,14 +42,14 @@ fn get_default_socket_path() -> PathBuf {
     {
         let var_run_path = PathBuf::from("/var/run/all-smi.sock");
         // Check if we can write to /var/run
-        if let Ok(metadata) = std::fs::metadata("/var/run") {
-            if metadata.is_dir() {
-                // Try to create a test file to check write permission
-                let test_path = PathBuf::from("/var/run/.all-smi-test");
-                if std::fs::write(&test_path, b"").is_ok() {
-                    let _ = std::fs::remove_file(&test_path);
-                    return var_run_path;
-                }
+        if let Ok(metadata) = std::fs::metadata("/var/run")
+            && metadata.is_dir()
+        {
+            // Try to create a test file to check write permission
+            let test_path = PathBuf::from("/var/run/.all-smi-test");
+            if std::fs::write(&test_path, b"").is_ok() {
+                let _ = std::fs::remove_file(&test_path);
+                return var_run_path;
             }
         }
         // Fallback to /tmp
@@ -245,20 +245,19 @@ async fn run_unix_listener(app: Router, path: PathBuf) {
     }
 
     // Create parent directory if it doesn't exist
-    if let Some(parent) = path.parent() {
-        if !parent.exists() {
-            if let Err(e) = std::fs::create_dir_all(parent) {
-                tracing::error!(
-                    "Failed to create socket directory {}: {e}",
-                    parent.display()
-                );
-                eprintln!(
-                    "Error: Failed to create socket directory {}: {e}",
-                    parent.display()
-                );
-                return;
-            }
-        }
+    if let Some(parent) = path.parent()
+        && !parent.exists()
+        && let Err(e) = std::fs::create_dir_all(parent)
+    {
+        tracing::error!(
+            "Failed to create socket directory {}: {e}",
+            parent.display()
+        );
+        eprintln!(
+            "Error: Failed to create socket directory {}: {e}",
+            parent.display()
+        );
+        return;
     }
 
     let listener = match UnixListener::bind(&path) {
@@ -308,20 +307,19 @@ async fn run_dual_listeners(app: Router, port: u16, socket_path: PathBuf) {
     }
 
     // Create parent directory if it doesn't exist
-    if let Some(parent) = socket_path.parent() {
-        if !parent.exists() {
-            if let Err(e) = std::fs::create_dir_all(parent) {
-                tracing::error!(
-                    "Failed to create socket directory {}: {e}",
-                    parent.display()
-                );
-                eprintln!(
-                    "Error: Failed to create socket directory {}: {e}",
-                    parent.display()
-                );
-                return;
-            }
-        }
+    if let Some(parent) = socket_path.parent()
+        && !parent.exists()
+        && let Err(e) = std::fs::create_dir_all(parent)
+    {
+        tracing::error!(
+            "Failed to create socket directory {}: {e}",
+            parent.display()
+        );
+        eprintln!(
+            "Error: Failed to create socket directory {}: {e}",
+            parent.display()
+        );
+        return;
     }
 
     // Create TCP listener

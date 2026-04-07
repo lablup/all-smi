@@ -15,7 +15,7 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
-use super::parser::{parse_hlsmi_output, GaudiMetricsData};
+use super::parser::{GaudiMetricsData, parse_hlsmi_output};
 
 /// Stores hl-smi data in a circular buffer
 pub struct MetricsStore {
@@ -123,7 +123,9 @@ mod tests {
             let store_clone = store.clone();
             let handle = thread::spawn(move || {
                 for j in 0..20 {
-                    let section = format!("0, UUID-{i}-{j}, HL-325L, 131072 MiB, 672 MiB, 130400 MiB, 226 W, 850 W, 36 C, 0 %");
+                    let section = format!(
+                        "0, UUID-{i}-{j}, HL-325L, 131072 MiB, 672 MiB, 130400 MiB, 226 W, 850 W, 36 C, 0 %"
+                    );
                     store_clone.add_section(section, capacity);
                     thread::sleep(Duration::from_micros(100));
                 }

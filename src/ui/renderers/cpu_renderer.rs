@@ -217,12 +217,12 @@ pub fn print_cpu_info<W: Write>(
         let scroll_len = info.cpu_model.len() + 3;
         let start_pos = cpu_name_scroll_offset % scroll_len;
         let extended_name = format!("{0}   {0}", info.cpu_model);
-        let visible_name = extended_name
+
+        extended_name
             .chars()
             .skip(start_pos)
             .take(15)
-            .collect::<String>();
-        visible_name
+            .collect::<String>()
     } else {
         format!("{:<15}", info.cpu_model)
     };

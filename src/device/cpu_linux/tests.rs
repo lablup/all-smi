@@ -50,8 +50,8 @@ core id		: 5"#;
     assert_eq!(platform, CpuPlatformType::Intel);
     assert_eq!(sockets, 1);
     assert_eq!(threads, 3); // Based on processor count in test data (0, 1, 11)
-                            // The frequency now comes from actual system files or defaults, not just cpuinfo parsing
-                            // Since this is a test environment, we can't predict the exact value
+    // The frequency now comes from actual system files or defaults, not just cpuinfo parsing
+    // Since this is a test environment, we can't predict the exact value
     assert!(base_freq > 0);
     assert_eq!(cache, 12); // 12288 KB -> 12 MB
 }

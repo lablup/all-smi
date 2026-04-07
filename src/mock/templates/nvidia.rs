@@ -121,9 +121,7 @@ impl NvidiaMockGenerator {
                 "gpu=\"{}\", instance=\"{}\", uuid=\"{}\", index=\"{i}\", \
                  driver_version=\"{DEFAULT_NVIDIA_DRIVER_VERSION}\", cuda_version=\"{DEFAULT_CUDA_VERSION}\", \
                  lib_name=\"CUDA\", lib_version=\"{DEFAULT_CUDA_VERSION}\"",
-                self.gpu_name,
-                self.instance_name,
-                gpu.uuid
+                self.gpu_name, self.instance_name, gpu.uuid
             );
             template.push_str(&format!("all_smi_gpu_info{{{labels}}} 1\n"));
         }
@@ -296,7 +294,7 @@ impl MockGenerator for NvidiaMockGenerator {
 
         // Generate initial GPU metrics
         // Create a single RNG instance outside the loop for better performance
-        use rand::{rng, RngExt};
+        use rand::{RngExt, rng};
         let mut rng = rng();
 
         let gpus: Vec<GpuMetrics> = (0..config.device_count)

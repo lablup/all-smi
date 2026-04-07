@@ -15,7 +15,7 @@
 // limitations under the License.
 
 use crate::mock::constants::{PLACEHOLDER_DISK_AVAIL, PLACEHOLDER_DISK_TOTAL};
-use rand::{rng, RngExt};
+use rand::{RngExt, rng};
 
 /// Add disk metrics to template
 pub fn add_disk_metrics(template: &mut String, instance_name: &str) {

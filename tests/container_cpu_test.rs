@@ -15,7 +15,7 @@
 #[cfg(target_os = "linux")]
 #[cfg(test)]
 mod tests {
-    use all_smi::device::container_info::{parse_cpu_stat_with_container_limits, ContainerInfo};
+    use all_smi::device::container_info::{ContainerInfo, parse_cpu_stat_with_container_limits};
 
     #[test]
     fn test_container_cpu_limits_with_cpuset() {

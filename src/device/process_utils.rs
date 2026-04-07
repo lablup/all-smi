@@ -56,19 +56,19 @@ fn get_linux_process_info(pid: u32) -> ProcessInfoResult {
 
     for line in status_content.lines() {
         if line.starts_with("VmSize:") {
-            if let Some(size_str) = line.split_whitespace().nth(1) {
-                if let Ok(size_kb) = size_str.parse::<u64>() {
-                    vms_bytes = size_kb * 1024; // Convert KB to bytes
-                }
+            if let Some(size_str) = line.split_whitespace().nth(1)
+                && let Ok(size_kb) = size_str.parse::<u64>()
+            {
+                vms_bytes = size_kb * 1024; // Convert KB to bytes
             }
         } else if line.starts_with("Uid:") {
             if let Some(uid_str) = line.split_whitespace().nth(1) {
                 uid = uid_str.parse::<u32>().unwrap_or(0);
             }
-        } else if line.starts_with("Threads:") {
-            if let Some(thread_str) = line.split_whitespace().nth(1) {
-                threads = thread_str.parse::<u32>().unwrap_or(1);
-            }
+        } else if line.starts_with("Threads:")
+            && let Some(thread_str) = line.split_whitespace().nth(1)
+        {
+            threads = thread_str.parse::<u32>().unwrap_or(1);
         }
     }
 
@@ -192,12 +192,11 @@ fn get_username_from_uid(uid: u32) -> String {
     if let Ok(passwd_content) = fs::read_to_string("/etc/passwd") {
         for line in passwd_content.lines() {
             let fields: Vec<&str> = line.split(':').collect();
-            if fields.len() >= 3 {
-                if let Ok(line_uid) = fields[2].parse::<u32>() {
-                    if line_uid == uid {
-                        return fields[0].to_string();
-                    }
-                }
+            if fields.len() >= 3
+                && let Ok(line_uid) = fields[2].parse::<u32>()
+                && line_uid == uid
+            {
+                return fields[0].to_string();
             }
         }
     }
@@ -210,30 +209,29 @@ fn get_process_start_time(pid: u32) -> Option<String> {
     let stat_content = fs::read_to_string(&stat_path).ok()?;
     let stat_fields: Vec<&str> = stat_content.split_whitespace().collect();
 
-    if let Some(starttime_str) = stat_fields.get(21) {
-        if let Ok(starttime_jiffies) = starttime_str.parse::<u64>() {
-            // Convert jiffies to seconds since boot
-            let starttime_seconds = starttime_jiffies / 100; // Assuming 100 HZ
+    if let Some(starttime_str) = stat_fields.get(21)
+        && let Ok(starttime_jiffies) = starttime_str.parse::<u64>()
+    {
+        // Convert jiffies to seconds since boot
+        let starttime_seconds = starttime_jiffies / 100; // Assuming 100 HZ
 
-            // Get boot time
-            if let Ok(uptime_content) = fs::read_to_string("/proc/uptime") {
-                if let Some(uptime_str) = uptime_content.split_whitespace().next() {
-                    if let Ok(uptime_seconds) = uptime_str.parse::<f64>() {
-                        let boot_time = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_secs() as f64
-                            - uptime_seconds;
+        // Get boot time
+        if let Ok(uptime_content) = fs::read_to_string("/proc/uptime")
+            && let Some(uptime_str) = uptime_content.split_whitespace().next()
+            && let Ok(uptime_seconds) = uptime_str.parse::<f64>()
+        {
+            let boot_time = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as f64
+                - uptime_seconds;
 
-                        let process_start_time = boot_time + starttime_seconds as f64;
-                        let start_time = std::time::UNIX_EPOCH
-                            + std::time::Duration::from_secs(process_start_time as u64);
+            let process_start_time = boot_time + starttime_seconds as f64;
+            let start_time =
+                std::time::UNIX_EPOCH + std::time::Duration::from_secs(process_start_time as u64);
 
-                        if let Ok(datetime) = start_time.duration_since(std::time::UNIX_EPOCH) {
-                            return Some(format!("{}", datetime.as_secs()));
-                        }
-                    }
-                }
+            if let Ok(datetime) = start_time.duration_since(std::time::UNIX_EPOCH) {
+                return Some(format!("{}", datetime.as_secs()));
             }
         }
     }

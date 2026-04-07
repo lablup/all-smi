@@ -12,12 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::device::GpuReader;
 #[cfg(target_os = "linux")]
-use crate::device::hlsmi::parser::{map_device_name, GaudiDeviceMetrics};
+use crate::device::hlsmi::parser::{GaudiDeviceMetrics, map_device_name};
 #[cfg(target_os = "linux")]
 use crate::device::readers::common_cache::{DetailBuilder, DeviceStaticInfo};
 use crate::device::types::{GpuInfo, ProcessInfo};
-use crate::device::GpuReader;
 #[cfg(target_os = "linux")]
 use crate::utils::get_hostname;
 #[cfg(target_os = "linux")]
@@ -102,10 +102,10 @@ impl GaudiNpuReader {
     #[cfg(target_os = "linux")]
     fn is_hlsmi_available() -> bool {
         // Check cache first
-        if let Ok(cache) = HLSMI_COMMAND_AVAILABLE.lock() {
-            if let Some(available) = *cache {
-                return available;
-            }
+        if let Ok(cache) = HLSMI_COMMAND_AVAILABLE.lock()
+            && let Some(available) = *cache
+        {
+            return available;
         }
 
         // Check specific paths first
@@ -126,14 +126,14 @@ impl GaudiNpuReader {
         }
 
         // Check if command is available in PATH
-        if let Ok(output) = std::process::Command::new("which").arg("hl-smi").output() {
-            if output.status.success() {
-                // Cache the result
-                if let Ok(mut cache) = HLSMI_COMMAND_AVAILABLE.lock() {
-                    *cache = Some(true);
-                }
-                return true;
+        if let Ok(output) = std::process::Command::new("which").arg("hl-smi").output()
+            && output.status.success()
+        {
+            // Cache the result
+            if let Ok(mut cache) = HLSMI_COMMAND_AVAILABLE.lock() {
+                *cache = Some(true);
             }
+            return true;
         }
 
         // Cache negative result

@@ -30,7 +30,7 @@ use api::run_api_mode;
 use clap::Parser;
 use cli::{Cli, Commands, LocalArgs};
 use tokio::signal;
-use utils::{ensure_sudo_permissions_for_api, RuntimeEnvironment};
+use utils::{RuntimeEnvironment, ensure_sudo_permissions_for_api};
 
 // Sudo permission functions only needed on non-macOS platforms
 #[cfg(not(target_os = "macos"))]
@@ -190,7 +190,9 @@ async fn main() {
                         "Usage: all-smi view --hosts <URL>... or all-smi view --hostfile <FILE>"
                     );
                     if runtime_env.is_backend_ai() {
-                        eprintln!("\nBackend.AI environment detected but BACKENDAI_CLUSTER_HOSTS is not set.");
+                        eprintln!(
+                            "\nBackend.AI environment detected but BACKENDAI_CLUSTER_HOSTS is not set."
+                        );
                         eprintln!("Set the environment variable with comma-separated host names:");
                         eprintln!("  export BACKENDAI_CLUSTER_HOSTS=\"host1,host2\"");
                     }

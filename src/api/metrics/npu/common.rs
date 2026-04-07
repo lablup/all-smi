@@ -229,16 +229,16 @@ impl CommonNpuMetrics for CommonNpuExporter {
         ];
 
         // Generic temperature metric if available
-        if let Some(temp_str) = info.detail.get("temperature") {
-            if let Some(temp) = Self::parse_numeric_value(temp_str) {
-                builder
-                    .help(
-                        "all_smi_npu_temperature_celsius",
-                        "NPU temperature in celsius",
-                    )
-                    .type_("all_smi_npu_temperature_celsius", "gauge")
-                    .metric("all_smi_npu_temperature_celsius", &base_labels, temp);
-            }
+        if let Some(temp_str) = info.detail.get("temperature")
+            && let Some(temp) = Self::parse_numeric_value(temp_str)
+        {
+            builder
+                .help(
+                    "all_smi_npu_temperature_celsius",
+                    "NPU temperature in celsius",
+                )
+                .type_("all_smi_npu_temperature_celsius", "gauge")
+                .metric("all_smi_npu_temperature_celsius", &base_labels, temp);
         }
     }
 
@@ -251,23 +251,23 @@ impl CommonNpuMetrics for CommonNpuExporter {
         ];
 
         // Generic power metric if available
-        if let Some(power_str) = info.detail.get("power") {
-            if let Some(power) = Self::parse_numeric_value(power_str) {
-                builder
-                    .help("all_smi_npu_power_watts", "NPU power consumption in watts")
-                    .type_("all_smi_npu_power_watts", "gauge")
-                    .metric("all_smi_npu_power_watts", &base_labels, power);
-            }
+        if let Some(power_str) = info.detail.get("power")
+            && let Some(power) = Self::parse_numeric_value(power_str)
+        {
+            builder
+                .help("all_smi_npu_power_watts", "NPU power consumption in watts")
+                .type_("all_smi_npu_power_watts", "gauge")
+                .metric("all_smi_npu_power_watts", &base_labels, power);
         }
 
         // Generic power draw (common field name)
-        if let Some(power_str) = info.detail.get("power_draw") {
-            if let Some(power) = Self::parse_numeric_value(power_str) {
-                builder
-                    .help("all_smi_npu_power_draw_watts", "NPU power draw in watts")
-                    .type_("all_smi_npu_power_draw_watts", "gauge")
-                    .metric("all_smi_npu_power_draw_watts", &base_labels, power);
-            }
+        if let Some(power_str) = info.detail.get("power_draw")
+            && let Some(power) = Self::parse_numeric_value(power_str)
+        {
+            builder
+                .help("all_smi_npu_power_draw_watts", "NPU power draw in watts")
+                .type_("all_smi_npu_power_draw_watts", "gauge")
+                .metric("all_smi_npu_power_draw_watts", &base_labels, power);
         }
     }
 }

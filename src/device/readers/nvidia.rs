@@ -12,17 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::device::GpuReader;
 use crate::device::common::constants::BYTES_PER_MB;
 use crate::device::common::{execute_command_default, parse_csv_line};
 use crate::device::process_list::{get_all_processes, merge_gpu_processes};
 use crate::device::readers::common_cache::{DetailBuilder, DeviceStaticInfo, MAX_DEVICES};
 use crate::device::types::{GpuInfo, ProcessInfo};
-use crate::device::GpuReader;
 use crate::utils::{get_hostname, with_global_system};
 use chrono::Local;
 use nvml_wrapper::enums::device::UsedGpuMemory;
 use nvml_wrapper::error::NvmlError;
-use nvml_wrapper::{cuda_driver_version_major, cuda_driver_version_minor, Nvml};
+use nvml_wrapper::{Nvml, cuda_driver_version_major, cuda_driver_version_minor};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
 
@@ -508,10 +508,13 @@ fn create_device_detail(
 
 // Fallback implementation using nvidia-smi
 fn get_gpu_info_nvidia_smi() -> Vec<GpuInfo> {
-    let output = match execute_command_default("nvidia-smi", &[
-        "--query-gpu=index,uuid,name,utilization.gpu,temperature.gpu,memory.used,memory.total,clocks.gr,power.draw",
-        "--format=csv,noheader,nounits"
-    ]) {
+    let output = match execute_command_default(
+        "nvidia-smi",
+        &[
+            "--query-gpu=index,uuid,name,utilization.gpu,temperature.gpu,memory.used,memory.total,clocks.gr,power.draw",
+            "--format=csv,noheader,nounits",
+        ],
+    ) {
         Ok(output) => output.stdout,
         Err(_) => return Vec::new(),
     };
@@ -570,32 +573,32 @@ fn get_gpu_processes_nvidia_smi() -> (Vec<ProcessInfo>, HashSet<u32>) {
 
     for line in output.lines() {
         let parts = parse_csv_line(line);
-        if parts.len() >= 3 {
-            if let Ok(pid) = parts[1].parse::<u32>() {
-                gpu_pids.insert(pid);
-                gpu_processes.push(ProcessInfo {
-                    device_id: 0, // We don't have device index from this query
-                    device_uuid: parts[0].to_string(),
-                    pid,
-                    process_name: String::new(),
-                    used_memory: parse_memory_value(&parts[2]),
-                    cpu_percent: 0.0,
-                    memory_percent: 0.0,
-                    memory_rss: 0,
-                    memory_vms: 0,
-                    user: String::new(),
-                    state: String::new(),
-                    start_time: String::new(),
-                    cpu_time: 0,
-                    command: String::new(),
-                    ppid: 0,
-                    threads: 0,
-                    uses_gpu: true,
-                    priority: 0,
-                    nice_value: 0,
-                    gpu_utilization: 0.0,
-                });
-            }
+        if parts.len() >= 3
+            && let Ok(pid) = parts[1].parse::<u32>()
+        {
+            gpu_pids.insert(pid);
+            gpu_processes.push(ProcessInfo {
+                device_id: 0, // We don't have device index from this query
+                device_uuid: parts[0].to_string(),
+                pid,
+                process_name: String::new(),
+                used_memory: parse_memory_value(&parts[2]),
+                cpu_percent: 0.0,
+                memory_percent: 0.0,
+                memory_rss: 0,
+                memory_vms: 0,
+                user: String::new(),
+                state: String::new(),
+                start_time: String::new(),
+                cpu_time: 0,
+                command: String::new(),
+                ppid: 0,
+                threads: 0,
+                uses_gpu: true,
+                priority: 0,
+                nice_value: 0,
+                gpu_utilization: 0.0,
+            });
         }
     }
 

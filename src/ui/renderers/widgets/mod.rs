@@ -23,4 +23,4 @@ pub use gauges::get_utilization_block;
 #[allow(unused_imports)]
 pub use gauges::render_gauge;
 #[allow(unused_imports)]
-pub use tables::{close_bordered_box, render_bordered_box, render_info_table, TableRow};
+pub use tables::{TableRow, close_bordered_box, render_bordered_box, render_info_table};

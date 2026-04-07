@@ -20,7 +20,7 @@ use hyper::service::service_fn;
 use hyper::{Request, Response};
 use hyper_util::rt::TokioIo;
 use hyper_util::server::conn::auto::Builder;
-use rand::{rng, RngExt};
+use rand::{RngExt, rng};
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::fs::File;
@@ -33,10 +33,10 @@ use tokio::net::TcpListener;
 use tokio::sync::Semaphore;
 use tokio::time::interval;
 
+use crate::mock::Args;
 use crate::mock::constants::{MAX_CONNECTIONS_PER_SERVER, UPDATE_INTERVAL_SECS};
 use crate::mock::metrics::PlatformType;
 use crate::mock::node::MockNode;
-use crate::mock::Args;
 
 /// Parse port range from string (e.g., "10001-10010" or "10001")
 pub fn parse_port_range(range_str: &str) -> Result<RangeInclusive<u16>> {

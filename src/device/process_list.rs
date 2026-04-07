@@ -167,10 +167,10 @@ fn get_process_user(process: &sysinfo::Process) -> String {
             use std::ffi::CStr;
             unsafe {
                 let passwd = libc::getpwuid(**user_id);
-                if !passwd.is_null() {
-                    if let Ok(name) = CStr::from_ptr((*passwd).pw_name).to_str() {
-                        return name.to_string();
-                    }
+                if !passwd.is_null()
+                    && let Ok(name) = CStr::from_ptr((*passwd).pw_name).to_str()
+                {
+                    return name.to_string();
                 }
             }
         }
@@ -360,12 +360,16 @@ mod tests {
         let merged = merge_gpu_processes(all_processes, gpu_processes);
 
         assert_eq!(merged.len(), 2);
-        assert!(merged
-            .iter()
-            .any(|p| p.pid == 123 && p.device_uuid == "GPU-A" && p.used_memory == 1024));
-        assert!(merged
-            .iter()
-            .any(|p| p.pid == 123 && p.device_uuid == "GPU-B" && p.used_memory == 2048));
+        assert!(
+            merged
+                .iter()
+                .any(|p| p.pid == 123 && p.device_uuid == "GPU-A" && p.used_memory == 1024)
+        );
+        assert!(
+            merged
+                .iter()
+                .any(|p| p.pid == 123 && p.device_uuid == "GPU-B" && p.used_memory == 2048)
+        );
     }
 
     #[test]

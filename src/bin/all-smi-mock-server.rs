@@ -25,7 +25,7 @@ use clap::Parser;
 #[path = "../mock/mod.rs"]
 mod mock;
 
-use mock::{start_servers, Args};
+use mock::{Args, start_servers};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -123,7 +123,7 @@ mod tests {
         assert!(response.contains("instance=\"test-node-123\""));
         assert!(response.contains("gpu=\"NVIDIA A100\""));
         assert!(response.contains("model=\"")); // CPU model
-                                                // UUID format is a standard hex UUID, not "GPU-" prefixed
+        // UUID format is a standard hex UUID, not "GPU-" prefixed
         assert!(response.contains("uuid=\"")); // UUID is present
 
         // Check that special characters in labels are handled

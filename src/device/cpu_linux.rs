@@ -20,7 +20,7 @@ use sysinfo::System;
 use chrono::Local;
 use once_cell::sync::Lazy;
 
-use crate::device::container_info::{parse_cpu_stat_with_container_limits, ContainerInfo};
+use crate::device::container_info::{ContainerInfo, parse_cpu_stat_with_container_limits};
 use crate::device::{
     CoreType, CoreUtilization, CpuInfo, CpuPlatformType, CpuReader, CpuSocketInfo,
 };
@@ -90,11 +90,11 @@ impl LinuxCpuReader {
         }
 
         // Run lscpu once and cache the result
-        if let Ok(output) = std::process::Command::new("lscpu").output() {
-            if let Ok(lscpu_output) = String::from_utf8(output.stdout) {
-                *self.cached_lscpu_output.write().unwrap() = Some(lscpu_output.clone());
-                return Some(lscpu_output);
-            }
+        if let Ok(output) = std::process::Command::new("lscpu").output()
+            && let Ok(lscpu_output) = String::from_utf8(output.stdout)
+        {
+            *self.cached_lscpu_output.write().unwrap() = Some(lscpu_output.clone());
+            return Some(lscpu_output);
         }
 
         None
@@ -149,10 +149,10 @@ impl LinuxCpuReader {
         }
 
         // If cache_size is 0, try to get it from lscpu
-        if cache_size == 0 {
-            if let Some(lscpu_cache) = self.get_cache_size_from_lscpu() {
-                cache_size = lscpu_cache;
-            }
+        if cache_size == 0
+            && let Some(lscpu_cache) = self.get_cache_size_from_lscpu()
+        {
+            cache_size = lscpu_cache;
         }
 
         // Get overall CPU utilization from sysinfo
@@ -275,37 +275,36 @@ impl LinuxCpuReader {
                     }
                 }
             } else if line.starts_with("processor") {
-                if let Some(value) = line.split(':').nth(1) {
-                    if let Ok(id) = value.trim().parse::<u32>() {
-                        current_processor_id = Some(id);
-                    }
+                if let Some(value) = line.split(':').nth(1)
+                    && let Ok(id) = value.trim().parse::<u32>()
+                {
+                    current_processor_id = Some(id);
                 }
                 processor_count += 1;
             } else if line.starts_with("physical id") {
-                if let Some(value) = line.split(':').nth(1) {
-                    if let Ok(id) = value.trim().parse::<u32>() {
-                        physical_ids.insert(id);
-                    }
+                if let Some(value) = line.split(':').nth(1)
+                    && let Ok(id) = value.trim().parse::<u32>()
+                {
+                    physical_ids.insert(id);
                 }
             } else if line.starts_with("cpu MHz") {
-                if let Some(value) = line.split(':').nth(1) {
-                    if let Ok(freq) = value.trim().parse::<f64>() {
-                        if freq > 0.0 {
-                            cpu_mhz_values.push(freq);
-                            // Map frequency to processor ID if available
-                            if let Some(proc_id) = current_processor_id {
-                                cpu_mhz_by_processor.insert(proc_id, freq);
-                            }
-                        }
+                if let Some(value) = line.split(':').nth(1)
+                    && let Ok(freq) = value.trim().parse::<f64>()
+                    && freq > 0.0
+                {
+                    cpu_mhz_values.push(freq);
+                    // Map frequency to processor ID if available
+                    if let Some(proc_id) = current_processor_id {
+                        cpu_mhz_by_processor.insert(proc_id, freq);
                     }
                 }
             } else if line.starts_with("cache size") && cache_size == 0 {
                 if let Some(value) = line.split(':').nth(1) {
                     let value = value.trim();
-                    if let Some(size_str) = value.split_whitespace().next() {
-                        if let Ok(size) = size_str.parse::<u32>() {
-                            cache_size = size / 1024; // Convert KB to MB
-                        }
+                    if let Some(size_str) = value.split_whitespace().next()
+                        && let Ok(size) = size_str.parse::<u32>()
+                    {
+                        cache_size = size / 1024; // Convert KB to MB
                     }
                 }
             } else if line.starts_with("CPU implementer") {
@@ -316,12 +315,12 @@ impl LinuxCpuReader {
                 if let Some(value) = line.split(':').nth(1) {
                     cpu_part = value.trim().to_string();
                 }
-            } else if line.starts_with("bogomips") && bogomips == 0.0 {
-                if let Some(value) = line.split(':').nth(1) {
-                    if let Ok(bogo) = value.trim().parse::<f64>() {
-                        bogomips = bogo;
-                    }
-                }
+            } else if line.starts_with("bogomips")
+                && bogomips == 0.0
+                && let Some(value) = line.split(':').nth(1)
+                && let Ok(bogo) = value.trim().parse::<f64>()
+            {
+                bogomips = bogo;
             }
         }
 
@@ -415,12 +414,12 @@ impl LinuxCpuReader {
         ];
 
         for path in &cpufreq_paths {
-            if let Ok(content) = fs::read_to_string(path) {
-                if let Ok(freq_khz) = content.trim().parse::<u32>() {
-                    max_frequency = khz_to_mhz(freq_khz);
-                    // Found max frequency from scaling_max_freq
-                    break;
-                }
+            if let Ok(content) = fs::read_to_string(path)
+                && let Ok(freq_khz) = content.trim().parse::<u32>()
+            {
+                max_frequency = khz_to_mhz(freq_khz);
+                // Found max frequency from scaling_max_freq
+                break;
             }
         }
 
@@ -434,12 +433,12 @@ impl LinuxCpuReader {
             ];
 
             for path in &scaling_paths {
-                if let Ok(content) = fs::read_to_string(path) {
-                    if let Ok(freq_khz) = content.trim().parse::<u32>() {
-                        base_frequency = khz_to_mhz(freq_khz);
-                        // Found current frequency from scaling_cur_freq
-                        break;
-                    }
+                if let Ok(content) = fs::read_to_string(path)
+                    && let Ok(freq_khz) = content.trim().parse::<u32>()
+                {
+                    base_frequency = khz_to_mhz(freq_khz);
+                    // Found current frequency from scaling_cur_freq
+                    break;
                 }
             }
         }
@@ -454,12 +453,12 @@ impl LinuxCpuReader {
             ];
 
             for path in &min_freq_paths {
-                if let Ok(content) = fs::read_to_string(path) {
-                    if let Ok(freq_khz) = content.trim().parse::<u32>() {
-                        base_frequency = khz_to_mhz(freq_khz);
-                        // Using min frequency from scaling_min_freq
-                        break;
-                    }
+                if let Ok(content) = fs::read_to_string(path)
+                    && let Ok(freq_khz) = content.trim().parse::<u32>()
+                {
+                    base_frequency = khz_to_mhz(freq_khz);
+                    // Using min frequency from scaling_min_freq
+                    break;
                 }
             }
         }
@@ -469,29 +468,30 @@ impl LinuxCpuReader {
         }
 
         // If we still don't have frequencies, try lscpu command as fallback
-        if base_frequency == 0 && max_frequency == 0 {
-            if let Some(lscpu_output) = self.get_lscpu_output() {
-                for line in lscpu_output.lines() {
-                    if line.starts_with("CPU MHz:") {
-                        if let Some(value) = line.split(':').nth(1) {
-                            if let Ok(freq) = value.trim().parse::<f64>() {
-                                base_frequency = freq as u32;
-                                break;
-                            }
-                        }
-                    } else if line.starts_with("CPU max MHz:") {
-                        if let Some(value) = line.split(':').nth(1) {
-                            if let Ok(freq) = value.trim().parse::<f64>() {
-                                max_frequency = freq as u32;
-                            }
-                        }
-                    } else if line.starts_with("CPU min MHz:") && base_frequency == 0 {
-                        if let Some(value) = line.split(':').nth(1) {
-                            if let Ok(freq) = value.trim().parse::<f64>() {
-                                base_frequency = freq as u32;
-                            }
-                        }
+        if base_frequency == 0
+            && max_frequency == 0
+            && let Some(lscpu_output) = self.get_lscpu_output()
+        {
+            for line in lscpu_output.lines() {
+                if line.starts_with("CPU MHz:") {
+                    if let Some(value) = line.split(':').nth(1)
+                        && let Ok(freq) = value.trim().parse::<f64>()
+                    {
+                        base_frequency = freq as u32;
+                        break;
                     }
+                } else if line.starts_with("CPU max MHz:") {
+                    if let Some(value) = line.split(':').nth(1)
+                        && let Ok(freq) = value.trim().parse::<f64>()
+                    {
+                        max_frequency = freq as u32;
+                    }
+                } else if line.starts_with("CPU min MHz:")
+                    && base_frequency == 0
+                    && let Some(value) = line.split(':').nth(1)
+                    && let Ok(freq) = value.trim().parse::<f64>()
+                {
+                    base_frequency = freq as u32;
                 }
             }
         }
@@ -499,27 +499,26 @@ impl LinuxCpuReader {
         // Try DMI/sysfs for ARM systems
         if base_frequency == 0 && platform_type == CpuPlatformType::Arm {
             // Check for ARM-specific frequency files
-            if let Ok(content) = fs::read_to_string("/sys/devices/system/cpu/cpu0/clock_rate") {
-                if let Ok(freq_hz) = content.trim().parse::<u64>() {
-                    base_frequency = hz_to_mhz(freq_hz);
-                    // Found clock_rate from device-tree
-                }
+            if let Ok(content) = fs::read_to_string("/sys/devices/system/cpu/cpu0/clock_rate")
+                && let Ok(freq_hz) = content.trim().parse::<u64>()
+            {
+                base_frequency = hz_to_mhz(freq_hz);
+                // Found clock_rate from device-tree
             }
 
             // Try to read from device tree
-            if base_frequency == 0 {
-                if let Ok(content) =
+            if base_frequency == 0
+                && let Ok(content) =
                     fs::read_to_string("/proc/device-tree/cpus/cpu@0/clock-frequency")
-                {
-                    // Device tree values are often in big-endian format
-                    if content.len() >= 4 {
-                        let bytes = content.as_bytes();
-                        let freq_hz =
-                            u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as u64;
-                        if freq_hz > 0 {
-                            base_frequency = hz_to_mhz(freq_hz);
-                            // Found device-tree frequency
-                        }
+            {
+                // Device tree values are often in big-endian format
+                if content.len() >= 4 {
+                    let bytes = content.as_bytes();
+                    let freq_hz =
+                        u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as u64;
+                    if freq_hz > 0 {
+                        base_frequency = hz_to_mhz(freq_hz);
+                        // Found device-tree frequency
                     }
                 }
             }
@@ -632,10 +631,10 @@ impl LinuxCpuReader {
         ];
 
         for path in &thermal_paths {
-            if let Ok(content) = fs::read_to_string(path) {
-                if let Ok(temp_millicelsius) = content.trim().parse::<u32>() {
-                    return Some(millicelsius_to_celsius(temp_millicelsius));
-                }
+            if let Ok(content) = fs::read_to_string(path)
+                && let Ok(temp_millicelsius) = content.trim().parse::<u32>()
+            {
+                return Some(millicelsius_to_celsius(temp_millicelsius));
             }
         }
 
@@ -660,36 +659,36 @@ impl LinuxCpuReader {
                 let line = line.trim();
 
                 // Check for L3 cache (handle both "L3:" and "L3 cache:" formats)
-                if line.starts_with("L3:") || line.starts_with("L3 cache:") {
-                    if let Some(size_part) = line.split(':').nth(1) {
-                        let size_part = size_part.trim();
+                if (line.starts_with("L3:") || line.starts_with("L3 cache:"))
+                    && let Some(size_part) = line.split(':').nth(1)
+                {
+                    let size_part = size_part.trim();
 
-                        // Parse different formats: "4 MiB", "4MiB", "4096 KiB", etc.
-                        // Also handle format with instances: "4 MiB (2 instances)"
-                        let parts: Vec<&str> = size_part.split_whitespace().collect();
-                        if !parts.is_empty() {
-                            if let Ok(size) = parts[0].parse::<f64>() {
-                                let unit = if parts.len() > 1 {
-                                    parts[1].to_lowercase()
-                                } else {
-                                    // Try to extract unit from the first part if it's like "4MiB"
-                                    let num_end = parts[0]
-                                        .find(|c: char| !c.is_numeric() && c != '.')
-                                        .unwrap_or(parts[0].len());
-                                    parts[0][num_end..].to_lowercase()
-                                };
+                    // Parse different formats: "4 MiB", "4MiB", "4096 KiB", etc.
+                    // Also handle format with instances: "4 MiB (2 instances)"
+                    let parts: Vec<&str> = size_part.split_whitespace().collect();
+                    if !parts.is_empty()
+                        && let Ok(size) = parts[0].parse::<f64>()
+                    {
+                        let unit = if parts.len() > 1 {
+                            parts[1].to_lowercase()
+                        } else {
+                            // Try to extract unit from the first part if it's like "4MiB"
+                            let num_end = parts[0]
+                                .find(|c: char| !c.is_numeric() && c != '.')
+                                .unwrap_or(parts[0].len());
+                            parts[0][num_end..].to_lowercase()
+                        };
 
-                                let size_mb = match unit.as_str() {
-                                    "mib" | "mb" => size as u32,
-                                    "kib" | "kb" => (size / 1024.0) as u32,
-                                    "gib" | "gb" => (size * 1024.0) as u32,
-                                    _ => 0,
-                                };
+                        let size_mb = match unit.as_str() {
+                            "mib" | "mb" => size as u32,
+                            "kib" | "kb" => (size / 1024.0) as u32,
+                            "gib" | "gb" => (size * 1024.0) as u32,
+                            _ => 0,
+                        };
 
-                                if size_mb > 0 {
-                                    found_l3_cache = Some(size_mb);
-                                }
-                            }
+                        if size_mb > 0 {
+                            found_l3_cache = Some(size_mb);
                         }
                     }
                 }
@@ -697,33 +696,32 @@ impl LinuxCpuReader {
                 // Check for L2 cache as fallback (handle both "L2:" and "L2 cache:" formats)
                 if (line.starts_with("L2:") || line.starts_with("L2 cache:"))
                     && found_l3_cache.is_none()
+                    && let Some(size_part) = line.split(':').nth(1)
                 {
-                    if let Some(size_part) = line.split(':').nth(1) {
-                        let size_part = size_part.trim();
+                    let size_part = size_part.trim();
 
-                        let parts: Vec<&str> = size_part.split_whitespace().collect();
-                        if !parts.is_empty() {
-                            if let Ok(size) = parts[0].parse::<f64>() {
-                                let unit = if parts.len() > 1 {
-                                    parts[1].to_lowercase()
-                                } else {
-                                    let num_end = parts[0]
-                                        .find(|c: char| !c.is_numeric() && c != '.')
-                                        .unwrap_or(parts[0].len());
-                                    parts[0][num_end..].to_lowercase()
-                                };
+                    let parts: Vec<&str> = size_part.split_whitespace().collect();
+                    if !parts.is_empty()
+                        && let Ok(size) = parts[0].parse::<f64>()
+                    {
+                        let unit = if parts.len() > 1 {
+                            parts[1].to_lowercase()
+                        } else {
+                            let num_end = parts[0]
+                                .find(|c: char| !c.is_numeric() && c != '.')
+                                .unwrap_or(parts[0].len());
+                            parts[0][num_end..].to_lowercase()
+                        };
 
-                                let size_mb = match unit.as_str() {
-                                    "mib" | "mb" => size as u32,
-                                    "kib" | "kb" => (size / 1024.0) as u32,
-                                    "gib" | "gb" => (size * 1024.0) as u32,
-                                    _ => 0,
-                                };
+                        let size_mb = match unit.as_str() {
+                            "mib" | "mb" => size as u32,
+                            "kib" | "kb" => (size / 1024.0) as u32,
+                            "gib" | "gb" => (size * 1024.0) as u32,
+                            _ => 0,
+                        };
 
-                                if size_mb > 0 {
-                                    found_l2_cache = Some(size_mb);
-                                }
-                            }
+                        if size_mb > 0 {
+                            found_l2_cache = Some(size_mb);
                         }
                     }
                 }

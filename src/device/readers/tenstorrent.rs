@@ -12,14 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::device::GpuReader;
 use crate::device::process_list::{get_all_processes, merge_gpu_processes};
 use crate::device::readers::common_cache::{DetailBuilder, DeviceStaticInfo};
 use crate::device::types::{GpuInfo, ProcessInfo};
-use crate::device::GpuReader;
 use crate::utils::{get_hostname, with_global_system};
 use all_smi_luwen_core;
-use all_smi_luwen_if::chip::{Chip, ChipImpl, Telemetry};
 use all_smi_luwen_if::ChipDetectOptions;
+use all_smi_luwen_if::chip::{Chip, ChipImpl, Telemetry};
 use all_smi_luwen_ref;
 use chrono::Local;
 use once_cell::sync::Lazy;

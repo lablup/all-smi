@@ -13,9 +13,9 @@
 // limitations under the License.
 
 #[cfg(test)]
-use crate::device::memory_linux::LinuxMemoryReader;
-#[cfg(test)]
 use crate::device::MemoryReader;
+#[cfg(test)]
+use crate::device::memory_linux::LinuxMemoryReader;
 
 #[test]
 fn test_memory_reader_creation() {

@@ -73,11 +73,11 @@ pub fn validate_command_path(path: &Path) -> bool {
     }
 
     // Must not contain path traversal
-    if let Some(path_str) = path.to_str() {
-        if path_str.contains("..") {
-            eprintln!("Command path with traversal rejected: {path_str}");
-            return false;
-        }
+    if let Some(path_str) = path.to_str()
+        && path_str.contains("..")
+    {
+        eprintln!("Command path with traversal rejected: {path_str}");
+        return false;
     }
 
     // Should exist and be executable (on Unix)

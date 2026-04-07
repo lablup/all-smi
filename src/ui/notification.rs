@@ -149,10 +149,10 @@ impl NotificationManager {
     }
 
     pub fn update(&mut self) {
-        if let Some(notification) = &self.current_notification {
-            if notification.is_expired() {
-                self.current_notification = None;
-            }
+        if let Some(notification) = &self.current_notification
+            && notification.is_expired()
+        {
+            self.current_notification = None;
         }
     }
 
@@ -215,17 +215,21 @@ mod tests {
         assert!(manager.warning("Test warning".to_string()).is_ok());
         assert!(manager.error("Test error".to_string()).is_ok());
         assert!(manager.status("Test status".to_string()).is_ok());
-        assert!(manager
-            .persistent_status("Test persistent".to_string())
-            .is_ok());
+        assert!(
+            manager
+                .persistent_status("Test persistent".to_string())
+                .is_ok()
+        );
     }
 
     #[test]
     fn test_notification_with_duration() {
         let mut manager = NotificationManager::new();
-        assert!(manager
-            .show_with_duration("Test".to_string(), NotificationType::Info, 10)
-            .is_ok());
+        assert!(
+            manager
+                .show_with_duration("Test".to_string(), NotificationType::Info, 10)
+                .is_ok()
+        );
     }
 
     #[test]

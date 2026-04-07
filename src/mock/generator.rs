@@ -14,10 +14,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::mock::constants::{DISK_SIZE_12TB, DISK_SIZE_1TB, DISK_SIZE_4TB, NUM_GPUS};
+use crate::mock::constants::{DISK_SIZE_1TB, DISK_SIZE_4TB, DISK_SIZE_12TB, NUM_GPUS};
 use crate::mock::metrics::gpu::generate_uuid;
 use crate::mock::metrics::{CpuMetrics, GpuMetrics, MemoryMetrics, PlatformType};
-use rand::{rng, RngExt};
+use rand::{RngExt, rng};
 
 /// Extract GPU memory size from GPU name (e.g., "NVIDIA H200 141GB HBM3" -> 141)
 pub fn extract_gpu_memory_gb(gpu_name: &str) -> u64 {

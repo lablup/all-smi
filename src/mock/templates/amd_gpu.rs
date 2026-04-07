@@ -18,7 +18,7 @@ use crate::mock::metrics::{CpuMetrics, GpuMetrics, MemoryMetrics};
 use all_smi::traits::mock_generator::{
     MockConfig, MockData, MockGenerator, MockPlatform, MockResult,
 };
-use rand::{rng, RngExt};
+use rand::{RngExt, rng};
 
 // Fan speed constants (RPM)
 const FAN_SPEED_HIGH_TEMP: u32 = 70; // Temperature threshold for high fan speed
@@ -198,9 +198,7 @@ impl AmdGpuMockGenerator {
                 "gpu=\"{}\", instance=\"{}\", uuid=\"{}\", index=\"{i}\", type=\"GPU\", \
                  driver_version=\"{DEFAULT_AMD_DRIVER_VERSION}\", rocm_version=\"{DEFAULT_AMD_ROCM_VERSION}\", \
                  lib_name=\"ROCm\", lib_version=\"{DEFAULT_AMD_ROCM_VERSION}\"",
-                self.gpu_name,
-                self.instance_name,
-                gpu.uuid
+                self.gpu_name, self.instance_name, gpu.uuid
             );
             template.push_str(&format!("all_smi_gpu_info{{{labels}}} 1\n"));
         }

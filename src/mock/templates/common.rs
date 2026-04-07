@@ -15,7 +15,7 @@
 // limitations under the License.
 
 use crate::mock::metrics::GpuMetrics;
-use rand::{rng, RngExt};
+use rand::{RngExt, rng};
 
 /// Add basic GPU metrics that are common across all platforms
 pub fn add_basic_gpu_metrics(
@@ -133,7 +133,7 @@ pub fn render_basic_gpu_metrics(mut response: String, gpus: &[GpuMetrics]) -> St
 
 /// Render system metrics with default values
 pub fn render_system_metrics(mut response: String) -> String {
-    use rand::{rng, RngExt};
+    use rand::{RngExt, rng};
     let mut rng = rng();
 
     response = response

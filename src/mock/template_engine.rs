@@ -207,7 +207,7 @@ pub fn render_response(
 
     // Default I/O values if not already replaced
     if response.contains("{{DISK_READ}}") {
-        use rand::{rng, RngExt};
+        use rand::{RngExt, rng};
         let mut rng = rng();
         response = response
             .replace(

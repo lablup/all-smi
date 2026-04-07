@@ -59,11 +59,11 @@ impl ProcessManager {
         let old_hook = panic::take_hook();
         panic::set_hook(Box::new(move |panic_info| {
             // Cleanup subprocess on panic
-            if let Ok(mut guard) = process_clone.lock() {
-                if let Some(mut child) = guard.take() {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                }
+            if let Ok(mut guard) = process_clone.lock()
+                && let Some(mut child) = guard.take()
+            {
+                let _ = child.kill();
+                let _ = child.wait();
             }
             if let Ok(mut running) = is_running_clone.lock() {
                 *running = false;
@@ -232,10 +232,10 @@ impl ProcessManager {
                 };
 
                 if should_restart {
-                    if let Ok(running) = is_running.lock() {
-                        if !*running {
-                            break; // Manager is shutting down
-                        }
+                    if let Ok(running) = is_running.lock()
+                        && !*running
+                    {
+                        break; // Manager is shutting down
                     }
 
                     // Create new channel for the restarted process

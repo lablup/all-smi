@@ -19,9 +19,9 @@ use tokio::sync::RwLock;
 use crate::app_state::AppState;
 
 use super::metrics::{
-    chassis::ChassisMetricExporter, cpu::CpuMetricExporter, disk::DiskMetricExporter,
-    gpu::GpuMetricExporter, memory::MemoryMetricExporter, npu::NpuMetricExporter,
-    process::ProcessMetricExporter, runtime::RuntimeMetricExporter, MetricExporter,
+    MetricExporter, chassis::ChassisMetricExporter, cpu::CpuMetricExporter,
+    disk::DiskMetricExporter, gpu::GpuMetricExporter, memory::MemoryMetricExporter,
+    npu::NpuMetricExporter, process::ProcessMetricExporter, runtime::RuntimeMetricExporter,
 };
 
 pub type SharedState = Arc<RwLock<AppState>>;

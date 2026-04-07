@@ -108,33 +108,33 @@ impl FuriosaExporter {
         ];
 
         // Export NPU utilization if available
-        if let Some(util_str) = info.detail.get("utilization") {
-            if let Some(util) = CommonNpuExporter::parse_numeric_value(util_str) {
-                builder
-                    .help(
-                        "all_smi_furiosa_utilization_percent",
-                        "NPU utilization percentage",
-                    )
-                    .type_("all_smi_furiosa_utilization_percent", "gauge")
-                    .metric("all_smi_furiosa_utilization_percent", &base_labels, util);
-            }
+        if let Some(util_str) = info.detail.get("utilization")
+            && let Some(util) = CommonNpuExporter::parse_numeric_value(util_str)
+        {
+            builder
+                .help(
+                    "all_smi_furiosa_utilization_percent",
+                    "NPU utilization percentage",
+                )
+                .type_("all_smi_furiosa_utilization_percent", "gauge")
+                .metric("all_smi_furiosa_utilization_percent", &base_labels, util);
         }
 
         // Export compute utilization if available
-        if let Some(compute_util_str) = info.detail.get("compute_utilization") {
-            if let Some(compute_util) = CommonNpuExporter::parse_numeric_value(compute_util_str) {
-                builder
-                    .help(
-                        "all_smi_furiosa_compute_utilization_percent",
-                        "NPU compute utilization percentage",
-                    )
-                    .type_("all_smi_furiosa_compute_utilization_percent", "gauge")
-                    .metric(
-                        "all_smi_furiosa_compute_utilization_percent",
-                        &base_labels,
-                        compute_util,
-                    );
-            }
+        if let Some(compute_util_str) = info.detail.get("compute_utilization")
+            && let Some(compute_util) = CommonNpuExporter::parse_numeric_value(compute_util_str)
+        {
+            builder
+                .help(
+                    "all_smi_furiosa_compute_utilization_percent",
+                    "NPU compute utilization percentage",
+                )
+                .type_("all_smi_furiosa_compute_utilization_percent", "gauge")
+                .metric(
+                    "all_smi_furiosa_compute_utilization_percent",
+                    &base_labels,
+                    compute_util,
+                );
         }
     }
 
@@ -147,33 +147,33 @@ impl FuriosaExporter {
         ];
 
         // Export memory usage if available
-        if let Some(mem_used_str) = info.detail.get("memory_used") {
-            if let Some(mem_used) = CommonNpuExporter::parse_numeric_value(mem_used_str) {
-                builder
-                    .help(
-                        "all_smi_furiosa_memory_used_bytes",
-                        "NPU memory used in bytes",
-                    )
-                    .type_("all_smi_furiosa_memory_used_bytes", "gauge")
-                    .metric("all_smi_furiosa_memory_used_bytes", &base_labels, mem_used);
-            }
+        if let Some(mem_used_str) = info.detail.get("memory_used")
+            && let Some(mem_used) = CommonNpuExporter::parse_numeric_value(mem_used_str)
+        {
+            builder
+                .help(
+                    "all_smi_furiosa_memory_used_bytes",
+                    "NPU memory used in bytes",
+                )
+                .type_("all_smi_furiosa_memory_used_bytes", "gauge")
+                .metric("all_smi_furiosa_memory_used_bytes", &base_labels, mem_used);
         }
 
         // Export memory total if available
-        if let Some(mem_total_str) = info.detail.get("memory_total") {
-            if let Some(mem_total) = CommonNpuExporter::parse_numeric_value(mem_total_str) {
-                builder
-                    .help(
-                        "all_smi_furiosa_memory_total_bytes",
-                        "NPU total memory in bytes",
-                    )
-                    .type_("all_smi_furiosa_memory_total_bytes", "gauge")
-                    .metric(
-                        "all_smi_furiosa_memory_total_bytes",
-                        &base_labels,
-                        mem_total,
-                    );
-            }
+        if let Some(mem_total_str) = info.detail.get("memory_total")
+            && let Some(mem_total) = CommonNpuExporter::parse_numeric_value(mem_total_str)
+        {
+            builder
+                .help(
+                    "all_smi_furiosa_memory_total_bytes",
+                    "NPU total memory in bytes",
+                )
+                .type_("all_smi_furiosa_memory_total_bytes", "gauge")
+                .metric(
+                    "all_smi_furiosa_memory_total_bytes",
+                    &base_labels,
+                    mem_total,
+                );
         }
     }
 
@@ -186,26 +186,26 @@ impl FuriosaExporter {
         ];
 
         // Export clock frequencies if available
-        if let Some(clock_str) = info.detail.get("clock_mhz") {
-            if let Some(clock) = CommonNpuExporter::parse_numeric_value(clock_str) {
-                builder
-                    .help("all_smi_furiosa_clock_mhz", "NPU clock frequency in MHz")
-                    .type_("all_smi_furiosa_clock_mhz", "gauge")
-                    .metric("all_smi_furiosa_clock_mhz", &base_labels, clock);
-            }
+        if let Some(clock_str) = info.detail.get("clock_mhz")
+            && let Some(clock) = CommonNpuExporter::parse_numeric_value(clock_str)
+        {
+            builder
+                .help("all_smi_furiosa_clock_mhz", "NPU clock frequency in MHz")
+                .type_("all_smi_furiosa_clock_mhz", "gauge")
+                .metric("all_smi_furiosa_clock_mhz", &base_labels, clock);
         }
 
         // Export memory clock if available
-        if let Some(mem_clock_str) = info.detail.get("memory_clock_mhz") {
-            if let Some(mem_clock) = CommonNpuExporter::parse_numeric_value(mem_clock_str) {
-                builder
-                    .help(
-                        "all_smi_furiosa_memory_clock_mhz",
-                        "NPU memory clock frequency in MHz",
-                    )
-                    .type_("all_smi_furiosa_memory_clock_mhz", "gauge")
-                    .metric("all_smi_furiosa_memory_clock_mhz", &base_labels, mem_clock);
-            }
+        if let Some(mem_clock_str) = info.detail.get("memory_clock_mhz")
+            && let Some(mem_clock) = CommonNpuExporter::parse_numeric_value(mem_clock_str)
+        {
+            builder
+                .help(
+                    "all_smi_furiosa_memory_clock_mhz",
+                    "NPU memory clock frequency in MHz",
+                )
+                .type_("all_smi_furiosa_memory_clock_mhz", "gauge")
+                .metric("all_smi_furiosa_memory_clock_mhz", &base_labels, mem_clock);
         }
     }
 

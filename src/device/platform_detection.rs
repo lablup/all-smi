@@ -20,24 +20,24 @@ pub fn has_nvidia() -> bool {
     // On macOS, use system_profiler to check for NVIDIA devices
     if std::env::consts::OS == "macos" {
         // First check system_profiler for NVIDIA PCI devices
-        if let Ok(output) = execute_command_default("system_profiler", &["SPPCIDataType"]) {
-            if output.status == 0 {
-                // Look for NVIDIA in the output - could be in Type field or device name
-                if output.stdout.contains("NVIDIA") {
-                    return true;
-                }
+        if let Ok(output) = execute_command_default("system_profiler", &["SPPCIDataType"])
+            && output.status == 0
+        {
+            // Look for NVIDIA in the output - could be in Type field or device name
+            if output.stdout.contains("NVIDIA") {
+                return true;
             }
         }
 
         // Fallback to nvidia-smi check
-        if let Ok(output) = execute_command_default("nvidia-smi", &["-L"]) {
-            if output.status == 0 {
-                // nvidia-smi -L outputs lines like "GPU 0: NVIDIA GeForce..."
-                return output
-                    .stdout
-                    .lines()
-                    .any(|line| line.trim().starts_with("GPU"));
-            }
+        if let Ok(output) = execute_command_default("nvidia-smi", &["-L"])
+            && output.status == 0
+        {
+            // nvidia-smi -L outputs lines like "GPU 0: NVIDIA GeForce..."
+            return output
+                .stdout
+                .lines()
+                .any(|line| line.trim().starts_with("GPU"));
         }
         return false;
     }
@@ -45,16 +45,16 @@ pub fn has_nvidia() -> bool {
     // On Windows, check if nvidia-smi is available and can list GPUs
     if std::env::consts::OS == "windows" {
         // Try nvidia-smi first (most reliable on Windows)
-        if let Ok(output) = execute_command_default("nvidia-smi", &["-L"]) {
-            if output.status == 0 {
-                // nvidia-smi -L outputs lines like "GPU 0: NVIDIA GeForce..."
-                let has_gpu = output.stdout.lines().any(|line| {
-                    let trimmed = line.trim();
-                    trimmed.starts_with("GPU") && trimmed.contains(":")
-                });
-                if has_gpu {
-                    return true;
-                }
+        if let Ok(output) = execute_command_default("nvidia-smi", &["-L"])
+            && output.status == 0
+        {
+            // nvidia-smi -L outputs lines like "GPU 0: NVIDIA GeForce..."
+            let has_gpu = output.stdout.lines().any(|line| {
+                let trimmed = line.trim();
+                trimmed.starts_with("GPU") && trimmed.contains(":")
+            });
+            if has_gpu {
+                return true;
             }
         }
 
@@ -64,13 +64,13 @@ pub fn has_nvidia() -> bool {
     }
 
     // On Linux, first try lspci to check for NVIDIA VGA/3D controllers
-    if let Ok(output) = execute_command_default("lspci", &[]) {
-        if output.status == 0 {
-            // Look for NVIDIA VGA or 3D controllers
-            for line in output.stdout.lines() {
-                if (line.contains("VGA") || line.contains("3D")) && line.contains("NVIDIA") {
-                    return true;
-                }
+    if let Ok(output) = execute_command_default("lspci", &[])
+        && output.status == 0
+    {
+        // Look for NVIDIA VGA or 3D controllers
+        for line in output.stdout.lines() {
+            if (line.contains("VGA") || line.contains("3D")) && line.contains("NVIDIA") {
+                return true;
             }
         }
     }
@@ -105,12 +105,12 @@ pub fn has_amd() -> bool {
     // On Linux, check for AMD GPUs
     if std::env::consts::OS == "linux" {
         // Check lspci for AMD devices (Vendor ID 1002)
-        if let Ok(output) = execute_command_default("lspci", &["-n"]) {
-            if output.status == 0 {
-                for line in output.stdout.lines() {
-                    if line.contains(":1002:") {
-                        return true;
-                    }
+        if let Ok(output) = execute_command_default("lspci", &["-n"])
+            && output.status == 0
+        {
+            for line in output.stdout.lines() {
+                if line.contains(":1002:") {
+                    return true;
                 }
             }
         }
@@ -119,10 +119,10 @@ pub fn has_amd() -> bool {
         if let Ok(entries) = std::fs::read_dir("/sys/class/drm") {
             for entry in entries.flatten() {
                 let path = entry.path().join("device/vendor");
-                if let Ok(vendor) = std::fs::read_to_string(path) {
-                    if vendor.trim() == "0x1002" {
-                        return true;
-                    }
+                if let Ok(vendor) = std::fs::read_to_string(path)
+                    && vendor.trim() == "0x1002"
+                {
+                    return true;
                 }
             }
         }
@@ -164,10 +164,10 @@ pub fn has_furiosa() -> bool {
 
     // Check if the content of platform_type is FuriosaAI
     let platform_type_path = npu0_mgmt_path.join("platform_type");
-    if let Ok(platform_type) = std::fs::read_to_string(platform_type_path) {
-        if platform_type.trim() == "FuriosaAI" {
-            return true;
-        }
+    if let Ok(platform_type) = std::fs::read_to_string(platform_type_path)
+        && platform_type.trim() == "FuriosaAI"
+    {
+        return true;
     }
 
     false
@@ -182,29 +182,30 @@ pub fn has_tenstorrent() -> bool {
 
     // On macOS, use system_profiler
     if std::env::consts::OS == "macos" {
-        if let Ok(output) = execute_command_default("system_profiler", &["SPPCIDataType"]) {
-            if output.status == 0 && output.stdout.contains("Tenstorrent") {
-                return true;
-            }
+        if let Ok(output) = execute_command_default("system_profiler", &["SPPCIDataType"])
+            && output.status == 0
+            && output.stdout.contains("Tenstorrent")
+        {
+            return true;
         }
     } else {
         // On Linux, try lspci to check for Tenstorrent devices
-        if let Ok(output) = execute_command_default("lspci", &[]) {
-            if output.status == 0 {
-                // Look for Tenstorrent devices
-                if output.stdout.contains("Tenstorrent") {
-                    return true;
-                }
+        if let Ok(output) = execute_command_default("lspci", &[])
+            && output.status == 0
+        {
+            // Look for Tenstorrent devices
+            if output.stdout.contains("Tenstorrent") {
+                return true;
             }
         }
     }
 
     // Last resort: check if tt-smi can actually list devices
-    if let Ok(output) = execute_command_default("tt-smi", &["-s", "--snapshot_no_tty"]) {
-        if output.status == 0 {
-            // Check if output contains device_info
-            return output.stdout.contains("device_info");
-        }
+    if let Ok(output) = execute_command_default("tt-smi", &["-s", "--snapshot_no_tty"])
+        && output.status == 0
+    {
+        // Check if output contains device_info
+        return output.stdout.contains("device_info");
     }
 
     false
@@ -218,21 +219,20 @@ pub fn has_rebellions() -> bool {
 
     // On macOS, use system_profiler
     if std::env::consts::OS == "macos" {
-        if let Ok(output) = execute_command_default("system_profiler", &["SPPCIDataType"]) {
-            if output.status == 0
-                && (output.stdout.contains("Rebellions") || output.stdout.contains("RBLN"))
-            {
-                return true;
-            }
+        if let Ok(output) = execute_command_default("system_profiler", &["SPPCIDataType"])
+            && output.status == 0
+            && (output.stdout.contains("Rebellions") || output.stdout.contains("RBLN"))
+        {
+            return true;
         }
     } else {
         // On Linux, try lspci to check for Rebellions devices
-        if let Ok(output) = execute_command_default("lspci", &[]) {
-            if output.status == 0 {
-                // Look for Rebellions devices - vendor ID 1f3f
-                if output.stdout.contains("1f3f:") || output.stdout.contains("Rebellions") {
-                    return true;
-                }
+        if let Ok(output) = execute_command_default("lspci", &[])
+            && output.status == 0
+        {
+            // Look for Rebellions devices - vendor ID 1f3f
+            if output.stdout.contains("1f3f:") || output.stdout.contains("Rebellions") {
+                return true;
             }
         }
     }
@@ -246,12 +246,12 @@ pub fn has_rebellions() -> bool {
         "/usr/local/bin/rbln-smi",
         "/usr/bin/rbln-smi",
     ] {
-        if let Ok(output) = execute_command_default(cmd, &["-j"]) {
-            if output.status == 0 {
-                // Check if output contains device information
-                if output.stdout.contains("\"devices\"") && output.stdout.contains("\"uuid\"") {
-                    return true;
-                }
+        if let Ok(output) = execute_command_default(cmd, &["-j"])
+            && output.status == 0
+        {
+            // Check if output contains device information
+            if output.stdout.contains("\"devices\"") && output.stdout.contains("\"uuid\"") {
+                return true;
             }
         }
     }
@@ -268,15 +268,15 @@ pub fn has_google_tpu() -> bool {
     // This works for on-premise TPU nodes and some TPU versions
     if let Ok(entries) = std::fs::read_dir("/dev") {
         for entry in entries.flatten() {
-            if let Some(name) = entry.file_name().to_str() {
-                if name.starts_with("accel") {
-                    // Check sysfs for Google vendor ID (0x1ae0)
-                    let sysfs_path = format!("/sys/class/accel/{name}/device/vendor");
-                    if let Ok(vendor) = std::fs::read_to_string(&sysfs_path) {
-                        if vendor.trim() == "0x1ae0" {
-                            return true;
-                        }
-                    }
+            if let Some(name) = entry.file_name().to_str()
+                && name.starts_with("accel")
+            {
+                // Check sysfs for Google vendor ID (0x1ae0)
+                let sysfs_path = format!("/sys/class/accel/{name}/device/vendor");
+                if let Ok(vendor) = std::fs::read_to_string(&sysfs_path)
+                    && vendor.trim() == "0x1ae0"
+                {
+                    return true;
                 }
             }
         }
@@ -297,17 +297,17 @@ pub fn has_google_tpu() -> bool {
     // Method 3: Check libtpu availability combined with TPU indicators
     if is_libtpu_available() {
         // Check for PJRT TPU plugin indicators
-        if let Ok(pjrt_names) = std::env::var("PJRT_DEVICE") {
-            if pjrt_names.to_lowercase().contains("tpu") {
-                return true;
-            }
+        if let Ok(pjrt_names) = std::env::var("PJRT_DEVICE")
+            && pjrt_names.to_lowercase().contains("tpu")
+        {
+            return true;
         }
 
         // If on GCE (Google Compute Engine), libtpu likely means TPU
-        if let Ok(product) = std::fs::read_to_string("/sys/class/dmi/id/product_name") {
-            if product.to_lowercase().contains("google") {
-                return true;
-            }
+        if let Ok(product) = std::fs::read_to_string("/sys/class/dmi/id/product_name")
+            && product.to_lowercase().contains("google")
+        {
+            return true;
         }
     }
 
@@ -355,36 +355,36 @@ pub fn has_gaudi() -> bool {
     if std::env::consts::OS == "linux" {
         // Check with numeric vendor ID format (lspci -n)
         // Habana Labs vendor ID: 1da3
-        if let Ok(output) = execute_command_default("lspci", &["-n"]) {
-            if output.status == 0 {
-                // Look for Habana Labs vendor ID (1da3)
-                for line in output.stdout.lines() {
-                    if line.contains("1da3:") {
-                        return true;
-                    }
+        if let Ok(output) = execute_command_default("lspci", &["-n"])
+            && output.status == 0
+        {
+            // Look for Habana Labs vendor ID (1da3)
+            for line in output.stdout.lines() {
+                if line.contains("1da3:") {
+                    return true;
                 }
             }
         }
 
         // Also check regular lspci output for text matches
-        if let Ok(output) = execute_command_default("lspci", &[]) {
-            if output.status == 0 {
-                // Look for Habana Labs / Intel Gaudi devices
-                // May show as "Processing accelerators" with Habana in the name
-                let stdout_lower = output.stdout.to_lowercase();
-                if stdout_lower.contains("habana") || stdout_lower.contains("gaudi") {
-                    return true;
-                }
+        if let Ok(output) = execute_command_default("lspci", &[])
+            && output.status == 0
+        {
+            // Look for Habana Labs / Intel Gaudi devices
+            // May show as "Processing accelerators" with Habana in the name
+            let stdout_lower = output.stdout.to_lowercase();
+            if stdout_lower.contains("habana") || stdout_lower.contains("gaudi") {
+                return true;
             }
         }
     }
 
     // Last resort: check if hl-smi can actually list devices
-    if let Ok(output) = execute_command_default("hl-smi", &["-L"]) {
-        if output.status == 0 {
-            // Check if output contains device listing
-            return !output.stdout.is_empty();
-        }
+    if let Ok(output) = execute_command_default("hl-smi", &["-L"])
+        && output.status == 0
+    {
+        // Check if output contains device listing
+        return !output.stdout.is_empty();
     }
 
     false
@@ -431,14 +431,14 @@ pub fn is_running_in_container() -> bool {
     }
 
     // Check /proc/1/sched for container hints
-    if let Ok(sched_content) = std::fs::read_to_string("/proc/1/sched") {
-        if sched_content.lines().next().is_some_and(|line| {
+    if let Ok(sched_content) = std::fs::read_to_string("/proc/1/sched")
+        && sched_content.lines().next().is_some_and(|line| {
             line.contains("bash") || line.contains("sh") || line.contains("init")
-        }) {
-            // If PID 1 is a shell or init process that's not systemd/upstart, likely in container
-            if !sched_content.contains("systemd") && !sched_content.contains("upstart") {
-                return true;
-            }
+        })
+    {
+        // If PID 1 is a shell or init process that's not systemd/upstart, likely in container
+        if !sched_content.contains("systemd") && !sched_content.contains("upstart") {
+            return true;
         }
     }
 
@@ -452,16 +452,16 @@ pub fn get_container_pid_namespace() -> Option<u32> {
         // Convert PathBuf to String
         if let Some(ns_str) = ns_link.to_str() {
             // Extract namespace ID from the link (format: "pid:[4026531836]")
-            if let Some(start) = ns_str.find('[') {
-                if let Some(end) = ns_str.find(']') {
-                    let ns_id_str = &ns_str[start + 1..end];
-                    // Parse as u64 first, then convert to u32 if within range
-                    if let Ok(ns_id_u64) = ns_id_str.parse::<u64>() {
-                        // Namespace IDs can be larger than u32::MAX
-                        // For comparison purposes, we'll use the lower 32 bits
-                        let ns_id = ns_id_u64 as u32;
-                        return Some(ns_id);
-                    }
+            if let Some(start) = ns_str.find('[')
+                && let Some(end) = ns_str.find(']')
+            {
+                let ns_id_str = &ns_str[start + 1..end];
+                // Parse as u64 first, then convert to u32 if within range
+                if let Ok(ns_id_u64) = ns_id_str.parse::<u64>() {
+                    // Namespace IDs can be larger than u32::MAX
+                    // For comparison purposes, we'll use the lower 32 bits
+                    let ns_id = ns_id_u64 as u32;
+                    return Some(ns_id);
                 }
             }
         }

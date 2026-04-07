@@ -106,18 +106,48 @@ pub fn print_process_info<W: Write>(
     let header_format = format!(
         "{:>pid_w$} {:<user_w$} {:>pri_w$} {:>ni_w$} {:>virt_w$} {:>res_w$} {:<s_w$} {:>cpu_w$} {:>mem_w$} {:>gpu_w$} {:>gpu_mem_w$} {:>time_w$} {}",
         format!("PID{}", get_sort_arrow(crate::app_state::SortCriteria::Pid)),
-        format!("USER{}", get_sort_arrow(crate::app_state::SortCriteria::User)),
-        format!("PRI{}", get_sort_arrow(crate::app_state::SortCriteria::Priority)),
+        format!(
+            "USER{}",
+            get_sort_arrow(crate::app_state::SortCriteria::User)
+        ),
+        format!(
+            "PRI{}",
+            get_sort_arrow(crate::app_state::SortCriteria::Priority)
+        ),
         format!("NI{}", get_sort_arrow(crate::app_state::SortCriteria::Nice)),
-        format!("VIRT{}", get_sort_arrow(crate::app_state::SortCriteria::VirtualMemory)),
-        format!("RES{}", get_sort_arrow(crate::app_state::SortCriteria::ResidentMemory)),
+        format!(
+            "VIRT{}",
+            get_sort_arrow(crate::app_state::SortCriteria::VirtualMemory)
+        ),
+        format!(
+            "RES{}",
+            get_sort_arrow(crate::app_state::SortCriteria::ResidentMemory)
+        ),
         format!("S{}", get_sort_arrow(crate::app_state::SortCriteria::State)),
-        format!("CPU%{}", get_sort_arrow(crate::app_state::SortCriteria::CpuPercent)),
-        format!("MEM%{}", get_sort_arrow(crate::app_state::SortCriteria::MemoryPercent)),
-        format!("GPU%{}", get_sort_arrow(crate::app_state::SortCriteria::GpuPercent)),
-        format!("VRAM{}", get_sort_arrow(crate::app_state::SortCriteria::GpuMemoryUsage)),
-        format!("TIME+{}", get_sort_arrow(crate::app_state::SortCriteria::CpuTime)),
-        format!("Command{}", get_sort_arrow(crate::app_state::SortCriteria::Command)),
+        format!(
+            "CPU%{}",
+            get_sort_arrow(crate::app_state::SortCriteria::CpuPercent)
+        ),
+        format!(
+            "MEM%{}",
+            get_sort_arrow(crate::app_state::SortCriteria::MemoryPercent)
+        ),
+        format!(
+            "GPU%{}",
+            get_sort_arrow(crate::app_state::SortCriteria::GpuPercent)
+        ),
+        format!(
+            "VRAM{}",
+            get_sort_arrow(crate::app_state::SortCriteria::GpuMemoryUsage)
+        ),
+        format!(
+            "TIME+{}",
+            get_sort_arrow(crate::app_state::SortCriteria::CpuTime)
+        ),
+        format!(
+            "Command{}",
+            get_sort_arrow(crate::app_state::SortCriteria::Command)
+        ),
     );
 
     // Apply horizontal scrolling

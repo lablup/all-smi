@@ -149,9 +149,13 @@ pub fn print_function_keys<W: Write>(
     } else {
         // Local mode: both process and GPU sorting
         if state.gpu_filter_enabled {
-            format!("h:Help q:Exit c:CPU Cores f:Filter ←→:Scroll ↑↓:Scroll p:PID m:Memory g:GPU-Mem [{sort_indicator}] [{filter_indicator}]")
+            format!(
+                "h:Help q:Exit c:CPU Cores f:Filter ←→:Scroll ↑↓:Scroll p:PID m:Memory g:GPU-Mem [{sort_indicator}] [{filter_indicator}]"
+            )
         } else {
-            format!("h:Help q:Exit c:CPU Cores f:Filter ←→:Scroll ↑↓:Scroll p:PID m:Memory g:GPU-Mem [{sort_indicator}]")
+            format!(
+                "h:Help q:Exit c:CPU Cores f:Filter ←→:Scroll ↑↓:Scroll p:PID m:Memory g:GPU-Mem [{sort_indicator}]"
+            )
         }
     };
 

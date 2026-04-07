@@ -62,33 +62,33 @@ impl RebellionsExporter {
     }
 
     fn export_device_info(&self, builder: &mut MetricBuilder, info: &GpuInfo, index: usize) {
-        if let Some(_device_name) = info.detail.get("device_name") {
-            if let Some(sid) = info.detail.get("serial_id") {
-                let model_type = if info.name.contains("ATOM Max") {
-                    "ATOM-Max"
-                } else if info.name.contains("ATOM+") {
-                    "ATOM-Plus"
-                } else {
-                    "ATOM"
-                };
+        if let Some(_device_name) = info.detail.get("device_name")
+            && let Some(sid) = info.detail.get("serial_id")
+        {
+            let model_type = if info.name.contains("ATOM Max") {
+                "ATOM-Max"
+            } else if info.name.contains("ATOM+") {
+                "ATOM-Plus"
+            } else {
+                "ATOM"
+            };
 
-                let device_labels = [
-                    ("npu", info.name.as_str()),
-                    ("instance", info.instance.as_str()),
-                    ("uuid", info.uuid.as_str()),
-                    ("index", &index.to_string()),
-                    ("model", model_type),
-                    ("sid", sid.as_str()),
-                    ("location", "5"), // Default location from mock server
-                ];
-                builder
-                    .help(
-                        "all_smi_rebellions_device_info",
-                        "Rebellions device information",
-                    )
-                    .type_("all_smi_rebellions_device_info", "gauge")
-                    .metric("all_smi_rebellions_device_info", &device_labels, 1);
-            }
+            let device_labels = [
+                ("npu", info.name.as_str()),
+                ("instance", info.instance.as_str()),
+                ("uuid", info.uuid.as_str()),
+                ("index", &index.to_string()),
+                ("model", model_type),
+                ("sid", sid.as_str()),
+                ("location", "5"), // Default location from mock server
+            ];
+            builder
+                .help(
+                    "all_smi_rebellions_device_info",
+                    "Rebellions device information",
+                )
+                .type_("all_smi_rebellions_device_info", "gauge")
+                .metric("all_smi_rebellions_device_info", &device_labels, 1);
         }
     }
 

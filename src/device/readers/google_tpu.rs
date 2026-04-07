@@ -37,6 +37,7 @@
 //! | TPU v6 | Trillium | 32 GB | 4.7x v5e performance |
 //! | TPU v7 | Ironwood | 192 GB | Latest generation, HBM3e |
 
+use crate::device::GpuReader;
 #[cfg(target_os = "linux")]
 use crate::device::common::constants::google_tpu::is_libtpu_available;
 #[cfg(target_os = "linux")]
@@ -48,7 +49,6 @@ use crate::device::readers::tpu_info_runner;
 #[cfg(target_os = "linux")]
 use crate::device::readers::tpu_sysfs;
 use crate::device::types::{GpuInfo, ProcessInfo};
-use crate::device::GpuReader;
 #[cfg(target_os = "linux")]
 use crate::utils::get_hostname;
 #[cfg(target_os = "linux")]
@@ -414,10 +414,10 @@ impl GoogleTpuReader {
                         memory_used = val as u64;
                     }
 
-                    if let Some(val) = runner.get_metric(meta.index, "memory_total") {
-                        if val > 0.0 {
-                            total_memory = val as u64;
-                        }
+                    if let Some(val) = runner.get_metric(meta.index, "memory_total")
+                        && val > 0.0
+                    {
+                        total_memory = val as u64;
                     }
                 }
 
@@ -534,17 +534,17 @@ impl GoogleTpuReader {
         }
 
         // Method 3: Check /dev/vfio/* for v6e and newer TPUs (if not found via sysfs)
-        if metadata.is_empty() {
-            if let Some(vfio_metadata) = Self::detect_tpu_metadata_from_vfio() {
-                metadata = vfio_metadata;
-            }
+        if metadata.is_empty()
+            && let Some(vfio_metadata) = Self::detect_tpu_metadata_from_vfio()
+        {
+            metadata = vfio_metadata;
         }
 
         // Method 4: For TPU VMs, use environment variables
-        if metadata.is_empty() {
-            if let Some(env_metadata) = Self::detect_tpu_metadata_from_environment() {
-                metadata.push(env_metadata);
-            }
+        if metadata.is_empty()
+            && let Some(env_metadata) = Self::detect_tpu_metadata_from_environment()
+        {
+            metadata.push(env_metadata);
         }
 
         metadata

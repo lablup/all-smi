@@ -26,4 +26,4 @@ pub mod reader;
 #[allow(unused_imports)]
 pub use info::StorageInfo;
 #[allow(unused_imports)]
-pub use reader::{create_storage_reader, LocalStorageReader, StorageReader};
+pub use reader::{LocalStorageReader, StorageReader, create_storage_reader};

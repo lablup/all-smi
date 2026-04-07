@@ -155,21 +155,21 @@ impl<'a> GpuMetricExporter<'a> {
         }
 
         // Combined power (CPU + GPU + ANE) for Apple Silicon
-        if let Some(combined_power_str) = info.detail.get("combined_power_mw") {
-            if let Ok(combined_power_mw) = combined_power_str.parse::<f64>() {
-                let combined_power_watts = combined_power_mw / 1000.0;
-                builder
-                    .help(
-                        "all_smi_combined_power_watts",
-                        "Combined power consumption (CPU + GPU + ANE) in watts",
-                    )
-                    .type_("all_smi_combined_power_watts", "gauge")
-                    .metric(
-                        "all_smi_combined_power_watts",
-                        &base_labels,
-                        combined_power_watts,
-                    );
-            }
+        if let Some(combined_power_str) = info.detail.get("combined_power_mw")
+            && let Ok(combined_power_mw) = combined_power_str.parse::<f64>()
+        {
+            let combined_power_watts = combined_power_mw / 1000.0;
+            builder
+                .help(
+                    "all_smi_combined_power_watts",
+                    "Combined power consumption (CPU + GPU + ANE) in watts",
+                )
+                .type_("all_smi_combined_power_watts", "gauge")
+                .metric(
+                    "all_smi_combined_power_watts",
+                    &base_labels,
+                    combined_power_watts,
+                );
         }
     }
 
@@ -222,87 +222,86 @@ impl<'a> GpuMetricExporter<'a> {
         ];
 
         // PCIe metrics
-        if let Some(pcie_gen) = info.detail.get("pcie_gen_current") {
-            if let Ok(pcie_gen_value) = pcie_gen.parse::<f64>() {
-                builder
-                    .help("all_smi_gpu_pcie_gen_current", "Current PCIe generation")
-                    .type_("all_smi_gpu_pcie_gen_current", "gauge")
-                    .metric("all_smi_gpu_pcie_gen_current", &base_labels, pcie_gen_value);
-            }
+        if let Some(pcie_gen) = info.detail.get("pcie_gen_current")
+            && let Ok(pcie_gen_value) = pcie_gen.parse::<f64>()
+        {
+            builder
+                .help("all_smi_gpu_pcie_gen_current", "Current PCIe generation")
+                .type_("all_smi_gpu_pcie_gen_current", "gauge")
+                .metric("all_smi_gpu_pcie_gen_current", &base_labels, pcie_gen_value);
         }
 
-        if let Some(pcie_width) = info.detail.get("pcie_width_current") {
-            if let Ok(width) = pcie_width.parse::<f64>() {
-                builder
-                    .help("all_smi_gpu_pcie_width_current", "Current PCIe link width")
-                    .type_("all_smi_gpu_pcie_width_current", "gauge")
-                    .metric("all_smi_gpu_pcie_width_current", &base_labels, width);
-            }
+        if let Some(pcie_width) = info.detail.get("pcie_width_current")
+            && let Ok(width) = pcie_width.parse::<f64>()
+        {
+            builder
+                .help("all_smi_gpu_pcie_width_current", "Current PCIe link width")
+                .type_("all_smi_gpu_pcie_width_current", "gauge")
+                .metric("all_smi_gpu_pcie_width_current", &base_labels, width);
         }
 
         // Clock metrics
-        if let Some(clock_max) = info.detail.get("clock_graphics_max") {
-            if let Ok(clock) = clock_max.parse::<f64>() {
-                builder
-                    .help(
-                        "all_smi_gpu_clock_graphics_max_mhz",
-                        "Maximum graphics clock in MHz",
-                    )
-                    .type_("all_smi_gpu_clock_graphics_max_mhz", "gauge")
-                    .metric("all_smi_gpu_clock_graphics_max_mhz", &base_labels, clock);
-            }
+        if let Some(clock_max) = info.detail.get("clock_graphics_max")
+            && let Ok(clock) = clock_max.parse::<f64>()
+        {
+            builder
+                .help(
+                    "all_smi_gpu_clock_graphics_max_mhz",
+                    "Maximum graphics clock in MHz",
+                )
+                .type_("all_smi_gpu_clock_graphics_max_mhz", "gauge")
+                .metric("all_smi_gpu_clock_graphics_max_mhz", &base_labels, clock);
         }
 
-        if let Some(clock_max) = info.detail.get("clock_memory_max") {
-            if let Ok(clock) = clock_max.parse::<f64>() {
-                builder
-                    .help(
-                        "all_smi_gpu_clock_memory_max_mhz",
-                        "Maximum memory clock in MHz",
-                    )
-                    .type_("all_smi_gpu_clock_memory_max_mhz", "gauge")
-                    .metric("all_smi_gpu_clock_memory_max_mhz", &base_labels, clock);
-            }
+        if let Some(clock_max) = info.detail.get("clock_memory_max")
+            && let Ok(clock) = clock_max.parse::<f64>()
+        {
+            builder
+                .help(
+                    "all_smi_gpu_clock_memory_max_mhz",
+                    "Maximum memory clock in MHz",
+                )
+                .type_("all_smi_gpu_clock_memory_max_mhz", "gauge")
+                .metric("all_smi_gpu_clock_memory_max_mhz", &base_labels, clock);
         }
 
         // Power limit metrics
-        if let Some(power_limit) = info.detail.get("power_limit_current") {
-            if let Ok(power) = power_limit.parse::<f64>() {
-                builder
-                    .help(
-                        "all_smi_gpu_power_limit_current_watts",
-                        "Current power limit in watts",
-                    )
-                    .type_("all_smi_gpu_power_limit_current_watts", "gauge")
-                    .metric("all_smi_gpu_power_limit_current_watts", &base_labels, power);
-            }
+        if let Some(power_limit) = info.detail.get("power_limit_current")
+            && let Ok(power) = power_limit.parse::<f64>()
+        {
+            builder
+                .help(
+                    "all_smi_gpu_power_limit_current_watts",
+                    "Current power limit in watts",
+                )
+                .type_("all_smi_gpu_power_limit_current_watts", "gauge")
+                .metric("all_smi_gpu_power_limit_current_watts", &base_labels, power);
         }
 
-        if let Some(power_limit) = info.detail.get("power_limit_max") {
-            if let Ok(power) = power_limit.parse::<f64>() {
-                builder
-                    .help(
-                        "all_smi_gpu_power_limit_max_watts",
-                        "Maximum power limit in watts",
-                    )
-                    .type_("all_smi_gpu_power_limit_max_watts", "gauge")
-                    .metric("all_smi_gpu_power_limit_max_watts", &base_labels, power);
-            }
+        if let Some(power_limit) = info.detail.get("power_limit_max")
+            && let Ok(power) = power_limit.parse::<f64>()
+        {
+            builder
+                .help(
+                    "all_smi_gpu_power_limit_max_watts",
+                    "Maximum power limit in watts",
+                )
+                .type_("all_smi_gpu_power_limit_max_watts", "gauge")
+                .metric("all_smi_gpu_power_limit_max_watts", &base_labels, power);
         }
 
         // Performance state
-        if let Some(pstate) = info.detail.get("performance_state") {
-            if let Some(state_str) = pstate.strip_prefix('P') {
-                if let Ok(state_num) = state_str.parse::<f64>() {
-                    builder
-                        .help(
-                            "all_smi_gpu_performance_state",
-                            "GPU performance state (P0=0, P1=1, ...)",
-                        )
-                        .type_("all_smi_gpu_performance_state", "gauge")
-                        .metric("all_smi_gpu_performance_state", &base_labels, state_num);
-                }
-            }
+        if let Some(pstate) = info.detail.get("performance_state")
+            && let Some(state_str) = pstate.strip_prefix('P')
+            && let Ok(state_num) = state_str.parse::<f64>()
+        {
+            builder
+                .help(
+                    "all_smi_gpu_performance_state",
+                    "GPU performance state (P0=0, P1=1, ...)",
+                )
+                .type_("all_smi_gpu_performance_state", "gauge")
+                .metric("all_smi_gpu_performance_state", &base_labels, state_num);
         }
     }
 }

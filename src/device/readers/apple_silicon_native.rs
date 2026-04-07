@@ -25,7 +25,7 @@
 
 use crate::device::common::command_executor::execute_command_default;
 use crate::device::macos_native::{
-    get_native_metrics_manager, initialize_native_metrics_manager, NativeMetricsManager,
+    NativeMetricsManager, get_native_metrics_manager, initialize_native_metrics_manager,
 };
 use crate::device::readers::common_cache::{DetailBuilder, DeviceStaticInfo};
 use crate::device::{GpuInfo, GpuReader, ProcessInfo};
@@ -33,8 +33,8 @@ use crate::utils::get_hostname;
 use chrono::Local;
 use once_cell::sync::{Lazy, OnceCell};
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
     Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
 };
 use sysinfo::System;
 

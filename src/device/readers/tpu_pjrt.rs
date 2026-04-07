@@ -272,18 +272,17 @@ fn scan_python_dirs_for_libtpu(base_dir: &std::path::Path) -> Option<LibTpu> {
     if let Ok(entries) = std::fs::read_dir(base_dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                if name.starts_with("python") {
-                    let subdirs = ["site-packages", "dist-packages"];
-                    for subdir in subdirs {
-                        let libtpu_path = path.join(subdir).join("libtpu").join("libtpu.so");
-                        if libtpu_path.exists() {
-                            if let Some(str_path) = libtpu_path.to_str() {
-                                if let Some(lib) = unsafe { try_load_library(str_path) } {
-                                    return Some(lib);
-                                }
-                            }
-                        }
+            if let Some(name) = path.file_name().and_then(|n| n.to_str())
+                && name.starts_with("python")
+            {
+                let subdirs = ["site-packages", "dist-packages"];
+                for subdir in subdirs {
+                    let libtpu_path = path.join(subdir).join("libtpu").join("libtpu.so");
+                    if libtpu_path.exists()
+                        && let Some(str_path) = libtpu_path.to_str()
+                        && let Some(lib) = unsafe { try_load_library(str_path) }
+                    {
+                        return Some(lib);
                     }
                 }
             }

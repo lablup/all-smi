@@ -18,7 +18,7 @@ use crossterm::{
     event::{DisableMouseCapture, EnableMouseCapture},
     execute,
     terminal::{
-        disable_raw_mode, enable_raw_mode, ClearType, EnterAlternateScreen, LeaveAlternateScreen,
+        ClearType, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
     },
 };
 

@@ -213,9 +213,13 @@ fn get_sudo_messages(
         // Monitored items
         "   • AMD GPU: Utilization, VRAM usage, temperature, power, clock speeds\n   • CPU: Core utilization and performance metrics\n   • Memory: System RAM usage and allocation\n   • Storage: Disk usage and performance",
         // Alternative
-        Some("💡 Alternative: Add your user to the 'video' and 'render' groups:\n   sudo usermod -a -G video,render $USER\n   (requires logout/login to take effect)"),
+        Some(
+            "💡 Alternative: Add your user to the 'video' and 'render' groups:\n   sudo usermod -a -G video,render $USER\n   (requires logout/login to take effect)",
+        ),
         // Additional troubleshooting
-        Some("   Alternative: Add your user to video/render groups:\n   → sudo usermod -a -G video,render $USER"),
+        Some(
+            "   Alternative: Add your user to video/render groups:\n   → sudo usermod -a -G video,render $USER",
+        ),
     )
 }
 

@@ -17,7 +17,7 @@
 //! Queries the root/Intel WMI namespace for thermal zone information.
 //! This is available on some Intel systems with proper chipset drivers.
 
-use super::{is_wmi_not_found_error, TemperatureResult};
+use super::{TemperatureResult, is_wmi_not_found_error};
 use once_cell::sync::OnceCell;
 use serde::Deserialize;
 use wmi::WMIConnection;

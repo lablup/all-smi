@@ -134,87 +134,87 @@ impl TenstorrentExporter {
         ];
 
         // ASIC temperature (main chip temperature)
-        if let Some(asic_temp) = info.detail.get("asic_temperature") {
-            if let Some(temp) = CommonNpuExporter::parse_numeric_value(asic_temp) {
-                builder
-                    .help(
-                        "all_smi_tenstorrent_asic_temperature_celsius",
-                        "ASIC temperature in celsius",
-                    )
-                    .type_("all_smi_tenstorrent_asic_temperature_celsius", "gauge")
-                    .metric(
-                        "all_smi_tenstorrent_asic_temperature_celsius",
-                        &base_labels,
-                        temp,
-                    );
-            }
+        if let Some(asic_temp) = info.detail.get("asic_temperature")
+            && let Some(temp) = CommonNpuExporter::parse_numeric_value(asic_temp)
+        {
+            builder
+                .help(
+                    "all_smi_tenstorrent_asic_temperature_celsius",
+                    "ASIC temperature in celsius",
+                )
+                .type_("all_smi_tenstorrent_asic_temperature_celsius", "gauge")
+                .metric(
+                    "all_smi_tenstorrent_asic_temperature_celsius",
+                    &base_labels,
+                    temp,
+                );
         }
 
         // Voltage regulator temperature
-        if let Some(vreg_temp) = info.detail.get("vreg_temperature") {
-            if let Some(temp) = CommonNpuExporter::parse_numeric_value(vreg_temp) {
-                builder
-                    .help(
-                        "all_smi_tenstorrent_vreg_temperature_celsius",
-                        "Voltage regulator temperature in celsius",
-                    )
-                    .type_("all_smi_tenstorrent_vreg_temperature_celsius", "gauge")
-                    .metric(
-                        "all_smi_tenstorrent_vreg_temperature_celsius",
-                        &base_labels,
-                        temp,
-                    );
-            }
+        if let Some(vreg_temp) = info.detail.get("vreg_temperature")
+            && let Some(temp) = CommonNpuExporter::parse_numeric_value(vreg_temp)
+        {
+            builder
+                .help(
+                    "all_smi_tenstorrent_vreg_temperature_celsius",
+                    "Voltage regulator temperature in celsius",
+                )
+                .type_("all_smi_tenstorrent_vreg_temperature_celsius", "gauge")
+                .metric(
+                    "all_smi_tenstorrent_vreg_temperature_celsius",
+                    &base_labels,
+                    temp,
+                );
         }
 
         // Inlet temperature
-        if let Some(inlet_temp) = info.detail.get("inlet_temperature") {
-            if let Some(temp) = CommonNpuExporter::parse_numeric_value(inlet_temp) {
-                builder
-                    .help(
-                        "all_smi_tenstorrent_inlet_temperature_celsius",
-                        "Inlet temperature in celsius",
-                    )
-                    .type_("all_smi_tenstorrent_inlet_temperature_celsius", "gauge")
-                    .metric(
-                        "all_smi_tenstorrent_inlet_temperature_celsius",
-                        &base_labels,
-                        temp,
-                    );
-            }
+        if let Some(inlet_temp) = info.detail.get("inlet_temperature")
+            && let Some(temp) = CommonNpuExporter::parse_numeric_value(inlet_temp)
+        {
+            builder
+                .help(
+                    "all_smi_tenstorrent_inlet_temperature_celsius",
+                    "Inlet temperature in celsius",
+                )
+                .type_("all_smi_tenstorrent_inlet_temperature_celsius", "gauge")
+                .metric(
+                    "all_smi_tenstorrent_inlet_temperature_celsius",
+                    &base_labels,
+                    temp,
+                );
         }
 
         // Outlet temperatures
-        if let Some(outlet_temp1) = info.detail.get("outlet_temperature1") {
-            if let Some(temp) = CommonNpuExporter::parse_numeric_value(outlet_temp1) {
-                builder
-                    .help(
-                        "all_smi_tenstorrent_outlet1_temperature_celsius",
-                        "Outlet 1 temperature in celsius",
-                    )
-                    .type_("all_smi_tenstorrent_outlet1_temperature_celsius", "gauge")
-                    .metric(
-                        "all_smi_tenstorrent_outlet1_temperature_celsius",
-                        &base_labels,
-                        temp,
-                    );
-            }
+        if let Some(outlet_temp1) = info.detail.get("outlet_temperature1")
+            && let Some(temp) = CommonNpuExporter::parse_numeric_value(outlet_temp1)
+        {
+            builder
+                .help(
+                    "all_smi_tenstorrent_outlet1_temperature_celsius",
+                    "Outlet 1 temperature in celsius",
+                )
+                .type_("all_smi_tenstorrent_outlet1_temperature_celsius", "gauge")
+                .metric(
+                    "all_smi_tenstorrent_outlet1_temperature_celsius",
+                    &base_labels,
+                    temp,
+                );
         }
 
-        if let Some(outlet_temp2) = info.detail.get("outlet_temperature2") {
-            if let Some(temp) = CommonNpuExporter::parse_numeric_value(outlet_temp2) {
-                builder
-                    .help(
-                        "all_smi_tenstorrent_outlet2_temperature_celsius",
-                        "Outlet 2 temperature in celsius",
-                    )
-                    .type_("all_smi_tenstorrent_outlet2_temperature_celsius", "gauge")
-                    .metric(
-                        "all_smi_tenstorrent_outlet2_temperature_celsius",
-                        &base_labels,
-                        temp,
-                    );
-            }
+        if let Some(outlet_temp2) = info.detail.get("outlet_temperature2")
+            && let Some(temp) = CommonNpuExporter::parse_numeric_value(outlet_temp2)
+        {
+            builder
+                .help(
+                    "all_smi_tenstorrent_outlet2_temperature_celsius",
+                    "Outlet 2 temperature in celsius",
+                )
+                .type_("all_smi_tenstorrent_outlet2_temperature_celsius", "gauge")
+                .metric(
+                    "all_smi_tenstorrent_outlet2_temperature_celsius",
+                    &base_labels,
+                    temp,
+                );
         }
     }
 
@@ -227,39 +227,39 @@ impl TenstorrentExporter {
         ];
 
         // AI clock
-        if let Some(aiclk) = info.detail.get("aiclk_mhz") {
-            if let Some(freq) = CommonNpuExporter::parse_numeric_value(aiclk) {
-                builder
-                    .help("all_smi_tenstorrent_aiclk_mhz", "AI clock frequency in MHz")
-                    .type_("all_smi_tenstorrent_aiclk_mhz", "gauge")
-                    .metric("all_smi_tenstorrent_aiclk_mhz", &base_labels, freq);
-            }
+        if let Some(aiclk) = info.detail.get("aiclk_mhz")
+            && let Some(freq) = CommonNpuExporter::parse_numeric_value(aiclk)
+        {
+            builder
+                .help("all_smi_tenstorrent_aiclk_mhz", "AI clock frequency in MHz")
+                .type_("all_smi_tenstorrent_aiclk_mhz", "gauge")
+                .metric("all_smi_tenstorrent_aiclk_mhz", &base_labels, freq);
         }
 
         // AXI clock
-        if let Some(axiclk) = info.detail.get("axiclk_mhz") {
-            if let Some(freq) = CommonNpuExporter::parse_numeric_value(axiclk) {
-                builder
-                    .help(
-                        "all_smi_tenstorrent_axiclk_mhz",
-                        "AXI clock frequency in MHz",
-                    )
-                    .type_("all_smi_tenstorrent_axiclk_mhz", "gauge")
-                    .metric("all_smi_tenstorrent_axiclk_mhz", &base_labels, freq);
-            }
+        if let Some(axiclk) = info.detail.get("axiclk_mhz")
+            && let Some(freq) = CommonNpuExporter::parse_numeric_value(axiclk)
+        {
+            builder
+                .help(
+                    "all_smi_tenstorrent_axiclk_mhz",
+                    "AXI clock frequency in MHz",
+                )
+                .type_("all_smi_tenstorrent_axiclk_mhz", "gauge")
+                .metric("all_smi_tenstorrent_axiclk_mhz", &base_labels, freq);
         }
 
         // ARC clock
-        if let Some(arcclk) = info.detail.get("arcclk_mhz") {
-            if let Some(freq) = CommonNpuExporter::parse_numeric_value(arcclk) {
-                builder
-                    .help(
-                        "all_smi_tenstorrent_arcclk_mhz",
-                        "ARC clock frequency in MHz",
-                    )
-                    .type_("all_smi_tenstorrent_arcclk_mhz", "gauge")
-                    .metric("all_smi_tenstorrent_arcclk_mhz", &base_labels, freq);
-            }
+        if let Some(arcclk) = info.detail.get("arcclk_mhz")
+            && let Some(freq) = CommonNpuExporter::parse_numeric_value(arcclk)
+        {
+            builder
+                .help(
+                    "all_smi_tenstorrent_arcclk_mhz",
+                    "ARC clock frequency in MHz",
+                )
+                .type_("all_smi_tenstorrent_arcclk_mhz", "gauge")
+                .metric("all_smi_tenstorrent_arcclk_mhz", &base_labels, freq);
         }
     }
 
@@ -272,123 +272,123 @@ impl TenstorrentExporter {
         ];
 
         // Voltage
-        if let Some(voltage) = info.detail.get("voltage") {
-            if let Some(v) = CommonNpuExporter::parse_numeric_value(voltage) {
-                builder
-                    .help("all_smi_tenstorrent_voltage_volts", "Core voltage in volts")
-                    .type_("all_smi_tenstorrent_voltage_volts", "gauge")
-                    .metric("all_smi_tenstorrent_voltage_volts", &base_labels, v);
-            }
+        if let Some(voltage) = info.detail.get("voltage")
+            && let Some(v) = CommonNpuExporter::parse_numeric_value(voltage)
+        {
+            builder
+                .help("all_smi_tenstorrent_voltage_volts", "Core voltage in volts")
+                .type_("all_smi_tenstorrent_voltage_volts", "gauge")
+                .metric("all_smi_tenstorrent_voltage_volts", &base_labels, v);
         }
 
         // Current
-        if let Some(current) = info.detail.get("current") {
-            if let Some(c) = CommonNpuExporter::parse_numeric_value(current) {
-                builder
-                    .help("all_smi_tenstorrent_current_amperes", "Current in amperes")
-                    .type_("all_smi_tenstorrent_current_amperes", "gauge")
-                    .metric("all_smi_tenstorrent_current_amperes", &base_labels, c);
-            }
+        if let Some(current) = info.detail.get("current")
+            && let Some(c) = CommonNpuExporter::parse_numeric_value(current)
+        {
+            builder
+                .help("all_smi_tenstorrent_current_amperes", "Current in amperes")
+                .type_("all_smi_tenstorrent_current_amperes", "gauge")
+                .metric("all_smi_tenstorrent_current_amperes", &base_labels, c);
         }
 
         // Power limits
-        if let Some(tdp_limit) = info.detail.get("power_limit_tdp") {
-            if let Some(power) = CommonNpuExporter::parse_numeric_value(tdp_limit) {
-                builder
-                    .help(
-                        "all_smi_tenstorrent_power_limit_tdp_watts",
-                        "TDP power limit in watts",
-                    )
-                    .type_("all_smi_tenstorrent_power_limit_tdp_watts", "gauge")
-                    .metric(
-                        "all_smi_tenstorrent_power_limit_tdp_watts",
-                        &base_labels,
-                        power,
-                    );
-            }
+        if let Some(tdp_limit) = info.detail.get("power_limit_tdp")
+            && let Some(power) = CommonNpuExporter::parse_numeric_value(tdp_limit)
+        {
+            builder
+                .help(
+                    "all_smi_tenstorrent_power_limit_tdp_watts",
+                    "TDP power limit in watts",
+                )
+                .type_("all_smi_tenstorrent_power_limit_tdp_watts", "gauge")
+                .metric(
+                    "all_smi_tenstorrent_power_limit_tdp_watts",
+                    &base_labels,
+                    power,
+                );
         }
 
-        if let Some(tdc_limit) = info.detail.get("power_limit_tdc") {
-            if let Some(current) = CommonNpuExporter::parse_numeric_value(tdc_limit) {
-                builder
-                    .help(
-                        "all_smi_tenstorrent_power_limit_tdc_amperes",
-                        "TDC current limit in amperes",
-                    )
-                    .type_("all_smi_tenstorrent_power_limit_tdc_amperes", "gauge")
-                    .metric(
-                        "all_smi_tenstorrent_power_limit_tdc_amperes",
-                        &base_labels,
-                        current,
-                    );
-            }
+        if let Some(tdc_limit) = info.detail.get("power_limit_tdc")
+            && let Some(current) = CommonNpuExporter::parse_numeric_value(tdc_limit)
+        {
+            builder
+                .help(
+                    "all_smi_tenstorrent_power_limit_tdc_amperes",
+                    "TDC current limit in amperes",
+                )
+                .type_("all_smi_tenstorrent_power_limit_tdc_amperes", "gauge")
+                .metric(
+                    "all_smi_tenstorrent_power_limit_tdc_amperes",
+                    &base_labels,
+                    current,
+                );
         }
 
         // TDP limit (new field from enhanced metrics)
-        if let Some(tdp_limit) = info.detail.get("tdp_limit") {
-            if let Some(power) = CommonNpuExporter::parse_numeric_value(tdp_limit) {
-                builder
-                    .help("all_smi_tenstorrent_tdp_limit_watts", "TDP limit in watts")
-                    .type_("all_smi_tenstorrent_tdp_limit_watts", "gauge")
-                    .metric("all_smi_tenstorrent_tdp_limit_watts", &base_labels, power);
-            }
+        if let Some(tdp_limit) = info.detail.get("tdp_limit")
+            && let Some(power) = CommonNpuExporter::parse_numeric_value(tdp_limit)
+        {
+            builder
+                .help("all_smi_tenstorrent_tdp_limit_watts", "TDP limit in watts")
+                .type_("all_smi_tenstorrent_tdp_limit_watts", "gauge")
+                .metric("all_smi_tenstorrent_tdp_limit_watts", &base_labels, power);
         }
 
         // TDC limit (new field from enhanced metrics)
-        if let Some(tdc_limit) = info.detail.get("tdc_limit") {
-            if let Some(current) = CommonNpuExporter::parse_numeric_value(tdc_limit) {
-                builder
-                    .help(
-                        "all_smi_tenstorrent_tdc_limit_amperes",
-                        "TDC limit in amperes",
-                    )
-                    .type_("all_smi_tenstorrent_tdc_limit_amperes", "gauge")
-                    .metric(
-                        "all_smi_tenstorrent_tdc_limit_amperes",
-                        &base_labels,
-                        current,
-                    );
-            }
+        if let Some(tdc_limit) = info.detail.get("tdc_limit")
+            && let Some(current) = CommonNpuExporter::parse_numeric_value(tdc_limit)
+        {
+            builder
+                .help(
+                    "all_smi_tenstorrent_tdc_limit_amperes",
+                    "TDC limit in amperes",
+                )
+                .type_("all_smi_tenstorrent_tdc_limit_amperes", "gauge")
+                .metric(
+                    "all_smi_tenstorrent_tdc_limit_amperes",
+                    &base_labels,
+                    current,
+                );
         }
 
         // Thermal limit
-        if let Some(thermal_limit) = info.detail.get("thermal_limit") {
-            if let Some(temp) = CommonNpuExporter::parse_numeric_value(thermal_limit) {
-                builder
-                    .help(
-                        "all_smi_tenstorrent_thermal_limit_celsius",
-                        "Thermal limit in celsius",
-                    )
-                    .type_("all_smi_tenstorrent_thermal_limit_celsius", "gauge")
-                    .metric(
-                        "all_smi_tenstorrent_thermal_limit_celsius",
-                        &base_labels,
-                        temp,
-                    );
-            }
+        if let Some(thermal_limit) = info.detail.get("thermal_limit")
+            && let Some(temp) = CommonNpuExporter::parse_numeric_value(thermal_limit)
+        {
+            builder
+                .help(
+                    "all_smi_tenstorrent_thermal_limit_celsius",
+                    "Thermal limit in celsius",
+                )
+                .type_("all_smi_tenstorrent_thermal_limit_celsius", "gauge")
+                .metric(
+                    "all_smi_tenstorrent_thermal_limit_celsius",
+                    &base_labels,
+                    temp,
+                );
         }
 
         // Heartbeat
-        if let Some(heartbeat) = info.detail.get("heartbeat") {
-            if let Some(hb) = CommonNpuExporter::parse_numeric_value(heartbeat) {
-                builder
-                    .help("all_smi_tenstorrent_heartbeat", "Device heartbeat counter")
-                    .type_("all_smi_tenstorrent_heartbeat", "counter")
-                    .metric("all_smi_tenstorrent_heartbeat", &base_labels, hb);
-            }
+        if let Some(heartbeat) = info.detail.get("heartbeat")
+            && let Some(hb) = CommonNpuExporter::parse_numeric_value(heartbeat)
+        {
+            builder
+                .help("all_smi_tenstorrent_heartbeat", "Device heartbeat counter")
+                .type_("all_smi_tenstorrent_heartbeat", "counter")
+                .metric("all_smi_tenstorrent_heartbeat", &base_labels, hb);
         }
 
         // Raw power consumption in watts
-        if let Some(power_watts) = info.detail.get("power_watts") {
-            if let Some(power) = CommonNpuExporter::parse_numeric_value(power_watts) {
-                builder
-                    .help(
-                        "all_smi_tenstorrent_power_raw_watts",
-                        "Raw power consumption in watts",
-                    )
-                    .type_("all_smi_tenstorrent_power_raw_watts", "gauge")
-                    .metric("all_smi_tenstorrent_power_raw_watts", &base_labels, power);
-            }
+        if let Some(power_watts) = info.detail.get("power_watts")
+            && let Some(power) = CommonNpuExporter::parse_numeric_value(power_watts)
+        {
+            builder
+                .help(
+                    "all_smi_tenstorrent_power_raw_watts",
+                    "Raw power consumption in watts",
+                )
+                .type_("all_smi_tenstorrent_power_raw_watts", "gauge")
+                .metric("all_smi_tenstorrent_power_raw_watts", &base_labels, power);
         }
     }
 
@@ -456,80 +456,80 @@ impl TenstorrentExporter {
         }
 
         // DDR status (as numeric register value)
-        if let Some(ddr_status) = info.detail.get("ddr_status") {
-            if let Some(status_val) = CommonNpuExporter::parse_hex_register(ddr_status) {
-                builder
-                    .help(
-                        "all_smi_tenstorrent_ddr_status",
-                        "DDR status register value",
-                    )
-                    .type_("all_smi_tenstorrent_ddr_status", "gauge")
-                    .metric("all_smi_tenstorrent_ddr_status", &base_labels, status_val);
-            }
+        if let Some(ddr_status) = info.detail.get("ddr_status")
+            && let Some(status_val) = CommonNpuExporter::parse_hex_register(ddr_status)
+        {
+            builder
+                .help(
+                    "all_smi_tenstorrent_ddr_status",
+                    "DDR status register value",
+                )
+                .type_("all_smi_tenstorrent_ddr_status", "gauge")
+                .metric("all_smi_tenstorrent_ddr_status", &base_labels, status_val);
         }
 
         // ARC health counters
-        if let Some(arc0_health) = info.detail.get("arc0_health") {
-            if let Some(health) = CommonNpuExporter::parse_numeric_value(arc0_health) {
-                builder
-                    .help("all_smi_tenstorrent_arc0_health", "ARC0 health counter")
-                    .type_("all_smi_tenstorrent_arc0_health", "counter")
-                    .metric("all_smi_tenstorrent_arc0_health", &base_labels, health);
-            }
+        if let Some(arc0_health) = info.detail.get("arc0_health")
+            && let Some(health) = CommonNpuExporter::parse_numeric_value(arc0_health)
+        {
+            builder
+                .help("all_smi_tenstorrent_arc0_health", "ARC0 health counter")
+                .type_("all_smi_tenstorrent_arc0_health", "counter")
+                .metric("all_smi_tenstorrent_arc0_health", &base_labels, health);
         }
 
-        if let Some(arc3_health) = info.detail.get("arc3_health") {
-            if let Some(health) = CommonNpuExporter::parse_numeric_value(arc3_health) {
-                builder
-                    .help("all_smi_tenstorrent_arc3_health", "ARC3 health counter")
-                    .type_("all_smi_tenstorrent_arc3_health", "counter")
-                    .metric("all_smi_tenstorrent_arc3_health", &base_labels, health);
-            }
+        if let Some(arc3_health) = info.detail.get("arc3_health")
+            && let Some(health) = CommonNpuExporter::parse_numeric_value(arc3_health)
+        {
+            builder
+                .help("all_smi_tenstorrent_arc3_health", "ARC3 health counter")
+                .type_("all_smi_tenstorrent_arc3_health", "counter")
+                .metric("all_smi_tenstorrent_arc3_health", &base_labels, health);
         }
 
         // Faults register
-        if let Some(faults) = info.detail.get("faults") {
-            if let Some(faults_val) = CommonNpuExporter::parse_hex_register(faults) {
-                builder
-                    .help("all_smi_tenstorrent_faults", "Fault register value")
-                    .type_("all_smi_tenstorrent_faults", "gauge")
-                    .metric("all_smi_tenstorrent_faults", &base_labels, faults_val);
-            }
+        if let Some(faults) = info.detail.get("faults")
+            && let Some(faults_val) = CommonNpuExporter::parse_hex_register(faults)
+        {
+            builder
+                .help("all_smi_tenstorrent_faults", "Fault register value")
+                .type_("all_smi_tenstorrent_faults", "gauge")
+                .metric("all_smi_tenstorrent_faults", &base_labels, faults_val);
         }
 
         // Throttler state
-        if let Some(throttler) = info.detail.get("throttler") {
-            if let Some(throttler_val) = CommonNpuExporter::parse_hex_register(throttler) {
-                builder
-                    .help(
-                        "all_smi_tenstorrent_throttler",
-                        "Throttler state register value",
-                    )
-                    .type_("all_smi_tenstorrent_throttler", "gauge")
-                    .metric("all_smi_tenstorrent_throttler", &base_labels, throttler_val);
-            }
+        if let Some(throttler) = info.detail.get("throttler")
+            && let Some(throttler_val) = CommonNpuExporter::parse_hex_register(throttler)
+        {
+            builder
+                .help(
+                    "all_smi_tenstorrent_throttler",
+                    "Throttler state register value",
+                )
+                .type_("all_smi_tenstorrent_throttler", "gauge")
+                .metric("all_smi_tenstorrent_throttler", &base_labels, throttler_val);
         }
 
         // Fan metrics
-        if let Some(fan_speed) = info.detail.get("fan_speed") {
-            if let Some(speed) = CommonNpuExporter::parse_numeric_value(fan_speed) {
-                builder
-                    .help(
-                        "all_smi_tenstorrent_fan_speed_percent",
-                        "Fan speed percentage",
-                    )
-                    .type_("all_smi_tenstorrent_fan_speed_percent", "gauge")
-                    .metric("all_smi_tenstorrent_fan_speed_percent", &base_labels, speed);
-            }
+        if let Some(fan_speed) = info.detail.get("fan_speed")
+            && let Some(speed) = CommonNpuExporter::parse_numeric_value(fan_speed)
+        {
+            builder
+                .help(
+                    "all_smi_tenstorrent_fan_speed_percent",
+                    "Fan speed percentage",
+                )
+                .type_("all_smi_tenstorrent_fan_speed_percent", "gauge")
+                .metric("all_smi_tenstorrent_fan_speed_percent", &base_labels, speed);
         }
 
-        if let Some(fan_rpm) = info.detail.get("fan_rpm") {
-            if let Some(rpm) = CommonNpuExporter::parse_numeric_value(fan_rpm) {
-                builder
-                    .help("all_smi_tenstorrent_fan_rpm", "Fan speed in RPM")
-                    .type_("all_smi_tenstorrent_fan_rpm", "gauge")
-                    .metric("all_smi_tenstorrent_fan_rpm", &base_labels, rpm);
-            }
+        if let Some(fan_rpm) = info.detail.get("fan_rpm")
+            && let Some(rpm) = CommonNpuExporter::parse_numeric_value(fan_rpm)
+        {
+            builder
+                .help("all_smi_tenstorrent_fan_rpm", "Fan speed in RPM")
+                .type_("all_smi_tenstorrent_fan_rpm", "gauge")
+                .metric("all_smi_tenstorrent_fan_rpm", &base_labels, rpm);
         }
     }
 
@@ -620,52 +620,50 @@ impl TenstorrentExporter {
         }
 
         // PCIe vendor and device ID
-        if let Some(vendor_id) = info.detail.get("pcie_vendor_id") {
-            if let Some(device_id) = info.detail.get("pcie_device_id") {
-                let pcie_labels = [
-                    ("npu", info.name.as_str()),
-                    ("instance", info.instance.as_str()),
-                    ("uuid", info.uuid.as_str()),
-                    ("index", &index.to_string()),
-                    ("vendor_id", vendor_id.as_str()),
-                    ("device_id", device_id.as_str()),
-                ];
-                builder
-                    .help(
-                        "all_smi_tenstorrent_pcie_device_info",
-                        "PCIe device identification",
-                    )
-                    .type_("all_smi_tenstorrent_pcie_device_info", "gauge")
-                    .metric("all_smi_tenstorrent_pcie_device_info", &pcie_labels, 1);
-            }
+        if let Some(vendor_id) = info.detail.get("pcie_vendor_id")
+            && let Some(device_id) = info.detail.get("pcie_device_id")
+        {
+            let pcie_labels = [
+                ("npu", info.name.as_str()),
+                ("instance", info.instance.as_str()),
+                ("uuid", info.uuid.as_str()),
+                ("index", &index.to_string()),
+                ("vendor_id", vendor_id.as_str()),
+                ("device_id", device_id.as_str()),
+            ];
+            builder
+                .help(
+                    "all_smi_tenstorrent_pcie_device_info",
+                    "PCIe device identification",
+                )
+                .type_("all_smi_tenstorrent_pcie_device_info", "gauge")
+                .metric("all_smi_tenstorrent_pcie_device_info", &pcie_labels, 1);
         }
 
         // PCIe generation
-        if let Some(pcie_gen) = info.detail.get("pcie_link_gen") {
-            if let Some(gen_str) = pcie_gen.strip_prefix("Gen") {
-                if let Some(generation) = CommonNpuExporter::parse_numeric_value(gen_str) {
-                    builder
-                        .help("all_smi_tenstorrent_pcie_generation", "PCIe generation")
-                        .type_("all_smi_tenstorrent_pcie_generation", "gauge")
-                        .metric(
-                            "all_smi_tenstorrent_pcie_generation",
-                            &base_labels,
-                            generation,
-                        );
-                }
-            }
+        if let Some(pcie_gen) = info.detail.get("pcie_link_gen")
+            && let Some(gen_str) = pcie_gen.strip_prefix("Gen")
+            && let Some(generation) = CommonNpuExporter::parse_numeric_value(gen_str)
+        {
+            builder
+                .help("all_smi_tenstorrent_pcie_generation", "PCIe generation")
+                .type_("all_smi_tenstorrent_pcie_generation", "gauge")
+                .metric(
+                    "all_smi_tenstorrent_pcie_generation",
+                    &base_labels,
+                    generation,
+                );
         }
 
         // PCIe width
-        if let Some(pcie_width) = info.detail.get("pcie_link_width") {
-            if let Some(width_str) = pcie_width.strip_prefix("x") {
-                if let Some(width) = CommonNpuExporter::parse_numeric_value(width_str) {
-                    builder
-                        .help("all_smi_tenstorrent_pcie_width", "PCIe link width")
-                        .type_("all_smi_tenstorrent_pcie_width", "gauge")
-                        .metric("all_smi_tenstorrent_pcie_width", &base_labels, width);
-                }
-            }
+        if let Some(pcie_width) = info.detail.get("pcie_link_width")
+            && let Some(width_str) = pcie_width.strip_prefix("x")
+            && let Some(width) = CommonNpuExporter::parse_numeric_value(width_str)
+        {
+            builder
+                .help("all_smi_tenstorrent_pcie_width", "PCIe link width")
+                .type_("all_smi_tenstorrent_pcie_width", "gauge")
+                .metric("all_smi_tenstorrent_pcie_width", &base_labels, width);
         }
 
         // DRAM speed

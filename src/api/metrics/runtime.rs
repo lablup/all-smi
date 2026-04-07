@@ -48,16 +48,16 @@ impl<'a> MetricExporter for RuntimeMetricExporter<'a> {
             ));
 
             // Additional Kubernetes-specific metrics
-            if let crate::utils::ContainerRuntime::Kubernetes = self.runtime_env.container.runtime {
-                if let Some(pod_name) = &self.runtime_env.container.pod_name {
-                    output.push_str(&format!(
+            if let crate::utils::ContainerRuntime::Kubernetes = self.runtime_env.container.runtime
+                && let Some(pod_name) = &self.runtime_env.container.pod_name
+            {
+                output.push_str(&format!(
                         "# HELP all_smi_kubernetes_pod_info Kubernetes pod information\n\
                          # TYPE all_smi_kubernetes_pod_info gauge\n\
                          all_smi_kubernetes_pod_info{{hostname=\"{}\",pod_name=\"{pod_name}\",namespace=\"{}\"}} 1\n",
                         self.hostname,
                         self.runtime_env.container.namespace.as_deref().unwrap_or("default")
                     ));
-                }
             }
         }
 

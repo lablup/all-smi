@@ -12,13 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::device::GpuReader;
 use crate::device::readers::common_cache::{DetailBuilder, DeviceStaticInfo};
 use crate::device::types::{GpuInfo, ProcessInfo};
-use crate::device::GpuReader;
 use crate::utils::get_hostname;
 use chrono::Local;
+use libamdgpu_top::AMDGPU::{DeviceHandle, GPU_INFO, GpuMetrics, MetricsInfo};
 use libamdgpu_top::stat::{self, FdInfoStat, ProcInfo};
-use libamdgpu_top::AMDGPU::{DeviceHandle, GpuMetrics, MetricsInfo, GPU_INFO};
 use libamdgpu_top::{AppDeviceInfo, DevicePath, VramUsage};
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
@@ -463,15 +463,15 @@ impl GpuReader for AmdGpuReader {
                         power_consumption = watts.clamp(0.0, MAX_GPU_POWER_WATTS);
                     }
                 }
-                if temperature == 0 {
-                    if let Some(ref t) = s.edge_temp {
-                        temperature = (t.current as u32).min(MAX_GPU_TEMP_CELSIUS);
-                    }
+                if temperature == 0
+                    && let Some(ref t) = s.edge_temp
+                {
+                    temperature = (t.current as u32).min(MAX_GPU_TEMP_CELSIUS);
                 }
-                if frequency == 0 {
-                    if let Some(clk) = s.sclk {
-                        frequency = clk.min(MAX_GPU_FREQ_MHZ);
-                    }
+                if frequency == 0
+                    && let Some(clk) = s.sclk
+                {
+                    frequency = clk.min(MAX_GPU_FREQ_MHZ);
                 }
             }
 

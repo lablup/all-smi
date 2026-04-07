@@ -23,8 +23,8 @@
 #![allow(unused)]
 
 use once_cell::sync::OnceCell;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::sync::Mutex;
 use tonic::transport::{Channel, Endpoint};
@@ -37,8 +37,8 @@ pub mod tpu_proto {
     tonic::include_proto!("tpu.monitoring.runtime");
 }
 
-use tpu_proto::runtime_metric_service_client::RuntimeMetricServiceClient;
 use tpu_proto::MetricRequest;
+use tpu_proto::runtime_metric_service_client::RuntimeMetricServiceClient;
 
 /// Default gRPC server address for libtpu metrics
 const DEFAULT_GRPC_ADDR: &str = "http://localhost:8431";
@@ -350,17 +350,17 @@ fn extract_device_ordinal(attr: &tpu_proto::Attribute) -> Option<i64> {
     };
 
     for kv_attr in &kvlist.attributes {
-        if kv_attr.key == "device_ordinal" {
-            if let Some(ref val) = kv_attr.value {
-                match &val.attr {
-                    Some(tpu_proto::attr_value::Attr::StringAttr(s)) => {
-                        return s.parse().ok();
-                    }
-                    Some(tpu_proto::attr_value::Attr::IntAttr(i)) => {
-                        return Some(*i);
-                    }
-                    _ => {}
+        if kv_attr.key == "device_ordinal"
+            && let Some(ref val) = kv_attr.value
+        {
+            match &val.attr {
+                Some(tpu_proto::attr_value::Attr::StringAttr(s)) => {
+                    return s.parse().ok();
                 }
+                Some(tpu_proto::attr_value::Attr::IntAttr(i)) => {
+                    return Some(*i);
+                }
+                _ => {}
             }
         }
     }

@@ -117,12 +117,11 @@ impl RemoteCollector {
         // Update connection status for each received status
         for mut status in connection_statuses {
             // Preserve actual_hostname from previous successful connection if current doesn't have it
-            if status.actual_hostname.is_none() {
-                if let Some(existing_status) = state.connection_status.get(&status.host_id) {
-                    if let Some(existing_hostname) = &existing_status.actual_hostname {
-                        status.actual_hostname = Some(existing_hostname.clone());
-                    }
-                }
+            if status.actual_hostname.is_none()
+                && let Some(existing_status) = state.connection_status.get(&status.host_id)
+                && let Some(existing_hostname) = &existing_status.actual_hostname
+            {
+                status.actual_hostname = Some(existing_hostname.clone());
             }
 
             // Update the reverse lookup map if we have an actual hostname
