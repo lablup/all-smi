@@ -148,39 +148,43 @@ impl LocalCollector {
 
         // Store the readers in self using RwLock with timeout
         {
-            if let Ok(mut gpu_lock) =
-                timeout(Duration::from_secs(2), self.gpu_readers.write()).await
-            {
-                *gpu_lock = gpu_readers;
-            } else {
-                eprintln!("Warning: Timeout acquiring GPU readers lock");
+            match timeout(Duration::from_secs(2), self.gpu_readers.write()).await {
+                Ok(mut gpu_lock) => {
+                    *gpu_lock = gpu_readers;
+                }
+                _ => {
+                    eprintln!("Warning: Timeout acquiring GPU readers lock");
+                }
             }
         }
         {
-            if let Ok(mut cpu_lock) =
-                timeout(Duration::from_secs(2), self.cpu_readers.write()).await
-            {
-                *cpu_lock = cpu_readers;
-            } else {
-                eprintln!("Warning: Timeout acquiring CPU readers lock");
+            match timeout(Duration::from_secs(2), self.cpu_readers.write()).await {
+                Ok(mut cpu_lock) => {
+                    *cpu_lock = cpu_readers;
+                }
+                _ => {
+                    eprintln!("Warning: Timeout acquiring CPU readers lock");
+                }
             }
         }
         {
-            if let Ok(mut mem_lock) =
-                timeout(Duration::from_secs(2), self.memory_readers.write()).await
-            {
-                *mem_lock = memory_readers;
-            } else {
-                eprintln!("Warning: Timeout acquiring memory readers lock");
+            match timeout(Duration::from_secs(2), self.memory_readers.write()).await {
+                Ok(mut mem_lock) => {
+                    *mem_lock = memory_readers;
+                }
+                _ => {
+                    eprintln!("Warning: Timeout acquiring memory readers lock");
+                }
             }
         }
         {
-            if let Ok(mut chassis_lock) =
-                timeout(Duration::from_secs(2), self.chassis_reader.write()).await
-            {
-                *chassis_lock = Some(chassis_reader);
-            } else {
-                eprintln!("Warning: Timeout acquiring chassis reader lock");
+            match timeout(Duration::from_secs(2), self.chassis_reader.write()).await {
+                Ok(mut chassis_lock) => {
+                    *chassis_lock = Some(chassis_reader);
+                }
+                _ => {
+                    eprintln!("Warning: Timeout acquiring chassis reader lock");
+                }
             }
         }
 

@@ -123,11 +123,14 @@ async fn main() {
             // Initialize hlsmi manager for Intel Gaudi on Linux
             #[cfg(target_os = "linux")]
             if has_gaudi() {
-                if let Err(e) = initialize_hlsmi_manager(args.interval) {
-                    eprintln!("Warning: Failed to initialize hlsmi manager: {e}");
-                } else {
-                    use std::sync::atomic::Ordering;
-                    HLSMI_INITIALIZED.store(true, Ordering::Relaxed);
+                match initialize_hlsmi_manager(args.interval) {
+                    Err(e) => {
+                        eprintln!("Warning: Failed to initialize hlsmi manager: {e}");
+                    }
+                    _ => {
+                        use std::sync::atomic::Ordering;
+                        HLSMI_INITIALIZED.store(true, Ordering::Relaxed);
+                    }
                 }
             }
 
@@ -154,10 +157,11 @@ async fn main() {
             #[cfg(target_os = "linux")]
             if has_gaudi() {
                 let interval = args.interval.unwrap_or(2);
-                std::thread::spawn(move || {
-                    if let Err(e) = initialize_hlsmi_manager(interval) {
+                std::thread::spawn(move || match initialize_hlsmi_manager(interval) {
+                    Err(e) => {
                         eprintln!("Warning: Failed to initialize hlsmi manager: {e}");
-                    } else {
+                    }
+                    _ => {
                         use std::sync::atomic::Ordering;
                         HLSMI_INITIALIZED.store(true, Ordering::Relaxed);
                     }
@@ -232,10 +236,11 @@ async fn main() {
                 // Initialize hlsmi manager for Intel Gaudi on Linux
                 #[cfg(target_os = "linux")]
                 if has_gaudi() {
-                    std::thread::spawn(|| {
-                        if let Err(e) = initialize_hlsmi_manager(2) {
+                    std::thread::spawn(|| match initialize_hlsmi_manager(2) {
+                        Err(e) => {
                             eprintln!("Warning: Failed to initialize hlsmi manager: {e}");
-                        } else {
+                        }
+                        _ => {
                             use std::sync::atomic::Ordering;
                             HLSMI_INITIALIZED.store(true, Ordering::Relaxed);
                         }

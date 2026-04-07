@@ -54,7 +54,7 @@ impl MemoryReader for LinuxMemoryReader {
         let mut memory_info = Vec::new();
 
         // Check if we're in a container and have memory limits
-        if let Some(ref container_info) = self.container_info {
+        if let Some(container_info) = self.container_info {
             if let Some((total, used, utilization)) = container_info.get_memory_stats() {
                 // Use container memory limits
                 let hostname = get_hostname();

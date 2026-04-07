@@ -146,10 +146,13 @@ impl TenstorrentReader {
     /// Invalidate cache to force re-detection on next access
     #[allow(dead_code)]
     pub fn invalidate_cache() {
-        if let Ok(mut chips_guard) = INITIALIZED_CHIPS.lock() {
-            *chips_guard = None;
-        } else {
-            eprintln!("Failed to acquire lock to invalidate Tenstorrent cache");
+        match INITIALIZED_CHIPS.lock() {
+            Ok(mut chips_guard) => {
+                *chips_guard = None;
+            }
+            _ => {
+                eprintln!("Failed to acquire lock to invalidate Tenstorrent cache");
+            }
         }
     }
 

@@ -294,36 +294,38 @@ fn scan_python_dirs_for_libtpu(base_dir: &std::path::Path) -> Option<LibTpu> {
 
 #[cfg(target_os = "linux")]
 unsafe fn try_load_library(path: &str) -> Option<LibTpu> {
-    debug!("PJRT: Trying to load library at: {}", path);
-    let lib = match Library::new(path) {
-        Ok(l) => {
-            debug!("PJRT: Successfully loaded library: {}", path);
-            l
-        }
-        Err(e) => {
-            debug!("PJRT: Failed to load library: {} - Error: {}", path, e);
+    unsafe {
+        debug!("PJRT: Trying to load library at: {}", path);
+        let lib = match Library::new(path) {
+            Ok(l) => {
+                debug!("PJRT: Successfully loaded library: {}", path);
+                l
+            }
+            Err(e) => {
+                debug!("PJRT: Failed to load library: {} - Error: {}", path, e);
+                return None;
+            }
+        };
+
+        // Get the API table
+        let get_api_sym: Symbol<unsafe extern "C" fn() -> *const PJRT_Api> = lib
+            .get(b"GetPjrtApi\0")
+            .ok()
+            .or_else(|| lib.get(b"PJRT_GetApi\0").ok())?;
+
+        let api = get_api_sym();
+        if api.is_null() {
             return None;
         }
-    };
 
-    // Get the API table
-    let get_api_sym: Symbol<unsafe extern "C" fn() -> *const PJRT_Api> = lib
-        .get(b"GetPjrtApi\0")
-        .ok()
-        .or_else(|| lib.get(b"PJRT_GetApi\0").ok())?;
+        // Basic sanity check: struct_size should be reasonable
+        let struct_size = (*api).struct_size;
+        if !(128..=10000).contains(&struct_size) {
+            return None;
+        }
 
-    let api = get_api_sym();
-    if api.is_null() {
-        return None;
+        Some(LibTpu { _library: lib, api })
     }
-
-    // Basic sanity check: struct_size should be reasonable
-    let struct_size = (*api).struct_size;
-    if !(128..=10000).contains(&struct_size) {
-        return None;
-    }
-
-    Some(LibTpu { _library: lib, api })
 }
 
 // --- Metrics Retrieval ---
@@ -342,22 +344,25 @@ pub fn initialize_in_background() {
 
         let mut status = STATUS_MESSAGE.lock().unwrap();
         if let Some(mutex) = client_opt {
-            if let Ok(guard) = mutex.lock() {
-                if guard.is_some() {
-                    *status = "Ready".to_string();
-                    debug!("PJRT: Initialization successful.");
-                } else {
-                    // Client creation failed or was skipped, but check if lib is loaded
-                    if is_libtpu_available() {
-                        *status = "Ready (Sysfs/Limited)".to_string();
-                        debug!("PJRT: Client creation skipped, running in limited mode.");
+            match mutex.lock() {
+                Ok(guard) => {
+                    if guard.is_some() {
+                        *status = "Ready".to_string();
+                        debug!("PJRT: Initialization successful.");
                     } else {
-                        *status = "TPU runtime initialization failed (Check logs)".to_string();
-                        debug!("PJRT: Initialization failed.");
+                        // Client creation failed or was skipped, but check if lib is loaded
+                        if is_libtpu_available() {
+                            *status = "Ready (Sysfs/Limited)".to_string();
+                            debug!("PJRT: Client creation skipped, running in limited mode.");
+                        } else {
+                            *status = "TPU runtime initialization failed (Check logs)".to_string();
+                            debug!("PJRT: Initialization failed.");
+                        }
                     }
                 }
-            } else {
-                *status = "TPU runtime error".to_string();
+                _ => {
+                    *status = "TPU runtime error".to_string();
+                }
             }
         } else {
             // This case shouldn't happen with get_or_init unless panic

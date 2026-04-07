@@ -325,16 +325,19 @@ pub async fn is_grpc_server_available() -> bool {
 /// Uses the tokio runtime to run the async function
 pub fn get_tpu_metrics_grpc_sync() -> Option<Vec<TpuUsageMetrics>> {
     // Try to get the current tokio runtime handle
-    if let Ok(handle) = tokio::runtime::Handle::try_current() {
-        // We're in an async context, use block_in_place
-        tokio::task::block_in_place(|| handle.block_on(get_tpu_metrics_grpc()))
-    } else {
-        // No runtime available, create a temporary one
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .ok()?;
-        rt.block_on(get_tpu_metrics_grpc())
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => {
+            // We're in an async context, use block_in_place
+            tokio::task::block_in_place(|| handle.block_on(get_tpu_metrics_grpc()))
+        }
+        _ => {
+            // No runtime available, create a temporary one
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .ok()?;
+            rt.block_on(get_tpu_metrics_grpc())
+        }
     }
 }
 
@@ -559,27 +562,29 @@ pub async fn get_hlo_execution_timing() -> Option<Vec<HloExecutionTiming>> {
 
 /// Synchronous wrapper for get_hlo_queue_size
 pub fn get_hlo_queue_size_sync() -> Option<Vec<HloQueueSize>> {
-    if let Ok(handle) = tokio::runtime::Handle::try_current() {
-        tokio::task::block_in_place(|| handle.block_on(get_hlo_queue_size()))
-    } else {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .ok()?;
-        rt.block_on(get_hlo_queue_size())
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => tokio::task::block_in_place(|| handle.block_on(get_hlo_queue_size())),
+        _ => {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .ok()?;
+            rt.block_on(get_hlo_queue_size())
+        }
     }
 }
 
 /// Synchronous wrapper for get_hlo_execution_timing
 pub fn get_hlo_execution_timing_sync() -> Option<Vec<HloExecutionTiming>> {
-    if let Ok(handle) = tokio::runtime::Handle::try_current() {
-        tokio::task::block_in_place(|| handle.block_on(get_hlo_execution_timing()))
-    } else {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .ok()?;
-        rt.block_on(get_hlo_execution_timing())
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => tokio::task::block_in_place(|| handle.block_on(get_hlo_execution_timing())),
+        _ => {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .ok()?;
+            rt.block_on(get_hlo_execution_timing())
+        }
     }
 }
 

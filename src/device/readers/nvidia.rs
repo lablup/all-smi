@@ -269,10 +269,9 @@ pub fn get_nvml_status() -> Option<String> {
 #[allow(dead_code)]
 pub fn get_nvml_status_message() -> Option<String> {
     // Only return the stored status, don't try to initialize NVML here
-    if let Ok(status) = NVML_STATUS.lock() {
-        status.clone()
-    } else {
-        None
+    match NVML_STATUS.lock() {
+        Ok(status) => status.clone(),
+        _ => None,
     }
 }
 
@@ -382,7 +381,7 @@ fn create_base_process_info(
 
 // Macros to reduce boilerplate
 macro_rules! add_detail {
-    ($detail:expr, $result:expr, $key:expr) => {
+    ($detail:expr_2021, $result:expr_2021, $key:expr_2021) => {
         if let Ok(value) = $result {
             $detail.insert($key.to_string(), format!("{value:?}"));
         }
@@ -390,7 +389,7 @@ macro_rules! add_detail {
 }
 
 macro_rules! add_detail_fmt {
-    ($detail:expr, $result:expr, $key:expr, $fmt:expr) => {
+    ($detail:expr_2021, $result:expr_2021, $key:expr_2021, $fmt:expr_2021) => {
         if let Ok(value) = $result {
             $detail.insert($key.to_string(), format!($fmt, value));
         }

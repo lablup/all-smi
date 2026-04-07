@@ -84,7 +84,7 @@ impl ErrorHandler {
 /// Macro for simplified error handling with context
 #[macro_export]
 macro_rules! handle_error {
-    ($result:expr, $context:expr) => {
+    ($result:expr_2021, $context:expr_2021) => {
         match $result {
             Ok(val) => val,
             Err(err) => return Err(AppError::from(format!("{}: {}", $context, err))),
@@ -95,7 +95,7 @@ macro_rules! handle_error {
 /// Macro for logging errors and using default values
 #[macro_export]
 macro_rules! log_error_default {
-    ($result:expr, $context:expr) => {
+    ($result:expr_2021, $context:expr_2021) => {
         match $result {
             Ok(val) => val,
             Err(err) => {
@@ -109,7 +109,7 @@ macro_rules! log_error_default {
 /// Macro for logging errors and using provided default
 #[macro_export]
 macro_rules! log_error_return {
-    ($result:expr, $context:expr, $default:expr) => {
+    ($result:expr_2021, $context:expr_2021, $default:expr_2021) => {
         match $result {
             Ok(val) => val,
             Err(err) => {

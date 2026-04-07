@@ -602,7 +602,7 @@ fn check_aws_metadata() -> bool {
     }
 
     // Try to access AWS metadata service with very short timeout
-    if let Ok(output) = Command::new("curl")
+    match Command::new("curl")
         .args([
             "-s",
             "--max-time",
@@ -613,9 +613,8 @@ fn check_aws_metadata() -> bool {
         ])
         .output()
     {
-        output.status.success() && !output.stdout.is_empty()
-    } else {
-        false
+        Ok(output) => output.status.success() && !output.stdout.is_empty(),
+        _ => false,
     }
 }
 
