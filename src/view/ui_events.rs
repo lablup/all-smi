@@ -140,12 +140,24 @@ impl UiEventCoordinator {
         }
     }
 
-    /// Set whether animation ticks should fire.
+    /// Set whether fast animation ticks should fire.
     ///
-    /// When `active` is false the animation interval is effectively paused:
-    /// `next_event()` will not return `AnimationTick` variants.
+    /// When `active` is true, ticks fire at `ANIMATION_TICK_MS` (200ms) for
+    /// smooth marquee and loading animations. When false, ticks fire at
+    /// `REFRESH_TICK_MS` (1s) for clock updates and periodic refresh.
+    /// The tick is never fully disabled so the display stays alive.
     pub fn set_animations_active(&mut self, active: bool) {
-        self.animations_active = active;
+        if active != self.animations_active {
+            self.animations_active = active;
+            let new_period = if active {
+                Duration::from_millis(AppConfig::ANIMATION_TICK_MS)
+            } else {
+                Duration::from_millis(AppConfig::REFRESH_TICK_MS)
+            };
+            self.animation_interval = tokio::time::interval(new_period);
+            self.animation_interval
+                .set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        }
     }
 
     /// Wait for the next UI event from any source.
@@ -174,8 +186,8 @@ impl UiEventCoordinator {
                 UiEvent::DataReady
             }
 
-            // Branch 3: animation tick (only when active)
-            _ = self.animation_interval.tick(), if self.animations_active => {
+            // Branch 3: periodic tick (fast for animations, slow for clock-only refresh)
+            _ = self.animation_interval.tick() => {
                 UiEvent::AnimationTick
             }
         }

@@ -26,8 +26,10 @@ impl AppConfig {
     pub const SCROLL_UPDATE_FREQUENCY: u64 = 1; // Every N frames for text scrolling (1 = every 100ms at 10 FPS)
 
     // Event-driven UI constants
-    /// Animation tick interval in milliseconds (loading indicator, marquee scroll, clock)
+    /// Animation tick interval in milliseconds (loading indicator, marquee scroll)
     pub const ANIMATION_TICK_MS: u64 = 200;
+    /// Refresh tick interval when no animations are active (clock update only)
+    pub const REFRESH_TICK_MS: u64 = 1000;
     /// Poll timeout for the dedicated terminal reader task (ms).
     /// Short enough to detect shutdown promptly, long enough to avoid busy-spinning.
     pub const TERMINAL_READER_POLL_MS: u64 = 50;

@@ -113,6 +113,7 @@ impl UiLoop {
 
         // Track whether we need to render after processing events
         let mut needs_render = true; // Render once at startup
+        let mut tick_fired = false; // Whether an animation/refresh tick triggered this iteration
 
         loop {
             // Check hl-smi initialization on Linux (periodic check for performance)
@@ -121,6 +122,7 @@ impl UiLoop {
 
             // If nothing needs rendering, wait for the next event (fully async sleep)
             if !needs_render {
+                tick_fired = false;
                 match self.event_coordinator.next_event().await {
                     UiEvent::TerminalInput(Event::Key(key_event)) => {
                         let mut state = self.app_state.lock().await;
@@ -163,6 +165,7 @@ impl UiLoop {
                     }
                     UiEvent::AnimationTick => {
                         needs_render = true;
+                        tick_fired = true;
                     }
                 }
             }
@@ -212,11 +215,11 @@ impl UiLoop {
 
                 // User-driven scroll/cursor changes render immediately (no throttle)
                 // so that keyboard navigation feels responsive.
-                // Data-driven updates are still throttled to MIN_RENDER_INTERVAL_MS.
+                // Data-driven updates and periodic ticks are throttled to MIN_RENDER_INTERVAL_MS.
                 let should_render = force_clear
                     || self.resize_occurred
                     || scroll_changed
-                    || (time_to_render && data_changed);
+                    || (time_to_render && (data_changed || tick_fired));
 
                 // Update scroll offsets for long text (marquee animation)
                 if time_to_render {
