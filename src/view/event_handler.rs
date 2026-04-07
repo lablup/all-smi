@@ -20,6 +20,18 @@ use crossterm::{
 use crate::app_state::{AppState, SortCriteria};
 use crate::cli::ViewArgs;
 
+/// Get the actual number of visible process rows from the last rendered frame.
+/// Falls back to a conservative estimate if the renderer hasn't set it yet.
+fn get_visible_process_rows(state: &AppState) -> usize {
+    if state.visible_process_rows > 0 {
+        state.visible_process_rows
+    } else {
+        // Fallback for the first frame before rendering has set the value
+        let (_cols, rows) = size().unwrap_or((80, 24));
+        (rows / 2).saturating_sub(1) as usize
+    }
+}
+
 pub async fn handle_key_event(key_event: KeyEvent, state: &mut AppState, args: &ViewArgs) -> bool {
     match key_event.code {
         KeyCode::Esc => {
@@ -220,11 +232,9 @@ fn handle_down_arrow(state: &mut AppState, args: &ViewArgs) {
         {
             state.selected_process_index += 1;
         }
-        let (_cols, rows) = size().unwrap();
-        let half_rows = rows / 2;
-        let visible_process_rows = half_rows.saturating_sub(1) as usize;
-        if state.selected_process_index >= state.start_index + visible_process_rows {
-            state.start_index = state.selected_process_index - visible_process_rows + 1;
+        let visible = get_visible_process_rows(state);
+        if visible > 0 && state.selected_process_index >= state.start_index + visible {
+            state.start_index = state.selected_process_index - visible + 1;
         }
     }
 }
@@ -263,9 +273,7 @@ fn handle_page_up(state: &mut AppState, args: &ViewArgs) {
         state.storage_scroll_offset = 0; // Reset storage scroll when paging GPU list
     } else {
         // Local mode - page up through process list
-        let (_cols, rows) = size().unwrap();
-        let half_rows = rows / 2;
-        let page_size = half_rows.saturating_sub(1) as usize;
+        let page_size = get_visible_process_rows(state).max(1);
         state.selected_process_index = state.selected_process_index.saturating_sub(page_size);
         if state.selected_process_index < state.start_index {
             state.start_index = state.selected_process_index;
@@ -322,14 +330,12 @@ fn handle_page_down(state: &mut AppState, args: &ViewArgs) {
     } else {
         // Local mode - page down through process list
         if !state.process_info.is_empty() {
-            let (_cols, rows) = size().unwrap();
-            let half_rows = rows / 2;
-            let page_size = half_rows.saturating_sub(1) as usize;
+            let visible = get_visible_process_rows(state);
+            let page_size = visible.max(1);
             state.selected_process_index =
                 (state.selected_process_index + page_size).min(state.process_info.len() - 1);
-            let visible_process_rows = half_rows.saturating_sub(1) as usize;
-            if state.selected_process_index >= state.start_index + visible_process_rows {
-                state.start_index = state.selected_process_index - visible_process_rows + 1;
+            if visible > 0 && state.selected_process_index >= state.start_index + visible {
+                state.start_index = state.selected_process_index - visible + 1;
             }
         }
     }

@@ -80,13 +80,18 @@ impl FrameRenderer {
     ///
     /// When a `ViewCache` is provided, pre-computed sorted/filtered indices
     /// are used instead of re-sorting and re-filtering on every frame.
+    /// Render the main TUI view.
+    ///
+    /// Returns `(content, visible_process_rows)` where `visible_process_rows`
+    /// is the actual number of process rows that fit on screen. The caller
+    /// should store this value so the event handler can scroll correctly.
     pub fn render_main(
         snapshot: &RenderSnapshot,
         args: &ViewArgs,
         cols: u16,
         rows: u16,
         cache: Option<&ViewCache>,
-    ) -> String {
+    ) -> (String, usize) {
         let width = cols as usize;
         let mut buffer = BufferWriter::new();
 
@@ -162,16 +167,17 @@ impl FrameRenderer {
         Self::render_gpu_section(&mut buffer, snapshot, &view_state, args, cols, rows, cache);
 
         // Render other device information based on mode
-        if is_remote {
+        let visible_process_rows = if is_remote {
             Self::render_remote_devices(&mut buffer, snapshot, width, cache);
+            0
         } else {
-            Self::render_local_devices(&mut buffer, snapshot, cols, rows, cache);
-        }
+            Self::render_local_devices(&mut buffer, snapshot, cols, rows, cache)
+        };
 
         // Add function keys to main content view
         print_function_keys(&mut buffer, cols, rows, &view_state, is_remote);
 
-        buffer.get_buffer().to_string()
+        (buffer.get_buffer().to_string(), visible_process_rows)
     }
 
     fn render_gpu_section(
@@ -514,13 +520,14 @@ impl FrameRenderer {
         writeln!(buffer).unwrap();
     }
 
+    /// Returns the number of visible process rows for event handler scroll calculation.
     fn render_local_devices(
         buffer: &mut BufferWriter,
         snapshot: &RenderSnapshot,
         cols: u16,
         rows: u16,
         cache: Option<&ViewCache>,
-    ) {
+    ) -> usize {
         let width = cols as usize;
 
         // CPU information for local mode
@@ -578,6 +585,11 @@ impl FrameRenderer {
 
             let available_rows = rows.saturating_sub(lines_used as u16 + 1 + function_key_rows);
 
+            // Calculate actual visible process rows (must match process_renderer logic)
+            // RESERVED_HEADER_ROWS = 4 ("Processes:" title, column header, separator, blank)
+            // footer_rows = 2 ("Showing..." + "Active..." stats)
+            let visible = (available_rows as usize).saturating_sub(4 + 2);
+
             // Get current user for process coloring
             let current_user = whoami::username().unwrap_or_default();
 
@@ -615,7 +627,10 @@ impl FrameRenderer {
                 &snapshot.sort_criteria,
                 &snapshot.sort_direction,
             );
+
+            return visible;
         }
+        0
     }
 }
 
@@ -687,7 +702,7 @@ mod tests {
     fn test_render_main_does_not_panic_empty_state() {
         let snapshot = make_snapshot();
         let args = make_local_args();
-        let output = FrameRenderer::render_main(&snapshot, &args, 80, 24, None);
+        let (output, _) = FrameRenderer::render_main(&snapshot, &args, 80, 24, None);
         // Header must be present.
         assert!(output.contains("all-smi"));
     }
@@ -696,7 +711,7 @@ mod tests {
     fn test_render_main_contains_header_timestamp() {
         let snapshot = make_snapshot();
         let args = make_local_args();
-        let output = FrameRenderer::render_main(&snapshot, &args, 120, 40, None);
+        let (output, _) = FrameRenderer::render_main(&snapshot, &args, 120, 40, None);
         // The header includes the current year which is deterministic for the test run.
         assert!(output.contains("all-smi - 20"));
     }
@@ -705,7 +720,7 @@ mod tests {
     fn test_render_main_contains_version() {
         let snapshot = make_snapshot();
         let args = make_local_args();
-        let output = FrameRenderer::render_main(&snapshot, &args, 80, 24, None);
+        let (output, _) = FrameRenderer::render_main(&snapshot, &args, 80, 24, None);
         let version = env!("CARGO_PKG_VERSION");
         assert!(output.contains(version));
     }

@@ -283,14 +283,23 @@ impl UiLoop {
             self.view_cache.update(&snapshot);
 
             // Assemble frame content from the snapshot (no lock held)
-            let content = if snapshot.show_help {
-                FrameRenderer::render_help(&snapshot, args, cols, rows)
+            let (content, visible_process_rows) = if snapshot.show_help {
+                (FrameRenderer::render_help(&snapshot, args, cols, rows), 0)
             } else if snapshot.loading {
                 let is_remote = args.hosts.is_some() || args.hostfile.is_some();
-                FrameRenderer::render_loading(&snapshot, is_remote, cols, rows)
+                (
+                    FrameRenderer::render_loading(&snapshot, is_remote, cols, rows),
+                    0,
+                )
             } else {
                 FrameRenderer::render_main(&snapshot, args, cols, rows, Some(&self.view_cache))
             };
+
+            // Store actual visible process rows so the event handler scrolls correctly
+            if visible_process_rows > 0 {
+                let mut state = self.app_state.lock().await;
+                state.visible_process_rows = visible_process_rows;
+            }
 
             // Use differential rendering to update only changed lines.
             // Terminal dimensions are passed in to avoid a redundant size() syscall.

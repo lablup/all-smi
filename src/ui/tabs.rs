@@ -233,6 +233,7 @@ mod tests {
             runtime_environment: crate::utils::RuntimeEnvironment::detect(),
             data_version: 0,
             gpu_filter_enabled: false,
+            visible_process_rows: 0,
         }
     }
 

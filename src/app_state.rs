@@ -124,6 +124,9 @@ pub struct AppState {
     pub data_version: u64,
     /// Filter to show only GPU processes (processes with used_memory > 0)
     pub gpu_filter_enabled: bool,
+    /// Actual number of visible process rows in the last rendered frame.
+    /// Updated by the renderer so the event handler can scroll correctly.
+    pub visible_process_rows: usize,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -216,6 +219,7 @@ impl AppState {
             runtime_environment: RuntimeEnvironment::detect(),
             data_version: 0,
             gpu_filter_enabled: false, // GPU filter disabled by default
+            visible_process_rows: 0,
         }
     }
 
