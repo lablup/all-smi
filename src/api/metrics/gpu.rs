@@ -223,11 +223,11 @@ impl<'a> GpuMetricExporter<'a> {
 
         // PCIe metrics
         if let Some(pcie_gen) = info.detail.get("pcie_gen_current") {
-            if let Ok(gen) = pcie_gen.parse::<f64>() {
+            if let Ok(pcie_gen_value) = pcie_gen.parse::<f64>() {
                 builder
                     .help("all_smi_gpu_pcie_gen_current", "Current PCIe generation")
                     .type_("all_smi_gpu_pcie_gen_current", "gauge")
-                    .metric("all_smi_gpu_pcie_gen_current", &base_labels, gen);
+                    .metric("all_smi_gpu_pcie_gen_current", &base_labels, pcie_gen_value);
             }
         }
 

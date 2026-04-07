@@ -212,28 +212,28 @@ impl AmdGpuReader {
                     if let Some(link) = app_device_info.max_gpu_link {
                         detail.insert(
                             "Max GPU Link".to_string(),
-                            format!("Gen{} x{}", link.gen, link.width),
+                            format!("Gen{} x{}", link.r#gen, link.width),
                         );
                     }
 
                     if let Some(link) = app_device_info.max_system_link {
                         detail.insert(
                             "Max System Link".to_string(),
-                            format!("Gen{} x{}", link.gen, link.width),
+                            format!("Gen{} x{}", link.r#gen, link.width),
                         );
                     }
 
                     if let Some(min_dpm_link) = app_device_info.min_dpm_link {
                         detail.insert(
                             "Min DPM Link".to_string(),
-                            format!("Gen{} x{}", min_dpm_link.gen, min_dpm_link.width),
+                            format!("Gen{} x{}", min_dpm_link.r#gen, min_dpm_link.width),
                         );
                     }
 
                     if let Some(max_dpm_link) = app_device_info.max_dpm_link {
                         detail.insert(
                             "Max DPM Link".to_string(),
-                            format!("Gen{} x{}", max_dpm_link.gen, max_dpm_link.width),
+                            format!("Gen{} x{}", max_dpm_link.r#gen, max_dpm_link.width),
                         );
                     }
 
@@ -411,7 +411,7 @@ impl GpuReader for AmdGpuReader {
                 if let Some(link) = sensors.current_link {
                     detail.insert(
                         "Current Link".to_string(),
-                        format!("Gen{} x{}", link.gen, link.width),
+                        format!("Gen{} x{}", link.r#gen, link.width),
                     );
                 }
                 if let Some(fan) = sensors.fan_rpm {

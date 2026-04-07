@@ -643,11 +643,15 @@ impl TenstorrentExporter {
         // PCIe generation
         if let Some(pcie_gen) = info.detail.get("pcie_link_gen") {
             if let Some(gen_str) = pcie_gen.strip_prefix("Gen") {
-                if let Some(gen) = CommonNpuExporter::parse_numeric_value(gen_str) {
+                if let Some(generation) = CommonNpuExporter::parse_numeric_value(gen_str) {
                     builder
                         .help("all_smi_tenstorrent_pcie_generation", "PCIe generation")
                         .type_("all_smi_tenstorrent_pcie_generation", "gauge")
-                        .metric("all_smi_tenstorrent_pcie_generation", &base_labels, gen);
+                        .metric(
+                            "all_smi_tenstorrent_pcie_generation",
+                            &base_labels,
+                            generation,
+                        );
                 }
             }
         }
