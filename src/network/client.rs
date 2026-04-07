@@ -327,10 +327,14 @@ impl NetworkClient {
                         request = request.header("Authorization", format!("Bearer {token}"));
                     }
 
-                    match request.send().await {
+                    // Bind the send result to a local variable to ensure
+                    // temporaries are dropped before surrounding locals (Rust 2024 drop order).
+                    let send_result = request.send().await;
+                    match send_result {
                         Ok(response) => {
                             if response.status().is_success() {
-                                match response.text().await {
+                                let text_result = response.text().await;
+                                match text_result {
                                     Ok(text) => return Some((host, text, None)),
                                     Err(e) => {
                                         if attempt == 3 {

@@ -117,7 +117,10 @@ async fn get_channel() -> Option<Channel> {
     }
 
     // Try to create a new channel
-    match create_channel().await {
+    // Bind the result to a local variable to ensure temporaries from
+    // create_channel().await are dropped before the MutexGuard (Rust 2024 drop order).
+    let channel_result = create_channel().await;
+    match channel_result {
         Ok(channel) => {
             *guard = Some(channel.clone());
             Some(channel)
