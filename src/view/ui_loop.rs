@@ -210,9 +210,13 @@ impl UiLoop {
                 let time_to_render = now.duration_since(self.last_render_time).as_millis()
                     >= AppConfig::MIN_RENDER_INTERVAL_MS as u128;
 
+                // User-driven scroll/cursor changes render immediately (no throttle)
+                // so that keyboard navigation feels responsive.
+                // Data-driven updates are still throttled to MIN_RENDER_INTERVAL_MS.
                 let should_render = force_clear
                     || self.resize_occurred
-                    || (time_to_render && (data_changed || scroll_changed));
+                    || scroll_changed
+                    || (time_to_render && data_changed);
 
                 // Update scroll offsets for long text (marquee animation)
                 if time_to_render {
@@ -223,7 +227,7 @@ impl UiLoop {
                     }
                 }
 
-                if !should_render && !time_to_render {
+                if !should_render {
                     needs_render = false;
                     // Lock is dropped here via `state` going out of scope
                     continue;
