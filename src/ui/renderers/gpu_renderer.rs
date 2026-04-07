@@ -99,12 +99,12 @@ pub fn print_gpu_info<W: Write>(
         let scroll_len = info.name.len() + 3;
         let start_pos = device_name_scroll_offset % scroll_len;
         let extended_name = format!("{}   {}", info.name, info.name);
-        let visible_name = extended_name
+
+        extended_name
             .chars()
             .skip(start_pos)
             .take(15)
-            .collect::<String>();
-        visible_name
+            .collect::<String>()
     } else {
         format!("{:<15}", info.name)
     };

@@ -13,16 +13,16 @@
 // limitations under the License.
 
 #[cfg(test)]
-use crate::device::memory_linux::LinuxMemoryReader;
-#[cfg(test)]
 use crate::device::MemoryReader;
+#[cfg(test)]
+use crate::device::memory_linux::LinuxMemoryReader;
 
 #[test]
 fn test_memory_reader_creation() {
     let reader = LinuxMemoryReader::new();
     // Reader should be created successfully
     // Container info is detected during creation
-    if let Some(ref container_info) = reader.container_info {
+    if let Some(container_info) = reader.container_info {
         if container_info.is_container {
             println!("Created memory reader in container environment");
         } else {
@@ -46,7 +46,7 @@ fn test_memory_info_retrieval() {
     assert!(memory_info.total_bytes > 0);
     assert!(memory_info.utilization >= 0.0 && memory_info.utilization <= 100.0);
 
-    if let Some(ref container_info) = reader.container_info {
+    if let Some(container_info) = reader.container_info {
         if container_info.is_container {
             println!("Container memory:");
             println!("  Total: {} MB", memory_info.total_bytes / 1024 / 1024);
@@ -87,7 +87,7 @@ fn test_container_memory_detection() {
 
     // In a real container environment, the reader would report
     // container memory limits instead of host memory
-    if let Some(ref container_info) = reader.container_info {
+    if let Some(container_info) = reader.container_info {
         if container_info.is_container {
             println!("Container memory detected:");
             if let Some(limit) = container_info.memory_limit_bytes {

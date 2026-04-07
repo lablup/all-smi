@@ -366,7 +366,7 @@ impl MockGenerator for AppleSiliconMockGenerator {
         // Generate initial GPU metrics (typically 1 for Apple Silicon)
         let gpus: Vec<GpuMetrics> = (0..config.device_count.min(1))
             .map(|_| {
-                use rand::{rng, RngExt};
+                use rand::{RngExt, rng};
                 let mut rng = rng();
 
                 GpuMetrics {
@@ -384,7 +384,7 @@ impl MockGenerator for AppleSiliconMockGenerator {
             .collect();
 
         // Generate CPU and memory metrics
-        use rand::{rng, RngExt};
+        use rand::{RngExt, rng};
         let mut rng = rng();
         let cpu = CpuMetrics {
             model: "Apple M3 Max".to_string(),

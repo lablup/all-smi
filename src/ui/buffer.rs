@@ -15,9 +15,9 @@
 use crossterm::{
     cursor, queue,
     style::Print,
-    terminal::{size, ClearType},
+    terminal::{ClearType, size},
 };
-use std::io::{stdout, Write};
+use std::io::{Write, stdout};
 
 pub struct BufferWriter {
     buffer: String,

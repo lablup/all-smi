@@ -153,25 +153,25 @@ impl NpuExporter for GoogleTpuExporter {
         }
 
         // 2. Core Counts
-        if let Some(core_count) = info.detail.get("Core Count") {
-            if let Ok(count) = core_count.parse::<f64>() {
-                builder
-                    .help("all_smi_tpu_core_count", "Number of TPU cores")
-                    .type_("all_smi_tpu_core_count", "gauge")
-                    .metric("all_smi_tpu_core_count", &base_labels, count);
-            }
+        if let Some(core_count) = info.detail.get("Core Count")
+            && let Ok(count) = core_count.parse::<f64>()
+        {
+            builder
+                .help("all_smi_tpu_core_count", "Number of TPU cores")
+                .type_("all_smi_tpu_core_count", "gauge")
+                .metric("all_smi_tpu_core_count", &base_labels, count);
         }
 
-        if let Some(tc_count) = info.detail.get("TensorCore Count") {
-            if let Ok(count) = tc_count.parse::<f64>() {
-                builder
-                    .help(
-                        "all_smi_tpu_tensorcore_count",
-                        "Number of TensorCores per chip",
-                    )
-                    .type_("all_smi_tpu_tensorcore_count", "gauge")
-                    .metric("all_smi_tpu_tensorcore_count", &base_labels, count);
-            }
+        if let Some(tc_count) = info.detail.get("TensorCore Count")
+            && let Ok(count) = tc_count.parse::<f64>()
+        {
+            builder
+                .help(
+                    "all_smi_tpu_tensorcore_count",
+                    "Number of TensorCores per chip",
+                )
+                .type_("all_smi_tpu_tensorcore_count", "gauge")
+                .metric("all_smi_tpu_tensorcore_count", &base_labels, count);
         }
 
         // 3. Memory Type
@@ -213,30 +213,30 @@ impl NpuExporter for GoogleTpuExporter {
         // 5. Max Power Limit
         if let Some(max_power_str) = info.detail.get("Max Power") {
             // Format is usually "XXX W"
-            if let Some(val_str) = max_power_str.split_whitespace().next() {
-                if let Ok(val) = val_str.parse::<f64>() {
-                    builder
-                        .help(
-                            "all_smi_tpu_power_max_watts",
-                            "TPU maximum power limit in watts",
-                        )
-                        .type_("all_smi_tpu_power_max_watts", "gauge")
-                        .metric("all_smi_tpu_power_max_watts", &base_labels, val);
-                }
+            if let Some(val_str) = max_power_str.split_whitespace().next()
+                && let Ok(val) = val_str.parse::<f64>()
+            {
+                builder
+                    .help(
+                        "all_smi_tpu_power_max_watts",
+                        "TPU maximum power limit in watts",
+                    )
+                    .type_("all_smi_tpu_power_max_watts", "gauge")
+                    .metric("all_smi_tpu_power_max_watts", &base_labels, val);
             }
         }
 
         // 6. HLO Metrics (Queue Size and Execution Timing)
-        if let Some(q_size_str) = info.detail.get("HLO Queue Size") {
-            if let Ok(val) = q_size_str.parse::<f64>() {
-                builder
-                    .help(
-                        "all_smi_tpu_hlo_queue_size",
-                        "Number of pending HLO programs in the queue",
-                    )
-                    .type_("all_smi_tpu_hlo_queue_size", "gauge")
-                    .metric("all_smi_tpu_hlo_queue_size", &base_labels, val);
-            }
+        if let Some(q_size_str) = info.detail.get("HLO Queue Size")
+            && let Ok(val) = q_size_str.parse::<f64>()
+        {
+            builder
+                .help(
+                    "all_smi_tpu_hlo_queue_size",
+                    "Number of pending HLO programs in the queue",
+                )
+                .type_("all_smi_tpu_hlo_queue_size", "gauge")
+                .metric("all_smi_tpu_hlo_queue_size", &base_labels, val);
         }
 
         let hlo_metrics = [
@@ -270,13 +270,13 @@ impl NpuExporter for GoogleTpuExporter {
         for (detail_key, metric_name, help_text) in hlo_metrics {
             if let Some(val_str) = info.detail.get(detail_key) {
                 // Format is "XXX.X µs"
-                if let Some(v_str) = val_str.split_whitespace().next() {
-                    if let Ok(val) = v_str.parse::<f64>() {
-                        builder
-                            .help(metric_name, help_text)
-                            .type_(metric_name, "gauge")
-                            .metric(metric_name, &base_labels, val);
-                    }
+                if let Some(v_str) = val_str.split_whitespace().next()
+                    && let Ok(val) = v_str.parse::<f64>()
+                {
+                    builder
+                        .help(metric_name, help_text)
+                        .type_(metric_name, "gauge")
+                        .metric(metric_name, &base_labels, val);
                 }
             }
         }

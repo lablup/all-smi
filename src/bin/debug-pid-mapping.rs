@@ -39,62 +39,62 @@ fn main() {
     }
 
     // If a specific PID was provided, try to map it
-    if args.len() > 1 {
-        if let Ok(target_pid) = args[1].parse::<u32>() {
-            println!("\n=== Searching for PID {target_pid} ===");
+    if args.len() > 1
+        && let Ok(target_pid) = args[1].parse::<u32>()
+    {
+        println!("\n=== Searching for PID {target_pid} ===");
 
-            // Strategy 1: Direct check
-            if std::path::Path::new(&format!("/proc/{target_pid}")).exists() {
-                println!("✓ PID {target_pid} exists in current namespace");
-                print_pid_info(target_pid);
-            } else {
-                println!("✗ PID {target_pid} not found in current namespace");
-            }
+        // Strategy 1: Direct check
+        if std::path::Path::new(&format!("/proc/{target_pid}")).exists() {
+            println!("✓ PID {target_pid} exists in current namespace");
+            print_pid_info(target_pid);
+        } else {
+            println!("✗ PID {target_pid} not found in current namespace");
+        }
 
-            // Strategy 2: Check host proc mounts
-            let host_proc_paths = vec!["/host/proc", "/hostproc", "/proc_host"];
-            for host_proc in &host_proc_paths {
-                let status_path = format!("{host_proc}/{target_pid}/status");
-                if let Ok(status) = fs::read_to_string(&status_path) {
-                    println!("\n✓ Found in {host_proc}/");
-                    for line in status.lines() {
-                        if line.starts_with("NSpid:") || line.starts_with("Name:") {
-                            println!("  {line}");
-                        }
+        // Strategy 2: Check host proc mounts
+        let host_proc_paths = vec!["/host/proc", "/hostproc", "/proc_host"];
+        for host_proc in &host_proc_paths {
+            let status_path = format!("{host_proc}/{target_pid}/status");
+            if let Ok(status) = fs::read_to_string(&status_path) {
+                println!("\n✓ Found in {host_proc}/");
+                for line in status.lines() {
+                    if line.starts_with("NSpid:") || line.starts_with("Name:") {
+                        println!("  {line}");
                     }
                 }
             }
+        }
 
-            // Strategy 3: Scan all processes
-            println!("\n=== Scanning all processes for mapping ===");
-            let mut found = false;
-            if let Ok(entries) = fs::read_dir("/proc") {
-                for entry in entries.flatten() {
-                    if let Some(pid_str) = entry.file_name().to_str() {
-                        if let Ok(pid) = pid_str.parse::<u32>() {
-                            if let Ok(status) = fs::read_to_string(format!("/proc/{pid}/status")) {
-                                for line in status.lines() {
-                                    if line.starts_with("NSpid:") {
-                                        let pids: Vec<&str> =
-                                            line.split_whitespace().skip(1).collect();
-                                        // Check if any PID in the list matches our target
-                                        for (i, p) in pids.iter().enumerate() {
-                                            if let Ok(parsed) = p.parse::<u32>() {
-                                                if parsed == target_pid {
-                                                    if !found {
-                                                        println!("\nFound mappings:");
-                                                        found = true;
-                                                    }
-                                                    println!("  Container PID {pid} -> NSpid: {line} (position {i})");
-                                                    // Also show the process name
-                                                    for status_line in status.lines() {
-                                                        if status_line.starts_with("Name:") {
-                                                            println!("    {status_line}");
-                                                            break;
-                                                        }
-                                                    }
-                                                }
-                                            }
+        // Strategy 3: Scan all processes
+        println!("\n=== Scanning all processes for mapping ===");
+        let mut found = false;
+        if let Ok(entries) = fs::read_dir("/proc") {
+            for entry in entries.flatten() {
+                if let Some(pid_str) = entry.file_name().to_str()
+                    && let Ok(pid) = pid_str.parse::<u32>()
+                    && let Ok(status) = fs::read_to_string(format!("/proc/{pid}/status"))
+                {
+                    for line in status.lines() {
+                        if line.starts_with("NSpid:") {
+                            let pids: Vec<&str> = line.split_whitespace().skip(1).collect();
+                            // Check if any PID in the list matches our target
+                            for (i, p) in pids.iter().enumerate() {
+                                if let Ok(parsed) = p.parse::<u32>()
+                                    && parsed == target_pid
+                                {
+                                    if !found {
+                                        println!("\nFound mappings:");
+                                        found = true;
+                                    }
+                                    println!(
+                                        "  Container PID {pid} -> NSpid: {line} (position {i})"
+                                    );
+                                    // Also show the process name
+                                    for status_line in status.lines() {
+                                        if status_line.starts_with("Name:") {
+                                            println!("    {status_line}");
+                                            break;
                                         }
                                     }
                                 }
@@ -103,9 +103,9 @@ fn main() {
                     }
                 }
             }
-            if !found {
-                println!("No mappings found for PID {target_pid}");
-            }
+        }
+        if !found {
+            println!("No mappings found for PID {target_pid}");
         }
     }
 
@@ -117,23 +117,22 @@ fn main() {
             if count >= 5 {
                 break;
             }
-            if let Some(pid_str) = entry.file_name().to_str() {
-                if let Ok(pid) = pid_str.parse::<u32>() {
-                    if let Ok(status) = fs::read_to_string(format!("/proc/{pid}/status")) {
-                        let mut name = String::new();
-                        let mut nspid = String::new();
-                        for line in status.lines() {
-                            if line.starts_with("Name:") {
-                                name = line.to_string();
-                            } else if line.starts_with("NSpid:") {
-                                nspid = line.to_string();
-                            }
-                        }
-                        if !nspid.is_empty() && nspid != "NSpid:\t1" {
-                            println!("PID {pid}: {name} -> {nspid}");
-                            count += 1;
-                        }
+            if let Some(pid_str) = entry.file_name().to_str()
+                && let Ok(pid) = pid_str.parse::<u32>()
+                && let Ok(status) = fs::read_to_string(format!("/proc/{pid}/status"))
+            {
+                let mut name = String::new();
+                let mut nspid = String::new();
+                for line in status.lines() {
+                    if line.starts_with("Name:") {
+                        name = line.to_string();
+                    } else if line.starts_with("NSpid:") {
+                        nspid = line.to_string();
                     }
+                }
+                if !nspid.is_empty() && nspid != "NSpid:\t1" {
+                    println!("PID {pid}: {name} -> {nspid}");
+                    count += 1;
                 }
             }
         }

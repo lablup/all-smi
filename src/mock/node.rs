@@ -19,7 +19,7 @@ use crate::mock::generator::{
 };
 use crate::mock::metrics::{CpuMetrics, GpuMetrics, MemoryMetrics, PlatformType};
 use crate::mock::template_engine::{build_response_template, render_response};
-use rand::{rng, RngExt};
+use rand::{RngExt, rng};
 
 /// High-performance template-based mock node
 #[allow(dead_code)]
@@ -276,7 +276,7 @@ mod tests {
         );
 
         // Check that disk sizes are one of the expected values
-        use crate::mock::constants::{DISK_SIZE_12TB, DISK_SIZE_1TB, DISK_SIZE_4TB};
+        use crate::mock::constants::{DISK_SIZE_1TB, DISK_SIZE_4TB, DISK_SIZE_12TB};
         let valid_sizes = [DISK_SIZE_1TB, DISK_SIZE_4TB, DISK_SIZE_12TB];
         assert!(valid_sizes.contains(&node.disk_total_bytes));
         assert!(node.disk_available_bytes <= node.disk_total_bytes);

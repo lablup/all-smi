@@ -64,10 +64,10 @@ impl MetricsParser {
                 let labels = self.parse_labels(&labels_str);
 
                 // Extract instance name from the first metric that has it
-                if host_instance_name.is_none() {
-                    if let Some(instance) = labels.get("instance") {
-                        host_instance_name = Some(instance.clone());
-                    }
+                if host_instance_name.is_none()
+                    && let Some(instance) = labels.get("instance")
+                {
+                    host_instance_name = Some(instance.clone());
                 }
 
                 // Process different metric types with size limits
@@ -385,33 +385,32 @@ impl MetricsParser {
                 // Parse per-core utilization
                 if let (Some(core_id_str), Some(core_type_str)) =
                     (labels.get("core_id"), labels.get("core_type"))
+                    && let Ok(core_id) = core_id_str.parse::<u32>()
                 {
-                    if let Ok(core_id) = core_id_str.parse::<u32>() {
-                        let core_type = match core_type_str.as_str() {
-                            "P" => crate::device::CoreType::Performance,
-                            "E" => crate::device::CoreType::Efficiency,
-                            _ => crate::device::CoreType::Standard,
-                        };
+                    let core_type = match core_type_str.as_str() {
+                        "P" => crate::device::CoreType::Performance,
+                        "E" => crate::device::CoreType::Efficiency,
+                        _ => crate::device::CoreType::Standard,
+                    };
 
-                        // Ensure vector is large enough
-                        while cpu_info.per_core_utilization.len() <= core_id as usize {
-                            cpu_info
-                                .per_core_utilization
-                                .push(crate::device::CoreUtilization {
-                                    core_id: cpu_info.per_core_utilization.len() as u32,
-                                    core_type: crate::device::CoreType::Standard,
-                                    utilization: 0.0,
-                                });
-                        }
-
-                        // Update the specific core
-                        cpu_info.per_core_utilization[core_id as usize] =
-                            crate::device::CoreUtilization {
-                                core_id,
-                                core_type,
-                                utilization: value,
-                            };
+                    // Ensure vector is large enough
+                    while cpu_info.per_core_utilization.len() <= core_id as usize {
+                        cpu_info
+                            .per_core_utilization
+                            .push(crate::device::CoreUtilization {
+                                core_id: cpu_info.per_core_utilization.len() as u32,
+                                core_type: crate::device::CoreType::Standard,
+                                utilization: 0.0,
+                            });
                     }
+
+                    // Update the specific core
+                    cpu_info.per_core_utilization[core_id as usize] =
+                        crate::device::CoreUtilization {
+                            core_id,
+                            core_type,
+                            utilization: value,
+                        };
                 }
             }
             "cpu_info" => {

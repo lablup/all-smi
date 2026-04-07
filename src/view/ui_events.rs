@@ -22,7 +22,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crossterm::event::{self, Event};
-use tokio::sync::{mpsc, Notify};
+use tokio::sync::{Notify, mpsc};
 
 use crate::common::config::AppConfig;
 

@@ -18,7 +18,7 @@ use crate::mock::metrics::GpuMetrics;
 use all_smi::traits::mock_generator::{
     MockConfig, MockData, MockError, MockGenerator, MockPlatform, MockResult,
 };
-use rand::{rng, RngExt};
+use rand::{RngExt, rng};
 
 /// Intel Gaudi NPU mock generator
 pub struct GaudiMockGenerator {

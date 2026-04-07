@@ -12,18 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::device::GpuReader;
 use crate::device::common::execute_command_default;
 use crate::device::common::parsers::{
     parse_device_id, parse_memory_mb_to_bytes, parse_power, parse_temperature, parse_utilization,
 };
 use crate::device::readers::common_cache::{DetailBuilder, DeviceStaticInfo};
 use crate::device::types::{GpuInfo, ProcessInfo};
-use crate::device::GpuReader;
 use crate::utils::get_hostname;
 use chrono::Local;
 use once_cell::sync::Lazy;
-use serde::de::{self, Deserializer, Visitor};
 use serde::Deserialize;
+use serde::de::{self, Deserializer, Visitor};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -197,10 +197,10 @@ impl RebellionsNpuReader {
     /// Determine which command to use (rbln-stat or rbln-smi)
     fn get_rebellions_command() -> Option<(String, PathBuf)> {
         // Check cache first
-        if let Ok(cache) = RBLN_COMMAND_CACHE.lock() {
-            if let Some(ref cached) = *cache {
-                return Some(cached.clone());
-            }
+        if let Ok(cache) = RBLN_COMMAND_CACHE.lock()
+            && let Some(ref cached) = *cache
+        {
+            return Some(cached.clone());
         }
 
         // Check specific paths first

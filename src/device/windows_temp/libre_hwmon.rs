@@ -23,7 +23,7 @@
 //! The user should be advised to run LibreHardwareMonitor if they want
 //! temperature monitoring on Windows systems without ACPI thermal zones.
 
-use super::{is_wmi_not_found_error, TemperatureResult};
+use super::{TemperatureResult, is_wmi_not_found_error};
 use once_cell::sync::OnceCell;
 use serde::Deserialize;
 use wmi::WMIConnection;

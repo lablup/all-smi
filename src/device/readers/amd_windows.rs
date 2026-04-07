@@ -18,8 +18,8 @@
 //! Note: Detailed metrics like utilization and temperature require AMD ADL SDK,
 //! which is not currently implemented.
 
-use crate::device::types::{GpuInfo, ProcessInfo};
 use crate::device::GpuReader;
+use crate::device::types::{GpuInfo, ProcessInfo};
 use crate::utils::get_hostname;
 use chrono::Local;
 use serde::Deserialize;

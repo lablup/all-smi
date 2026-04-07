@@ -23,8 +23,8 @@
 #![allow(unused)]
 
 use once_cell::sync::OnceCell;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::sync::Mutex;
 use tonic::transport::{Channel, Endpoint};
@@ -37,8 +37,8 @@ pub mod tpu_proto {
     tonic::include_proto!("tpu.monitoring.runtime");
 }
 
-use tpu_proto::runtime_metric_service_client::RuntimeMetricServiceClient;
 use tpu_proto::MetricRequest;
+use tpu_proto::runtime_metric_service_client::RuntimeMetricServiceClient;
 
 /// Default gRPC server address for libtpu metrics
 const DEFAULT_GRPC_ADDR: &str = "http://localhost:8431";
@@ -117,7 +117,10 @@ async fn get_channel() -> Option<Channel> {
     }
 
     // Try to create a new channel
-    match create_channel().await {
+    // Bind the result to a local variable to ensure temporaries from
+    // create_channel().await are dropped before the MutexGuard (Rust 2024 drop order).
+    let channel_result = create_channel().await;
+    match channel_result {
         Ok(channel) => {
             *guard = Some(channel.clone());
             Some(channel)
@@ -322,16 +325,19 @@ pub async fn is_grpc_server_available() -> bool {
 /// Uses the tokio runtime to run the async function
 pub fn get_tpu_metrics_grpc_sync() -> Option<Vec<TpuUsageMetrics>> {
     // Try to get the current tokio runtime handle
-    if let Ok(handle) = tokio::runtime::Handle::try_current() {
-        // We're in an async context, use block_in_place
-        tokio::task::block_in_place(|| handle.block_on(get_tpu_metrics_grpc()))
-    } else {
-        // No runtime available, create a temporary one
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .ok()?;
-        rt.block_on(get_tpu_metrics_grpc())
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => {
+            // We're in an async context, use block_in_place
+            tokio::task::block_in_place(|| handle.block_on(get_tpu_metrics_grpc()))
+        }
+        _ => {
+            // No runtime available, create a temporary one
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .ok()?;
+            rt.block_on(get_tpu_metrics_grpc())
+        }
     }
 }
 
@@ -344,17 +350,17 @@ fn extract_device_ordinal(attr: &tpu_proto::Attribute) -> Option<i64> {
     };
 
     for kv_attr in &kvlist.attributes {
-        if kv_attr.key == "device_ordinal" {
-            if let Some(ref val) = kv_attr.value {
-                match &val.attr {
-                    Some(tpu_proto::attr_value::Attr::StringAttr(s)) => {
-                        return s.parse().ok();
-                    }
-                    Some(tpu_proto::attr_value::Attr::IntAttr(i)) => {
-                        return Some(*i);
-                    }
-                    _ => {}
+        if kv_attr.key == "device_ordinal"
+            && let Some(ref val) = kv_attr.value
+        {
+            match &val.attr {
+                Some(tpu_proto::attr_value::Attr::StringAttr(s)) => {
+                    return s.parse().ok();
                 }
+                Some(tpu_proto::attr_value::Attr::IntAttr(i)) => {
+                    return Some(*i);
+                }
+                _ => {}
             }
         }
     }
@@ -556,27 +562,29 @@ pub async fn get_hlo_execution_timing() -> Option<Vec<HloExecutionTiming>> {
 
 /// Synchronous wrapper for get_hlo_queue_size
 pub fn get_hlo_queue_size_sync() -> Option<Vec<HloQueueSize>> {
-    if let Ok(handle) = tokio::runtime::Handle::try_current() {
-        tokio::task::block_in_place(|| handle.block_on(get_hlo_queue_size()))
-    } else {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .ok()?;
-        rt.block_on(get_hlo_queue_size())
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => tokio::task::block_in_place(|| handle.block_on(get_hlo_queue_size())),
+        _ => {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .ok()?;
+            rt.block_on(get_hlo_queue_size())
+        }
     }
 }
 
 /// Synchronous wrapper for get_hlo_execution_timing
 pub fn get_hlo_execution_timing_sync() -> Option<Vec<HloExecutionTiming>> {
-    if let Ok(handle) = tokio::runtime::Handle::try_current() {
-        tokio::task::block_in_place(|| handle.block_on(get_hlo_execution_timing()))
-    } else {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .ok()?;
-        rt.block_on(get_hlo_execution_timing())
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => tokio::task::block_in_place(|| handle.block_on(get_hlo_execution_timing())),
+        _ => {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .ok()?;
+            rt.block_on(get_hlo_execution_timing())
+        }
     }
 }
 

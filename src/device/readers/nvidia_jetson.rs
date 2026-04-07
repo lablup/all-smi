@@ -12,11 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::device::GpuReader;
 use crate::device::common::{execute_command_default, parse_csv_line};
 use crate::device::process_list::{get_all_processes, merge_gpu_processes};
 use crate::device::readers::common_cache::{DetailBuilder, DeviceStaticInfo};
 use crate::device::types::{GpuInfo, ProcessInfo};
-use crate::device::GpuReader;
 use crate::utils::{get_hostname, hz_to_mhz, millicelsius_to_celsius, with_global_system};
 use chrono::Local;
 use std::collections::HashSet;
@@ -53,25 +53,25 @@ impl NvidiaJetsonGpuReader {
             let mut builder = DetailBuilder::new();
 
             // Try to get CUDA version from nvidia-smi if available
-            if let Ok(output) = execute_command_default("nvidia-smi", &[]) {
-                if output.status == 0 {
-                    // Parse CUDA version from header
-                    for line in output.stdout.lines() {
-                        if line.contains("CUDA Version:") {
-                            if let Some(version_part) = line.split("CUDA Version:").nth(1) {
-                                let version = version_part
-                                    .split_whitespace()
-                                    .next()
-                                    .unwrap_or("Unknown")
-                                    .to_string();
-                                builder = builder
-                                    .insert("CUDA Version", &version)
-                                    // Add unified AI acceleration library labels
-                                    .insert("lib_name", "CUDA")
-                                    .insert("lib_version", version);
-                            }
-                            break;
+            if let Ok(output) = execute_command_default("nvidia-smi", &[])
+                && output.status == 0
+            {
+                // Parse CUDA version from header
+                for line in output.stdout.lines() {
+                    if line.contains("CUDA Version:") {
+                        if let Some(version_part) = line.split("CUDA Version:").nth(1) {
+                            let version = version_part
+                                .split_whitespace()
+                                .next()
+                                .unwrap_or("Unknown")
+                                .to_string();
+                            builder = builder
+                                .insert("CUDA Version", &version)
+                                // Add unified AI acceleration library labels
+                                .insert("lib_name", "CUDA")
+                                .insert("lib_version", version);
                         }
+                        break;
                     }
                 }
             }
@@ -91,10 +91,10 @@ impl NvidiaJetsonGpuReader {
 
             // Get L4T version
             let mut detail = builder.build();
-            if let Ok(l4t) = fs::read_to_string("/etc/nv_tegra_release") {
-                if let Some(version) = l4t.split_whitespace().nth(1) {
-                    detail.insert("L4T Version".to_string(), version.to_string());
-                }
+            if let Ok(l4t) = fs::read_to_string("/etc/nv_tegra_release")
+                && let Some(version) = l4t.split_whitespace().nth(1)
+            {
+                detail.insert("L4T Version".to_string(), version.to_string());
             }
 
             // Static hardware info
@@ -210,40 +210,38 @@ fn get_gpu_processes() -> (Vec<ProcessInfo>, HashSet<u32>) {
             "--query-compute-apps=pid,used_memory",
             "--format=csv,noheader,nounits",
         ],
-    ) {
-        if output.status == 0 {
-            for line in output.stdout.lines() {
-                let parts = parse_csv_line(line);
-                if parts.len() >= 2 {
-                    if let Ok(pid) = parts[0].parse::<u32>() {
-                        if let Ok(used_memory_mb) = parts[1].parse::<u64>() {
-                            gpu_pids.insert(pid);
+    ) && output.status == 0
+    {
+        for line in output.stdout.lines() {
+            let parts = parse_csv_line(line);
+            if parts.len() >= 2
+                && let Ok(pid) = parts[0].parse::<u32>()
+                && let Ok(used_memory_mb) = parts[1].parse::<u64>()
+            {
+                gpu_pids.insert(pid);
 
-                            gpu_processes.push(ProcessInfo {
-                                device_id: 0,
-                                device_uuid: "JetsonGPU".to_string(),
-                                pid,
-                                process_name: String::new(), // Will be filled by sysinfo
-                                used_memory: used_memory_mb * 1024 * 1024, // Convert MB to bytes
-                                cpu_percent: 0.0,            // Will be filled by sysinfo
-                                memory_percent: 0.0,         // Will be filled by sysinfo
-                                memory_rss: 0,               // Will be filled by sysinfo
-                                memory_vms: 0,               // Will be filled by sysinfo
-                                user: String::new(),         // Will be filled by sysinfo
-                                state: String::new(),        // Will be filled by sysinfo
-                                start_time: String::new(),   // Will be filled by sysinfo
-                                cpu_time: 0,                 // Will be filled by sysinfo
-                                command: String::new(),      // Will be filled by sysinfo
-                                ppid: 0,                     // Will be filled by sysinfo
-                                threads: 0,                  // Will be filled by sysinfo
-                                uses_gpu: true,
-                                priority: 0,          // Will be filled by sysinfo
-                                nice_value: 0,        // Will be filled by sysinfo
-                                gpu_utilization: 0.0, // nvidia-smi on Jetson doesn't provide per-process GPU utilization
-                            });
-                        }
-                    }
-                }
+                gpu_processes.push(ProcessInfo {
+                    device_id: 0,
+                    device_uuid: "JetsonGPU".to_string(),
+                    pid,
+                    process_name: String::new(), // Will be filled by sysinfo
+                    used_memory: used_memory_mb * 1024 * 1024, // Convert MB to bytes
+                    cpu_percent: 0.0,            // Will be filled by sysinfo
+                    memory_percent: 0.0,         // Will be filled by sysinfo
+                    memory_rss: 0,               // Will be filled by sysinfo
+                    memory_vms: 0,               // Will be filled by sysinfo
+                    user: String::new(),         // Will be filled by sysinfo
+                    state: String::new(),        // Will be filled by sysinfo
+                    start_time: String::new(),   // Will be filled by sysinfo
+                    cpu_time: 0,                 // Will be filled by sysinfo
+                    command: String::new(),      // Will be filled by sysinfo
+                    ppid: 0,                     // Will be filled by sysinfo
+                    threads: 0,                  // Will be filled by sysinfo
+                    uses_gpu: true,
+                    priority: 0,          // Will be filled by sysinfo
+                    nice_value: 0,        // Will be filled by sysinfo
+                    gpu_utilization: 0.0, // nvidia-smi on Jetson doesn't provide per-process GPU utilization
+                });
             }
         }
     }
@@ -303,20 +301,20 @@ fn get_gpu_processes() -> (Vec<ProcessInfo>, HashSet<u32>) {
 
 fn get_memory_info() -> (u64, u64) {
     // Try to get GPU memory from tegrastats
-    if let Ok(output) = execute_command_default("tegrastats", &["--once"]) {
-        if output.status == 0 {
-            let output_str = &output.stdout;
-            // Parse memory info from tegrastats output
-            // Format: RAM 2298/3964MB (lfb 25x4MB) SWAP 0/1982MB (cached 0MB)
-            if let Some(ram_part) = output_str.split("RAM ").nth(1) {
-                if let Some(ram_info) = ram_part.split("MB").next() {
-                    let parts: Vec<&str> = ram_info.split('/').collect();
-                    if parts.len() == 2 {
-                        let used = parts[0].parse::<u64>().unwrap_or(0) * 1024 * 1024;
-                        let total = parts[1].parse::<u64>().unwrap_or(0) * 1024 * 1024;
-                        return (total, used);
-                    }
-                }
+    if let Ok(output) = execute_command_default("tegrastats", &["--once"])
+        && output.status == 0
+    {
+        let output_str = &output.stdout;
+        // Parse memory info from tegrastats output
+        // Format: RAM 2298/3964MB (lfb 25x4MB) SWAP 0/1982MB (cached 0MB)
+        if let Some(ram_part) = output_str.split("RAM ").nth(1)
+            && let Some(ram_info) = ram_part.split("MB").next()
+        {
+            let parts: Vec<&str> = ram_info.split('/').collect();
+            if parts.len() == 2 {
+                let used = parts[0].parse::<u64>().unwrap_or(0) * 1024 * 1024;
+                let total = parts[1].parse::<u64>().unwrap_or(0) * 1024 * 1024;
+                return (total, used);
             }
         }
     }
@@ -331,10 +329,10 @@ fn get_memory_info() -> (u64, u64) {
                 if let Some(value) = line.split_whitespace().nth(1) {
                     total = value.parse::<u64>().unwrap_or(0) * 1024; // Convert KB to bytes
                 }
-            } else if line.starts_with("MemAvailable:") {
-                if let Some(value) = line.split_whitespace().nth(1) {
-                    available = value.parse::<u64>().unwrap_or(0) * 1024; // Convert KB to bytes
-                }
+            } else if line.starts_with("MemAvailable:")
+                && let Some(value) = line.split_whitespace().nth(1)
+            {
+                available = value.parse::<u64>().unwrap_or(0) * 1024; // Convert KB to bytes
             }
         }
 

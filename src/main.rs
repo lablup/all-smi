@@ -30,7 +30,7 @@ use api::run_api_mode;
 use clap::Parser;
 use cli::{Cli, Commands, LocalArgs};
 use tokio::signal;
-use utils::{ensure_sudo_permissions_for_api, RuntimeEnvironment};
+use utils::{RuntimeEnvironment, ensure_sudo_permissions_for_api};
 
 // Sudo permission functions only needed on non-macOS platforms
 #[cfg(not(target_os = "macos"))]
@@ -123,11 +123,14 @@ async fn main() {
             // Initialize hlsmi manager for Intel Gaudi on Linux
             #[cfg(target_os = "linux")]
             if has_gaudi() {
-                if let Err(e) = initialize_hlsmi_manager(args.interval) {
-                    eprintln!("Warning: Failed to initialize hlsmi manager: {e}");
-                } else {
-                    use std::sync::atomic::Ordering;
-                    HLSMI_INITIALIZED.store(true, Ordering::Relaxed);
+                match initialize_hlsmi_manager(args.interval) {
+                    Err(e) => {
+                        eprintln!("Warning: Failed to initialize hlsmi manager: {e}");
+                    }
+                    _ => {
+                        use std::sync::atomic::Ordering;
+                        HLSMI_INITIALIZED.store(true, Ordering::Relaxed);
+                    }
                 }
             }
 
@@ -154,10 +157,11 @@ async fn main() {
             #[cfg(target_os = "linux")]
             if has_gaudi() {
                 let interval = args.interval.unwrap_or(2);
-                std::thread::spawn(move || {
-                    if let Err(e) = initialize_hlsmi_manager(interval) {
+                std::thread::spawn(move || match initialize_hlsmi_manager(interval) {
+                    Err(e) => {
                         eprintln!("Warning: Failed to initialize hlsmi manager: {e}");
-                    } else {
+                    }
+                    _ => {
                         use std::sync::atomic::Ordering;
                         HLSMI_INITIALIZED.store(true, Ordering::Relaxed);
                     }
@@ -186,7 +190,9 @@ async fn main() {
                         "Usage: all-smi view --hosts <URL>... or all-smi view --hostfile <FILE>"
                     );
                     if runtime_env.is_backend_ai() {
-                        eprintln!("\nBackend.AI environment detected but BACKENDAI_CLUSTER_HOSTS is not set.");
+                        eprintln!(
+                            "\nBackend.AI environment detected but BACKENDAI_CLUSTER_HOSTS is not set."
+                        );
                         eprintln!("Set the environment variable with comma-separated host names:");
                         eprintln!("  export BACKENDAI_CLUSTER_HOSTS=\"host1,host2\"");
                     }
@@ -232,10 +238,11 @@ async fn main() {
                 // Initialize hlsmi manager for Intel Gaudi on Linux
                 #[cfg(target_os = "linux")]
                 if has_gaudi() {
-                    std::thread::spawn(|| {
-                        if let Err(e) = initialize_hlsmi_manager(2) {
+                    std::thread::spawn(|| match initialize_hlsmi_manager(2) {
+                        Err(e) => {
                             eprintln!("Warning: Failed to initialize hlsmi manager: {e}");
-                        } else {
+                        }
+                        _ => {
                             use std::sync::atomic::Ordering;
                             HLSMI_INITIALIZED.store(true, Ordering::Relaxed);
                         }

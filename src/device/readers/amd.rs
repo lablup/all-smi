@@ -12,13 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::device::GpuReader;
 use crate::device::readers::common_cache::{DetailBuilder, DeviceStaticInfo};
 use crate::device::types::{GpuInfo, ProcessInfo};
-use crate::device::GpuReader;
 use crate::utils::get_hostname;
 use chrono::Local;
+use libamdgpu_top::AMDGPU::{DeviceHandle, GPU_INFO, GpuMetrics, MetricsInfo};
 use libamdgpu_top::stat::{self, FdInfoStat, ProcInfo};
-use libamdgpu_top::AMDGPU::{DeviceHandle, GpuMetrics, MetricsInfo, GPU_INFO};
 use libamdgpu_top::{AppDeviceInfo, DevicePath, VramUsage};
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
@@ -212,28 +212,28 @@ impl AmdGpuReader {
                     if let Some(link) = app_device_info.max_gpu_link {
                         detail.insert(
                             "Max GPU Link".to_string(),
-                            format!("Gen{} x{}", link.gen, link.width),
+                            format!("Gen{} x{}", link.r#gen, link.width),
                         );
                     }
 
                     if let Some(link) = app_device_info.max_system_link {
                         detail.insert(
                             "Max System Link".to_string(),
-                            format!("Gen{} x{}", link.gen, link.width),
+                            format!("Gen{} x{}", link.r#gen, link.width),
                         );
                     }
 
                     if let Some(min_dpm_link) = app_device_info.min_dpm_link {
                         detail.insert(
                             "Min DPM Link".to_string(),
-                            format!("Gen{} x{}", min_dpm_link.gen, min_dpm_link.width),
+                            format!("Gen{} x{}", min_dpm_link.r#gen, min_dpm_link.width),
                         );
                     }
 
                     if let Some(max_dpm_link) = app_device_info.max_dpm_link {
                         detail.insert(
                             "Max DPM Link".to_string(),
-                            format!("Gen{} x{}", max_dpm_link.gen, max_dpm_link.width),
+                            format!("Gen{} x{}", max_dpm_link.r#gen, max_dpm_link.width),
                         );
                     }
 
@@ -411,7 +411,7 @@ impl GpuReader for AmdGpuReader {
                 if let Some(link) = sensors.current_link {
                     detail.insert(
                         "Current Link".to_string(),
-                        format!("Gen{} x{}", link.gen, link.width),
+                        format!("Gen{} x{}", link.r#gen, link.width),
                     );
                 }
                 if let Some(fan) = sensors.fan_rpm {
@@ -463,15 +463,15 @@ impl GpuReader for AmdGpuReader {
                         power_consumption = watts.clamp(0.0, MAX_GPU_POWER_WATTS);
                     }
                 }
-                if temperature == 0 {
-                    if let Some(ref t) = s.edge_temp {
-                        temperature = (t.current as u32).min(MAX_GPU_TEMP_CELSIUS);
-                    }
+                if temperature == 0
+                    && let Some(ref t) = s.edge_temp
+                {
+                    temperature = (t.current as u32).min(MAX_GPU_TEMP_CELSIUS);
                 }
-                if frequency == 0 {
-                    if let Some(clk) = s.sclk {
-                        frequency = clk.min(MAX_GPU_FREQ_MHZ);
-                    }
+                if frequency == 0
+                    && let Some(clk) = s.sclk
+                {
+                    frequency = clk.min(MAX_GPU_FREQ_MHZ);
                 }
             }
 

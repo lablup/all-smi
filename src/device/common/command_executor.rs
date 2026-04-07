@@ -20,7 +20,7 @@
 // - Provide an optional status check
 // - Keep a default helper compatible with existing call sites
 
-use crate::device::common::{validate_args, validate_command, DeviceError, DeviceResult};
+use crate::device::common::{DeviceError, DeviceResult, validate_args, validate_command};
 use crate::utils::{command_timeout::run_command_with_timeout, run_command_fast_fail};
 use std::time::Duration;
 

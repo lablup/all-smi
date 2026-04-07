@@ -199,15 +199,15 @@ pub fn detect_container_environment() -> ContainerInfo {
     }
 
     // Check for LXC environment variable
-    if let Ok(environ) = fs::read_to_string("/proc/1/environ") {
-        if environ.contains("container=lxc") {
-            return ContainerInfo {
-                runtime: ContainerRuntime::Lxc,
-                container_id: None,
-                pod_name: None,
-                namespace: None,
-            };
-        }
+    if let Ok(environ) = fs::read_to_string("/proc/1/environ")
+        && environ.contains("container=lxc")
+    {
+        return ContainerInfo {
+            runtime: ContainerRuntime::Lxc,
+            container_id: None,
+            pod_name: None,
+            namespace: None,
+        };
     }
 
     // Not in a container
@@ -364,72 +364,72 @@ pub struct VirtualizationInfo {
 /// Detects if the current process is running inside a virtual machine
 pub fn detect_virtualization() -> VirtualizationInfo {
     // Try systemd-detect-virt first (most reliable if available)
-    if let Ok(output) = Command::new("systemd-detect-virt").output() {
-        if output.status.success() {
-            let virt_type = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            match virt_type.as_str() {
-                "kvm" => {
-                    return VirtualizationInfo {
-                        vm_type: VirtualizationType::Kvm,
-                        hypervisor: Some("KVM".to_string()),
-                        is_virtual: true,
-                    }
-                }
-                "vmware" => {
-                    return VirtualizationInfo {
-                        vm_type: VirtualizationType::VMware,
-                        hypervisor: Some("VMware".to_string()),
-                        is_virtual: true,
-                    }
-                }
-                "oracle" | "virtualbox" => {
-                    return VirtualizationInfo {
-                        vm_type: VirtualizationType::VirtualBox,
-                        hypervisor: Some("VirtualBox".to_string()),
-                        is_virtual: true,
-                    }
-                }
-                "microsoft" | "hyperv" => {
-                    return VirtualizationInfo {
-                        vm_type: VirtualizationType::HyperV,
-                        hypervisor: Some("Hyper-V".to_string()),
-                        is_virtual: true,
-                    }
-                }
-                "xen" => {
-                    return VirtualizationInfo {
-                        vm_type: VirtualizationType::Xen,
-                        hypervisor: Some("Xen".to_string()),
-                        is_virtual: true,
-                    }
-                }
-                "qemu" => {
-                    return VirtualizationInfo {
-                        vm_type: VirtualizationType::Qemu,
-                        hypervisor: Some("QEMU".to_string()),
-                        is_virtual: true,
-                    }
-                }
-                "parallels" => {
-                    return VirtualizationInfo {
-                        vm_type: VirtualizationType::Parallels,
-                        hypervisor: Some("Parallels".to_string()),
-                        is_virtual: true,
-                    }
-                }
-                "none" => {
-                    // Continue with other detection methods
-                }
-                _ if !virt_type.is_empty() => {
-                    // Unknown virtualization detected
-                    return VirtualizationInfo {
-                        vm_type: VirtualizationType::None,
-                        hypervisor: Some(virt_type),
-                        is_virtual: true,
-                    };
-                }
-                _ => {}
+    if let Ok(output) = Command::new("systemd-detect-virt").output()
+        && output.status.success()
+    {
+        let virt_type = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        match virt_type.as_str() {
+            "kvm" => {
+                return VirtualizationInfo {
+                    vm_type: VirtualizationType::Kvm,
+                    hypervisor: Some("KVM".to_string()),
+                    is_virtual: true,
+                };
             }
+            "vmware" => {
+                return VirtualizationInfo {
+                    vm_type: VirtualizationType::VMware,
+                    hypervisor: Some("VMware".to_string()),
+                    is_virtual: true,
+                };
+            }
+            "oracle" | "virtualbox" => {
+                return VirtualizationInfo {
+                    vm_type: VirtualizationType::VirtualBox,
+                    hypervisor: Some("VirtualBox".to_string()),
+                    is_virtual: true,
+                };
+            }
+            "microsoft" | "hyperv" => {
+                return VirtualizationInfo {
+                    vm_type: VirtualizationType::HyperV,
+                    hypervisor: Some("Hyper-V".to_string()),
+                    is_virtual: true,
+                };
+            }
+            "xen" => {
+                return VirtualizationInfo {
+                    vm_type: VirtualizationType::Xen,
+                    hypervisor: Some("Xen".to_string()),
+                    is_virtual: true,
+                };
+            }
+            "qemu" => {
+                return VirtualizationInfo {
+                    vm_type: VirtualizationType::Qemu,
+                    hypervisor: Some("QEMU".to_string()),
+                    is_virtual: true,
+                };
+            }
+            "parallels" => {
+                return VirtualizationInfo {
+                    vm_type: VirtualizationType::Parallels,
+                    hypervisor: Some("Parallels".to_string()),
+                    is_virtual: true,
+                };
+            }
+            "none" => {
+                // Continue with other detection methods
+            }
+            _ if !virt_type.is_empty() => {
+                // Unknown virtualization detected
+                return VirtualizationInfo {
+                    vm_type: VirtualizationType::None,
+                    hypervisor: Some(virt_type),
+                    is_virtual: true,
+                };
+            }
+            _ => {}
         }
     }
 
@@ -512,47 +512,47 @@ pub fn detect_virtualization() -> VirtualizationInfo {
     }
 
     // Check for GCP
-    if let Ok(bios_vendor) = fs::read_to_string("/sys/class/dmi/id/bios_vendor") {
-        if bios_vendor.trim().to_lowercase().contains("google") {
-            return VirtualizationInfo {
-                vm_type: VirtualizationType::Gcp,
-                hypervisor: Some("Google Cloud".to_string()),
-                is_virtual: true,
-            };
-        }
+    if let Ok(bios_vendor) = fs::read_to_string("/sys/class/dmi/id/bios_vendor")
+        && bios_vendor.trim().to_lowercase().contains("google")
+    {
+        return VirtualizationInfo {
+            vm_type: VirtualizationType::Gcp,
+            hypervisor: Some("Google Cloud".to_string()),
+            is_virtual: true,
+        };
     }
 
     // Check for Azure
-    if let Ok(chassis_asset_tag) = fs::read_to_string("/sys/class/dmi/id/chassis_asset_tag") {
-        if chassis_asset_tag.trim() == "7783-7084-3265-9085-8269-3286-77" {
-            return VirtualizationInfo {
-                vm_type: VirtualizationType::Azure,
-                hypervisor: Some("Microsoft Azure".to_string()),
-                is_virtual: true,
-            };
-        }
+    if let Ok(chassis_asset_tag) = fs::read_to_string("/sys/class/dmi/id/chassis_asset_tag")
+        && chassis_asset_tag.trim() == "7783-7084-3265-9085-8269-3286-77"
+    {
+        return VirtualizationInfo {
+            vm_type: VirtualizationType::Azure,
+            hypervisor: Some("Microsoft Azure".to_string()),
+            is_virtual: true,
+        };
     }
 
     // Check for DigitalOcean
-    if let Ok(vendor) = fs::read_to_string("/sys/class/dmi/id/sys_vendor") {
-        if vendor.trim().to_lowercase().contains("digitalocean") {
-            return VirtualizationInfo {
-                vm_type: VirtualizationType::DigitalOcean,
-                hypervisor: Some("DigitalOcean".to_string()),
-                is_virtual: true,
-            };
-        }
+    if let Ok(vendor) = fs::read_to_string("/sys/class/dmi/id/sys_vendor")
+        && vendor.trim().to_lowercase().contains("digitalocean")
+    {
+        return VirtualizationInfo {
+            vm_type: VirtualizationType::DigitalOcean,
+            hypervisor: Some("DigitalOcean".to_string()),
+            is_virtual: true,
+        };
     }
 
     // Check CPU flags for hypervisor
-    if let Ok(cpuinfo) = fs::read_to_string("/proc/cpuinfo") {
-        if cpuinfo.contains("hypervisor") {
-            return VirtualizationInfo {
-                vm_type: VirtualizationType::None,
-                hypervisor: Some("Unknown".to_string()),
-                is_virtual: true,
-            };
-        }
+    if let Ok(cpuinfo) = fs::read_to_string("/proc/cpuinfo")
+        && cpuinfo.contains("hypervisor")
+    {
+        return VirtualizationInfo {
+            vm_type: VirtualizationType::None,
+            hypervisor: Some("Unknown".to_string()),
+            is_virtual: true,
+        };
     }
 
     // Check for specific kernel modules
@@ -595,14 +595,14 @@ pub fn detect_virtualization() -> VirtualizationInfo {
 /// Check if AWS metadata service is accessible
 fn check_aws_metadata() -> bool {
     // Make the AWS metadata check optional via environment variable
-    if let Ok(val) = env::var("AWS_METADATA_CHECK_ENABLED") {
-        if val == "0" || val.to_lowercase() == "false" {
-            return false;
-        }
+    if let Ok(val) = env::var("AWS_METADATA_CHECK_ENABLED")
+        && (val == "0" || val.to_lowercase() == "false")
+    {
+        return false;
     }
 
     // Try to access AWS metadata service with very short timeout
-    if let Ok(output) = Command::new("curl")
+    match Command::new("curl")
         .args([
             "-s",
             "--max-time",
@@ -613,9 +613,8 @@ fn check_aws_metadata() -> bool {
         ])
         .output()
     {
-        output.status.success() && !output.stdout.is_empty()
-    } else {
-        false
+        Ok(output) => output.status.success() && !output.stdout.is_empty(),
+        _ => false,
     }
 }
 

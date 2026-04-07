@@ -253,89 +253,86 @@ impl TpuInfoRunner {
                 TableType::RuntimeUtilization => {
                     // Header: ["Chip", "HBM Usage (GiB)", "Duty cycle"]
                     // Row: "0", "1.23 GiB / 16.00 GiB", "45.67%" (or "N/A")
-                    if parts.len() >= 3 {
-                        if let Ok(idx) = parts[0].parse::<u32>() {
-                            let hbm_str = parts[1];
-                            let duty_str = parts[2];
+                    if parts.len() >= 3
+                        && let Ok(idx) = parts[0].parse::<u32>()
+                    {
+                        let hbm_str = parts[1];
+                        let duty_str = parts[2];
 
-                            if hbm_str != "N/A" {
-                                let (used, total) = Self::parse_hbm_usage(hbm_str);
-                                if let Ok(mut map_guard) = store.write() {
-                                    let dev_map = map_guard.entry(idx).or_insert_with(HashMap::new);
-                                    dev_map.insert("hbm_usage".to_string(), used);
-                                    dev_map.insert("memory_total".to_string(), total);
-                                    updated = true;
-                                }
-                                debug!(
-                                    "Parsed RuntimeUtil HBM [Dev {}]: {} / {}",
-                                    idx, used, total
-                                );
+                        if hbm_str != "N/A" {
+                            let (used, total) = Self::parse_hbm_usage(hbm_str);
+                            if let Ok(mut map_guard) = store.write() {
+                                let dev_map = map_guard.entry(idx).or_insert_with(HashMap::new);
+                                dev_map.insert("hbm_usage".to_string(), used);
+                                dev_map.insert("memory_total".to_string(), total);
+                                updated = true;
                             }
+                            debug!("Parsed RuntimeUtil HBM [Dev {}]: {} / {}", idx, used, total);
+                        }
 
-                            if duty_str != "N/A" && !duty_str.is_empty() {
-                                let duty = Self::parse_percent(duty_str);
-                                if let Ok(mut map_guard) = store.write() {
-                                    let dev_map = map_guard.entry(idx).or_insert_with(HashMap::new);
-                                    dev_map.insert("duty_cycle_percent".to_string(), duty);
-                                    updated = true;
-                                }
-                                debug!("Parsed RuntimeUtil Duty [Dev {}]: {}", idx, duty);
+                        if duty_str != "N/A" && !duty_str.is_empty() {
+                            let duty = Self::parse_percent(duty_str);
+                            if let Ok(mut map_guard) = store.write() {
+                                let dev_map = map_guard.entry(idx).or_insert_with(HashMap::new);
+                                dev_map.insert("duty_cycle_percent".to_string(), duty);
+                                updated = true;
                             }
+                            debug!("Parsed RuntimeUtil Duty [Dev {}]: {}", idx, duty);
                         }
                     }
                 }
                 TableType::DutyCycle => {
                     // Header: ["Core ID", "Duty Cycle (%)"]
                     // Row: "0", "N/A" or "10.5%"
-                    if parts.len() >= 2 {
-                        if let Ok(idx) = parts[0].parse::<u32>() {
-                            let val_str = parts[1];
-                            if val_str != "N/A" {
-                                let val = Self::parse_percent(val_str);
-                                if let Ok(mut map_guard) = store.write() {
-                                    let dev_map = map_guard.entry(idx).or_insert_with(HashMap::new);
-                                    dev_map.insert("duty_cycle_percent".to_string(), val);
-                                    updated = true;
-                                }
-                                debug!("Parsed DutyCycle [Dev {}]: {}", idx, val);
+                    if parts.len() >= 2
+                        && let Ok(idx) = parts[0].parse::<u32>()
+                    {
+                        let val_str = parts[1];
+                        if val_str != "N/A" {
+                            let val = Self::parse_percent(val_str);
+                            if let Ok(mut map_guard) = store.write() {
+                                let dev_map = map_guard.entry(idx).or_insert_with(HashMap::new);
+                                dev_map.insert("duty_cycle_percent".to_string(), val);
+                                updated = true;
                             }
+                            debug!("Parsed DutyCycle [Dev {}]: {}", idx, val);
                         }
                     }
                 }
                 TableType::HbmUsage => {
                     // Header: ["Device", "HBM Usage (GiB)"]
                     // Row: "0", "N/A" or "1.23 GiB / 16.00 GiB"
-                    if parts.len() >= 2 {
-                        if let Ok(idx) = parts[0].parse::<u32>() {
-                            let val_str = parts[1];
-                            if val_str != "N/A" {
-                                let (used, total) = Self::parse_hbm_usage(val_str);
-                                if let Ok(mut map_guard) = store.write() {
-                                    let dev_map = map_guard.entry(idx).or_insert_with(HashMap::new);
-                                    dev_map.insert("hbm_usage".to_string(), used);
-                                    dev_map.insert("memory_total".to_string(), total);
-                                    updated = true;
-                                }
-                                debug!("Parsed HBM [Dev {}]: {} / {}", idx, used, total);
+                    if parts.len() >= 2
+                        && let Ok(idx) = parts[0].parse::<u32>()
+                    {
+                        let val_str = parts[1];
+                        if val_str != "N/A" {
+                            let (used, total) = Self::parse_hbm_usage(val_str);
+                            if let Ok(mut map_guard) = store.write() {
+                                let dev_map = map_guard.entry(idx).or_insert_with(HashMap::new);
+                                dev_map.insert("hbm_usage".to_string(), used);
+                                dev_map.insert("memory_total".to_string(), total);
+                                updated = true;
                             }
+                            debug!("Parsed HBM [Dev {}]: {} / {}", idx, used, total);
                         }
                     }
                 }
                 TableType::TensorCoreUtilization => {
                     // Header: ["Core ID", "TensorCore Utilization"]
                     // Row: "0", "0.00%"
-                    if parts.len() >= 2 {
-                        if let Ok(idx) = parts[0].parse::<u32>() {
-                            let val_str = parts[1];
-                            if val_str != "N/A" {
-                                let util = Self::parse_percent(val_str);
-                                if let Ok(mut map_guard) = store.write() {
-                                    let dev_map = map_guard.entry(idx).or_insert_with(HashMap::new);
-                                    dev_map.insert("tensorcore_utilization".to_string(), util);
-                                    updated = true;
-                                }
-                                debug!("Parsed TensorCore [Dev {}]: {}", idx, util);
+                    if parts.len() >= 2
+                        && let Ok(idx) = parts[0].parse::<u32>()
+                    {
+                        let val_str = parts[1];
+                        if val_str != "N/A" {
+                            let util = Self::parse_percent(val_str);
+                            if let Ok(mut map_guard) = store.write() {
+                                let dev_map = map_guard.entry(idx).or_insert_with(HashMap::new);
+                                dev_map.insert("tensorcore_utilization".to_string(), util);
+                                updated = true;
                             }
+                            debug!("Parsed TensorCore [Dev {}]: {}", idx, util);
                         }
                     }
                 }
@@ -385,11 +382,7 @@ impl TpuInfoRunner {
 
     pub fn get_status(&self) -> Option<String> {
         let s = self.status.lock().unwrap().clone();
-        if s == "Ready" {
-            None
-        } else {
-            Some(s)
-        }
+        if s == "Ready" { None } else { Some(s) }
     }
 
     pub fn get_metric(&self, device_idx: u32, key: &str) -> Option<f64> {

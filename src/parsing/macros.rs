@@ -27,7 +27,7 @@
 /// This macro does not panic. Returns None for invalid input.
 #[macro_export]
 macro_rules! parse_metric {
-    ($line:expr, $suffix:expr, $ty:ty) => {{
+    ($line:expr_2021, $suffix:expr_2021, $ty:ty) => {{
         let opt = $crate::parsing::common::after_colon_trimmed($line)
             .and_then(|rest| rest.split_whitespace().next())
             .map(|tok| {
@@ -52,7 +52,7 @@ macro_rules! parse_metric {
 /// This macro does not panic. Returns None for invalid input or regex mismatches.
 #[macro_export]
 macro_rules! parse_prometheus {
-    ($line:expr, $re:expr) => {{
+    ($line:expr_2021, $re:expr_2021) => {{
         if let Some(cap) = $re.captures($line.trim()) {
             let name = cap.get(1).map(|m| m.as_str().to_string());
             let labels = cap.get(2).map(|m| m.as_str().to_string());
@@ -88,13 +88,13 @@ macro_rules! parse_prometheus {
 /// This macro does not panic. Silently skips if the label is not found.
 #[macro_export]
 macro_rules! extract_label_to_detail {
-    ($labels:expr, $label_key:expr, $detail_map:expr, $detail_key:expr) => {
+    ($labels:expr_2021, $label_key:expr_2021, $detail_map:expr_2021, $detail_key:expr_2021) => {
         if let Some(value) = $labels.get($label_key) {
             $detail_map.insert($detail_key.to_string(), value.clone());
         }
     };
     // Variant that uses the same key for both label and detail
-    ($labels:expr, $key:expr, $detail_map:expr) => {
+    ($labels:expr_2021, $key:expr_2021, $detail_map:expr_2021) => {
         extract_label_to_detail!($labels, $key, $detail_map, $key);
     };
 }
@@ -112,7 +112,7 @@ macro_rules! extract_label_to_detail {
 /// ```
 #[macro_export]
 macro_rules! extract_labels_batch {
-    ($labels:expr, $detail_map:expr, [$($key:expr),* $(,)?]) => {
+    ($labels:expr_2021, $detail_map:expr_2021, [$($key:expr_2021),* $(,)?]) => {
         $(
             if let Some(value) = $labels.get($key) {
                 $detail_map.insert($key.to_string(), value.clone());
@@ -135,8 +135,8 @@ macro_rules! extract_labels_batch {
 /// ```
 #[macro_export]
 macro_rules! update_metric_field {
-    ($metric_name:expr, $value:expr, $target:expr, {
-        $($name:expr => $field:ident as $type:ty),* $(,)?
+    ($metric_name:expr_2021, $value:expr_2021, $target:expr_2021, {
+        $($name:expr_2021 => $field:ident as $type:ty),* $(,)?
     }) => {
         match $metric_name {
             $(
@@ -168,14 +168,14 @@ macro_rules! update_metric_field {
 /// ```
 #[macro_export]
 macro_rules! get_label_or_default {
-    ($labels:expr, $key:expr) => {
+    ($labels:expr_2021, $key:expr_2021) => {
         $labels
             .get($key)
             .map(|s| s.as_str())
             .unwrap_or("")
             .to_string()
     };
-    ($labels:expr, $key:expr, $default:expr) => {
+    ($labels:expr_2021, $key:expr_2021, $default:expr_2021) => {
         $labels
             .get($key)
             .map(|s| s.to_string())
@@ -192,7 +192,7 @@ macro_rules! get_label_or_default {
 /// ```
 #[macro_export]
 macro_rules! update_optional_field {
-    ($parent:expr, $optional_field:ident, $field:ident, $value:expr) => {
+    ($parent:expr_2021, $optional_field:ident, $field:ident, $value:expr_2021) => {
         if let Some(ref mut inner) = $parent.$optional_field {
             inner.$field = $value;
         }
@@ -213,7 +213,7 @@ macro_rules! update_optional_field {
 /// ```
 #[macro_export]
 macro_rules! extract_struct_fields {
-    ($detail:expr, $source:expr, {
+    ($detail:expr_2021, $source:expr_2021, {
         $($key:literal => $field:ident),* $(,)?
     }) => {
         $(
@@ -236,7 +236,7 @@ macro_rules! extract_struct_fields {
 /// ```
 #[macro_export]
 macro_rules! insert_optional_fields {
-    ($detail:expr, $source:expr, {
+    ($detail:expr_2021, $source:expr_2021, {
         $($key:literal => $field:ident),* $(,)?
     }) => {
         $(
@@ -257,7 +257,7 @@ macro_rules! insert_optional_fields {
 /// ```
 #[macro_export]
 macro_rules! parse_colon_value {
-    ($line:expr, $type:ty) => {
+    ($line:expr_2021, $type:ty) => {
         $line
             .split(':')
             .nth(1)
@@ -277,7 +277,7 @@ macro_rules! parse_colon_value {
 /// ```
 #[macro_export]
 macro_rules! parse_prefixed_line {
-    ($line:expr, $prefix:expr, $type:ty) => {
+    ($line:expr_2021, $prefix:expr_2021, $type:ty) => {
         if $line.starts_with($prefix) {
             $line
                 .strip_prefix($prefix)

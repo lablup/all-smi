@@ -8,7 +8,7 @@ repository = "https://github.com/lablup/all-smi"
 readme = "README.md"
 keywords = ["cli", "rust"]
 categories = ["command-line-utilities"]
-edition = "2021"
+edition = "2024"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 

@@ -12,14 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::device::GpuReader;
 use crate::device::process_list::{get_all_processes, merge_gpu_processes};
 use crate::device::readers::common_cache::{DetailBuilder, DeviceStaticInfo};
 use crate::device::types::{GpuInfo, ProcessInfo};
-use crate::device::GpuReader;
 use crate::utils::{get_hostname, with_global_system};
 use all_smi_luwen_core;
-use all_smi_luwen_if::chip::{Chip, ChipImpl, Telemetry};
 use all_smi_luwen_if::ChipDetectOptions;
+use all_smi_luwen_if::chip::{Chip, ChipImpl, Telemetry};
 use all_smi_luwen_ref;
 use chrono::Local;
 use once_cell::sync::Lazy;
@@ -146,10 +146,13 @@ impl TenstorrentReader {
     /// Invalidate cache to force re-detection on next access
     #[allow(dead_code)]
     pub fn invalidate_cache() {
-        if let Ok(mut chips_guard) = INITIALIZED_CHIPS.lock() {
-            *chips_guard = None;
-        } else {
-            eprintln!("Failed to acquire lock to invalidate Tenstorrent cache");
+        match INITIALIZED_CHIPS.lock() {
+            Ok(mut chips_guard) => {
+                *chips_guard = None;
+            }
+            _ => {
+                eprintln!("Failed to acquire lock to invalidate Tenstorrent cache");
+            }
         }
     }
 

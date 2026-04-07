@@ -189,34 +189,34 @@ impl GaudiExporter {
             );
 
         // Power limit max if available
-        if let Some(power_max_str) = info.detail.get("power_limit_max") {
-            if let Ok(power_max) = power_max_str.parse::<f64>() {
-                builder
-                    .help(
-                        "all_smi_gaudi_power_max_watts",
-                        "Gaudi maximum power limit in watts",
-                    )
-                    .type_("all_smi_gaudi_power_max_watts", "gauge")
-                    .metric("all_smi_gaudi_power_max_watts", &base_labels, power_max);
+        if let Some(power_max_str) = info.detail.get("power_limit_max")
+            && let Ok(power_max) = power_max_str.parse::<f64>()
+        {
+            builder
+                .help(
+                    "all_smi_gaudi_power_max_watts",
+                    "Gaudi maximum power limit in watts",
+                )
+                .type_("all_smi_gaudi_power_max_watts", "gauge")
+                .metric("all_smi_gaudi_power_max_watts", &base_labels, power_max);
 
-                // Power utilization percentage
-                let power_util = if power_max > 0.0 {
-                    (info.power_consumption / power_max) * 100.0
-                } else {
-                    0.0
-                };
-                builder
-                    .help(
-                        "all_smi_gaudi_power_utilization_percent",
-                        "Gaudi power utilization percentage",
-                    )
-                    .type_("all_smi_gaudi_power_utilization_percent", "gauge")
-                    .metric(
-                        "all_smi_gaudi_power_utilization_percent",
-                        &base_labels,
-                        power_util,
-                    );
-            }
+            // Power utilization percentage
+            let power_util = if power_max > 0.0 {
+                (info.power_consumption / power_max) * 100.0
+            } else {
+                0.0
+            };
+            builder
+                .help(
+                    "all_smi_gaudi_power_utilization_percent",
+                    "Gaudi power utilization percentage",
+                )
+                .type_("all_smi_gaudi_power_utilization_percent", "gauge")
+                .metric(
+                    "all_smi_gaudi_power_utilization_percent",
+                    &base_labels,
+                    power_util,
+                );
         }
     }
 

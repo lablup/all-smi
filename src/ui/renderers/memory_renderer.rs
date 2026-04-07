@@ -18,7 +18,7 @@ use crossterm::{queue, style::Color, style::Print};
 
 use crate::device::MemoryInfo;
 use crate::ui::text::print_colored_text;
-use crate::ui::widgets::{draw_bar_multi, BarSegment};
+use crate::ui::widgets::{BarSegment, draw_bar_multi};
 
 /// Memory renderer struct implementing the DeviceRenderer trait
 #[allow(dead_code)]

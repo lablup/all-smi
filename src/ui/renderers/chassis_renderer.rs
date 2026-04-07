@@ -93,25 +93,25 @@ pub fn print_chassis_info<W: Write>(
     if has_power_breakdown {
         print_colored_text(stdout, " │", Color::DarkGrey, None, None);
 
-        if let Some(cpu_power) = info.detail.get("cpu_power_watts") {
-            if let Ok(power) = cpu_power.parse::<f64>() {
-                print_colored_text(stdout, " CPU:", Color::Cyan, None, None);
-                print_colored_text(stdout, &format!("{power:>5.1}W"), Color::White, None, None);
-            }
+        if let Some(cpu_power) = info.detail.get("cpu_power_watts")
+            && let Ok(power) = cpu_power.parse::<f64>()
+        {
+            print_colored_text(stdout, " CPU:", Color::Cyan, None, None);
+            print_colored_text(stdout, &format!("{power:>5.1}W"), Color::White, None, None);
         }
 
-        if let Some(gpu_power) = info.detail.get("gpu_power_watts") {
-            if let Ok(power) = gpu_power.parse::<f64>() {
-                print_colored_text(stdout, " GPU:", Color::Green, None, None);
-                print_colored_text(stdout, &format!("{power:>5.1}W"), Color::White, None, None);
-            }
+        if let Some(gpu_power) = info.detail.get("gpu_power_watts")
+            && let Ok(power) = gpu_power.parse::<f64>()
+        {
+            print_colored_text(stdout, " GPU:", Color::Green, None, None);
+            print_colored_text(stdout, &format!("{power:>5.1}W"), Color::White, None, None);
         }
 
-        if let Some(ane_power) = info.detail.get("ane_power_watts") {
-            if let Ok(power) = ane_power.parse::<f64>() {
-                print_colored_text(stdout, " ANE:", Color::Blue, None, None);
-                print_colored_text(stdout, &format!("{power:>5.1}W"), Color::White, None, None);
-            }
+        if let Some(ane_power) = info.detail.get("ane_power_watts")
+            && let Ok(power) = ane_power.parse::<f64>()
+        {
+            print_colored_text(stdout, " ANE:", Color::Blue, None, None);
+            print_colored_text(stdout, &format!("{power:>5.1}W"), Color::White, None, None);
         }
     }
 

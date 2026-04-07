@@ -270,7 +270,7 @@ impl PciInfo {
 /// ```
 #[macro_export]
 macro_rules! build_detail_map {
-    ($($key:expr => $value:expr),* $(,)?) => {{
+    ($($key:expr_2021 => $value:expr_2021),* $(,)?) => {{
         let mut map = std::collections::HashMap::new();
         $(
             if let Some(val) = $value {
@@ -298,7 +298,7 @@ macro_rules! build_detail_map {
 /// ```
 #[macro_export]
 macro_rules! cache_device_static_info {
-    ($cache:expr, $key_type:ty, $discovery_fn:expr) => {{
+    ($cache:expr_2021, $key_type:ty, $discovery_fn:expr_2021) => {{
         use $crate::device::readers::common_cache::CacheInitializer;
 
         if $cache.get().is_some() {

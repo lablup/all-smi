@@ -98,11 +98,7 @@ impl ChassisReader for AppleSiliconNativeChassisReader {
         } else {
             // Fallback: sum individual components if combined is not available
             let sum = cpu_power_watts + gpu_power_watts + ane_power_watts;
-            if sum > 0.0 {
-                Some(sum)
-            } else {
-                None
-            }
+            if sum > 0.0 { Some(sum) } else { None }
         };
 
         // Clone hostname once and use for all identifier fields

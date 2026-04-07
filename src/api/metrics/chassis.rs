@@ -158,17 +158,17 @@ impl<'a> MetricExporter for ChassisMetricExporter<'a> {
                 .type_("all_smi_chassis_cpu_power_watts", "gauge");
 
             for chassis in self.chassis_info {
-                if let Some(power_str) = chassis.detail.get("cpu_power_watts") {
-                    if let Ok(power) = power_str.parse::<f64>() {
-                        builder.metric(
-                            "all_smi_chassis_cpu_power_watts",
-                            &[
-                                ("hostname", &chassis.hostname),
-                                ("instance", &chassis.instance),
-                            ],
-                            format!("{power:.2}"),
-                        );
-                    }
+                if let Some(power_str) = chassis.detail.get("cpu_power_watts")
+                    && let Ok(power) = power_str.parse::<f64>()
+                {
+                    builder.metric(
+                        "all_smi_chassis_cpu_power_watts",
+                        &[
+                            ("hostname", &chassis.hostname),
+                            ("instance", &chassis.instance),
+                        ],
+                        format!("{power:.2}"),
+                    );
                 }
             }
         }
@@ -182,17 +182,17 @@ impl<'a> MetricExporter for ChassisMetricExporter<'a> {
                 .type_("all_smi_chassis_gpu_power_watts", "gauge");
 
             for chassis in self.chassis_info {
-                if let Some(power_str) = chassis.detail.get("gpu_power_watts") {
-                    if let Ok(power) = power_str.parse::<f64>() {
-                        builder.metric(
-                            "all_smi_chassis_gpu_power_watts",
-                            &[
-                                ("hostname", &chassis.hostname),
-                                ("instance", &chassis.instance),
-                            ],
-                            format!("{power:.2}"),
-                        );
-                    }
+                if let Some(power_str) = chassis.detail.get("gpu_power_watts")
+                    && let Ok(power) = power_str.parse::<f64>()
+                {
+                    builder.metric(
+                        "all_smi_chassis_gpu_power_watts",
+                        &[
+                            ("hostname", &chassis.hostname),
+                            ("instance", &chassis.instance),
+                        ],
+                        format!("{power:.2}"),
+                    );
                 }
             }
         }
@@ -206,17 +206,17 @@ impl<'a> MetricExporter for ChassisMetricExporter<'a> {
                 .type_("all_smi_chassis_ane_power_watts", "gauge");
 
             for chassis in self.chassis_info {
-                if let Some(power_str) = chassis.detail.get("ane_power_watts") {
-                    if let Ok(power) = power_str.parse::<f64>() {
-                        builder.metric(
-                            "all_smi_chassis_ane_power_watts",
-                            &[
-                                ("hostname", &chassis.hostname),
-                                ("instance", &chassis.instance),
-                            ],
-                            format!("{power:.2}"),
-                        );
-                    }
+                if let Some(power_str) = chassis.detail.get("ane_power_watts")
+                    && let Ok(power) = power_str.parse::<f64>()
+                {
+                    builder.metric(
+                        "all_smi_chassis_ane_power_watts",
+                        &[
+                            ("hostname", &chassis.hostname),
+                            ("instance", &chassis.instance),
+                        ],
+                        format!("{power:.2}"),
+                    );
                 }
             }
         }

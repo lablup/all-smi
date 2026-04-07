@@ -17,7 +17,7 @@
 //! Queries MSAcpi_ThermalZoneTemperature from root\WMI namespace.
 //! This is the standard Windows method but is not available on all systems.
 
-use super::{is_wmi_not_found_error, TemperatureResult};
+use super::{TemperatureResult, is_wmi_not_found_error};
 use serde::Deserialize;
 use wmi::WMIConnection;
 

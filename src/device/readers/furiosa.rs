@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::device::GpuReader;
 use crate::device::common::constants::FURIOSA_HBM3_MEMORY_BYTES;
 use crate::device::common::execute_command_default;
 use crate::device::common::parsers::{
@@ -19,7 +20,6 @@ use crate::device::common::parsers::{
 };
 use crate::device::readers::common_cache::{DetailBuilder, DeviceStaticInfo};
 use crate::device::types::{GpuInfo, ProcessInfo};
-use crate::device::GpuReader;
 use crate::utils::get_hostname;
 use chrono::Local;
 use serde::Deserialize;
@@ -174,44 +174,43 @@ impl FuriosaNpuReader {
             let mut device_info_map = HashMap::new();
 
             // Get device info to extract static fields
-            if let Some(stdout) = furiosa_smi_json("info") {
-                if let Ok(devices) = serde_json::from_str::<Vec<FuriosaSmiInfoJson>>(&stdout) {
-                    // Use common MAX_DEVICES constant
-                    const MAX_DEVICES: usize = crate::device::readers::common_cache::MAX_DEVICES;
-                    let devices_to_process: Vec<_> =
-                        devices.into_iter().take(MAX_DEVICES).collect();
+            if let Some(stdout) = furiosa_smi_json("info")
+                && let Ok(devices) = serde_json::from_str::<Vec<FuriosaSmiInfoJson>>(&stdout)
+            {
+                // Use common MAX_DEVICES constant
+                const MAX_DEVICES: usize = crate::device::readers::common_cache::MAX_DEVICES;
+                let devices_to_process: Vec<_> = devices.into_iter().take(MAX_DEVICES).collect();
 
-                    for device in devices_to_process {
-                        // Build detail HashMap using DetailBuilder
-                        let mut builder = DetailBuilder::new()
-                            .insert("serial_number", &device.device_sn)
-                            .insert("firmware_version", &device.firmware)
-                            .insert("pci_bdf", &device.pci_bdf)
-                            .insert("pci_dev", &device.pci_dev)
-                            .insert("architecture", device.arch.to_uppercase())
-                            .insert("core_count", "8")
-                            .insert("pe_count", "64K")
-                            .insert("memory_bandwidth", "1.63TB/s")
-                            .insert("on_chip_sram", "256MB");
+                for device in devices_to_process {
+                    // Build detail HashMap using DetailBuilder
+                    let mut builder = DetailBuilder::new()
+                        .insert("serial_number", &device.device_sn)
+                        .insert("firmware_version", &device.firmware)
+                        .insert("pci_bdf", &device.pci_bdf)
+                        .insert("pci_dev", &device.pci_dev)
+                        .insert("architecture", device.arch.to_uppercase())
+                        .insert("core_count", "8")
+                        .insert("pe_count", "64K")
+                        .insert("memory_bandwidth", "1.63TB/s")
+                        .insert("on_chip_sram", "256MB");
 
-                        // Only add pert_version if available (Warboy has it, RNGD may not)
-                        if !device.pert.is_empty() {
-                            builder = builder
-                                .insert("pert_version", &device.pert)
-                                .insert_lib_info("PERT", Some(&device.pert));
-                        }
-
-                        let detail = builder.build();
-
-                        let static_info = DeviceStaticInfo::with_details(
-                            format!("Furiosa {}", device.arch.to_uppercase()),
-                            Some(device.device_uuid.clone()),
-                            detail,
-                        );
-
-                        // Use dev_name as key (e.g., "npu0") for both Warboy and RNGD
-                        device_info_map.insert(device.dev_name.clone(), static_info);
+                    // Only add pert_version if available (Warboy has it, RNGD may not)
+                    if !device.pert.is_empty() {
+                        builder = builder
+                            .insert("pert_version", &device.pert)
+                            .insert_lib_info("PERT", Some(&device.pert));
                     }
+
+                    let detail = builder.build();
+
+                    let static_info = DeviceStaticInfo::with_details(
+                        format!("Furiosa {}", device.arch.to_uppercase()),
+                        Some(device.device_uuid.clone()),
+                        detail,
+                    );
+
+                    // Use dev_name as key (e.g., "npu0") for both Warboy and RNGD
+                    device_info_map.insert(device.dev_name.clone(), static_info);
                 }
             }
 
@@ -405,11 +404,12 @@ fn furiosa_smi_json(subcommand: &str) -> Option<String> {
 
     // Slow path (first call only): probe with --format first (RNGD), then --output (Warboy).
     // Reuse the successful probe result directly instead of discarding it.
-    if let Ok(output) = execute_command_default("furiosa-smi", &[subcommand, "--format", "json"]) {
-        if output.status == 0 && !output.stdout.is_empty() {
-            let _ = FURIOSA_JSON_FLAG.set("--format");
-            return Some(output.stdout);
-        }
+    if let Ok(output) = execute_command_default("furiosa-smi", &[subcommand, "--format", "json"])
+        && output.status == 0
+        && !output.stdout.is_empty()
+    {
+        let _ = FURIOSA_JSON_FLAG.set("--format");
+        return Some(output.stdout);
     }
 
     // Fall back to --output (Warboy)

@@ -102,16 +102,16 @@ pub mod google_tpu {
         // $HOME/.local/lib/python*/site-packages/libtpu/libtpu.so
         if let Ok(home) = std::env::var("HOME") {
             let local_lib = PathBuf::from(&home).join(".local/lib");
-            if local_lib.exists() {
-                if let Ok(entries) = std::fs::read_dir(&local_lib) {
-                    for entry in entries.flatten() {
-                        let name = entry.file_name();
-                        let name_str = name.to_string_lossy();
-                        if name_str.starts_with("python") {
-                            let libtpu_path = entry.path().join("site-packages/libtpu/libtpu.so");
-                            if libtpu_path.exists() {
-                                paths.push(libtpu_path);
-                            }
+            if local_lib.exists()
+                && let Ok(entries) = std::fs::read_dir(&local_lib)
+            {
+                for entry in entries.flatten() {
+                    let name = entry.file_name();
+                    let name_str = name.to_string_lossy();
+                    if name_str.starts_with("python") {
+                        let libtpu_path = entry.path().join("site-packages/libtpu/libtpu.so");
+                        if libtpu_path.exists() {
+                            paths.push(libtpu_path);
                         }
                     }
                 }
@@ -122,16 +122,16 @@ pub mod google_tpu {
         // Check VIRTUAL_ENV environment variable
         if let Ok(venv) = std::env::var("VIRTUAL_ENV") {
             let venv_libtpu = PathBuf::from(&venv).join("lib");
-            if venv_libtpu.exists() {
-                if let Ok(entries) = std::fs::read_dir(&venv_libtpu) {
-                    for entry in entries.flatten() {
-                        let name = entry.file_name();
-                        let name_str = name.to_string_lossy();
-                        if name_str.starts_with("python") {
-                            let libtpu_path = entry.path().join("site-packages/libtpu/libtpu.so");
-                            if libtpu_path.exists() {
-                                paths.push(libtpu_path);
-                            }
+            if venv_libtpu.exists()
+                && let Ok(entries) = std::fs::read_dir(&venv_libtpu)
+            {
+                for entry in entries.flatten() {
+                    let name = entry.file_name();
+                    let name_str = name.to_string_lossy();
+                    if name_str.starts_with("python") {
+                        let libtpu_path = entry.path().join("site-packages/libtpu/libtpu.so");
+                        if libtpu_path.exists() {
+                            paths.push(libtpu_path);
                         }
                     }
                 }
@@ -144,23 +144,22 @@ pub mod google_tpu {
         if let Ok(home) = std::env::var("HOME") {
             for conda_dir in ["anaconda3", "miniconda3", "mambaforge", "miniforge3"] {
                 let envs_path = PathBuf::from(&home).join(conda_dir).join("envs");
-                if envs_path.exists() {
-                    if let Ok(env_entries) = std::fs::read_dir(&envs_path) {
-                        for env_entry in env_entries.flatten() {
-                            let lib_path = env_entry.path().join("lib");
-                            if lib_path.exists() {
-                                if let Ok(lib_entries) = std::fs::read_dir(&lib_path) {
-                                    for lib_entry in lib_entries.flatten() {
-                                        let name = lib_entry.file_name();
-                                        let name_str = name.to_string_lossy();
-                                        if name_str.starts_with("python") {
-                                            let libtpu_path = lib_entry
-                                                .path()
-                                                .join("site-packages/libtpu/libtpu.so");
-                                            if libtpu_path.exists() {
-                                                paths.push(libtpu_path);
-                                            }
-                                        }
+                if envs_path.exists()
+                    && let Ok(env_entries) = std::fs::read_dir(&envs_path)
+                {
+                    for env_entry in env_entries.flatten() {
+                        let lib_path = env_entry.path().join("lib");
+                        if lib_path.exists()
+                            && let Ok(lib_entries) = std::fs::read_dir(&lib_path)
+                        {
+                            for lib_entry in lib_entries.flatten() {
+                                let name = lib_entry.file_name();
+                                let name_str = name.to_string_lossy();
+                                if name_str.starts_with("python") {
+                                    let libtpu_path =
+                                        lib_entry.path().join("site-packages/libtpu/libtpu.so");
+                                    if libtpu_path.exists() {
+                                        paths.push(libtpu_path);
                                     }
                                 }
                             }
@@ -170,17 +169,16 @@ pub mod google_tpu {
 
                 // Also check base conda environment
                 let base_lib = PathBuf::from(&home).join(conda_dir).join("lib");
-                if base_lib.exists() {
-                    if let Ok(entries) = std::fs::read_dir(&base_lib) {
-                        for entry in entries.flatten() {
-                            let name = entry.file_name();
-                            let name_str = name.to_string_lossy();
-                            if name_str.starts_with("python") {
-                                let libtpu_path =
-                                    entry.path().join("site-packages/libtpu/libtpu.so");
-                                if libtpu_path.exists() {
-                                    paths.push(libtpu_path);
-                                }
+                if base_lib.exists()
+                    && let Ok(entries) = std::fs::read_dir(&base_lib)
+                {
+                    for entry in entries.flatten() {
+                        let name = entry.file_name();
+                        let name_str = name.to_string_lossy();
+                        if name_str.starts_with("python") {
+                            let libtpu_path = entry.path().join("site-packages/libtpu/libtpu.so");
+                            if libtpu_path.exists() {
+                                paths.push(libtpu_path);
                             }
                         }
                     }
@@ -193,16 +191,16 @@ pub mod google_tpu {
         // /usr/local/lib/python*/site-packages/libtpu/libtpu.so
         for base in ["/usr/lib", "/usr/local/lib"] {
             let base_path = PathBuf::from(base);
-            if base_path.exists() {
-                if let Ok(entries) = std::fs::read_dir(&base_path) {
-                    for entry in entries.flatten() {
-                        let name = entry.file_name();
-                        let name_str = name.to_string_lossy();
-                        if name_str.starts_with("python") {
-                            let libtpu_path = entry.path().join("site-packages/libtpu/libtpu.so");
-                            if libtpu_path.exists() {
-                                paths.push(libtpu_path);
-                            }
+            if base_path.exists()
+                && let Ok(entries) = std::fs::read_dir(&base_path)
+            {
+                for entry in entries.flatten() {
+                    let name = entry.file_name();
+                    let name_str = name.to_string_lossy();
+                    if name_str.starts_with("python") {
+                        let libtpu_path = entry.path().join("site-packages/libtpu/libtpu.so");
+                        if libtpu_path.exists() {
+                            paths.push(libtpu_path);
                         }
                     }
                 }

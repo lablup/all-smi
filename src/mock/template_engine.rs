@@ -48,76 +48,76 @@ pub fn build_response_template(
     // Build template using the generator
     match platform {
         PlatformType::Nvidia => {
-            let gen =
+            let generator =
                 NvidiaMockGenerator::new(Some(gpu_name.to_string()), instance_name.to_string());
-            let mut template = gen.build_nvidia_template(gpus, cpu, memory);
+            let mut template = generator.build_nvidia_template(gpus, cpu, memory);
 
             // Add disk metrics
             crate::mock::templates::disk::add_disk_metrics(&mut template, instance_name);
             template
         }
         PlatformType::Apple => {
-            let gen = AppleSiliconMockGenerator::new(
+            let generator = AppleSiliconMockGenerator::new(
                 Some(gpu_name.to_string()),
                 instance_name.to_string(),
             );
-            let mut template = gen.build_apple_template(gpus, cpu, memory);
+            let mut template = generator.build_apple_template(gpus, cpu, memory);
 
             // Add disk metrics
             crate::mock::templates::disk::add_disk_metrics(&mut template, instance_name);
             template
         }
         PlatformType::Jetson => {
-            let gen =
+            let generator =
                 JetsonMockGenerator::new(Some(gpu_name.to_string()), instance_name.to_string());
-            let mut template = gen.build_jetson_template(gpus);
+            let mut template = generator.build_jetson_template(gpus);
 
             // Add disk metrics
             crate::mock::templates::disk::add_disk_metrics(&mut template, instance_name);
             template
         }
         PlatformType::Tenstorrent => {
-            let gen = TenstorrentMockGenerator::new(
+            let generator = TenstorrentMockGenerator::new(
                 Some(gpu_name.to_string()),
                 instance_name.to_string(),
             );
-            let mut template = gen.build_tenstorrent_template(gpus);
+            let mut template = generator.build_tenstorrent_template(gpus);
 
             // Add disk metrics
             crate::mock::templates::disk::add_disk_metrics(&mut template, instance_name);
             template
         }
         PlatformType::Rebellions => {
-            let gen =
+            let generator =
                 RebellionsMockGenerator::new(Some(gpu_name.to_string()), instance_name.to_string());
-            let mut template = gen.build_rebellions_template(gpus);
+            let mut template = generator.build_rebellions_template(gpus);
 
             // Add disk metrics
             crate::mock::templates::disk::add_disk_metrics(&mut template, instance_name);
             template
         }
         PlatformType::Furiosa => {
-            let gen =
+            let generator =
                 FuriosaMockGenerator::new(Some(gpu_name.to_string()), instance_name.to_string());
-            let mut template = gen.build_furiosa_template(gpus);
+            let mut template = generator.build_furiosa_template(gpus);
 
             // Add disk metrics
             crate::mock::templates::disk::add_disk_metrics(&mut template, instance_name);
             template
         }
         PlatformType::Gaudi => {
-            let gen =
+            let generator =
                 GaudiMockGenerator::new(Some(gpu_name.to_string()), instance_name.to_string());
-            let mut template = gen.build_gaudi_template(gpus);
+            let mut template = generator.build_gaudi_template(gpus);
 
             // Add disk metrics
             crate::mock::templates::disk::add_disk_metrics(&mut template, instance_name);
             template
         }
         PlatformType::AmdGpu => {
-            let gen =
+            let generator =
                 AmdGpuMockGenerator::new(Some(gpu_name.to_string()), instance_name.to_string());
-            let mut template = gen.build_amd_template(gpus, cpu, memory);
+            let mut template = generator.build_amd_template(gpus, cpu, memory);
 
             // Add disk metrics
             crate::mock::templates::disk::add_disk_metrics(&mut template, instance_name);
@@ -125,9 +125,9 @@ pub fn build_response_template(
         }
         _ => {
             // Default to NVIDIA for unsupported platforms
-            let gen =
+            let generator =
                 NvidiaMockGenerator::new(Some(gpu_name.to_string()), instance_name.to_string());
-            let mut template = gen.build_nvidia_template(gpus, cpu, memory);
+            let mut template = generator.build_nvidia_template(gpus, cpu, memory);
 
             // Add disk metrics
             crate::mock::templates::disk::add_disk_metrics(&mut template, instance_name);
@@ -148,36 +148,36 @@ pub fn render_response(
 ) -> String {
     let mut response = match platform {
         PlatformType::Nvidia => {
-            let gen = NvidiaMockGenerator::new(None, "".to_string());
-            gen.render_nvidia_response(template, gpus, cpu, memory)
+            let generator = NvidiaMockGenerator::new(None, "".to_string());
+            generator.render_nvidia_response(template, gpus, cpu, memory)
         }
         PlatformType::Apple => {
-            let gen = AppleSiliconMockGenerator::new(None, "".to_string());
-            gen.render_apple_response(template, gpus, cpu, memory)
+            let generator = AppleSiliconMockGenerator::new(None, "".to_string());
+            generator.render_apple_response(template, gpus, cpu, memory)
         }
         PlatformType::Jetson => {
-            let gen = JetsonMockGenerator::new(None, "".to_string());
-            gen.render_jetson_response(template, gpus)
+            let generator = JetsonMockGenerator::new(None, "".to_string());
+            generator.render_jetson_response(template, gpus)
         }
         PlatformType::Tenstorrent => {
-            let gen = TenstorrentMockGenerator::new(None, "".to_string());
-            gen.render_tenstorrent_response(template, gpus)
+            let generator = TenstorrentMockGenerator::new(None, "".to_string());
+            generator.render_tenstorrent_response(template, gpus)
         }
         PlatformType::Rebellions => {
-            let gen = RebellionsMockGenerator::new(None, "".to_string());
-            gen.render_rebellions_response(template, gpus)
+            let generator = RebellionsMockGenerator::new(None, "".to_string());
+            generator.render_rebellions_response(template, gpus)
         }
         PlatformType::Furiosa => {
-            let gen = FuriosaMockGenerator::new(None, "".to_string());
-            gen.render_furiosa_response(template, gpus)
+            let generator = FuriosaMockGenerator::new(None, "".to_string());
+            generator.render_furiosa_response(template, gpus)
         }
         PlatformType::Gaudi => {
-            let gen = GaudiMockGenerator::new(None, "".to_string());
-            gen.render_gaudi_response(template, gpus)
+            let generator = GaudiMockGenerator::new(None, "".to_string());
+            generator.render_gaudi_response(template, gpus)
         }
         PlatformType::AmdGpu => {
-            let gen = AmdGpuMockGenerator::new(None, "".to_string());
-            gen.render_amd_response(template, gpus, cpu, memory)
+            let generator = AmdGpuMockGenerator::new(None, "".to_string());
+            generator.render_amd_response(template, gpus, cpu, memory)
         }
         _ => template.to_string(),
     };
@@ -207,7 +207,7 @@ pub fn render_response(
 
     // Default I/O values if not already replaced
     if response.contains("{{DISK_READ}}") {
-        use rand::{rng, RngExt};
+        use rand::{RngExt, rng};
         let mut rng = rng();
         response = response
             .replace(
