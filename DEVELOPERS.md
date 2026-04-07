@@ -34,7 +34,7 @@ This guide provides comprehensive information for developers and contributors wo
 sudo apt-get install pkg-config libssl-dev protobuf-compiler
 
 # Fedora/RHEL
-sudo dnf install pkg-config openssl-devel protobuf-compiler
+sudo dnf install pkg-config openssl-devel protobuf-compiler protobuf-devel
 
 # Arch Linux
 sudo pacman -S pkg-config openssl protobuf

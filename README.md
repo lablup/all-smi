@@ -77,6 +77,16 @@ Install all-smi through Cargo:
 cargo install all-smi
 ```
 
+On Linux, you need build dependencies installed first:
+
+```bash
+# Ubuntu/Debian
+sudo apt-get install pkg-config libssl-dev protobuf-compiler
+
+# Fedora/RHEL
+sudo dnf install pkg-config openssl-devel protobuf-compiler protobuf-devel
+```
+
 After installation, the binary will be available in your `$PATH` as `all-smi`.
 
 ### Option 6: Build from Source
