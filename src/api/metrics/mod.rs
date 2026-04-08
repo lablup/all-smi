@@ -77,8 +77,12 @@ impl MetricBuilder {
                 if i > 0 {
                     self.metrics.push_str(", ");
                 }
-                // Escape quotes in values for Prometheus format
-                let escaped_value = value.replace('"', "\\\"");
+                // Escape per Prometheus exposition format spec:
+                // backslash, double-quote, and newline must be escaped
+                let escaped_value = value
+                    .replace('\\', "\\\\")
+                    .replace('"', "\\\"")
+                    .replace('\n', "\\n");
                 self.metrics.push_str(&format!("{key}=\"{escaped_value}\""));
             }
             self.metrics.push('}');
@@ -99,5 +103,55 @@ impl MetricBuilder {
 impl Default for MetricBuilder {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_metric_builder_label_escaping_backslash() {
+        let mut builder = MetricBuilder::new();
+        builder.metric("test_metric", &[("path", "C:\\Windows\\System32")], "1");
+        let output = builder.build();
+        assert!(output.contains(r#"path="C:\\Windows\\System32""#));
+    }
+
+    #[test]
+    fn test_metric_builder_label_escaping_double_quote() {
+        let mut builder = MetricBuilder::new();
+        builder.metric("test_metric", &[("label", r#"say "hello""#)], "1");
+        let output = builder.build();
+        assert!(output.contains(r#"label="say \"hello\"""#));
+    }
+
+    #[test]
+    fn test_metric_builder_label_escaping_newline() {
+        let mut builder = MetricBuilder::new();
+        builder.metric("test_metric", &[("value", "line1\nline2")], "1");
+        let output = builder.build();
+        assert!(output.contains(r#"value="line1\nline2""#));
+    }
+
+    #[test]
+    fn test_metric_builder_no_labels() {
+        let mut builder = MetricBuilder::new();
+        builder.metric("test_metric", &[], "42.5");
+        let output = builder.build();
+        assert_eq!(output, "test_metric 42.5\n");
+    }
+
+    #[test]
+    fn test_metric_builder_help_and_type() {
+        let mut builder = MetricBuilder::new();
+        builder
+            .help("my_metric", "A test metric")
+            .type_("my_metric", "gauge")
+            .metric("my_metric", &[("host", "server1")], "99");
+        let output = builder.build();
+        assert!(output.contains("# HELP my_metric A test metric\n"));
+        assert!(output.contains("# TYPE my_metric gauge\n"));
+        assert!(output.contains("my_metric{host=\"server1\"} 99\n"));
     }
 }
