@@ -99,7 +99,7 @@ impl NvidiaJetsonGpuReader {
 
             // Static hardware info
             detail.insert("GPU Type".to_string(), "Integrated".to_string());
-            detail.insert("Architecture".to_string(), "Tegra".to_string());
+            detail.insert("architecture".to_string(), "Tegra".to_string());
 
             DeviceStaticInfo::with_details(name, None, detail)
         })

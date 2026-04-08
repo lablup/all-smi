@@ -42,10 +42,14 @@ pub fn draw_system_view<W: Write>(stdout: &mut W, state: &AppState, cols: u16) {
     };
     let total_gpus = state.gpu_info.len();
 
-    // Check if we're on Apple Silicon
+    // Check if we're on Apple Silicon. The native reader writes the
+    // architecture detail under the lowercase "architecture" key
+    // (see device/readers/apple_silicon_native.rs); previously this lookup
+    // used "Architecture" and never matched, so the special-case path
+    // (thermal pressure display, unified memory totals, etc.) was dead.
     let is_apple_silicon = state.gpu_info.iter().any(|gpu| {
         gpu.detail
-            .get("Architecture")
+            .get("architecture")
             .map(|arch| arch == "Apple Silicon")
             .unwrap_or(false)
     });
@@ -158,30 +162,36 @@ pub fn draw_system_view<W: Write>(stdout: &mut W, state: &AppState, cols: u16) {
         0.0
     };
 
-    // For Apple Silicon, get thermal pressure text; for others, calculate numeric temperature
-    let (avg_temperature_display, temp_std_dev_display) = if is_apple_silicon && total_gpus > 0 {
-        // Get the thermal pressure text from the first GPU (they should all be the same on a single machine)
+    // Average GPU temperature in °C — shown identically on every platform.
+    // On Apple Silicon, gpu.temperature is sourced from the SMC CPU die sensor
+    // (CPU/GPU share the same SoC die), so this is a real die temperature
+    // rather than the qualitative thermal-pressure text we used to show.
+    let avg_temperature = if total_gpus > 0 {
+        state
+            .gpu_info
+            .iter()
+            .map(|gpu| gpu.temperature as f64)
+            .sum::<f64>()
+            / total_gpus as f64
+    } else {
+        0.0
+    };
+    let avg_temperature_display = format!("{avg_temperature:.0}°C");
+
+    // The second-row temperature cell is platform-dependent:
+    // - On Apple Silicon (single SoC die) standard deviation is meaningless,
+    //   so we surface NSProcessInfo's thermal pressure level instead — that
+    //   qualitative reading is the only OS-blessed thermal hint Apple exposes.
+    // - On multi-GPU platforms we keep the cross-GPU temperature spread.
+    let (temp_secondary_label, temp_secondary_display) = if is_apple_silicon && total_gpus > 0 {
         let thermal_pressure = state
             .gpu_info
             .first()
             .and_then(|gpu| gpu.detail.get("thermal_pressure"))
             .cloned()
             .unwrap_or_else(|| "Unknown".to_string());
-        (thermal_pressure, "N/A".to_string())
+        ("Thermal", thermal_pressure)
     } else {
-        // Calculate numeric temperature for non-Apple Silicon
-        let avg_temperature = if total_gpus > 0 {
-            state
-                .gpu_info
-                .iter()
-                .map(|gpu| gpu.temperature as f64)
-                .sum::<f64>()
-                / total_gpus as f64
-        } else {
-            0.0
-        };
-
-        // Calculate temperature standard deviation
         let temp_std_dev = if total_gpus > 1 {
             let temp_variance = state
                 .gpu_info
@@ -196,11 +206,7 @@ pub fn draw_system_view<W: Write>(stdout: &mut W, state: &AppState, cols: u16) {
         } else {
             0.0
         };
-
-        (
-            format!("{avg_temperature:.0}°C"),
-            format!("±{temp_std_dev:.1}°C"),
-        )
+        ("Temp. Stdev", format!("±{temp_std_dev:.1}°C"))
     };
 
     let avg_power = if total_gpus > 0 {
@@ -270,7 +276,7 @@ pub fn draw_system_view<W: Write>(stdout: &mut W, state: &AppState, cols: u16) {
                 format_ram_value(used_gpu_memory_gb),
                 Color::Blue,
             ),
-            ("Temp. Stdev", temp_std_dev_display, Color::Magenta),
+            (temp_secondary_label, temp_secondary_display, Color::Magenta),
             ("Avg. Power", format!("{avg_power:.1}W"), Color::Red),
         ],
         box_width,

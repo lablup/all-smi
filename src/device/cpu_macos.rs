@@ -162,8 +162,12 @@ impl MacOsCpuReader {
         let per_core_utilization =
             self.get_per_core_utilization_no_refresh(e_core_count as usize, p_core_count as usize);
 
-        // Get CPU temperature (may not be available)
-        let temperature = self.get_cpu_temperature();
+        // Get CPU temperature from cached native metrics (SMC sensor reading).
+        // Falls back to None if SMC didn't return a usable value.
+        let temperature = native_data
+            .as_ref()
+            .and_then(|d| d.cpu_temperature)
+            .map(|t| t.round() as u32);
 
         // Power consumption from cached native metrics
         let power_consumption = native_data.as_ref().map(|d| d.cpu_power_mw / 1000.0);
