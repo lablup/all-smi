@@ -1,3 +1,17 @@
+all-smi (0.19.0-0) jammy; urgency=medium
+
+  * Fix Apple Silicon SMC `flt` float sensor decoding (little-endian) to restore real CPU/GPU die temperatures
+  * Standardise Apple Silicon architecture detail key to lowercase across readers and aggregator
+  * Wire cpu_macos::get_cpu_temperature through NativeMetricsData so CPU Temp. gauge is no longer stuck at 0 °C
+  * Fall back to SMC CPU die temperature on Apple Silicon when the GPU sensor is unavailable
+  * Dashboard "Avg. Temp" now shows numeric °C on every platform; Apple Silicon gains a "Thermal" cell for thermal pressure level
+  * Per-GPU list view shows real numeric die temperature on Apple Silicon instead of thermal pressure text
+  * Cache platform detection results (has_nvidia, has_gaudi, etc.) in a process-global OnceLock to avoid per-frame system_profiler probes on macOS
+  * Widen process list TIME+ column to 10 chars so long runtimes no longer push the Command column out of alignment
+  * Add regression tests for SMC FLT little-endian decoding and TIME+ column width invariant
+
+ -- Jeongkyu Shin <inureyes@gmail.com>  Wed, 08 Apr 2026 00:00:00 +0000
+
 all-smi (0.18.1-0) jammy; urgency=medium
 
   * Eliminate 1-second per-frame stall caused by RuntimeEnvironment::detect()
