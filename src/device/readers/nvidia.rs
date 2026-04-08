@@ -163,7 +163,7 @@ impl NvidiaGpuReader {
 
                     // Determine memory values: use system memory for UMA devices
                     let uma = is_uma_device(&device);
-                    let (used_memory, total_memory) = if uma {
+                    let (total_memory, used_memory) = if uma {
                         get_system_memory_for_uma()
                     } else {
                         (
