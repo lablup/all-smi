@@ -15,7 +15,6 @@
 use std::collections::HashSet;
 use std::io::Write;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use crossterm::{cursor, event::Event, queue, terminal::size};
 use tokio::sync::{Mutex, Notify};
@@ -52,9 +51,6 @@ pub struct UiLoop {
     view_cache: ViewCache,
     /// Event coordinator for event-driven wakeups
     event_coordinator: UiEventCoordinator,
-    /// Flag to skip frames when a previous stdout flush is still in progress
-    /// (prevents unbounded work on slow terminal pipes like SSH).
-    flush_in_progress: Arc<AtomicBool>,
     #[cfg(target_os = "linux")]
     hlsmi_notified: bool,
     #[cfg(target_os = "linux")]
@@ -91,7 +87,6 @@ impl UiLoop {
             previous_gpu_filter_enabled: false,
             view_cache: ViewCache::new(),
             event_coordinator,
-            flush_in_progress: Arc::new(AtomicBool::new(false)),
             #[cfg(target_os = "linux")]
             hlsmi_notified: false,
             #[cfg(target_os = "linux")]
@@ -315,27 +310,49 @@ impl UiLoop {
 
             // Use differential rendering to update only changed lines.
             // Terminal dimensions are passed in to avoid a redundant size() syscall.
-            match self
+            if self
                 .differential_renderer
                 .render_differential(&content, cols, rows)
+                .is_err()
             {
-                Ok(Some(buf)) => {
-                    // Fire-and-forget: offload the blocking write+flush to a worker
-                    // thread so the async event loop remains responsive to keyboard
-                    // input even when the terminal pipe is slow (e.g. over SSH).
-                    // If a previous flush is still in progress, skip this frame
-                    // to avoid queuing unbounded work on a congested pipe.
-                    if !self.flush_in_progress.load(Ordering::Relaxed) {
-                        let flag = Arc::clone(&self.flush_in_progress);
-                        flag.store(true, Ordering::Relaxed);
-                        tokio::task::spawn_blocking(move || {
-                            let _ = DifferentialRenderer::flush_to_stdout(&buf);
-                            flag.store(false, Ordering::Relaxed);
-                        });
+                break;
+            }
+
+            // After rendering (which may block on flush over SSH), drain any
+            // pending key/mouse events that accumulated during the flush.
+            // Process them all now, then render once — this prevents the
+            // "one render per queued keypress" cascade that causes input lag.
+            for event in self.event_coordinator.drain_pending_events() {
+                match event {
+                    UiEvent::TerminalInput(Event::Key(key_event)) => {
+                        let mut state = self.app_state.lock().await;
+                        let should_break = handle_key_event(key_event, &mut state, args).await;
+                        if should_break {
+                            return Ok(());
+                        }
+                        needs_render = true;
                     }
+                    UiEvent::TerminalInput(Event::Mouse(mouse_event)) => {
+                        let mut state = self.app_state.lock().await;
+                        let should_break = crate::view::event_handler::handle_mouse_event(
+                            mouse_event,
+                            &mut state,
+                            args,
+                        )
+                        .await;
+                        if should_break {
+                            return Ok(());
+                        }
+                        needs_render = true;
+                    }
+                    UiEvent::Resize(w, h) => {
+                        self.differential_renderer.update_dimensions(w, h);
+                        self.differential_renderer.force_clear().ok();
+                        self.resize_occurred = true;
+                        needs_render = true;
+                    }
+                    _ => {}
                 }
-                Ok(None) => {} // No changes — nothing to write
-                Err(_) => break,
             }
         }
 

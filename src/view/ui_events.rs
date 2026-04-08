@@ -167,6 +167,20 @@ impl UiEventCoordinator {
     /// simultaneously, `tokio::select!` picks one at random, ensuring fairness.
     ///
     /// Returns `TerminalClosed` when the terminal reader task has exited,
+    /// Drain all pending terminal events from the channel without blocking.
+    /// Returns them as a vector so the caller can batch-process them
+    /// and render only once at the end.
+    pub fn drain_pending_events(&mut self) -> Vec<UiEvent> {
+        let mut events = Vec::new();
+        while let Ok(event) = self.term_rx.try_recv() {
+            match event {
+                Event::Resize(w, h) => events.push(UiEvent::Resize(w, h)),
+                other => events.push(UiEvent::TerminalInput(other)),
+            }
+        }
+        events
+    }
+
     /// signalling that the UI loop should shut down.
     pub async fn next_event(&mut self) -> UiEvent {
         tokio::select! {

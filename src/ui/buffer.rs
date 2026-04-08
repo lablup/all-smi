@@ -120,16 +120,14 @@ impl DifferentialRenderer {
 
     /// Render content with differential updates - only changed lines are updated.
     ///
-    /// Returns `Some(Vec<u8>)` containing the terminal escape bytes to write,
-    /// or `None` if no lines changed. The caller is responsible for writing
-    /// the bytes to stdout — this allows offloading the potentially-blocking
-    /// write+flush to `spawn_blocking` on slow pipes (SSH).
+    /// Terminal escape sequences are first collected into an intermediate buffer,
+    /// then written to stdout in a single bulk write+flush.
     pub fn render_differential(
         &mut self,
         content: &str,
         cols: u16,
         rows: u16,
-    ) -> std::io::Result<Option<Vec<u8>>> {
+    ) -> std::io::Result<()> {
         // Keep dimensions in sync with what the caller sees.
         // This is a no-op when dimensions have not changed.
         self.update_dimensions(cols, rows);
@@ -184,20 +182,14 @@ impl DifferentialRenderer {
             }
         }
 
+        // Single bulk write + flush.
         if any_changes {
-            Ok(Some(self.write_buf.clone()))
-        } else {
-            Ok(None)
+            let mut stdout = stdout();
+            stdout.write_all(&self.write_buf)?;
+            stdout.flush()?;
         }
-    }
 
-    /// Synchronously write pre-built terminal bytes to stdout and flush.
-    /// This is the only blocking I/O operation and can be called from
-    /// `spawn_blocking` to avoid stalling the async event loop.
-    pub fn flush_to_stdout(buf: &[u8]) -> std::io::Result<()> {
-        let mut stdout = stdout();
-        stdout.write_all(buf)?;
-        stdout.flush()
+        Ok(())
     }
 
     /// Force clear the entire screen (use sparingly, e.g., on startup or resize)
