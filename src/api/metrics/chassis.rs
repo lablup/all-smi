@@ -377,4 +377,99 @@ mod tests {
         assert!(metrics.contains("all_smi_chassis_thermal_pressure_info"));
         assert!(metrics.contains("level=\"Nominal\""));
     }
+
+    #[test]
+    fn test_chassis_info_dmi_labels_metric() {
+        let mut detail = std::collections::HashMap::new();
+        detail.insert("Product Name".to_string(), "DGX H100".to_string());
+        detail.insert("Vendor".to_string(), "NVIDIA".to_string());
+        detail.insert("Board".to_string(), "H100-BOARD".to_string());
+        detail.insert("BIOS Version".to_string(), "1.0.0".to_string());
+        detail.insert("platform".to_string(), "Linux".to_string());
+
+        let chassis = ChassisInfo {
+            hostname: "dgx-host".to_string(),
+            instance: "dgx-instance".to_string(),
+            detail,
+            ..Default::default()
+        };
+
+        let chassis_vec = vec![chassis];
+        let exporter = ChassisMetricExporter::new(&chassis_vec);
+        let metrics = exporter.export_metrics();
+
+        assert!(metrics.contains("all_smi_chassis_info"));
+        assert!(metrics.contains("product_name=\"DGX H100\""));
+        assert!(metrics.contains("vendor=\"NVIDIA\""));
+        assert!(metrics.contains("board=\"H100-BOARD\""));
+        assert!(metrics.contains("bios_version=\"1.0.0\""));
+        assert!(metrics.contains("platform=\"Linux\""));
+        assert!(metrics.contains("hostname=\"dgx-host\""));
+        // The metric value should be 1
+        assert!(metrics.contains("} 1\n"));
+    }
+
+    #[test]
+    fn test_chassis_inlet_outlet_temperature_metrics() {
+        let chassis = ChassisInfo {
+            hostname: "server1".to_string(),
+            instance: "server1".to_string(),
+            inlet_temperature: Some(22.5),
+            outlet_temperature: Some(35.0),
+            ..Default::default()
+        };
+
+        let chassis_vec = vec![chassis];
+        let exporter = ChassisMetricExporter::new(&chassis_vec);
+        let metrics = exporter.export_metrics();
+
+        assert!(metrics.contains("all_smi_chassis_inlet_temperature_celsius"));
+        assert!(metrics.contains("22.5"));
+        assert!(metrics.contains("all_smi_chassis_outlet_temperature_celsius"));
+        assert!(metrics.contains("35.0"));
+    }
+
+    #[test]
+    fn test_chassis_info_no_dmi_details_skips_info_metric() {
+        // A chassis with no recognized detail keys should not emit all_smi_chassis_info
+        let chassis = ChassisInfo {
+            hostname: "bare-host".to_string(),
+            instance: "bare-instance".to_string(),
+            ..Default::default()
+        };
+
+        let chassis_vec = vec![chassis];
+        let exporter = ChassisMetricExporter::new(&chassis_vec);
+        let metrics = exporter.export_metrics();
+
+        assert!(!metrics.contains("all_smi_chassis_info"));
+    }
+
+    #[test]
+    fn test_metric_presence_flags_all_present() {
+        let mut detail = std::collections::HashMap::new();
+        detail.insert("cpu_power_watts".to_string(), "15.0".to_string());
+        detail.insert("gpu_power_watts".to_string(), "200.0".to_string());
+        detail.insert("ane_power_watts".to_string(), "5.0".to_string());
+
+        let chassis = ChassisInfo {
+            hostname: "full-host".to_string(),
+            instance: "full-instance".to_string(),
+            total_power_watts: Some(220.0),
+            thermal_pressure: Some("Nominal".to_string()),
+            inlet_temperature: Some(20.0),
+            outlet_temperature: Some(30.0),
+            fan_speeds: vec![crate::device::FanInfo {
+                id: 0,
+                name: "Fan0".to_string(),
+                speed_rpm: 1200,
+                max_rpm: 3000,
+            }],
+            detail,
+            ..Default::default()
+        };
+
+        let flags = MetricPresenceFlags::from_chassis_info(&[chassis]);
+        assert!(flags.all_present());
+    }
 }
