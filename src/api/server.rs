@@ -29,7 +29,7 @@ use tokio::net::UnixListener;
 use crate::api::handlers::{SharedState, metrics_handler};
 use crate::app_state::AppState;
 use crate::cli::ApiArgs;
-use crate::device::{get_cpu_readers, get_gpu_readers, get_memory_readers};
+use crate::device::{create_chassis_reader, get_cpu_readers, get_gpu_readers, get_memory_readers};
 use crate::storage::info::StorageInfo;
 use crate::utils::{filter_docker_aware_disks, get_hostname};
 
@@ -115,9 +115,10 @@ pub async fn run_api_mode(args: &ApiArgs) {
         let gpu_readers = get_gpu_readers();
         let cpu_readers = get_cpu_readers();
         let memory_readers = get_memory_readers();
+        let chassis_reader = create_chassis_reader();
         let mut disks = Disks::new_with_refreshed_list();
         loop {
-            let all_gpu_info = gpu_readers
+            let all_gpu_info: Vec<_> = gpu_readers
                 .iter()
                 .flat_map(|reader| reader.get_gpu_info())
                 .collect();
@@ -141,6 +142,23 @@ pub async fn run_api_mode(args: &ApiArgs) {
                 Vec::new()
             };
 
+            // Collect chassis-level info (DMI, thermals, power)
+            let chassis_info: Vec<_> = chassis_reader
+                .get_chassis_info()
+                .into_iter()
+                .map(|mut ci| {
+                    // Aggregate GPU power into chassis total if not already set
+                    if ci.total_power_watts.is_none() {
+                        let total_gpu_power: f64 =
+                            all_gpu_info.iter().map(|g| g.power_consumption).sum();
+                        if total_gpu_power > 0.0 {
+                            ci.total_power_watts = Some(total_gpu_power);
+                        }
+                    }
+                    ci
+                })
+                .collect();
+
             // Refresh disk info in-place instead of creating a new Disks instance
             disks.refresh(true);
             let storage_info = collect_storage_info_from(&disks);
@@ -150,6 +168,7 @@ pub async fn run_api_mode(args: &ApiArgs) {
             state.cpu_info = all_cpu_info;
             state.memory_info = all_memory_info;
             state.process_info = all_processes;
+            state.chassis_info = chassis_info;
             state.storage_info = storage_info;
             if state.loading {
                 state.loading = false;

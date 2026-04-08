@@ -101,6 +101,46 @@ impl<'a> MetricExporter for ChassisMetricExporter<'a> {
         // Single pass to determine which metrics are present
         let flags = MetricPresenceFlags::from_chassis_info(self.chassis_info);
 
+        // Export chassis info metric with DMI/platform details as labels
+        {
+            // Known detail keys to promote to Prometheus labels (display_key, label_name)
+            let detail_keys: &[(&str, &str)] = &[
+                ("Product Name", "product_name"),
+                ("Vendor", "vendor"),
+                ("Board", "board"),
+                ("Version", "version"),
+                ("BIOS Version", "bios_version"),
+                ("platform", "platform"),
+            ];
+            let has_details = self
+                .chassis_info
+                .iter()
+                .any(|c| detail_keys.iter().any(|(k, _)| c.detail.contains_key(*k)));
+
+            if has_details {
+                builder
+                    .help(
+                        "all_smi_chassis_info",
+                        "Chassis/node identification information",
+                    )
+                    .type_("all_smi_chassis_info", "gauge");
+
+                for chassis in self.chassis_info {
+                    // Collect label values that are present
+                    let mut label_values: Vec<(&str, &str)> = vec![
+                        ("hostname", &chassis.hostname),
+                        ("instance", &chassis.instance),
+                    ];
+                    for &(display_key, label_name) in detail_keys {
+                        if let Some(val) = chassis.detail.get(display_key) {
+                            label_values.push((label_name, val));
+                        }
+                    }
+                    builder.metric("all_smi_chassis_info", &label_values, "1");
+                }
+            }
+        }
+
         // Export chassis power metrics
         if flags.has_power {
             builder

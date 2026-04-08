@@ -58,6 +58,22 @@ const MAX_DISPLAY_PROCESSES: usize = 500;
 /// Every N cycles, we refresh all processes; otherwise, we only refresh tracked PIDs.
 const FULL_REFRESH_INTERVAL: u32 = 5;
 
+/// Inject aggregated GPU power into chassis info when not already set.
+fn inject_gpu_power(chassis_info: Vec<ChassisInfo>, gpu_info: &[GpuInfo]) -> Vec<ChassisInfo> {
+    chassis_info
+        .into_iter()
+        .map(|mut ci| {
+            if ci.total_power_watts.is_none() {
+                let total: f64 = gpu_info.iter().map(|g| g.power_consumption).sum();
+                if total > 0.0 {
+                    ci.total_power_watts = Some(total);
+                }
+            }
+            ci
+        })
+        .collect()
+}
+
 pub struct LocalCollector {
     gpu_readers: Arc<RwLock<Vec<Box<dyn GpuReader>>>>,
     cpu_readers: Arc<RwLock<Vec<Box<dyn CpuReader>>>>,
@@ -388,6 +404,9 @@ impl LocalCollector {
         // Reset refresh cycle counter (first iteration counts as cycle 0)
         self.refresh_cycle.store(1, Ordering::Relaxed);
 
+        // Inject aggregated GPU power into chassis info
+        let all_chassis_info = inject_gpu_power(all_chassis_info, &all_gpu_info);
+
         CollectionData {
             gpu_info: all_gpu_info,
             cpu_info: all_cpu_info,
@@ -496,6 +515,9 @@ impl LocalCollector {
             .and_then(|r| r.get_chassis_info())
             .into_iter()
             .collect();
+
+        // Inject aggregated GPU power into chassis info
+        let all_chassis_info = inject_gpu_power(all_chassis_info, &all_gpu_info);
 
         CollectionData {
             gpu_info: all_gpu_info,
