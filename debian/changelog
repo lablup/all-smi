@@ -1,3 +1,16 @@
+all-smi (0.18.1-0) jammy; urgency=medium
+
+  * Eliminate 1-second per-frame stall caused by RuntimeEnvironment::detect()
+  * Make TUI terminal flush non-blocking for SSH responsiveness
+  * Reduce TUI rendering overhead for remote/SSH sessions
+  * Drain pending key events after render to prevent input cascade
+  * Cache per-frame filesystem reads and remove detect() from tests
+  * Increase marquee scroll speed now that frame stall is fixed
+  * Gate Linux-only chassis functions with cfg(target_os) to suppress macOS warnings
+  * Suppress macOS build warnings for Linux-only OnceLock and mut
+
+ -- Jeongkyu Shin <inureyes@gmail.com>  Tue, 08 Apr 2026 00:00:00 +0000
+
 all-smi (0.18.0-0) jammy; urgency=medium
 
   * Reduce TUI idle CPU with event-driven UI wakeups
