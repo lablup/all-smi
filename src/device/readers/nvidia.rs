@@ -167,8 +167,8 @@ impl NvidiaGpuReader {
                         get_system_memory_for_uma()
                     } else {
                         (
-                            device.memory_info().map(|m| m.used).unwrap_or(0),
                             device.memory_info().map(|m| m.total).unwrap_or(0),
+                            device.memory_info().map(|m| m.used).unwrap_or(0),
                         )
                     };
 
