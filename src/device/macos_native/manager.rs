@@ -302,12 +302,10 @@ impl NativeMetricsManager {
         // First check: quick read-only cache check (no lock)
         if let (Ok(time_guard), Ok(data_guard)) =
             (self.last_collection_time.read(), self.latest_data.read())
+            && let (Some(last_time), Some(data)) = (*time_guard, data_guard.clone())
+            && last_time.elapsed().as_millis() < cache_duration_ms
         {
-            if let (Some(last_time), Some(data)) = (*time_guard, data_guard.clone()) {
-                if last_time.elapsed().as_millis() < cache_duration_ms {
-                    return Ok(data);
-                }
-            }
+            return Ok(data);
         }
 
         // Acquire collection lock to prevent concurrent collections
@@ -319,12 +317,10 @@ impl NativeMetricsManager {
         // Second check: re-check cache after acquiring lock (another thread may have collected)
         if let (Ok(time_guard), Ok(data_guard)) =
             (self.last_collection_time.read(), self.latest_data.read())
+            && let (Some(last_time), Some(data)) = (*time_guard, data_guard.clone())
+            && last_time.elapsed().as_millis() < cache_duration_ms
         {
-            if let (Some(last_time), Some(data)) = (*time_guard, data_guard.clone()) {
-                if last_time.elapsed().as_millis() < cache_duration_ms {
-                    return Ok(data);
-                }
-            }
+            return Ok(data);
         }
 
         // OPTIMIZATION: Reuse the existing IOReport instance instead of creating a new one
@@ -379,10 +375,10 @@ impl NativeMetricsManager {
         self.is_running.store(false, Ordering::Release);
 
         // Wait for collector thread to finish
-        if let Ok(mut guard) = self.collector_handle.lock() {
-            if let Some(handle) = guard.take() {
-                let _ = handle.join();
-            }
+        if let Ok(mut guard) = self.collector_handle.lock()
+            && let Some(handle) = guard.take()
+        {
+            let _ = handle.join();
         }
 
         FIRST_DATA_RECEIVED.store(false, Ordering::Relaxed);
@@ -435,10 +431,10 @@ pub fn get_native_metrics_manager() -> Option<Arc<NativeMetricsManager>> {
 /// Shutdown and cleanup the native metrics manager
 #[allow(dead_code)]
 pub fn shutdown_native_metrics_manager() {
-    if let Ok(mut guard) = NATIVE_METRICS_MANAGER.lock() {
-        if let Some(manager) = guard.take() {
-            manager.shutdown();
-        }
+    if let Ok(mut guard) = NATIVE_METRICS_MANAGER.lock()
+        && let Some(manager) = guard.take()
+    {
+        manager.shutdown();
     }
     FIRST_DATA_RECEIVED.store(false, Ordering::Relaxed);
 }
