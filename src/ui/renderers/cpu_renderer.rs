@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use std::io::Write;
-use std::sync::OnceLock;
 
 use crossterm::{queue, style::Color, style::Print};
 
@@ -26,7 +25,7 @@ use super::widgets::gauges::get_utilization_block;
 /// Cached container cpuset information (read once, reused every frame).
 /// The tuple is (is_container, cpuset_string).
 #[cfg(target_os = "linux")]
-static CACHED_CPUSET: OnceLock<(bool, Option<String>)> = OnceLock::new();
+static CACHED_CPUSET: std::sync::OnceLock<(bool, Option<String>)> = std::sync::OnceLock::new();
 
 #[cfg(target_os = "linux")]
 fn get_cached_cpuset() -> &'static (bool, Option<String>) {

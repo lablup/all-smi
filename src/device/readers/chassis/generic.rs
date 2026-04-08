@@ -44,6 +44,7 @@ impl Default for GenericChassisReader {
 #[allow(dead_code)]
 impl GenericChassisReader {
     pub fn new() -> Self {
+        #[allow(unused_mut)]
         let mut dmi_detail = HashMap::new();
         #[cfg(target_os = "linux")]
         collect_dmi_info(&mut dmi_detail);
