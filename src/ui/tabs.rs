@@ -230,7 +230,7 @@ mod tests {
             known_hosts: Vec::new(),
             hostname_to_host_id: HashMap::new(),
             is_local_mode: false, // Test state assumes remote mode
-            runtime_environment: crate::utils::RuntimeEnvironment::detect(),
+            runtime_environment: crate::utils::RuntimeEnvironment::default(),
             data_version: 0,
             gpu_filter_enabled: false,
             visible_process_rows: 0,

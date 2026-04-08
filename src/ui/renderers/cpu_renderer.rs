@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::io::Write;
+use std::sync::OnceLock;
 
 use crossterm::{queue, style::Color, style::Print};
 
@@ -21,6 +22,32 @@ use crate::ui::text::print_colored_text;
 use crate::ui::widgets::draw_bar;
 
 use super::widgets::gauges::get_utilization_block;
+
+/// Cached container cpuset information (read once, reused every frame).
+/// The tuple is (is_container, cpuset_string).
+#[cfg(target_os = "linux")]
+static CACHED_CPUSET: OnceLock<(bool, Option<String>)> = OnceLock::new();
+
+#[cfg(target_os = "linux")]
+fn get_cached_cpuset() -> &'static (bool, Option<String>) {
+    CACHED_CPUSET.get_or_init(|| {
+        let is_container = std::path::Path::new("/.dockerenv").exists()
+            || std::path::Path::new("/proc/self/cgroup").exists();
+
+        let cpuset = if is_container {
+            std::fs::read_to_string("/sys/fs/cgroup/cpuset.cpus.effective")
+                .or_else(|_| std::fs::read_to_string("/sys/fs/cgroup/cpuset.cpus"))
+                .or_else(|_| std::fs::read_to_string("/sys/fs/cgroup/cpuset/cpuset.cpus"))
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        } else {
+            None
+        };
+
+        (is_container, cpuset)
+    })
+}
 
 /// CPU renderer struct implementing the DeviceRenderer trait
 #[allow(dead_code)]
@@ -437,21 +464,8 @@ pub fn print_cpu_info<W: Write>(
         // Show CPU visualization for both container and bare metal
         #[cfg(target_os = "linux")]
         {
-            let is_container = std::path::Path::new("/.dockerenv").exists()
-                || std::path::Path::new("/proc/self/cgroup").exists();
-
-            // Check if we have cpuset information for containers
-            let cpuset = if is_container {
-                // Try cgroup v2 first, then cgroup v1
-                std::fs::read_to_string("/sys/fs/cgroup/cpuset.cpus.effective")
-                    .or_else(|_| std::fs::read_to_string("/sys/fs/cgroup/cpuset.cpus"))
-                    .or_else(|_| std::fs::read_to_string("/sys/fs/cgroup/cpuset/cpuset.cpus"))
-                    .ok()
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-            } else {
-                None
-            };
+            // Use cached container/cpuset detection (read once, not per-frame)
+            let &(is_container, ref cpuset) = get_cached_cpuset();
 
             // Render CPU visualization with utilization
             render_cpu_visualization(
