@@ -62,8 +62,14 @@ pub fn print_process_info<W: Write>(
 
     // Fixed column widths based on actual data sizes
     // PID: 7 (up to 9999999), USER: 12, PRI: 3, NI: 3, VIRT: 6, RES: 6, S: 1,
-    // CPU%: 5, MEM%: 5, GPU%: 5, VRAM: 7, TIME+: 8, Command: remaining
-    let fixed_widths = [7, 12, 3, 3, 6, 6, 1, 5, 5, 5, 7, 8];
+    // CPU%: 5, MEM%: 5, GPU%: 5, VRAM: 7, TIME+: 10, Command: remaining
+    //
+    // NOTE: TIME+ must be wide enough to hold the longest value produced by
+    // `format_cpu_time`, which is "HHHH:MM:SS" (10 chars) at the 365-day cap
+    // (8760 hours). Using a smaller width causes 9- or 10-char values like
+    // "213:16:04" to overflow and push the Command column out of alignment —
+    // the format specifier `{:>N}` is a minimum, not a maximum.
+    let fixed_widths = [7, 12, 3, 3, 6, 6, 1, 5, 5, 5, 7, 10];
     let num_gaps = fixed_widths.len(); // Gaps between columns (not after last column)
     let fixed_total: usize = fixed_widths.iter().sum::<usize>() + num_gaps;
 
@@ -86,7 +92,7 @@ pub fn print_process_info<W: Write>(
         fixed_widths[8],  // MEM%: 5
         fixed_widths[9],  // GPU%: 5
         fixed_widths[10], // VRAM: 7
-        fixed_widths[11], // TIME+: 8
+        fixed_widths[11], // TIME+: 10
     );
 
     // Helper function to add sort arrow
@@ -640,8 +646,18 @@ fn print_process_row_colored<W: Write>(
     }
 }
 
-/// Format CPU time in TIME+ format (e.g., 12:34.56, 1:23:45)
-/// For extremely long-running basic system processes, show as 0:00:00
+/// Format CPU time in TIME+ format (e.g., `0:01:30`, `1:23:45`, `8760:00:00`).
+///
+/// For extremely long-running basic system processes (> 365 days), show as
+/// `0:00:00` to avoid clutter.
+///
+/// # Width invariant
+///
+/// The output is at most **10 characters** long (`"8760:00:00"`, the 365-day
+/// cap). The TIME+ column in `print_process_info` relies on this bound:
+/// `fixed_widths[11] = 10`. If this function is changed to produce longer
+/// strings, the column width must be bumped to match, otherwise overflowing
+/// values push the Command column right and break alignment with the header.
 fn format_cpu_time(seconds: u64) -> Cow<'static, str> {
     if seconds == 0 {
         return Cow::Borrowed("0:00:00");
@@ -770,6 +786,49 @@ mod tests {
         let at_limit = 365 * 24 * 3600;
         let result = format_cpu_time(at_limit);
         assert!(matches!(result, Cow::Owned(_)));
+    }
+
+    #[test]
+    fn test_format_cpu_time_max_width_fits_time_column() {
+        // Alignment invariant: the TIME+ column in `print_process_info` is
+        // sized to the longest value that `format_cpu_time` can produce. If
+        // this ever changes (e.g. the 365-day cap is lifted), the column
+        // width must be bumped to match, otherwise the Command column will
+        // drift right for overflowing rows and no longer align with the
+        // header. See `fixed_widths[11]` in `print_process_info`.
+        const TIME_COL_WIDTH: usize = 10;
+
+        // The worst case under the current cap is 365 days = 8760 hours,
+        // which renders as "8760:00:00" (10 chars).
+        let at_limit = 365 * 24 * 3600;
+        assert_eq!(&*format_cpu_time(at_limit), "8760:00:00");
+        assert_eq!(format_cpu_time(at_limit).len(), TIME_COL_WIDTH);
+
+        // A handful of realistic and boundary values must all fit in the
+        // column so right-alignment produces a consistent Command position.
+        for &secs in &[
+            0u64,
+            59,           // "0:00:59"
+            90,           // "0:01:30"
+            3599,         // "0:59:59"
+            3600,         // "1:00:00"
+            35_999,       // "9:59:59"
+            36_000,       // "10:00:00"
+            359_999,      // "99:59:59"
+            360_000,      // "100:00:00"
+            3_599_999,    // "999:59:59"
+            3_600_000,    // "1000:00:00"
+            at_limit - 1, // "8759:59:59"
+            at_limit,     // "8760:00:00"
+        ] {
+            let rendered = format_cpu_time(secs);
+            assert!(
+                rendered.len() <= TIME_COL_WIDTH,
+                "format_cpu_time({secs}) = {rendered:?} exceeds TIME_COL_WIDTH={TIME_COL_WIDTH}; \
+                 this will break process list alignment. Widen `fixed_widths[11]` in \
+                 `print_process_info` to match."
+            );
+        }
     }
 
     // -----------------------------------------------------------------------
