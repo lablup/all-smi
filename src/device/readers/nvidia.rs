@@ -156,26 +156,23 @@ impl NvidiaGpuReader {
             for i in 0..device_count {
                 if let Ok(device) = nvml.device_by_index(i) {
                     // Get cached static detail for this device
-                    let mut detail = device_static_info
+                    let detail = device_static_info
                         .get(&i)
                         .map(|info| info.detail.clone())
                         .unwrap_or_default();
 
                     // Determine memory values: use system memory for UMA devices
-                    let uma = is_uma_device(&device);
+                    let mem_info = device.memory_info().ok();
+                    let mem_total_raw = mem_info.as_ref().map(|m| m.total).unwrap_or(0);
+                    let uma = is_uma_device_with_mem(&device, mem_total_raw);
                     let (total_memory, used_memory) = if uma {
                         get_system_memory_for_uma()
                     } else {
                         (
-                            device.memory_info().map(|m| m.total).unwrap_or(0),
-                            device.memory_info().map(|m| m.used).unwrap_or(0),
+                            mem_total_raw,
+                            mem_info.as_ref().map(|m| m.used).unwrap_or(0),
                         )
                     };
-
-                    // Annotate detail with memory type for UMA devices
-                    if uma {
-                        detail.insert("Memory Type".to_string(), "Unified".to_string());
-                    }
 
                     let info = GpuInfo {
                         uuid: device.uuid().unwrap_or_else(|_| format!("GPU-{i}")),
@@ -272,9 +269,11 @@ impl GpuReader for NvidiaGpuReader {
 ///
 /// Returns `true` when NVML cannot report dedicated GPU memory (total == 0 or error)
 /// AND the device is identified as a UMA-class chip (e.g. GB10 / Blackwell).
-fn is_uma_device(device: &nvml_wrapper::Device) -> bool {
-    let memory_unavailable = device.memory_info().map(|m| m.total).unwrap_or(0) == 0;
-    if !memory_unavailable {
+/// Check if a device is UMA based on architecture or device name.
+/// The caller should pass memory_total from a prior `memory_info()` call
+/// to avoid redundant NVML IPC round-trips.
+fn is_uma_device_with_mem(device: &nvml_wrapper::Device, memory_total: u64) -> bool {
+    if memory_total > 0 {
         return false;
     }
 
@@ -494,7 +493,8 @@ fn create_device_detail(
     add_detail!(detail, device.brand(), "Brand");
     add_detail!(detail, device.architecture(), "Architecture");
 
-    let uma = is_uma_device(device);
+    let mem_total = device.memory_info().map(|m| m.total).unwrap_or(0);
+    let uma = is_uma_device_with_mem(device, mem_total);
 
     // Suppress PCIe metrics for UMA devices — they use internal interconnect
     if uma {
