@@ -70,6 +70,7 @@ impl GenericChassisReader {
 
 /// Read a single DMI field from `/sys/class/dmi/id/`.
 /// Returns `None` if the file doesn't exist or is unreadable (e.g., permission denied).
+#[cfg(target_os = "linux")]
 fn read_dmi_field(field: &str) -> Option<String> {
     let path = format!("/sys/class/dmi/id/{field}");
     std::fs::read_to_string(&path)
@@ -79,6 +80,7 @@ fn read_dmi_field(field: &str) -> Option<String> {
 }
 
 /// Collect DMI information into the detail map.
+#[cfg(target_os = "linux")]
 fn collect_dmi_info(detail: &mut HashMap<String, String>) {
     if let Some(v) = read_dmi_field("product_name") {
         detail.insert("Product Name".to_string(), v);
@@ -102,11 +104,13 @@ fn collect_dmi_info(detail: &mut HashMap<String, String>) {
 /// On systems like DGX Spark, ACPI thermal zones provide board-level temperatures.
 /// We use the minimum temperature as "inlet" and maximum as "outlet" — a reasonable
 /// approximation when specific zone roles aren't labeled.
+#[cfg(target_os = "linux")]
 fn read_thermal_zones() -> (Option<f64>, Option<f64>) {
     read_thermal_zones_from("/sys/class/thermal")
 }
 
 /// Testable version that accepts a base path.
+#[cfg(target_os = "linux")]
 fn read_thermal_zones_from(base_path: &str) -> (Option<f64>, Option<f64>) {
     let entries = match std::fs::read_dir(base_path) {
         Ok(e) => e,
@@ -158,6 +162,7 @@ fn read_thermal_zones_from(base_path: &str) -> (Option<f64>, Option<f64>) {
 impl ChassisReader for GenericChassisReader {
     fn get_chassis_info(&self) -> Option<ChassisInfo> {
         // Start with cached DMI detail (read once at construction)
+        #[allow(unused_mut)]
         let mut detail = self.dmi_detail.clone();
 
         // Platform identifier
@@ -225,12 +230,14 @@ mod tests {
         assert!(!info.hostname.is_empty());
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn test_read_dmi_field_nonexistent() {
         // A non-existent DMI field should return None
         assert!(read_dmi_field("nonexistent_field_xyz").is_none());
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn test_read_thermal_zones_from_nonexistent_path() {
         let (inlet, outlet) = read_thermal_zones_from("/nonexistent/thermal/path");
@@ -238,6 +245,7 @@ mod tests {
         assert!(outlet.is_none());
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn test_read_thermal_zones_from_empty_dir() {
         let dir = tempfile::tempdir().unwrap();
@@ -246,6 +254,7 @@ mod tests {
         assert!(outlet.is_none());
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn test_read_thermal_zones_from_mock_zones() {
         let dir = tempfile::tempdir().unwrap();
@@ -270,6 +279,7 @@ mod tests {
         assert!((outlet.unwrap() - 42.3).abs() < 0.01);
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn test_read_thermal_zones_from_single_zone() {
         let dir = tempfile::tempdir().unwrap();
