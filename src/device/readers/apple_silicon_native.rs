@@ -198,14 +198,14 @@ impl GpuReader for AppleSiliconNativeGpuReader {
 
         // Add unified AI acceleration library labels
         detail.insert("lib_name".to_string(), "Metal".to_string());
-        if let Some(driver_ver) = static_info.detail.get("driver_version") {
-            if driver_ver != "Unknown" {
-                let lib_ver = driver_ver
-                    .strip_prefix("Metal ")
-                    .unwrap_or(driver_ver)
-                    .to_string();
-                detail.insert("lib_version".to_string(), lib_ver);
-            }
+        if let Some(driver_ver) = static_info.detail.get("driver_version")
+            && driver_ver != "Unknown"
+        {
+            let lib_ver = driver_ver
+                .strip_prefix("Metal ")
+                .unwrap_or(driver_ver)
+                .to_string();
+            detail.insert("lib_version".to_string(), lib_ver);
         }
 
         // Use GPU temperature if available, otherwise default to 0
@@ -264,12 +264,12 @@ fn get_gpu_name_and_version() -> (String, Option<String>) {
                 if part.starts_with("M") && part.chars().nth(1).is_some_and(|c| c.is_numeric()) {
                     let mut gpu_name = format!("Apple {part} GPU");
                     let parts: Vec<&str> = cpu_brand.split_whitespace().collect();
-                    if let Some(pos) = parts.iter().position(|&x| x == part) {
-                        if pos + 1 < parts.len() {
-                            let suffix = parts[pos + 1];
-                            if suffix == "Pro" || suffix == "Max" || suffix == "Ultra" {
-                                gpu_name = format!("Apple {part} {suffix} GPU");
-                            }
+                    if let Some(pos) = parts.iter().position(|&x| x == part)
+                        && pos + 1 < parts.len()
+                    {
+                        let suffix = parts[pos + 1];
+                        if suffix == "Pro" || suffix == "Max" || suffix == "Ultra" {
+                            gpu_name = format!("Apple {part} {suffix} GPU");
                         }
                     }
                     name = Some(gpu_name);
@@ -293,19 +293,19 @@ fn get_gpu_name_and_version() -> (String, Option<String>) {
 fn get_metal_version_from_framework() -> Option<String> {
     if let Ok(output) = execute_command_default("sw_vers", &["-productVersion"]) {
         let version_str = output.stdout.trim();
-        if let Some(major_version) = version_str.split('.').next() {
-            if let Ok(major) = major_version.parse::<u32>() {
-                let metal_version = match major {
-                    26.. => "Metal 4",
-                    15..=25 => "Metal 3",
-                    14 => "Metal 3",
-                    13 => "Metal 3",
-                    12 => "Metal 2.4",
-                    11 => "Metal 2.3",
-                    _ => "Metal 2",
-                };
-                return Some(metal_version.to_string());
-            }
+        if let Some(major_version) = version_str.split('.').next()
+            && let Ok(major) = major_version.parse::<u32>()
+        {
+            let metal_version = match major {
+                26.. => "Metal 4",
+                15..=25 => "Metal 3",
+                14 => "Metal 3",
+                13 => "Metal 3",
+                12 => "Metal 2.4",
+                11 => "Metal 2.3",
+                _ => "Metal 2",
+            };
+            return Some(metal_version.to_string());
         }
     }
     Some("Metal 3".to_string())
@@ -361,10 +361,10 @@ fn parse_ioreg_gpu_cores(output_str: &str) -> Option<u32> {
     for line in output_str.lines() {
         if line.contains("\"gpu-core-count\"") {
             let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() >= 3 {
-                if let Ok(core_count) = parts[2].parse::<u32>() {
-                    return Some(core_count);
-                }
+            if parts.len() >= 3
+                && let Ok(core_count) = parts[2].parse::<u32>()
+            {
+                return Some(core_count);
             }
         }
     }

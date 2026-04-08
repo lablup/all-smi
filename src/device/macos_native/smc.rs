@@ -454,10 +454,10 @@ impl SMC {
         ];
 
         for key in static_keys {
-            if let Ok(value) = self.read_value(key) {
-                if (10.0..=120.0).contains(&value) {
-                    temps.push(value);
-                }
+            if let Ok(value) = self.read_value(key)
+                && (10.0..=120.0).contains(&value)
+            {
+                temps.push(value);
             }
         }
 
@@ -469,10 +469,10 @@ impl SMC {
             });
 
             for key in &discovered.cpu_keys {
-                if let Ok(value) = self.read_value(key) {
-                    if (10.0..=120.0).contains(&value) {
-                        temps.push(value);
-                    }
+                if let Ok(value) = self.read_value(key)
+                    && (10.0..=120.0).contains(&value)
+                {
+                    temps.push(value);
                 }
             }
         }
@@ -495,10 +495,10 @@ impl SMC {
         let static_keys = ["Tg0f", "Tg0j", "TG0P", "TG0D"];
 
         for key in static_keys {
-            if let Ok(value) = self.read_value(key) {
-                if (10.0..=120.0).contains(&value) {
-                    temps.push(value);
-                }
+            if let Ok(value) = self.read_value(key)
+                && (10.0..=120.0).contains(&value)
+            {
+                temps.push(value);
             }
         }
 
@@ -510,10 +510,10 @@ impl SMC {
             });
 
             for key in &discovered.gpu_keys {
-                if let Ok(value) = self.read_value(key) {
-                    if (10.0..=120.0).contains(&value) {
-                        temps.push(value);
-                    }
+                if let Ok(value) = self.read_value(key)
+                    && (10.0..=120.0).contains(&value)
+                {
+                    temps.push(value);
                 }
             }
         }

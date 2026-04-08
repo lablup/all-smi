@@ -662,10 +662,10 @@ impl IOReport {
 impl Drop for IOReport {
     fn drop(&mut self) {
         unsafe {
-            if let Some((prev, _)) = self.prev_sample.take() {
-                if !prev.is_null() {
-                    CFRelease(prev as *const c_void);
-                }
+            if let Some((prev, _)) = self.prev_sample.take()
+                && !prev.is_null()
+            {
+                CFRelease(prev as *const c_void);
             }
             if !self.channels.is_null() {
                 CFRelease(self.channels as *const c_void);

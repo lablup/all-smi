@@ -363,10 +363,10 @@ impl MacOsCpuReader {
                 if let Some(value) = line.split(':').nth(1) {
                     p_core_count = value.trim().parse().unwrap_or(0);
                 }
-            } else if line.starts_with("hw.perflevel1.physicalcpu:") {
-                if let Some(value) = line.split(':').nth(1) {
-                    e_core_count = value.trim().parse().unwrap_or(0);
-                }
+            } else if line.starts_with("hw.perflevel1.physicalcpu:")
+                && let Some(value) = line.split(':').nth(1)
+            {
+                e_core_count = value.trim().parse().unwrap_or(0);
             }
         }
 
@@ -421,10 +421,10 @@ impl MacOsCpuReader {
             if line.contains("\"gpu-core-count\"") {
                 // Format: "gpu-core-count" = 10
                 let parts: Vec<&str> = line.split('=').collect();
-                if parts.len() >= 2 {
-                    if let Ok(count) = parts[1].trim().parse::<u32>() {
-                        return Ok(count);
-                    }
+                if parts.len() >= 2
+                    && let Ok(count) = parts[1].trim().parse::<u32>()
+                {
+                    return Ok(count);
                 }
             }
         }
@@ -516,15 +516,13 @@ impl MacOsCpuReader {
         for line in output_str.lines() {
             if line.contains("sppci_cores") {
                 // Extract the value between quotes after the colon
-                if let Some(value_part) = line.split(':').nth(1) {
-                    if let Some(start_quote) = value_part.find('"') {
-                        if let Some(end_quote) = value_part[start_quote + 1..].find('"') {
-                            let core_str =
-                                &value_part[start_quote + 1..start_quote + 1 + end_quote];
-                            if let Ok(count) = core_str.parse::<u32>() {
-                                return Ok(count);
-                            }
-                        }
+                if let Some(value_part) = line.split(':').nth(1)
+                    && let Some(start_quote) = value_part.find('"')
+                    && let Some(end_quote) = value_part[start_quote + 1..].find('"')
+                {
+                    let core_str = &value_part[start_quote + 1..start_quote + 1 + end_quote];
+                    if let Ok(count) = core_str.parse::<u32>() {
+                        return Ok(count);
                     }
                 }
             }
@@ -609,10 +607,10 @@ impl MacOsCpuReader {
                     total_cores = cores;
                     total_threads = cores * 2; // Assume hyperthreading
                 }
-            } else if line.starts_with("L3 Cache:") {
-                if let Some(size) = crate::parse_colon_value!(line, u32) {
-                    cache_size = size;
-                }
+            } else if line.starts_with("L3 Cache:")
+                && let Some(size) = crate::parse_colon_value!(line, u32)
+            {
+                cache_size = size;
             }
         }
 
@@ -698,21 +696,21 @@ impl MacOsCpuReader {
         let total_cpu_util = self.system.read().unwrap().global_cpu_usage() as f64;
 
         // Use native metrics manager for cluster residency (cached, no extra collection)
-        if let Some(manager) = get_native_metrics_manager() {
-            if let Ok(data) = manager.collect_once() {
-                // Use cluster residency from native metrics
-                let p_residency = data.p_cluster_active_residency.clamp(0.0, 100.0);
-                let e_residency = data.e_cluster_active_residency.clamp(0.0, 100.0);
-                let total_residency = p_residency + e_residency;
+        if let Some(manager) = get_native_metrics_manager()
+            && let Ok(data) = manager.collect_once()
+        {
+            // Use cluster residency from native metrics
+            let p_residency = data.p_cluster_active_residency.clamp(0.0, 100.0);
+            let e_residency = data.e_cluster_active_residency.clamp(0.0, 100.0);
+            let total_residency = p_residency + e_residency;
 
-                if total_residency > 0.0 {
-                    let p_ratio = p_residency / total_residency;
-                    let e_ratio = e_residency / total_residency;
-                    return Ok((
-                        (total_cpu_util * p_ratio * 1.2).clamp(0.0, 100.0),
-                        (total_cpu_util * e_ratio * 0.8).clamp(0.0, 100.0),
-                    ));
-                }
+            if total_residency > 0.0 {
+                let p_ratio = p_residency / total_residency;
+                let e_ratio = e_residency / total_residency;
+                return Ok((
+                    (total_cpu_util * p_ratio * 1.2).clamp(0.0, 100.0),
+                    (total_cpu_util * e_ratio * 0.8).clamp(0.0, 100.0),
+                ));
             }
         }
 
@@ -750,10 +748,10 @@ impl MacOsCpuReader {
     #[allow(dead_code)] // OPTIMIZATION: Now using cached native_data instead
     fn get_cpu_power_consumption(&self) -> Option<f64> {
         // Use native metrics manager
-        if let Some(manager) = get_native_metrics_manager() {
-            if let Ok(data) = manager.collect_once() {
-                return Some(data.cpu_power_mw / 1000.0); // Convert mW to W
-            }
+        if let Some(manager) = get_native_metrics_manager()
+            && let Ok(data) = manager.collect_once()
+        {
+            return Some(data.cpu_power_mw / 1000.0); // Convert mW to W
         }
 
         None

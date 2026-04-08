@@ -12,11 +12,24 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::OnceLock;
+
 #[cfg(target_os = "linux")]
 use crate::device::common::constants::google_tpu::is_libtpu_available;
 use crate::device::common::execute_command_default;
 
+// Platform detection results are immutable for the lifetime of the process:
+// hardware doesn't appear or disappear at runtime. Cache each detection call
+// in a process-global OnceLock so expensive probes (e.g. `system_profiler
+// SPPCIDataType` on macOS, `lspci` on Linux, `nvidia-smi -L` everywhere) run
+// at most once, instead of being re-executed on every view refresh cycle.
+
 pub fn has_nvidia() -> bool {
+    static CACHE: OnceLock<bool> = OnceLock::new();
+    *CACHE.get_or_init(detect_nvidia)
+}
+
+fn detect_nvidia() -> bool {
     // On macOS, use system_profiler to check for NVIDIA devices
     if std::env::consts::OS == "macos" {
         // First check system_profiler for NVIDIA PCI devices
@@ -102,6 +115,12 @@ pub fn has_nvidia() -> bool {
 
 #[cfg(all(target_os = "linux", not(target_env = "musl")))]
 pub fn has_amd() -> bool {
+    static CACHE: OnceLock<bool> = OnceLock::new();
+    *CACHE.get_or_init(detect_amd)
+}
+
+#[cfg(all(target_os = "linux", not(target_env = "musl")))]
+fn detect_amd() -> bool {
     // On Linux, check for AMD GPUs
     if std::env::consts::OS == "linux" {
         // Check lspci for AMD devices (Vendor ID 1002)
@@ -131,6 +150,11 @@ pub fn has_amd() -> bool {
 }
 
 pub fn is_jetson() -> bool {
+    static CACHE: OnceLock<bool> = OnceLock::new();
+    *CACHE.get_or_init(detect_jetson)
+}
+
+fn detect_jetson() -> bool {
     if let Ok(compatible) = std::fs::read_to_string("/proc/device-tree/compatible") {
         return compatible.contains("tegra");
     }
@@ -138,6 +162,11 @@ pub fn is_jetson() -> bool {
 }
 
 pub fn is_apple_silicon() -> bool {
+    static CACHE: OnceLock<bool> = OnceLock::new();
+    *CACHE.get_or_init(detect_apple_silicon)
+}
+
+fn detect_apple_silicon() -> bool {
     // Only check on macOS
     if std::env::consts::OS != "macos" {
         return false;
@@ -150,6 +179,11 @@ pub fn is_apple_silicon() -> bool {
 }
 
 pub fn has_furiosa() -> bool {
+    static CACHE: OnceLock<bool> = OnceLock::new();
+    *CACHE.get_or_init(detect_furiosa)
+}
+
+fn detect_furiosa() -> bool {
     // Check if devices are visible under the /sys/class/rngd_mgmt directory
     let rngd_mgmt_path = std::path::Path::new("/sys/class/rngd_mgmt");
     if !rngd_mgmt_path.exists() {
@@ -175,6 +209,12 @@ pub fn has_furiosa() -> bool {
 
 #[cfg(target_os = "linux")]
 pub fn has_tenstorrent() -> bool {
+    static CACHE: OnceLock<bool> = OnceLock::new();
+    *CACHE.get_or_init(detect_tenstorrent)
+}
+
+#[cfg(target_os = "linux")]
+fn detect_tenstorrent() -> bool {
     // First check if device directory exists
     if std::path::Path::new("/dev/tenstorrent").exists() {
         return true;
@@ -212,6 +252,11 @@ pub fn has_tenstorrent() -> bool {
 }
 
 pub fn has_rebellions() -> bool {
+    static CACHE: OnceLock<bool> = OnceLock::new();
+    *CACHE.get_or_init(detect_rebellions)
+}
+
+fn detect_rebellions() -> bool {
     // First check if device files exist (rbln0, rbln1, etc.)
     if std::path::Path::new("/dev/rbln0").exists() {
         return true;
@@ -264,6 +309,12 @@ pub fn has_rebellions() -> bool {
 /// IMPORTANT: No external commands are executed to prevent process accumulation.
 #[cfg(target_os = "linux")]
 pub fn has_google_tpu() -> bool {
+    static CACHE: OnceLock<bool> = OnceLock::new();
+    *CACHE.get_or_init(detect_google_tpu)
+}
+
+#[cfg(target_os = "linux")]
+fn detect_google_tpu() -> bool {
     // Method 1: Check if /dev/accel* devices exist with Google vendor ID
     // This works for on-premise TPU nodes and some TPU versions
     if let Ok(entries) = std::fs::read_dir("/dev") {
@@ -315,6 +366,11 @@ pub fn has_google_tpu() -> bool {
 }
 
 pub fn has_gaudi() -> bool {
+    static CACHE: OnceLock<bool> = OnceLock::new();
+    *CACHE.get_or_init(detect_gaudi)
+}
+
+fn detect_gaudi() -> bool {
     // First check if device files exist (typical Gaudi device paths)
     // Intel Gaudi uses /dev/accel/accel* device files
     if std::path::Path::new("/dev/accel/accel0").exists() {
