@@ -77,8 +77,12 @@ impl MetricBuilder {
                 if i > 0 {
                     self.metrics.push_str(", ");
                 }
-                // Escape quotes in values for Prometheus format
-                let escaped_value = value.replace('"', "\\\"");
+                // Escape per Prometheus exposition format spec:
+                // backslash, double-quote, and newline must be escaped
+                let escaped_value = value
+                    .replace('\\', "\\\\")
+                    .replace('"', "\\\"")
+                    .replace('\n', "\\n");
                 self.metrics.push_str(&format!("{key}=\"{escaped_value}\""));
             }
             self.metrics.push('}');

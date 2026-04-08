@@ -31,6 +31,8 @@ pub struct GenericChassisReader {
     hostname: String,
     /// Cached total GPU power (updated externally)
     cached_gpu_power: Arc<RwLock<Option<f64>>>,
+    /// Static DMI detail cached at construction (never changes at runtime)
+    dmi_detail: HashMap<String, String>,
 }
 
 impl Default for GenericChassisReader {
@@ -42,9 +44,13 @@ impl Default for GenericChassisReader {
 #[allow(dead_code)]
 impl GenericChassisReader {
     pub fn new() -> Self {
+        let mut dmi_detail = HashMap::new();
+        #[cfg(target_os = "linux")]
+        collect_dmi_info(&mut dmi_detail);
         Self {
             hostname: get_hostname(),
             cached_gpu_power: Arc::new(RwLock::new(None)),
+            dmi_detail,
         }
     }
 
@@ -151,17 +157,14 @@ fn read_thermal_zones_from(base_path: &str) -> (Option<f64>, Option<f64>) {
 
 impl ChassisReader for GenericChassisReader {
     fn get_chassis_info(&self) -> Option<ChassisInfo> {
-        let mut detail = HashMap::new();
+        // Start with cached DMI detail (read once at construction)
+        let mut detail = self.dmi_detail.clone();
 
         // Platform identifier
         #[cfg(target_os = "linux")]
         detail.insert("platform".to_string(), "Linux".to_string());
         #[cfg(target_os = "windows")]
         detail.insert("platform".to_string(), "Windows".to_string());
-
-        // Collect DMI information (Linux only, no sudo required)
-        #[cfg(target_os = "linux")]
-        collect_dmi_info(&mut detail);
 
         // Read thermal zones (Linux only)
         #[cfg(target_os = "linux")]
