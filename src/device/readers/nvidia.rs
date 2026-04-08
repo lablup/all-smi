@@ -499,7 +499,7 @@ fn create_device_detail(
     // Add all device details using helper macros
     let mut detail = builder.build();
     add_detail!(detail, device.brand(), "Brand");
-    add_detail!(detail, device.architecture(), "Architecture");
+    add_detail!(detail, device.architecture(), "architecture");
 
     let mem_total = device.memory_info().map(|m| m.total).unwrap_or(0);
     let uma = is_uma_device_with_mem(device, mem_total);

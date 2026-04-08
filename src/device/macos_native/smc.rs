@@ -370,7 +370,13 @@ impl SMC {
             SMC_TYPE_UI8 => bytes[0] as f64,
             SMC_TYPE_UI16 => u16::from_be_bytes([bytes[0], bytes[1]]) as f64,
             SMC_TYPE_UI32 => u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as f64,
-            SMC_TYPE_FLT => f32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as f64,
+            // Apple Silicon SMC stores `flt ` (IEEE 754 single-precision)
+            // values in little-endian byte order, unlike the legacy fixed-point
+            // types (SP78, FP*) which remain big-endian. This matches what
+            // mactop and asitop do; using `from_be_bytes` here yields random
+            // garbage that varies between calls because the bit pattern is
+            // misinterpreted as a wildly different float.
+            SMC_TYPE_FLT => f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as f64,
             SMC_TYPE_SP78 => {
                 // Signed 7.8 fixed point
                 let raw = i16::from_be_bytes([bytes[0], bytes[1]]);
@@ -614,5 +620,22 @@ mod tests {
     fn test_hash_key_fourcc() {
         // Test the #KEY special key used for key count
         assert_eq!(str_to_fourcc("#KEY"), u32::from_be_bytes(*b"#KEY"));
+    }
+
+    /// Sanity-check little-endian decoding of the `flt ` SMC type. Apple
+    /// Silicon stores temperature sensor floats as little-endian; if this
+    /// regresses we get garbage values like 1e-32 or 3e36 instead of real
+    /// temperatures (the symptom that motivated this conversion).
+    #[test]
+    fn test_flt_little_endian_decoding() {
+        let smc = SMC { conn: 0 }; // convert_value doesn't touch the connection
+        let mut bytes = [0u8; 32];
+        // 51.2°C as IEEE 754 single = 0x424ccccd
+        bytes[0..4].copy_from_slice(&0x424ccccd_u32.to_le_bytes());
+        let value = smc.convert_value(&bytes, SMC_TYPE_FLT, 4);
+        assert!(
+            (value - 51.2).abs() < 0.01,
+            "expected ~51.2, got {value} — float endianness may have regressed"
+        );
     }
 }

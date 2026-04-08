@@ -208,8 +208,12 @@ impl GpuReader for AppleSiliconNativeGpuReader {
             detail.insert("lib_version".to_string(), lib_ver);
         }
 
-        // Use GPU temperature if available, otherwise default to 0
-        let temperature = gpu_temp.map(|t| t as u32).unwrap_or(0);
+        // GPU temperature: Apple Silicon's per-die GPU thermistor keys (Tg*) are
+        // not always exposed reliably across chip generations. When SMC didn't
+        // return a usable value, fall back to the CPU die temperature — CPU and
+        // GPU share the same SoC package so the readings are tightly correlated
+        // and this is far more meaningful than reporting 0 °C.
+        let temperature = gpu_temp.or(cpu_temp).map(|t| t.round() as u32).unwrap_or(0);
 
         vec![GpuInfo {
             uuid: static_info

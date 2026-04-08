@@ -94,7 +94,7 @@ impl DataAggregator {
         let has_gpu_data = !state.gpu_info.is_empty();
         let is_apple_silicon = state.gpu_info.iter().any(|gpu| {
             gpu.detail
-                .get("Architecture")
+                .get("architecture")
                 .map(|arch| arch == "Apple Silicon")
                 .unwrap_or(false)
         });

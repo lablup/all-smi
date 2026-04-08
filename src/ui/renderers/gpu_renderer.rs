@@ -154,14 +154,16 @@ pub fn print_gpu_info<W: Write>(
     print_colored_text(stdout, &vram_display, Color::White, None, None);
     print_colored_text(stdout, " Temp:", Color::Magenta, None, None);
 
-    // For Apple Silicon, display thermal pressure level instead of numeric temperature
-    let temp_display = if info.name.contains("Apple") || info.name.contains("Metal") {
-        if let Some(thermal_level) = info.detail.get("thermal_pressure") {
-            format!("{thermal_level:>7}")
-        } else {
-            format!("{:>7}", "Unknown")
-        }
-    } else if info.detail.get("metrics_available") == Some(&"false".to_string()) {
+    // Display real GPU die temperature on every platform. Apple Silicon used
+    // to fall back to the qualitative thermal pressure text because SMC float
+    // decoding was broken; with the SMC `flt ` little-endian fix in place the
+    // Tg* sensors return real die temperatures (~50 °C idle), so the numeric
+    // reading is now meaningful and consistent with other platforms.
+    let temp_display = if info.detail.get("metrics_available") == Some(&"false".to_string()) {
+        format!("{:>7}", "N/A")
+    } else if info.temperature == 0 {
+        // SMC didn't yield a usable reading and we have no fallback — show N/A
+        // rather than a misleading "0 °C".
         format!("{:>7}", "N/A")
     } else {
         format!("{:>4}°C", info.temperature)
