@@ -265,6 +265,15 @@ impl GpuReader for NvidiaGpuReader {
     }
 }
 
+/// Return `true` when the device name indicates a UMA-class chip.
+///
+/// This covers the nvidia-smi fallback path and the NVML name-check fallback
+/// in `is_uma_device_with_mem`.  Extracted as a pure function for testability.
+fn is_uma_device_name(name: &str) -> bool {
+    let name_lower = name.to_lowercase();
+    name_lower.contains("gb10") || name_lower.contains("dgx spark")
+}
+
 /// Detect whether a device uses Unified Memory Architecture (UMA).
 ///
 /// Returns `true` when NVML cannot report dedicated GPU memory (total == 0 or error)
@@ -285,11 +294,10 @@ fn is_uma_device_with_mem(device: &nvml_wrapper::Device, memory_total: u64) -> b
     }
 
     // Fallback: match known UMA device names
-    if let Ok(name) = device.name() {
-        let name_lower = name.to_lowercase();
-        if name_lower.contains("gb10") || name_lower.contains("dgx spark") {
-            return true;
-        }
+    if let Ok(name) = device.name()
+        && is_uma_device_name(&name)
+    {
+        return true;
     }
 
     false
@@ -622,10 +630,7 @@ fn get_gpu_info_nvidia_smi() -> Vec<GpuInfo> {
                 let mut detail = HashMap::new();
 
                 // Detect UMA: memory fields are [N/A] and device name suggests UMA
-                let name_lower = parts[2].to_lowercase();
-                if total_memory == 0
-                    && (name_lower.contains("gb10") || name_lower.contains("dgx spark"))
-                {
+                if total_memory == 0 && is_uma_device_name(&parts[2]) {
                     let (sys_total, sys_used) = get_system_memory_for_uma();
                     total_memory = sys_total;
                     used_memory = sys_used;
@@ -807,5 +812,83 @@ Cached:          4096000 kB
     #[test]
     fn parse_memory_value_converts_mb_to_bytes() {
         assert_eq!(parse_memory_value("1024"), 1024 * BYTES_PER_MB);
+    }
+
+    // --- is_uma_device_name tests ---
+
+    #[test]
+    fn is_uma_device_name_matches_gb10_lowercase() {
+        assert!(is_uma_device_name("gb10 super"));
+    }
+
+    #[test]
+    fn is_uma_device_name_matches_gb10_mixed_case() {
+        assert!(is_uma_device_name("NVIDIA GB10"));
+    }
+
+    #[test]
+    fn is_uma_device_name_matches_dgx_spark_lowercase() {
+        assert!(is_uma_device_name("dgx spark"));
+    }
+
+    #[test]
+    fn is_uma_device_name_matches_dgx_spark_mixed_case() {
+        assert!(is_uma_device_name("NVIDIA DGX Spark"));
+    }
+
+    #[test]
+    fn is_uma_device_name_rejects_standard_gpu() {
+        assert!(!is_uma_device_name("NVIDIA GeForce RTX 4090"));
+        assert!(!is_uma_device_name("Tesla H100 SXM5 80GB"));
+        assert!(!is_uma_device_name("A100-SXM4-80GB"));
+    }
+
+    #[test]
+    fn is_uma_device_name_rejects_empty_string() {
+        assert!(!is_uma_device_name(""));
+    }
+
+    // --- read_meminfo_memory tests ---
+
+    #[test]
+    fn read_meminfo_memory_reads_temp_file() {
+        use std::io::Write;
+
+        let mut tmp = tempfile::NamedTempFile::new().expect("failed to create temp file");
+        writeln!(
+            tmp,
+            "MemTotal:       65536 kB\nMemFree:        1024 kB\nMemAvailable:   4096 kB"
+        )
+        .unwrap();
+
+        let (total, used) = read_meminfo_memory(tmp.path().to_str().unwrap());
+        assert_eq!(total, 65_536 * 1024);
+        assert_eq!(used, (65_536 - 4_096) * 1024);
+    }
+
+    #[test]
+    fn read_meminfo_memory_returns_zeros_for_missing_file() {
+        let (total, used) = read_meminfo_memory("/nonexistent/path/meminfo");
+        assert_eq!(total, 0);
+        assert_eq!(used, 0);
+    }
+
+    // --- parse_meminfo_content edge case tests ---
+
+    #[test]
+    fn parse_meminfo_content_used_does_not_underflow_when_available_exceeds_total() {
+        // Defensive: available > total should saturate to 0 rather than wrap
+        let content = "MemTotal:       1000 kB\nMemAvailable:   2000 kB\n";
+        let (total, used) = parse_meminfo_content(content);
+        assert_eq!(total, 1_000 * 1024);
+        assert_eq!(used, 0); // saturating_sub prevents underflow
+    }
+
+    #[test]
+    fn parse_meminfo_content_ignores_malformed_lines() {
+        let content = "MemTotal: notanumber kB\nMemAvailable: alsonotanumber kB\n";
+        let (total, used) = parse_meminfo_content(content);
+        assert_eq!(total, 0);
+        assert_eq!(used, 0);
     }
 }
