@@ -216,7 +216,7 @@ impl AppState {
             known_hosts: Vec::new(),
             hostname_to_host_id: HashMap::new(),
             is_local_mode: true, // Default to local mode
-            runtime_environment: RuntimeEnvironment::detect(),
+            runtime_environment: RuntimeEnvironment::default(),
             data_version: 0,
             gpu_filter_enabled: false, // GPU filter disabled by default
             visible_process_rows: 0,

@@ -309,7 +309,7 @@ impl UiLoop {
             }
 
             // Use differential rendering to update only changed lines.
-            // Terminal dimensions are passed in to avoid a redundant size() syscall.
+            let _t2 = std::time::Instant::now();
             if self
                 .differential_renderer
                 .render_differential(&content, cols, rows)

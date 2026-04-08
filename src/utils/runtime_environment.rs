@@ -624,6 +624,24 @@ pub struct RuntimeEnvironment {
     pub virtualization: VirtualizationInfo,
 }
 
+impl Default for RuntimeEnvironment {
+    fn default() -> Self {
+        Self {
+            container: ContainerInfo {
+                runtime: ContainerRuntime::None,
+                container_id: None,
+                pod_name: None,
+                namespace: None,
+            },
+            virtualization: VirtualizationInfo {
+                vm_type: VirtualizationType::None,
+                hypervisor: None,
+                is_virtual: false,
+            },
+        }
+    }
+}
+
 impl RuntimeEnvironment {
     /// Detect both container and virtualization environments
     pub fn detect() -> Self {

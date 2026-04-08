@@ -95,9 +95,6 @@ impl FrameRenderer {
         let width = cols as usize;
         let mut buffer = BufferWriter::new();
 
-        // Reconstruct AppState view once for all downstream UI functions that
-        // still accept `&AppState`. This single allocation is shared across
-        // the header, dashboard, tabs, GPU layout, and function-key bar.
         let view_state = snapshot.as_app_state();
 
         // Write time/date header to buffer first

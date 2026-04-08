@@ -669,11 +669,10 @@ fn print_history_bar_with_value<W: Write>(
     max_value: f64,
     value_text: String,
 ) {
-    if history.is_empty() || width == 0 {
+    let available_width = width.saturating_sub(value_text.len() + 1);
+    if history.is_empty() || available_width == 0 {
         return;
     }
-
-    let available_width = width.saturating_sub(value_text.len() + 1);
     let step = if history.len() > available_width {
         history.len() / available_width
     } else {
