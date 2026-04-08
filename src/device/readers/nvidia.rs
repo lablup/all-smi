@@ -20,7 +20,7 @@ use crate::device::readers::common_cache::{DetailBuilder, DeviceStaticInfo, MAX_
 use crate::device::types::{GpuInfo, ProcessInfo};
 use crate::utils::{get_hostname, with_global_system};
 use chrono::Local;
-use nvml_wrapper::enums::device::UsedGpuMemory;
+use nvml_wrapper::enums::device::{DeviceArchitecture, UsedGpuMemory};
 use nvml_wrapper::error::NvmlError;
 use nvml_wrapper::{Nvml, cuda_driver_version_major, cuda_driver_version_minor};
 use std::collections::{HashMap, HashSet};
@@ -156,10 +156,26 @@ impl NvidiaGpuReader {
             for i in 0..device_count {
                 if let Ok(device) = nvml.device_by_index(i) {
                     // Get cached static detail for this device
-                    let detail = device_static_info
+                    let mut detail = device_static_info
                         .get(&i)
                         .map(|info| info.detail.clone())
                         .unwrap_or_default();
+
+                    // Determine memory values: use system memory for UMA devices
+                    let uma = is_uma_device(&device);
+                    let (used_memory, total_memory) = if uma {
+                        get_system_memory_for_uma()
+                    } else {
+                        (
+                            device.memory_info().map(|m| m.used).unwrap_or(0),
+                            device.memory_info().map(|m| m.total).unwrap_or(0),
+                        )
+                    };
+
+                    // Annotate detail with memory type for UMA devices
+                    if uma {
+                        detail.insert("Memory Type".to_string(), "Unified".to_string());
+                    }
 
                     let info = GpuInfo {
                         uuid: device.uuid().unwrap_or_else(|_| format!("GPU-{i}")),
@@ -181,8 +197,8 @@ impl NvidiaGpuReader {
                                 nvml_wrapper::enum_wrappers::device::TemperatureSensor::Gpu,
                             )
                             .unwrap_or(0),
-                        used_memory: device.memory_info().map(|m| m.used).unwrap_or(0),
-                        total_memory: device.memory_info().map(|m| m.total).unwrap_or(0),
+                        used_memory,
+                        total_memory,
                         frequency: device
                             .clock(
                                 nvml_wrapper::enum_wrappers::device::Clock::Graphics,
@@ -250,6 +266,70 @@ impl GpuReader for NvidiaGpuReader {
     fn get_gpu_processes(&self) -> (Vec<ProcessInfo>, HashSet<u32>) {
         self.get_gpu_processes_cached()
     }
+}
+
+/// Detect whether a device uses Unified Memory Architecture (UMA).
+///
+/// Returns `true` when NVML cannot report dedicated GPU memory (total == 0 or error)
+/// AND the device is identified as a UMA-class chip (e.g. GB10 / Blackwell).
+fn is_uma_device(device: &nvml_wrapper::Device) -> bool {
+    let memory_unavailable = device.memory_info().map(|m| m.total).unwrap_or(0) == 0;
+    if !memory_unavailable {
+        return false;
+    }
+
+    // Check architecture first (preferred — covers future Blackwell UMA products)
+    if let Ok(arch) = device.architecture()
+        && arch == DeviceArchitecture::Blackwell
+    {
+        return true;
+    }
+
+    // Fallback: match known UMA device names
+    if let Ok(name) = device.name() {
+        let name_lower = name.to_lowercase();
+        if name_lower.contains("gb10") || name_lower.contains("dgx spark") {
+            return true;
+        }
+    }
+
+    false
+}
+
+/// Read system memory from `/proc/meminfo` for UMA devices.
+/// Returns `(total_bytes, used_bytes)`.
+fn get_system_memory_for_uma() -> (u64, u64) {
+    read_meminfo_memory("/proc/meminfo")
+}
+
+/// Parse `/proc/meminfo`-format content and return `(total_bytes, used_bytes)`.
+/// Extracted for testability.
+fn read_meminfo_memory(path: &str) -> (u64, u64) {
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return (0, 0),
+    };
+    parse_meminfo_content(&content)
+}
+
+/// Parse meminfo content string and return `(total_bytes, used_bytes)`.
+fn parse_meminfo_content(content: &str) -> (u64, u64) {
+    let mut total: u64 = 0;
+    let mut available: u64 = 0;
+
+    for line in content.lines() {
+        if line.starts_with("MemTotal:") {
+            if let Some(value) = line.split_whitespace().nth(1) {
+                total = value.parse::<u64>().unwrap_or(0) * 1024; // kB -> bytes
+            }
+        } else if line.starts_with("MemAvailable:")
+            && let Some(value) = line.split_whitespace().nth(1)
+        {
+            available = value.parse::<u64>().unwrap_or(0) * 1024;
+        }
+    }
+
+    (total, total.saturating_sub(available))
 }
 
 // Helper function to set NVML status
@@ -413,16 +493,26 @@ fn create_device_detail(
     let mut detail = builder.build();
     add_detail!(detail, device.brand(), "Brand");
     add_detail!(detail, device.architecture(), "Architecture");
-    add_detail!(detail, device.current_pcie_link_gen(), "PCIe Generation");
-    add_detail_fmt!(
-        detail,
-        device.current_pcie_link_width(),
-        "PCIe Width",
-        "x{}"
-    );
+
+    let uma = is_uma_device(device);
+
+    // Suppress PCIe metrics for UMA devices — they use internal interconnect
+    if uma {
+        detail.insert("Memory Type".to_string(), "Unified".to_string());
+        detail.insert("Interconnect".to_string(), "Integrated".to_string());
+    } else {
+        add_detail!(detail, device.current_pcie_link_gen(), "PCIe Generation");
+        add_detail_fmt!(
+            detail,
+            device.current_pcie_link_width(),
+            "PCIe Width",
+            "x{}"
+        );
+        add_detail!(detail, device.max_pcie_link_gen(), "pcie_gen_max");
+        add_detail!(detail, device.max_pcie_link_width(), "pcie_width_max");
+    }
+
     add_detail!(detail, device.compute_mode(), "compute_mode");
-    add_detail!(detail, device.max_pcie_link_gen(), "pcie_gen_max");
-    add_detail!(detail, device.max_pcie_link_width(), "pcie_width_max");
     add_detail!(detail, device.performance_state(), "performance_state");
 
     // Power limits
@@ -527,6 +617,22 @@ fn get_gpu_info_nvidia_smi() -> Vec<GpuInfo> {
         .filter_map(|line| {
             let parts = parse_csv_line(line);
             if parts.len() >= 9 {
+                let mut used_memory = parse_memory_value(&parts[5]);
+                let mut total_memory = parse_memory_value(&parts[6]);
+                let mut detail = HashMap::new();
+
+                // Detect UMA: memory fields are [N/A] and device name suggests UMA
+                let name_lower = parts[2].to_lowercase();
+                if total_memory == 0
+                    && (name_lower.contains("gb10") || name_lower.contains("dgx spark"))
+                {
+                    let (sys_total, sys_used) = get_system_memory_for_uma();
+                    total_memory = sys_total;
+                    used_memory = sys_used;
+                    detail.insert("Memory Type".to_string(), "Unified".to_string());
+                    detail.insert("Interconnect".to_string(), "Integrated".to_string());
+                }
+
                 Some(GpuInfo {
                     uuid: parts[1].to_string(),
                     time: time.clone(),
@@ -540,13 +646,13 @@ fn get_gpu_info_nvidia_smi() -> Vec<GpuInfo> {
                     dla_utilization: None,
                     tensorcore_utilization: None,
                     temperature: parts[4].parse().unwrap_or(0),
-                    used_memory: parse_memory_value(&parts[5]),
-                    total_memory: parse_memory_value(&parts[6]),
+                    used_memory,
+                    total_memory,
                     frequency: parts[7].parse().unwrap_or(0),
                     power_consumption: parts[8].replace("[N/A]", "0").parse::<f64>().unwrap_or(0.0)
                         / 1000.0,
                     gpu_core_count: None,
-                    detail: HashMap::new(),
+                    detail,
                 })
             } else {
                 None
@@ -659,5 +765,47 @@ mod tests {
         assert_eq!(process_map.len(), 1);
         let row = process_map.get(&(123, "GPU-A".to_string())).unwrap();
         assert_eq!(row.used_memory, 4096);
+    }
+
+    #[test]
+    fn parse_meminfo_content_extracts_total_and_used() {
+        let content = "\
+MemTotal:       137021440 kB
+MemFree:          204800 kB
+MemAvailable:    9437184 kB
+Buffers:          102400 kB
+Cached:          4096000 kB
+";
+        let (total, used) = parse_meminfo_content(content);
+        // 137021440 kB = 137021440 * 1024 bytes
+        assert_eq!(total, 137_021_440 * 1024);
+        // used = total - available = (137021440 - 9437184) * 1024
+        assert_eq!(used, (137_021_440 - 9_437_184) * 1024);
+    }
+
+    #[test]
+    fn parse_meminfo_content_handles_empty_input() {
+        let (total, used) = parse_meminfo_content("");
+        assert_eq!(total, 0);
+        assert_eq!(used, 0);
+    }
+
+    #[test]
+    fn parse_meminfo_content_handles_missing_available() {
+        let content = "MemTotal:       131072 kB\n";
+        let (total, used) = parse_meminfo_content(content);
+        assert_eq!(total, 131_072 * 1024);
+        // available defaults to 0, so used = total - 0 = total
+        assert_eq!(used, 131_072 * 1024);
+    }
+
+    #[test]
+    fn parse_memory_value_handles_na() {
+        assert_eq!(parse_memory_value("[N/A]"), 0);
+    }
+
+    #[test]
+    fn parse_memory_value_converts_mb_to_bytes() {
+        assert_eq!(parse_memory_value("1024"), 1024 * BYTES_PER_MB);
     }
 }
