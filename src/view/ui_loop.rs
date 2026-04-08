@@ -182,10 +182,14 @@ impl UiLoop {
             let (snapshot, decisions) = {
                 let mut state = self.app_state.lock().await;
 
-                // Activate animation ticks only when there are animated elements
-                let animations_needed = state.loading
-                    || !state.device_name_scroll_offsets.is_empty()
-                    || !state.is_local_mode;
+                // Activate animation ticks only when there are animated elements.
+                // In remote mode, only enable fast ticks when there are actual
+                // scrolling animations; otherwise use the slow refresh tick to
+                // reduce terminal output over SSH.
+                let has_scroll_animations = !state.device_name_scroll_offsets.is_empty()
+                    || !state.host_id_scroll_offsets.is_empty()
+                    || !state.cpu_name_scroll_offsets.is_empty();
+                let animations_needed = state.loading || has_scroll_animations;
                 self.event_coordinator
                     .set_animations_active(animations_needed);
 
