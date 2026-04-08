@@ -15,6 +15,7 @@
 use std::collections::HashSet;
 use std::io::Write;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crossterm::{cursor, event::Event, queue, terminal::size};
 use tokio::sync::{Mutex, Notify};
@@ -51,6 +52,9 @@ pub struct UiLoop {
     view_cache: ViewCache,
     /// Event coordinator for event-driven wakeups
     event_coordinator: UiEventCoordinator,
+    /// Flag to skip frames when a previous stdout flush is still in progress
+    /// (prevents unbounded work on slow terminal pipes like SSH).
+    flush_in_progress: Arc<AtomicBool>,
     #[cfg(target_os = "linux")]
     hlsmi_notified: bool,
     #[cfg(target_os = "linux")]
@@ -87,6 +91,7 @@ impl UiLoop {
             previous_gpu_filter_enabled: false,
             view_cache: ViewCache::new(),
             event_coordinator,
+            flush_in_progress: Arc::new(AtomicBool::new(false)),
             #[cfg(target_os = "linux")]
             hlsmi_notified: false,
             #[cfg(target_os = "linux")]
@@ -310,12 +315,27 @@ impl UiLoop {
 
             // Use differential rendering to update only changed lines.
             // Terminal dimensions are passed in to avoid a redundant size() syscall.
-            if self
+            match self
                 .differential_renderer
                 .render_differential(&content, cols, rows)
-                .is_err()
             {
-                break;
+                Ok(Some(buf)) => {
+                    // Fire-and-forget: offload the blocking write+flush to a worker
+                    // thread so the async event loop remains responsive to keyboard
+                    // input even when the terminal pipe is slow (e.g. over SSH).
+                    // If a previous flush is still in progress, skip this frame
+                    // to avoid queuing unbounded work on a congested pipe.
+                    if !self.flush_in_progress.load(Ordering::Relaxed) {
+                        let flag = Arc::clone(&self.flush_in_progress);
+                        flag.store(true, Ordering::Relaxed);
+                        tokio::task::spawn_blocking(move || {
+                            let _ = DifferentialRenderer::flush_to_stdout(&buf);
+                            flag.store(false, Ordering::Relaxed);
+                        });
+                    }
+                }
+                Ok(None) => {} // No changes — nothing to write
+                Err(_) => break,
             }
         }
 

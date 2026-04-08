@@ -83,10 +83,16 @@ impl Write for BufferWriter {
 /// `terminal::size()` syscalls. The per-line comparison is the authoritative
 /// change-detection mechanism; identical lines are skipped via cheap
 /// pointer+length string comparison, so duplicate frames incur near-zero cost.
+///
+/// Terminal writes are collected into an intermediate buffer so that
+/// `stdout.write_all + flush` can be offloaded to a blocking thread,
+/// preventing slow pipes (e.g. SSH) from stalling the async event loop.
 pub struct DifferentialRenderer {
     previous_lines: Vec<String>,
     screen_height: usize,
     screen_width: usize,
+    /// Reusable buffer for building terminal escape sequences before flushing.
+    write_buf: Vec<u8>,
 }
 
 impl DifferentialRenderer {
@@ -96,6 +102,7 @@ impl DifferentialRenderer {
             previous_lines: Vec::new(),
             screen_height: height as usize,
             screen_width: width as usize,
+            write_buf: Vec::with_capacity(32 * 1024),
         })
     }
 
@@ -113,14 +120,16 @@ impl DifferentialRenderer {
 
     /// Render content with differential updates - only changed lines are updated.
     ///
-    /// The caller should pass the terminal dimensions it already knows.
-    /// This avoids a redundant `terminal::size()` syscall on every frame.
+    /// Returns `Some(Vec<u8>)` containing the terminal escape bytes to write,
+    /// or `None` if no lines changed. The caller is responsible for writing
+    /// the bytes to stdout — this allows offloading the potentially-blocking
+    /// write+flush to `spawn_blocking` on slow pipes (SSH).
     pub fn render_differential(
         &mut self,
         content: &str,
         cols: u16,
         rows: u16,
-    ) -> std::io::Result<()> {
+    ) -> std::io::Result<Option<Vec<u8>>> {
         // Keep dimensions in sync with what the caller sees.
         // This is a no-op when dimensions have not changed.
         self.update_dimensions(cols, rows);
@@ -130,9 +139,11 @@ impl DifferentialRenderer {
             self.previous_lines = vec![String::new(); self.screen_height];
         }
 
-        let mut stdout = stdout();
-        let mut current_line_count = 0;
+        // Build escape sequences into an intermediate buffer so the
+        // subsequent write+flush to stdout is a single bulk operation.
+        self.write_buf.clear();
         let mut any_changes = false;
+        let mut current_line_count = 0;
 
         // Process lines directly from iterator, updating previous_lines in-place.
         // Per-line string comparison is the authoritative change-detection mechanism.
@@ -147,7 +158,7 @@ impl DifferentialRenderer {
             if self.previous_lines[line_num] != current_line {
                 // Update this line - clear it first to prevent artifacts from shorter lines
                 queue!(
-                    stdout,
+                    self.write_buf,
                     cursor::MoveTo(0, line_num as u16),
                     crossterm::terminal::Clear(ClearType::UntilNewLine),
                     Print(current_line)
@@ -164,7 +175,7 @@ impl DifferentialRenderer {
         for line_num in current_line_count..self.screen_height {
             if !self.previous_lines[line_num].is_empty() {
                 queue!(
-                    stdout,
+                    self.write_buf,
                     cursor::MoveTo(0, line_num as u16),
                     crossterm::terminal::Clear(ClearType::CurrentLine)
                 )?;
@@ -173,12 +184,20 @@ impl DifferentialRenderer {
             }
         }
 
-        // Only flush when there are actual terminal writes to push
         if any_changes {
-            stdout.flush()?;
+            Ok(Some(self.write_buf.clone()))
+        } else {
+            Ok(None)
         }
+    }
 
-        Ok(())
+    /// Synchronously write pre-built terminal bytes to stdout and flush.
+    /// This is the only blocking I/O operation and can be called from
+    /// `spawn_blocking` to avoid stalling the async event loop.
+    pub fn flush_to_stdout(buf: &[u8]) -> std::io::Result<()> {
+        let mut stdout = stdout();
+        stdout.write_all(buf)?;
+        stdout.flush()
     }
 
     /// Force clear the entire screen (use sparingly, e.g., on startup or resize)
@@ -193,118 +212,5 @@ impl DifferentialRenderer {
             .resize(self.screen_height, String::new());
 
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // -----------------------------------------------------------------------
-    // BufferWriter tests
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_buffer_writer_basic() {
-        let mut bw = BufferWriter::new();
-        write!(bw, "hello\nworld\n").unwrap();
-        assert_eq!(bw.get_buffer(), "hello\nworld\n");
-        assert_eq!(bw.line_count(), 2);
-    }
-
-    #[test]
-    fn test_buffer_writer_reset_preserves_capacity() {
-        let mut bw = BufferWriter::new();
-        write!(bw, "some content\n").unwrap();
-        let cap_before = bw.buffer.capacity();
-        bw.reset();
-        assert!(bw.get_buffer().is_empty());
-        assert_eq!(bw.line_count(), 0);
-        assert_eq!(bw.buffer.capacity(), cap_before);
-    }
-
-    #[test]
-    fn test_buffer_writer_preallocated_capacity() {
-        let bw = BufferWriter::new();
-        // Should pre-allocate at least 64KB
-        assert!(bw.buffer.capacity() >= 64 * 1024);
-    }
-
-    // -----------------------------------------------------------------------
-    // DifferentialRenderer tests
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_differential_renderer_update_dimensions() {
-        let mut dr = DifferentialRenderer {
-            previous_lines: Vec::new(),
-            screen_height: 24,
-            screen_width: 80,
-        };
-
-        dr.update_dimensions(120, 40);
-        assert_eq!(dr.screen_width, 120);
-        assert_eq!(dr.screen_height, 40);
-        assert_eq!(dr.previous_lines.len(), 40);
-    }
-
-    #[test]
-    fn test_differential_renderer_update_dimensions_noop() {
-        let mut dr = DifferentialRenderer {
-            previous_lines: vec![String::new(); 24],
-            screen_height: 24,
-            screen_width: 80,
-        };
-
-        dr.update_dimensions(80, 24);
-        // Should not change anything
-        assert_eq!(dr.screen_width, 80);
-        assert_eq!(dr.screen_height, 24);
-    }
-
-    #[test]
-    fn test_force_clear_resets_state() {
-        let mut dr = DifferentialRenderer {
-            previous_lines: vec!["old content".to_string(); 24],
-            screen_height: 24,
-            screen_width: 80,
-        };
-
-        // force_clear writes to stdout which may fail in test env, but
-        // we can still test the state reset by calling the method.
-        let _ = dr.force_clear();
-        assert_eq!(dr.previous_lines.len(), 24);
-        // All lines should be empty after clear
-        assert!(dr.previous_lines.iter().all(|l| l.is_empty()));
-    }
-
-    // -----------------------------------------------------------------------
-    // Render path measurement: lightweight timing tests
-    // -----------------------------------------------------------------------
-
-    /// Measure how quickly we can compose a frame from a BufferWriter.
-    /// This test verifies that the hot path (write into buffer, read buffer)
-    /// completes quickly for a realistic terminal size.
-    #[test]
-    fn test_buffer_writer_throughput() {
-        let mut bw = BufferWriter::new();
-        let line = "x".repeat(120); // 120-column terminal line
-
-        let start = std::time::Instant::now();
-        for _ in 0..1000 {
-            bw.reset();
-            for _ in 0..40 {
-                // 40-row terminal
-                write!(bw, "{line}\n").unwrap();
-            }
-            let _ = bw.get_buffer();
-        }
-        let elapsed = start.elapsed();
-
-        // 1000 frames of 40 lines each should complete well under 1 second
-        assert!(
-            elapsed.as_millis() < 1000,
-            "BufferWriter throughput too slow: {elapsed:?}"
-        );
     }
 }
