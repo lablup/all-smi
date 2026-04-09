@@ -26,7 +26,10 @@ pub async fn run_local_mode(args: &LocalArgs) {
     let mut startup_profiler = crate::utils::StartupProfiler::new();
     startup_profiler.checkpoint("Starting run_local_mode");
 
-    // Initialize application state for local mode
+    // Initialize application state for local mode.
+    // `is_local_mode = true` means no --hosts / --hostfile were supplied.
+    // The UI gates the Cluster Overview card, dashboard items, and tabs row
+    // behind `!is_local_mode` (see src/view/frame_renderer.rs render_main).
     let mut initial_state = AppState::new();
     initial_state.is_local_mode = true;
     let app_state = Arc::new(Mutex::new(initial_state));
@@ -83,7 +86,11 @@ pub async fn run_local_mode(args: &LocalArgs) {
 }
 
 pub async fn run_view_mode(args: &ViewArgs) {
-    // Initialize application state for remote mode
+    // Initialize application state for remote mode.
+    // `is_local_mode = false` whenever any --hosts / --hostfile argument is
+    // supplied, including a single remote host.  The UI renders Cluster
+    // Overview, dashboard items, and the tabs row only when this is false
+    // (see src/view/frame_renderer.rs render_main).
     let mut initial_state = AppState::new();
     initial_state.is_local_mode = false;
     let app_state = Arc::new(Mutex::new(initial_state));

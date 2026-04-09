@@ -148,14 +148,20 @@ impl FrameRenderer {
             None,
         );
 
-        // Write remaining header content to buffer
-        print_colored_text(&mut buffer, "Cluster Overview\r\n", Color::Cyan, None, None);
-        draw_system_view(&mut buffer, &view_state, cols);
-
-        draw_dashboard_items(&mut buffer, &view_state, cols);
-        draw_tabs(&mut buffer, &view_state, cols);
-
         let is_remote = args.hosts.is_some() || args.hostfile.is_some();
+
+        // Cluster Overview, dashboard items, and the tabs row are only meaningful
+        // when monitoring multiple remote hosts. `is_local_mode` is false the moment
+        // any --hosts / --hostfile argument is supplied (see src/ui/layout.rs build
+        // site near line 68), so a single remote host still shows these widgets.
+        if !view_state.is_local_mode {
+            // Write remaining header content to buffer
+            print_colored_text(&mut buffer, "Cluster Overview\r\n", Color::Cyan, None, None);
+            draw_system_view(&mut buffer, &view_state, cols);
+
+            draw_dashboard_items(&mut buffer, &view_state, cols);
+            draw_tabs(&mut buffer, &view_state, cols);
+        }
 
         // Render chassis information (node-level metrics)
         Self::render_chassis_section(&mut buffer, snapshot, width, cache);

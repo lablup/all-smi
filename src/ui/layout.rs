@@ -20,23 +20,34 @@ use crate::cli::ViewArgs;
 pub struct LayoutCalculator;
 
 impl LayoutCalculator {
-    /// Calculate the number of header lines for dynamic layout
+    /// Calculate the number of header lines for dynamic layout.
+    ///
+    /// In local mode (`state.is_local_mode == true`) the Cluster Overview card,
+    /// dashboard items, and the tabs row are all suppressed by `render_main()`,
+    /// so their line contributions are excluded here.  This keeps the content
+    /// area (process list, GPU rows) from being unnecessarily clipped and
+    /// preserves the "reserved space for function keys" regression fix.
     pub fn calculate_header_lines(state: &AppState) -> u16 {
         let mut lines = 0u16;
 
-        // Basic header (title, cluster overview)
-        lines += 3;
+        // Basic header (title line)
+        lines += 1;
 
-        // System overview dashboard (2 rows)
-        lines += 4;
+        if !state.is_local_mode {
+            // "Cluster Overview" label line
+            lines += 1;
 
-        // Live statistics section
-        if !state.utilization_history.is_empty() {
-            lines += 5; // Header + 3 history lines + separator
+            // System overview dashboard card (2 rows) + label separator row
+            lines += 4;
+
+            // Live statistics section
+            if !state.utilization_history.is_empty() {
+                lines += 5; // Header + 3 history lines + separator
+            }
+
+            // Tabs section
+            lines += 2; // Tabs line + separator
         }
-
-        // Tabs section
-        lines += 2; // Tabs line + separator
 
         lines
     }

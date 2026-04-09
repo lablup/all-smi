@@ -379,15 +379,15 @@ mod tests {
     #[test]
     fn test_animation_tick_ms_reasonable() {
         // Must be positive and not unreasonably large.
-        assert!(AppConfig::ANIMATION_TICK_MS > 0);
-        assert!(AppConfig::ANIMATION_TICK_MS <= 500);
+        const { assert!(AppConfig::ANIMATION_TICK_MS > 0) };
+        const { assert!(AppConfig::ANIMATION_TICK_MS <= 500) };
     }
 
     #[test]
     fn test_terminal_reader_poll_ms_reasonable() {
         // Must be positive and not so large that shutdown detection is sluggish.
-        assert!(AppConfig::TERMINAL_READER_POLL_MS > 0);
-        assert!(AppConfig::TERMINAL_READER_POLL_MS <= 200);
+        const { assert!(AppConfig::TERMINAL_READER_POLL_MS > 0) };
+        const { assert!(AppConfig::TERMINAL_READER_POLL_MS <= 200) };
     }
 
     #[test]
