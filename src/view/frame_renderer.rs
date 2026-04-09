@@ -152,8 +152,9 @@ impl FrameRenderer {
 
         // Cluster Overview, dashboard items, and the tabs row are only meaningful
         // when monitoring multiple remote hosts. `is_local_mode` is false the moment
-        // any --hosts / --hostfile argument is supplied (see src/ui/layout.rs build
-        // site near line 68), so a single remote host still shows these widgets.
+        // any --hosts / --hostfile argument is supplied (see the assignment sites in
+        // `src/view/runner.rs::run_view_mode` / `run_local_mode`), so a single remote
+        // host still shows these widgets.
         if !view_state.is_local_mode {
             // Write remaining header content to buffer
             print_colored_text(&mut buffer, "Cluster Overview\r\n", Color::Cyan, None, None);
