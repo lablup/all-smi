@@ -315,4 +315,38 @@ mod tests {
         assert_eq!(widths[1], 25); // 15 + 10
         assert_eq!(widths[2], 7); // 5 + 2
     }
+
+    #[test]
+    fn test_calculate_header_lines_local_vs_remote() {
+        use crate::app_state::AppState;
+
+        // Local mode: only the basic title line, no cluster/tab widgets.
+        let local_state = AppState {
+            is_local_mode: true,
+            ..AppState::default()
+        };
+        let local_lines = LayoutCalculator::calculate_header_lines(&local_state);
+
+        // Remote mode without history: title + "Cluster Overview" label +
+        // dashboard card rows + tabs row.
+        let mut remote_state = AppState {
+            is_local_mode: false,
+            ..AppState::default()
+        };
+        let remote_lines_no_history = LayoutCalculator::calculate_header_lines(&remote_state);
+
+        assert!(
+            local_lines < remote_lines_no_history,
+            "local mode ({local_lines}) should use fewer header lines than remote mode ({remote_lines_no_history})"
+        );
+
+        // Remote mode with non-empty utilization history adds more lines.
+        remote_state.utilization_history.push_back(42.0);
+        let remote_lines_with_history = LayoutCalculator::calculate_header_lines(&remote_state);
+
+        assert!(
+            remote_lines_no_history < remote_lines_with_history,
+            "remote mode with history ({remote_lines_with_history}) should use more header lines than without ({remote_lines_no_history})"
+        );
+    }
 }
