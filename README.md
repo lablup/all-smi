@@ -253,6 +253,9 @@ http://gpu-node3:9090
   - Server systems: BMC sensor integration for comprehensive thermal monitoring
 
 ### Cluster Management
+
+> Note: The Cluster Overview Dashboard, Live Statistics History, and Tabbed Interface appear only in remote mode (when `--hosts` or `--hostfile` is specified). Local mode shows a simplified single-node view without these sections.
+
 - **Cluster Overview Dashboard:** Real-time statistics showing:
   - Total nodes and GPUs across the cluster
   - Average utilization and memory usage

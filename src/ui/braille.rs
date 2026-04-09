@@ -31,6 +31,7 @@
 
 /// Row bit masks for the left sub-column, ordered bottom→top.
 /// level=0 fills only the bottom row; level=3 fills all four rows.
+#[allow(dead_code)] // Used by sparkline_braille; call-site integration lands in sub-issues #155/#157/#158 of #152
 const LEFT_BITS: [u32; 4] = [
     0x40, // dot7 – bottom row
     0x04, // dot3 – lower-mid row
@@ -39,6 +40,7 @@ const LEFT_BITS: [u32; 4] = [
 ];
 
 /// Row bit masks for the right sub-column, ordered bottom→top.
+#[allow(dead_code)] // Used by sparkline_braille; call-site integration lands in sub-issues #155/#157/#158 of #152
 const RIGHT_BITS: [u32; 4] = [
     0x80, // dot8 – bottom row
     0x20, // dot6 – lower-mid row
@@ -64,6 +66,7 @@ const RIGHT_BITS: [u32; 4] = [
 /// - Degenerate explicit range `(lo, hi)` where `hi <= lo` → treated as constant;
 ///   all cells rendered at the bottom row.
 #[must_use]
+#[allow(dead_code)] // Call-site integration lands in sub-issues #155/#157/#158 of #152
 pub fn sparkline_braille(data: &[f64], width: usize, range: Option<(f64, f64)>) -> String {
     if data.is_empty() {
         return " ".repeat(width);
