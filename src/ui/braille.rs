@@ -74,6 +74,10 @@ pub fn sparkline_braille(data: &[f64], width: usize, range: Option<(f64, f64)>) 
 
     // Determine effective min/max.
     let (min, max) = match range {
+        Some((lo, hi)) if !lo.is_finite() || !hi.is_finite() => {
+            // Non-finite range bounds are treated as a degenerate (constant) range.
+            (0.0_f64, 0.0_f64)
+        }
         Some((lo, hi)) => (lo, hi),
         None => {
             let mut lo = f64::INFINITY;
@@ -247,5 +251,23 @@ mod tests {
         let data = [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 1.0, 2.0];
         let result = sparkline_braille(&data, 5, None);
         assert_eq!(char_count(&result), 5);
+    }
+
+    // 9. Non-finite range bounds do not panic; output has correct char length.
+    //    This validates the guard against NaN/infinite explicit range arguments.
+    #[test]
+    fn non_finite_range_bounds_no_panic() {
+        let result = sparkline_braille(&[1.0], 4, Some((f64::NAN, 1.0)));
+        assert_eq!(
+            char_count(&result),
+            4,
+            "should return 4 chars even with NaN range bound"
+        );
+        let result2 = sparkline_braille(&[1.0], 4, Some((0.0, f64::INFINITY)));
+        assert_eq!(
+            char_count(&result2),
+            4,
+            "should return 4 chars even with infinite range bound"
+        );
     }
 }
