@@ -541,6 +541,7 @@ See the [LICENSE](./LICENSE) file for details.
 ## Changelog
 
 ### Recent Updates
+- **v0.20.1 (2026/04/10):** Fix local header metric row jitter by using fixed-width formatted fields; auto-promote pre-release to release in CI
 - **v0.20.0 (2026/04/10):** Redesign local-mode TUI with Activity panel featuring braille sparklines, CPU per-core view, host summary bar, and per-node LED grid; add Apple M5 Pro/Max Super core (S-CPU) support
 - **v0.19.0 (2026/04/08):** Fix Apple Silicon SMC float decoding to restore real CPU/GPU die temperatures, cache platform detection to avoid per-frame system_profiler on macOS, and fix TIME+/Command column alignment in process list
 - **v0.18.1 (2026/04/08):** Fix TUI responsiveness over SSH with non-blocking flush, eliminate 1-second per-frame stall from RuntimeEnvironment::detect(), drain key events after render, and cache per-frame filesystem reads
