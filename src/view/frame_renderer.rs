@@ -33,6 +33,7 @@ use crate::device::ProcessInfo;
 use crate::ui::buffer::BufferWriter;
 use crate::ui::dashboard::{draw_dashboard_items, draw_system_view};
 use crate::ui::layout::LayoutCalculator;
+use crate::ui::local_header::draw_local_header_bar;
 use crate::ui::renderer::{
     print_chassis_info, print_cpu_info, print_function_keys, print_gpu_info,
     print_loading_indicator, print_memory_info, print_process_info, print_storage_info,
@@ -155,7 +156,11 @@ impl FrameRenderer {
         // any --hosts / --hostfile argument is supplied (see the assignment sites in
         // `src/view/runner.rs::run_view_mode` / `run_local_mode`), so a single remote
         // host still shows these widgets.
-        if !view_state.is_local_mode {
+        //
+        // In local mode we show the compact two-line host summary bar instead.
+        if view_state.is_local_mode {
+            draw_local_header_bar(&mut buffer, &view_state, cols);
+        } else {
             // Write remaining header content to buffer
             print_colored_text(&mut buffer, "Cluster Overview\r\n", Color::Cyan, None, None);
             draw_system_view(&mut buffer, &view_state, cols);

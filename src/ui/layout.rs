@@ -33,7 +33,10 @@ impl LayoutCalculator {
         // Basic header (title line)
         lines += 1;
 
-        if !state.is_local_mode {
+        if state.is_local_mode {
+            // Local mode shows the two-line host summary bar (identity + sparklines)
+            lines += 2;
+        } else {
             // "Cluster Overview" label line
             lines += 1;
 
