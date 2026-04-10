@@ -55,7 +55,6 @@ pub struct RenderSnapshot {
     pub show_help: bool,
     pub loading: bool,
     pub is_local_mode: bool,
-    pub show_per_core_cpu: bool,
     pub gpu_filter_enabled: bool,
 
     // Tab state
@@ -129,7 +128,6 @@ impl RenderSnapshot {
             show_help: state.show_help,
             loading: state.loading,
             is_local_mode: state.is_local_mode,
-            show_per_core_cpu: state.show_per_core_cpu,
             gpu_filter_enabled: state.gpu_filter_enabled,
 
             // Tab state -- cheap Vec<String> clone
@@ -206,7 +204,6 @@ impl RenderSnapshot {
         state.show_help = self.show_help;
         state.loading = self.loading;
         state.is_local_mode = self.is_local_mode;
-        state.show_per_core_cpu = self.show_per_core_cpu;
         state.gpu_filter_enabled = self.gpu_filter_enabled;
 
         // Tab state
@@ -279,7 +276,6 @@ mod tests {
         state.show_help = true;
         state.loading = false;
         state.is_local_mode = true;
-        state.show_per_core_cpu = true;
         state.gpu_filter_enabled = true;
 
         let snapshot = RenderSnapshot::capture(&state);
@@ -287,7 +283,6 @@ mod tests {
         assert!(snapshot.show_help);
         assert!(!snapshot.loading);
         assert!(snapshot.is_local_mode);
-        assert!(snapshot.show_per_core_cpu);
         assert!(snapshot.gpu_filter_enabled);
     }
 
