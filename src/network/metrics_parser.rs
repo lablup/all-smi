@@ -345,6 +345,15 @@ impl MetricsParser {
             }
             "cpu_temperature_celsius" => cpu_info.temperature = Some(value as u32),
             "cpu_power_consumption_watts" => cpu_info.power_consumption = Some(value),
+            "cpu_s_core_count" => {
+                self.ensure_apple_silicon_info(cpu_info);
+                crate::update_optional_field!(
+                    cpu_info,
+                    apple_silicon_info,
+                    s_core_count,
+                    value as u32
+                );
+            }
             "cpu_p_core_count" => {
                 self.ensure_apple_silicon_info(cpu_info);
                 crate::update_optional_field!(
@@ -361,6 +370,15 @@ impl MetricsParser {
                     apple_silicon_info,
                     e_core_count,
                     value as u32
+                );
+            }
+            "cpu_s_core_utilization" => {
+                self.ensure_apple_silicon_info(cpu_info);
+                crate::update_optional_field!(
+                    cpu_info,
+                    apple_silicon_info,
+                    s_core_utilization,
+                    value
                 );
             }
             "cpu_p_core_utilization" => {
@@ -388,6 +406,7 @@ impl MetricsParser {
                     && let Ok(core_id) = core_id_str.parse::<u32>()
                 {
                     let core_type = match core_type_str.as_str() {
+                        "S" => crate::device::CoreType::Super,
                         "P" => crate::device::CoreType::Performance,
                         "E" => crate::device::CoreType::Efficiency,
                         _ => crate::device::CoreType::Standard,
@@ -516,14 +535,18 @@ impl MetricsParser {
     fn ensure_apple_silicon_info(&self, cpu_info: &mut CpuInfo) {
         if cpu_info.apple_silicon_info.is_none() {
             cpu_info.apple_silicon_info = Some(AppleSiliconCpuInfo {
+                s_core_count: 0,
                 p_core_count: 0,
                 e_core_count: 0,
                 gpu_core_count: 0,
+                s_core_utilization: 0.0,
                 p_core_utilization: 0.0,
                 e_core_utilization: 0.0,
                 ane_ops_per_second: None,
+                s_cluster_frequency_mhz: None,
                 p_cluster_frequency_mhz: None,
                 e_cluster_frequency_mhz: None,
+                s_core_l2_cache_mb: None,
                 p_core_l2_cache_mb: None,
                 e_core_l2_cache_mb: None,
             });
@@ -913,5 +936,112 @@ all_smi_disk_total_bytes{instance="node-0058", index="0"} 1000000000
 
         assert!(gpu_info.is_empty());
         assert!(storage_info.is_empty());
+    }
+
+    #[test]
+    fn test_parse_m5_super_core_metrics() {
+        let parser = create_test_parser();
+        let re = create_test_regex();
+        let host = "127.0.0.1:10001";
+
+        // M5 Max has 6 Super cores + 10 Performance cores, no Efficiency cores
+        let test_data = r#"
+all_smi_cpu_utilization{cpu_model="Apple M5 Max", instance="m5-node", hostname="m5-node", index="0"} 42.0
+all_smi_cpu_s_core_count{cpu_model="Apple M5 Max", instance="m5-node", hostname="m5-node", index="0"} 6
+all_smi_cpu_p_core_count{cpu_model="Apple M5 Max", instance="m5-node", hostname="m5-node", index="0"} 10
+all_smi_cpu_e_core_count{cpu_model="Apple M5 Max", instance="m5-node", hostname="m5-node", index="0"} 0
+all_smi_cpu_s_core_utilization{cpu_model="Apple M5 Max", instance="m5-node", hostname="m5-node", index="0"} 38.5
+all_smi_cpu_p_core_utilization{cpu_model="Apple M5 Max", instance="m5-node", hostname="m5-node", index="0"} 44.2
+all_smi_cpu_e_core_utilization{cpu_model="Apple M5 Max", instance="m5-node", hostname="m5-node", index="0"} 0.0
+"#;
+
+        let (_, cpu_info, _, _) = parser.parse_metrics(test_data, host, &re);
+
+        assert_eq!(cpu_info.len(), 1);
+        let cpu = &cpu_info[0];
+        assert_eq!(cpu.cpu_model, "Apple M5 Max");
+        assert_eq!(cpu.utilization, 42.0);
+        assert!(matches!(
+            cpu.platform_type,
+            crate::device::CpuPlatformType::AppleSilicon
+        ));
+
+        let apple_info = cpu.apple_silicon_info.as_ref().unwrap();
+        assert_eq!(apple_info.s_core_count, 6);
+        assert_eq!(apple_info.p_core_count, 10);
+        assert_eq!(apple_info.e_core_count, 0);
+        assert_eq!(apple_info.s_core_utilization, 38.5);
+        assert_eq!(apple_info.p_core_utilization, 44.2);
+        assert_eq!(apple_info.e_core_utilization, 0.0);
+    }
+
+    #[test]
+    fn test_parse_m5_per_core_super_type() {
+        let parser = create_test_parser();
+        let re = create_test_regex();
+        let host = "127.0.0.1:10001";
+
+        // Per-core metrics for M5 with S-type cores
+        let test_data = r#"
+all_smi_cpu_utilization{cpu_model="Apple M5 Pro", instance="m5pro-node", hostname="m5pro-node", index="0"} 35.0
+all_smi_cpu_core_utilization{cpu_model="Apple M5 Pro", instance="m5pro-node", hostname="m5pro-node", core_id="0", core_type="S", index="0"} 50.0
+all_smi_cpu_core_utilization{cpu_model="Apple M5 Pro", instance="m5pro-node", hostname="m5pro-node", core_id="1", core_type="S", index="0"} 40.0
+all_smi_cpu_core_utilization{cpu_model="Apple M5 Pro", instance="m5pro-node", hostname="m5pro-node", core_id="2", core_type="P", index="0"} 30.0
+all_smi_cpu_core_utilization{cpu_model="Apple M5 Pro", instance="m5pro-node", hostname="m5pro-node", core_id="3", core_type="P", index="0"} 25.0
+"#;
+
+        let (_, cpu_info, _, _) = parser.parse_metrics(test_data, host, &re);
+
+        assert_eq!(cpu_info.len(), 1);
+        let cpu = &cpu_info[0];
+        assert_eq!(cpu.per_core_utilization.len(), 4);
+
+        let core0 = &cpu.per_core_utilization[0];
+        assert_eq!(core0.core_id, 0);
+        assert_eq!(core0.core_type, crate::device::CoreType::Super);
+        assert_eq!(core0.utilization, 50.0);
+
+        let core1 = &cpu.per_core_utilization[1];
+        assert_eq!(core1.core_id, 1);
+        assert_eq!(core1.core_type, crate::device::CoreType::Super);
+        assert_eq!(core1.utilization, 40.0);
+
+        let core2 = &cpu.per_core_utilization[2];
+        assert_eq!(core2.core_id, 2);
+        assert_eq!(core2.core_type, crate::device::CoreType::Performance);
+        assert_eq!(core2.utilization, 30.0);
+
+        let core3 = &cpu.per_core_utilization[3];
+        assert_eq!(core3.core_id, 3);
+        assert_eq!(core3.core_type, crate::device::CoreType::Performance);
+        assert_eq!(core3.utilization, 25.0);
+    }
+
+    #[test]
+    fn test_m5_backward_compat_m1_m4_no_super_cores() {
+        let parser = create_test_parser();
+        let re = create_test_regex();
+        let host = "127.0.0.1:10001";
+
+        // M2 Max: no S-cores, standard P+E layout
+        let test_data = r#"
+all_smi_cpu_utilization{cpu_model="Apple M2 Max", instance="m2-node", hostname="m2-node", index="0"} 20.0
+all_smi_cpu_p_core_count{cpu_model="Apple M2 Max", instance="m2-node", hostname="m2-node", index="0"} 8
+all_smi_cpu_e_core_count{cpu_model="Apple M2 Max", instance="m2-node", hostname="m2-node", index="0"} 4
+all_smi_cpu_p_core_utilization{cpu_model="Apple M2 Max", instance="m2-node", hostname="m2-node", index="0"} 18.0
+all_smi_cpu_e_core_utilization{cpu_model="Apple M2 Max", instance="m2-node", hostname="m2-node", index="0"} 5.0
+"#;
+
+        let (_, cpu_info, _, _) = parser.parse_metrics(test_data, host, &re);
+
+        assert_eq!(cpu_info.len(), 1);
+        let cpu = &cpu_info[0];
+        let apple_info = cpu.apple_silicon_info.as_ref().unwrap();
+
+        // s_core_count defaults to 0 when not present in metrics
+        assert_eq!(apple_info.s_core_count, 0);
+        assert_eq!(apple_info.s_core_utilization, 0.0);
+        assert_eq!(apple_info.p_core_count, 8);
+        assert_eq!(apple_info.e_core_count, 4);
     }
 }

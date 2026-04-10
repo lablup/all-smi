@@ -273,23 +273,42 @@ pub fn print_cpu_info<W: Write>(
         None,
         None,
     );
-    // Show P-Core/E-Core counts for Apple Silicon, regular core count for others
+    // Show S/P/E-Core counts for Apple Silicon, regular core count for others
     if let Some(apple_info) = &info.apple_silicon_info {
         print_colored_text(stdout, " Cores:", Color::Green, None, None);
-        print_colored_text(
-            stdout,
-            &format!("{:>2}P+", apple_info.p_core_count),
-            Color::White,
-            None,
-            None,
-        );
-        print_colored_text(
-            stdout,
-            &format!("{:>2}E", apple_info.e_core_count),
-            Color::White,
-            None,
-            None,
-        );
+        if apple_info.s_core_count > 0 {
+            // M5 Pro/Max: Super + Performance
+            print_colored_text(
+                stdout,
+                &format!("{:>2}S+", apple_info.s_core_count),
+                Color::White,
+                None,
+                None,
+            );
+            print_colored_text(
+                stdout,
+                &format!("{:>2}P", apple_info.p_core_count),
+                Color::White,
+                None,
+                None,
+            );
+        } else {
+            // M1-M4: Performance + Efficiency
+            print_colored_text(
+                stdout,
+                &format!("{:>2}P+", apple_info.p_core_count),
+                Color::White,
+                None,
+                None,
+            );
+            print_colored_text(
+                stdout,
+                &format!("{:>2}E", apple_info.e_core_count),
+                Color::White,
+                None,
+                None,
+            );
+        }
     } else {
         print_colored_text(stdout, " Cores:", Color::Green, None, None);
         print_colored_text(
@@ -301,26 +320,33 @@ pub fn print_cpu_info<W: Write>(
         );
     }
 
-    // Display frequency - P+E format for Apple Silicon, regular for others
+    // Display frequency - S+P or P+E format for Apple Silicon, regular for others
     print_colored_text(stdout, " Freq:", Color::Magenta, None, None);
     if let Some(apple_info) = &info.apple_silicon_info {
-        if let (Some(p_freq), Some(e_freq)) = (
-            apple_info.p_cluster_frequency_mhz,
-            apple_info.e_cluster_frequency_mhz,
-        ) {
-            // Format as P+E
-            let freq_display = if p_freq >= 1000 && e_freq >= 1000 {
-                format!(
-                    "{:.2}+{:.2}GHz",
-                    p_freq as f64 / 1000.0,
-                    e_freq as f64 / 1000.0
-                )
-            } else if p_freq >= 1000 {
-                format!("{:.2}GHz+{e_freq}MHz", p_freq as f64 / 1000.0)
-            } else if e_freq >= 1000 {
-                format!("{p_freq}MHz+{:.2}GHz", e_freq as f64 / 1000.0)
+        // Determine which two frequency tiers to display
+        let (high_freq, low_freq) = if apple_info.s_core_count > 0 {
+            // M5 Pro/Max: S-cluster + P-cluster
+            (
+                apple_info.s_cluster_frequency_mhz,
+                apple_info.p_cluster_frequency_mhz,
+            )
+        } else {
+            // M1-M4: P-cluster + E-cluster
+            (
+                apple_info.p_cluster_frequency_mhz,
+                apple_info.e_cluster_frequency_mhz,
+            )
+        };
+
+        if let (Some(hi), Some(lo)) = (high_freq, low_freq) {
+            let freq_display = if hi >= 1000 && lo >= 1000 {
+                format!("{:.2}+{:.2}GHz", hi as f64 / 1000.0, lo as f64 / 1000.0)
+            } else if hi >= 1000 {
+                format!("{:.2}GHz+{lo}MHz", hi as f64 / 1000.0)
+            } else if lo >= 1000 {
+                format!("{hi}MHz+{:.2}GHz", lo as f64 / 1000.0)
             } else {
-                format!("{p_freq}+{e_freq}MHz")
+                format!("{hi}+{lo}MHz")
             };
             print_colored_text(
                 stdout,
@@ -359,14 +385,21 @@ pub fn print_cpu_info<W: Write>(
 
     // Display cache based on platform type
     if let Some(apple_info) = &info.apple_silicon_info {
-        if let (Some(p_cache), Some(e_cache)) =
+        // Determine which cache tiers to display
+        let (high_cache, low_cache) = if apple_info.s_core_count > 0 {
+            // M5 Pro/Max: S-cache + P-cache
+            (apple_info.s_core_l2_cache_mb, apple_info.p_core_l2_cache_mb)
+        } else {
+            // M1-M4: P-cache + E-cache
             (apple_info.p_core_l2_cache_mb, apple_info.e_core_l2_cache_mb)
-        {
-            // Apple Silicon: Display L2 cache as P+E format
+        };
+
+        if let (Some(hi_cache), Some(lo_cache)) = (high_cache, low_cache) {
+            // Apple Silicon: Display L2 cache as two-tier format
             print_colored_text(stdout, " L2 Cache:", Color::Red, None, None);
             print_colored_text(
                 stdout,
-                &format!("{p_cache}MB+{e_cache}MB"),
+                &format!("{hi_cache}MB+{lo_cache}MB"),
                 Color::White,
                 None,
                 None,
@@ -406,7 +439,7 @@ pub fn print_cpu_info<W: Write>(
     let available_width = width.saturating_sub(10); // 5 padding each side
 
     if let Some(apple_info) = &info.apple_silicon_info {
-        // Apple Silicon: Two gauges for P-Core and E-Core
+        // Apple Silicon: Two gauges for the two core tiers
         let num_gauges = 2;
         let gauge_width = (available_width - 2) / 2; // 2 spaces between gauges
 
@@ -417,26 +450,47 @@ pub fn print_cpu_info<W: Write>(
 
         print_colored_text(stdout, "     ", Color::White, None, None); // 5 char left padding
 
-        // P-Core gauge
-        draw_bar(
-            stdout,
-            "P-CPU",
-            apple_info.p_core_utilization,
-            100.0,
-            gauge_width,
-            None,
-        );
-        print_colored_text(stdout, "  ", Color::White, None, None); // 2 space separator
+        if apple_info.s_core_count > 0 {
+            // M5 Pro/Max: S-CPU + P-CPU gauges
+            draw_bar(
+                stdout,
+                "S-CPU",
+                apple_info.s_core_utilization,
+                100.0,
+                gauge_width,
+                None,
+            );
+            print_colored_text(stdout, "  ", Color::White, None, None);
 
-        // E-Core gauge
-        draw_bar(
-            stdout,
-            "E-CPU",
-            apple_info.e_core_utilization,
-            100.0,
-            gauge_width,
-            None,
-        );
+            draw_bar(
+                stdout,
+                "P-CPU",
+                apple_info.p_core_utilization,
+                100.0,
+                gauge_width,
+                None,
+            );
+        } else {
+            // M1-M4: P-CPU + E-CPU gauges
+            draw_bar(
+                stdout,
+                "P-CPU",
+                apple_info.p_core_utilization,
+                100.0,
+                gauge_width,
+                None,
+            );
+            print_colored_text(stdout, "  ", Color::White, None, None);
+
+            draw_bar(
+                stdout,
+                "E-CPU",
+                apple_info.e_core_utilization,
+                100.0,
+                gauge_width,
+                None,
+            );
+        }
 
         print_colored_text(stdout, &" ".repeat(right_padding), Color::White, None, None);
     // dynamic right padding
@@ -488,12 +542,14 @@ pub fn print_cpu_info<W: Write>(
         let cores_per_line = if total_cores <= 16 { 4 } else { 8 };
 
         // Group cores by type for simpler labeling
+        let mut s_cores = Vec::new();
         let mut p_cores = Vec::new();
         let mut e_cores = Vec::new();
         let mut standard_cores = Vec::new();
 
         for core in &info.per_core_utilization {
             match core.core_type {
+                crate::device::CoreType::Super => s_cores.push(core),
                 crate::device::CoreType::Performance => p_cores.push(core),
                 crate::device::CoreType::Efficiency => e_cores.push(core),
                 crate::device::CoreType::Standard => standard_cores.push(core),
@@ -506,8 +562,34 @@ pub fn print_cpu_info<W: Write>(
         let core_bar_width =
             (available_width - (cores_per_line - 1) * spacing_between_cores) / cores_per_line;
 
-        // Display E-cores first (matches Apple Silicon core ordering)
+        // Display S-cores first (M5 Pro/Max Super cores, if present)
         let mut cores_displayed = 0;
+        for (i, core) in s_cores.iter().enumerate() {
+            if cores_displayed % cores_per_line == 0 && cores_displayed > 0 {
+                queue!(stdout, Print("\r\n")).unwrap();
+            }
+
+            if cores_displayed % cores_per_line == 0 {
+                print_colored_text(stdout, "     ", Color::White, None, None); // 5 char left padding
+            }
+
+            let label = format!("S{}", i + 1);
+            draw_bar(
+                stdout,
+                &label,
+                core.utilization,
+                100.0,
+                core_bar_width,
+                None,
+            );
+
+            cores_displayed += 1;
+            if cores_displayed % cores_per_line != 0 && cores_displayed < total_cores {
+                print_colored_text(stdout, "  ", Color::White, None, None); // spacing between cores
+            }
+        }
+
+        // Display E-cores (matches Apple Silicon M1-M4 core ordering)
         for (i, core) in e_cores.iter().enumerate() {
             if cores_displayed % cores_per_line == 0 && cores_displayed > 0 {
                 queue!(stdout, Print("\r\n")).unwrap();
@@ -680,14 +762,18 @@ mod tests {
             power_consumption: None,
             per_socket_info: Vec::new(),
             apple_silicon_info: Some(AppleSiliconCpuInfo {
+                s_core_count: 0,
                 p_core_count: 8,
                 e_core_count: 4,
                 gpu_core_count: 16,
+                s_core_utilization: 0.0,
                 p_core_utilization: 55.0,
                 e_core_utilization: 25.0,
                 ane_ops_per_second: None,
+                s_cluster_frequency_mhz: None,
                 p_cluster_frequency_mhz: Some(3490),
                 e_cluster_frequency_mhz: Some(2420),
+                s_core_l2_cache_mb: None,
                 p_core_l2_cache_mb: Some(16),
                 e_core_l2_cache_mb: Some(4),
             }),

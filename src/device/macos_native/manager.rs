@@ -233,8 +233,10 @@ impl NativeMetricsManager {
             avg.ane_power += sample.ane_power;
             avg.dram_power += sample.dram_power;
             avg.package_power += sample.package_power;
+            avg.s_cluster_freq += sample.s_cluster_freq;
             avg.e_cluster_freq += sample.e_cluster_freq;
             avg.p_cluster_freq += sample.p_cluster_freq;
+            avg.s_cluster_residency += sample.s_cluster_residency;
             avg.e_cluster_residency += sample.e_cluster_residency;
             avg.p_cluster_residency += sample.p_cluster_residency;
             avg.gpu_freq += sample.gpu_freq;
@@ -246,8 +248,10 @@ impl NativeMetricsManager {
         avg.ane_power /= count;
         avg.dram_power /= count;
         avg.package_power /= count;
+        avg.s_cluster_freq = (avg.s_cluster_freq as f64 / count) as u32;
         avg.e_cluster_freq = (avg.e_cluster_freq as f64 / count) as u32;
         avg.p_cluster_freq = (avg.p_cluster_freq as f64 / count) as u32;
+        avg.s_cluster_residency /= count;
         avg.e_cluster_residency /= count;
         avg.p_cluster_residency /= count;
         avg.gpu_freq = (avg.gpu_freq as f64 / count) as u32;
@@ -255,6 +259,7 @@ impl NativeMetricsManager {
 
         // Use cluster data from last sample for detail
         if let Some(last) = samples.last() {
+            avg.s_cluster_data = last.s_cluster_data.clone();
             avg.e_cluster_data = last.e_cluster_data.clone();
             avg.p_cluster_data = last.p_cluster_data.clone();
         }

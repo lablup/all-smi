@@ -109,6 +109,7 @@ pub struct CoreUtilization {
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub enum CoreType {
+    Super,       // S-cores (Apple Silicon M5 Pro/Max Super cores)
     Performance, // P-cores (Apple Silicon) or Performance cores (Intel/AMD)
     Efficiency,  // E-cores (Apple Silicon) or Efficiency cores (Intel/AMD)
     Standard,    // Regular cores (no P/E distinction)
@@ -135,14 +136,18 @@ pub struct CpuSocketInfo {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AppleSiliconCpuInfo {
+    pub s_core_count: u32,                    // Super core count (M5 Pro/Max)
     pub p_core_count: u32,                    // Performance core count
     pub e_core_count: u32,                    // Efficiency core count
     pub gpu_core_count: u32,                  // GPU core count
+    pub s_core_utilization: f64,              // Super core utilization (M5 Pro/Max)
     pub p_core_utilization: f64,              // Performance core utilization
     pub e_core_utilization: f64,              // Efficiency core utilization
     pub ane_ops_per_second: Option<f64>,      // ANE operations per second
+    pub s_cluster_frequency_mhz: Option<u32>, // S-cluster frequency in MHz (M5 Pro/Max)
     pub p_cluster_frequency_mhz: Option<u32>, // P-cluster frequency in MHz
     pub e_cluster_frequency_mhz: Option<u32>, // E-cluster frequency in MHz
+    pub s_core_l2_cache_mb: Option<u32>,      // S-core L2 cache size in MB (M5 Pro/Max)
     pub p_core_l2_cache_mb: Option<u32>,      // P-core L2 cache size in MB
     pub e_core_l2_cache_mb: Option<u32>,      // E-core L2 cache size in MB
 }

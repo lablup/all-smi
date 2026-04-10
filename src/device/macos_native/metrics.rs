@@ -24,6 +24,7 @@ use super::thermal::ThermalState;
 /// Core types for Apple Silicon cluster identification
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum CoreType {
+    Super,
     Efficiency,
     Performance,
 }
@@ -35,8 +36,10 @@ pub enum CoreType {
 #[derive(Debug, Default, Clone)]
 pub struct NativeMetricsData {
     // CPU cluster metrics
+    pub s_cluster_active_residency: f64,
     pub e_cluster_active_residency: f64,
     pub p_cluster_active_residency: f64,
+    pub s_cluster_frequency: u32,
     pub e_cluster_frequency: u32,
     pub p_cluster_frequency: u32,
     pub cpu_power_mw: f64,
@@ -84,8 +87,10 @@ impl NativeMetricsData {
 
         Self {
             // CPU cluster metrics from IOReport
+            s_cluster_active_residency: ioreport.s_cluster_residency,
             e_cluster_active_residency: ioreport.e_cluster_residency,
             p_cluster_active_residency: ioreport.p_cluster_residency,
+            s_cluster_frequency: ioreport.s_cluster_freq,
             e_cluster_frequency: ioreport.e_cluster_freq,
             p_cluster_frequency: ioreport.p_cluster_freq,
             cpu_power_mw: ioreport.cpu_power * 1000.0, // Convert W to mW
@@ -120,6 +125,11 @@ impl NativeMetricsData {
     fn extract_core_residencies(ioreport: &IOReportMetrics) -> Vec<f64> {
         let mut residencies = Vec::new();
 
+        // Add S-cluster cores (M5 Pro/Max Super cores)
+        for (_, residency) in &ioreport.s_cluster_data {
+            residencies.push(*residency);
+        }
+
         // Add E-cluster cores
         for (_, residency) in &ioreport.e_cluster_data {
             residencies.push(*residency);
@@ -136,6 +146,11 @@ impl NativeMetricsData {
     fn extract_core_frequencies(ioreport: &IOReportMetrics) -> Vec<u32> {
         let mut frequencies = Vec::new();
 
+        // Add S-cluster cores (M5 Pro/Max Super cores)
+        for (freq, _) in &ioreport.s_cluster_data {
+            frequencies.push(*freq);
+        }
+
         // Add E-cluster cores
         for (freq, _) in &ioreport.e_cluster_data {
             frequencies.push(*freq);
@@ -151,6 +166,11 @@ impl NativeMetricsData {
 
     fn extract_core_types(ioreport: &IOReportMetrics) -> Vec<CoreType> {
         let mut types = Vec::new();
+
+        // Add S-cluster cores (M5 Pro/Max Super cores)
+        for _ in &ioreport.s_cluster_data {
+            types.push(CoreType::Super);
+        }
 
         // Add E-cluster cores
         for _ in &ioreport.e_cluster_data {
@@ -169,8 +189,15 @@ impl NativeMetricsData {
     /// Uses weighted average of cluster utilization
     #[allow(dead_code)]
     pub fn cpu_utilization(&self) -> f64 {
-        // Weight P-cores more heavily as they handle more intensive tasks
-        self.e_cluster_active_residency * 0.3 + self.p_cluster_active_residency * 0.7
+        if self.s_cluster_active_residency > 0.0 {
+            // M5 Pro/Max: Super + Performance (no Efficiency)
+            // Weight Super cores more heavily as they handle the most intensive tasks
+            self.s_cluster_active_residency * 0.4 + self.p_cluster_active_residency * 0.6
+        } else {
+            // M1-M4: Performance + Efficiency
+            // Weight P-cores more heavily as they handle more intensive tasks
+            self.e_cluster_active_residency * 0.3 + self.p_cluster_active_residency * 0.7
+        }
     }
 
     /// Get GPU utilization as a percentage (0-100)

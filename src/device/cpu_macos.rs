@@ -27,6 +27,8 @@ use sysinfo::System;
 
 type CpuHardwareParseResult = Result<(String, u32, u32, u32, u32, u32), Box<dyn std::error::Error>>;
 type IntelCpuInfo = (String, u32, u32, u32, u32, u32);
+/// (cpu_model, s_core_count, p_core_count, e_core_count, gpu_core_count)
+type AppleSiliconHwInfo = (String, u32, u32, u32, u32);
 
 pub struct MacOsCpuReader {
     is_apple_silicon: bool,
@@ -36,9 +38,11 @@ pub struct MacOsCpuReader {
     first_refresh_done: RwLock<bool>,
     // Cached hardware info for Apple Silicon
     cached_cpu_model: Mutex<Option<String>>,
+    cached_s_core_count: Mutex<Option<u32>>,
     cached_p_core_count: Mutex<Option<u32>>,
     cached_e_core_count: Mutex<Option<u32>>,
     cached_gpu_core_count: Mutex<Option<u32>>,
+    cached_s_core_l2_cache_mb: Mutex<Option<u32>>,
     cached_p_core_l2_cache_mb: Mutex<Option<u32>>,
     cached_e_core_l2_cache_mb: Mutex<Option<u32>>,
     // Cached hardware info for Intel
@@ -61,9 +65,11 @@ impl MacOsCpuReader {
             system: RwLock::new(system),
             first_refresh_done: RwLock::new(false),
             cached_cpu_model: Mutex::new(None),
+            cached_s_core_count: Mutex::new(None),
             cached_p_core_count: Mutex::new(None),
             cached_e_core_count: Mutex::new(None),
             cached_gpu_core_count: Mutex::new(None),
+            cached_s_core_l2_cache_mb: Mutex::new(None),
             cached_p_core_l2_cache_mb: Mutex::new(None),
             cached_e_core_l2_cache_mb: Mutex::new(None),
             cached_intel_info: Mutex::new(None),
@@ -100,22 +106,37 @@ impl MacOsCpuReader {
         // IMPORTANT: Read cache values first and drop the locks before any else branch
         let cached_values = {
             let cpu_model = self.cached_cpu_model.lock().unwrap().clone();
+            let s_core_count = *self.cached_s_core_count.lock().unwrap();
             let p_core_count = *self.cached_p_core_count.lock().unwrap();
             let e_core_count = *self.cached_e_core_count.lock().unwrap();
             let gpu_core_count = *self.cached_gpu_core_count.lock().unwrap();
-            (cpu_model, p_core_count, e_core_count, gpu_core_count)
+            (
+                cpu_model,
+                s_core_count,
+                p_core_count,
+                e_core_count,
+                gpu_core_count,
+            )
         };
         // Now all locks are released
 
-        let (cpu_model, p_core_count, e_core_count, gpu_core_count) = if let (
+        let (cpu_model, s_core_count, p_core_count, e_core_count, gpu_core_count) = if let (
             Some(cpu_model),
+            Some(s_core_count),
             Some(p_core_count),
             Some(e_core_count),
             Some(gpu_core_count),
-        ) = cached_values
+        ) =
+            cached_values
         {
             // Use cached values - avoids sysctl/ioreg calls
-            (cpu_model, p_core_count, e_core_count, gpu_core_count)
+            (
+                cpu_model,
+                s_core_count,
+                p_core_count,
+                e_core_count,
+                gpu_core_count,
+            )
         } else {
             // Get CPU model and core counts using fast sysctl commands (first time only)
             self.parse_apple_silicon_hardware_info_fast()?
@@ -133,25 +154,40 @@ impl MacOsCpuReader {
         let native_data = get_native_metrics_manager().and_then(|m| m.collect_once().ok());
 
         // Get CPU frequency information from cached native metrics
-        let (base_frequency, max_frequency, p_cluster_freq, e_cluster_freq): (
+        let (base_frequency, max_frequency, s_cluster_freq, p_cluster_freq, e_cluster_freq): (
             u32,
             u32,
+            Option<u32>,
             Option<u32>,
             Option<u32>,
         ) = {
             if let Some(ref data) = native_data {
-                // Use actual frequencies from native metrics
-                let avg_freq = (data.p_cluster_frequency + data.e_cluster_frequency) / 2;
-                (
-                    avg_freq,
-                    data.p_cluster_frequency, // P-cluster frequency as max
-                    Some(data.p_cluster_frequency),
-                    Some(data.e_cluster_frequency),
-                )
+                if s_core_count > 0 {
+                    // M5 Pro/Max: Super + Performance (no Efficiency)
+                    let avg_freq = (data.s_cluster_frequency + data.p_cluster_frequency) / 2;
+                    (
+                        avg_freq,
+                        data.s_cluster_frequency, // S-cluster frequency as max
+                        Some(data.s_cluster_frequency),
+                        Some(data.p_cluster_frequency),
+                        None, // No E-cluster on M5 Pro/Max
+                    )
+                } else {
+                    // M1-M4: Performance + Efficiency
+                    let avg_freq = (data.p_cluster_frequency + data.e_cluster_frequency) / 2;
+                    (
+                        avg_freq,
+                        data.p_cluster_frequency, // P-cluster frequency as max
+                        None,
+                        Some(data.p_cluster_frequency),
+                        Some(data.e_cluster_frequency),
+                    )
+                }
             } else {
                 (
                     self.get_cpu_base_frequency()?,
                     self.get_cpu_max_frequency()?,
+                    None,
                     None,
                     None,
                 )
@@ -159,8 +195,11 @@ impl MacOsCpuReader {
         };
 
         // Get per-core utilization (no refresh needed - already done above)
-        let per_core_utilization =
-            self.get_per_core_utilization_no_refresh(e_core_count as usize, p_core_count as usize);
+        let per_core_utilization = self.get_per_core_utilization_no_refresh(
+            s_core_count as usize,
+            e_core_count as usize,
+            p_core_count as usize,
+        );
 
         // Get CPU temperature from cached native metrics (SMC sensor reading).
         // Falls back to None if SMC didn't return a usable value.
@@ -172,62 +211,85 @@ impl MacOsCpuReader {
         // Power consumption from cached native metrics
         let power_consumption = native_data.as_ref().map(|d| d.cpu_power_mw / 1000.0);
 
-        let total_cores = p_core_count + e_core_count;
+        let total_cores = s_core_count + p_core_count + e_core_count;
         let total_threads = total_cores; // Apple Silicon doesn't use hyperthreading
 
-        // Get cache sizes for P and E cores
+        // Get cache sizes for S, P and E cores
+        let s_core_l2_cache_mb = self.get_s_core_l2_cache_size().ok();
         let p_core_l2_cache_mb = self.get_p_core_l2_cache_size().ok();
         let e_core_l2_cache_mb = self.get_e_core_l2_cache_size().ok();
 
-        // Calculate P-core and E-core utilization from per-core data if available
-        let (p_core_utilization, e_core_utilization) = if !per_core_utilization.is_empty() {
-            let mut p_sum = 0.0;
-            let mut p_count = 0;
-            let mut e_sum = 0.0;
-            let mut e_count = 0;
+        // Calculate S-core, P-core and E-core utilization from per-core data if available
+        let (s_core_utilization, p_core_utilization, e_core_utilization) =
+            if !per_core_utilization.is_empty() {
+                let mut s_sum = 0.0;
+                let mut s_count = 0;
+                let mut p_sum = 0.0;
+                let mut p_count = 0;
+                let mut e_sum = 0.0;
+                let mut e_count = 0;
 
-            for core in &per_core_utilization {
-                match core.core_type {
-                    CoreType::Performance => {
-                        p_sum += core.utilization;
-                        p_count += 1;
+                for core in &per_core_utilization {
+                    match core.core_type {
+                        CoreType::Super => {
+                            s_sum += core.utilization;
+                            s_count += 1;
+                        }
+                        CoreType::Performance => {
+                            p_sum += core.utilization;
+                            p_count += 1;
+                        }
+                        CoreType::Efficiency => {
+                            e_sum += core.utilization;
+                            e_count += 1;
+                        }
+                        _ => {}
                     }
-                    CoreType::Efficiency => {
-                        e_sum += core.utilization;
-                        e_count += 1;
-                    }
-                    _ => {}
                 }
-            }
 
-            let p_util = if p_count > 0 {
-                p_sum / p_count as f64
+                let s_util = if s_count > 0 {
+                    s_sum / s_count as f64
+                } else {
+                    0.0
+                };
+
+                let p_util = if p_count > 0 {
+                    p_sum / p_count as f64
+                } else {
+                    cpu_utilization * 0.6
+                };
+
+                let e_util = if e_count > 0 {
+                    e_sum / e_count as f64
+                } else if s_core_count > 0 {
+                    // M5 Pro/Max has no E-cores, so no fallback needed
+                    0.0
+                } else {
+                    cpu_utilization * 0.4
+                };
+
+                (s_util, p_util, e_util)
             } else {
-                cpu_utilization * 0.6
+                // Fallback to estimated values
+                let (p_util, e_util) = self
+                    .get_apple_silicon_core_utilization()
+                    .unwrap_or((cpu_utilization * 0.6, cpu_utilization * 0.4));
+                (0.0, p_util, e_util)
             };
-
-            let e_util = if e_count > 0 {
-                e_sum / e_count as f64
-            } else {
-                cpu_utilization * 0.4
-            };
-
-            (p_util, e_util)
-        } else {
-            // Fallback to estimated values
-            self.get_apple_silicon_core_utilization()
-                .unwrap_or((cpu_utilization * 0.6, cpu_utilization * 0.4))
-        };
 
         let apple_silicon_info = Some(AppleSiliconCpuInfo {
+            s_core_count,
             p_core_count,
             e_core_count,
             gpu_core_count,
+            s_core_utilization,
             p_core_utilization,
             e_core_utilization,
             ane_ops_per_second: None, // ANE metrics are complex to get
+            s_cluster_frequency_mhz: s_cluster_freq,
             p_cluster_frequency_mhz: p_cluster_freq,
             e_cluster_frequency_mhz: e_cluster_freq,
+            s_core_l2_cache_mb,
             p_core_l2_cache_mb,
             e_core_l2_cache_mb,
         });
@@ -254,7 +316,9 @@ impl MacOsCpuReader {
             total_threads,
             base_frequency_mhz: base_frequency,
             max_frequency_mhz: max_frequency,
-            cache_size_mb: p_core_l2_cache_mb.unwrap_or(0) + e_core_l2_cache_mb.unwrap_or(0), // Total L2 cache
+            cache_size_mb: s_core_l2_cache_mb.unwrap_or(0)
+                + p_core_l2_cache_mb.unwrap_or(0)
+                + e_core_l2_cache_mb.unwrap_or(0), // Total L2 cache
             utilization: cpu_utilization,
             temperature,
             power_consumption,
@@ -337,58 +401,108 @@ impl MacOsCpuReader {
 
     /// Fast method to get Apple Silicon hardware info using sysctl and ioreg
     /// This is ~50x faster than system_profiler (~10ms vs ~500ms)
+    /// Returns (cpu_model, s_core_count, p_core_count, e_core_count, gpu_core_count)
     fn parse_apple_silicon_hardware_info_fast(
         &self,
-    ) -> Result<(String, u32, u32, u32), Box<dyn std::error::Error>> {
+    ) -> Result<AppleSiliconHwInfo, Box<dyn std::error::Error>> {
         // Check if we have cached values
-        if let (Some(cpu_model), Some(p_core_count), Some(e_core_count), Some(gpu_core_count)) = (
+        if let (
+            Some(cpu_model),
+            Some(s_core_count),
+            Some(p_core_count),
+            Some(e_core_count),
+            Some(gpu_core_count),
+        ) = (
             self.cached_cpu_model.lock().unwrap().clone(),
+            *self.cached_s_core_count.lock().unwrap(),
             *self.cached_p_core_count.lock().unwrap(),
             *self.cached_e_core_count.lock().unwrap(),
             *self.cached_gpu_core_count.lock().unwrap(),
         ) {
-            return Ok((cpu_model, p_core_count, e_core_count, gpu_core_count));
+            return Ok((
+                cpu_model,
+                s_core_count,
+                p_core_count,
+                e_core_count,
+                gpu_core_count,
+            ));
         }
 
         // Get CPU model using sysctl (fast: ~10ms vs system_profiler ~500ms)
         let cpu_model = self.get_cpu_model_sysctl()?;
 
-        // Get P and E core counts in a single sysctl call
+        // Read perflevel names and core counts to determine core types dynamically
+        // M5 Pro/Max: perflevel0.name=Super, perflevel1.name=Performance (no E-cores)
+        // M1-M4:      perflevel0.name=Performance (or absent), perflevel1.name=Efficiency
         let output = Command::new("sysctl")
             .args(["hw.perflevel0.physicalcpu", "hw.perflevel1.physicalcpu"])
             .output()?;
 
         let output_str = String::from_utf8_lossy(&output.stdout);
-        let mut p_core_count = 0u32;
-        let mut e_core_count = 0u32;
+        let mut perflevel0_count = 0u32;
+        let mut perflevel1_count = 0u32;
 
         for line in output_str.lines() {
             if line.starts_with("hw.perflevel0.physicalcpu:") {
                 if let Some(value) = line.split(':').nth(1) {
-                    p_core_count = value.trim().parse().unwrap_or(0);
+                    perflevel0_count = value.trim().parse().unwrap_or(0);
                 }
             } else if line.starts_with("hw.perflevel1.physicalcpu:")
                 && let Some(value) = line.split(':').nth(1)
             {
-                e_core_count = value.trim().parse().unwrap_or(0);
+                perflevel1_count = value.trim().parse().unwrap_or(0);
             }
         }
+
+        // Read perflevel0 name to detect Super cores (M5 Pro/Max)
+        let perflevel0_name = Self::get_perflevel_name(0);
+
+        let (s_core_count, p_core_count, e_core_count) =
+            if perflevel0_name.as_deref() == Some("Super") {
+                // M5 Pro/Max: perflevel0 = Super, perflevel1 = Performance, no E-cores
+                (perflevel0_count, perflevel1_count, 0u32)
+            } else {
+                // M1-M4 (legacy): perflevel0 = P-cores, perflevel1 = E-cores
+                (0u32, perflevel0_count, perflevel1_count)
+            };
 
         // Get GPU core count using ioreg (fast: ~50ms vs system_profiler ~500ms)
         let gpu_core_count = self.get_gpu_core_count_ioreg().unwrap_or(0);
 
         // Validate we got valid counts
-        if p_core_count == 0 || e_core_count == 0 {
+        // M5 Pro/Max has 0 E-cores, so only check that at least one core type is non-zero
+        if (s_core_count + p_core_count) == 0 {
             return Err("Failed to get core counts".into());
         }
 
         // Cache the values
         *self.cached_cpu_model.lock().unwrap() = Some(cpu_model.clone());
+        *self.cached_s_core_count.lock().unwrap() = Some(s_core_count);
         *self.cached_p_core_count.lock().unwrap() = Some(p_core_count);
         *self.cached_e_core_count.lock().unwrap() = Some(e_core_count);
         *self.cached_gpu_core_count.lock().unwrap() = Some(gpu_core_count);
 
-        Ok((cpu_model, p_core_count, e_core_count, gpu_core_count))
+        Ok((
+            cpu_model,
+            s_core_count,
+            p_core_count,
+            e_core_count,
+            gpu_core_count,
+        ))
+    }
+
+    /// Read hw.perflevelN.name via sysctl to determine core type names
+    /// Returns None if the sysctl key does not exist (M1-M4 chips)
+    fn get_perflevel_name(level: u32) -> Option<String> {
+        let key = format!("hw.perflevel{level}.name");
+        let output = Command::new("sysctl").args(["-n", &key]).output().ok()?;
+
+        if !output.status.success() {
+            return None;
+        }
+
+        let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if name.is_empty() { None } else { Some(name) }
     }
 
     /// Get CPU model from sysctl machdep.cpu.brand_string
@@ -535,15 +649,52 @@ impl MacOsCpuReader {
         Err("Failed to parse GPU core count".into())
     }
 
+    /// Get S-core (Super) L2 cache size from perflevel0 on M5 Pro/Max
+    /// On M1-M4, this returns Err since perflevel0 is P-cores there (handled by get_p_core_l2_cache_size)
+    fn get_s_core_l2_cache_size(&self) -> Result<u32, Box<dyn std::error::Error>> {
+        // Only valid on M5 Pro/Max where Super cores exist
+        if *self.cached_s_core_count.lock().unwrap() == Some(0) {
+            return Err("No Super cores on this chip".into());
+        }
+
+        if let Some(cached) = *self.cached_s_core_l2_cache_mb.lock().unwrap() {
+            return Ok(cached);
+        }
+
+        // On M5 Pro/Max, perflevel0 = Super cores
+        let output = Command::new("sysctl")
+            .arg("hw.perflevel0.l2cachesize")
+            .output()?;
+
+        let output_str = String::from_utf8_lossy(&output.stdout);
+        if let Some(value_str) = output_str.split(':').nth(1) {
+            let cache_bytes = value_str.trim().parse::<u64>()?;
+            let cache_mb = (cache_bytes / 1024 / 1024) as u32;
+
+            *self.cached_s_core_l2_cache_mb.lock().unwrap() = Some(cache_mb);
+            Ok(cache_mb)
+        } else {
+            Err("Failed to parse S-core L2 cache size".into())
+        }
+    }
+
     fn get_p_core_l2_cache_size(&self) -> Result<u32, Box<dyn std::error::Error>> {
         // Check if we have cached value
         if let Some(cached) = *self.cached_p_core_l2_cache_mb.lock().unwrap() {
             return Ok(cached);
         }
 
-        let output = Command::new("sysctl")
-            .arg("hw.perflevel0.l2cachesize")
-            .output()?;
+        // On M5 Pro/Max (has Super cores), P-cores are perflevel1
+        // On M1-M4, P-cores are perflevel0
+        let s_count = *self.cached_s_core_count.lock().unwrap();
+        let has_super = s_count.is_some() && s_count != Some(0);
+        let perflevel = if has_super {
+            "hw.perflevel1.l2cachesize"
+        } else {
+            "hw.perflevel0.l2cachesize"
+        };
+
+        let output = Command::new("sysctl").arg(perflevel).output()?;
 
         let output_str = String::from_utf8_lossy(&output.stdout);
         if let Some(value_str) = output_str.split(':').nth(1) {
@@ -559,11 +710,20 @@ impl MacOsCpuReader {
     }
 
     fn get_e_core_l2_cache_size(&self) -> Result<u32, Box<dyn std::error::Error>> {
+        // M5 Pro/Max has no E-cores — skip if Super cores are present
+        {
+            let s_count = self.cached_s_core_count.lock().unwrap();
+            if matches!(*s_count, Some(n) if n > 0) {
+                return Err("No E-cores on M5 Pro/Max".into());
+            }
+        }
+
         // Check if we have cached value
         if let Some(cached) = *self.cached_e_core_l2_cache_mb.lock().unwrap() {
             return Ok(cached);
         }
 
+        // On M1-M4, E-cores are perflevel1
         let output = Command::new("sysctl")
             .arg("hw.perflevel1.l2cachesize")
             .output()?;
@@ -762,25 +922,27 @@ impl MacOsCpuReader {
     }
 
     /// Get per-core CPU utilization using sysinfo (with refresh)
-    /// For Apple Silicon: E-cores are indexed first (0 to e_core_count-1),
-    /// then P-cores (e_core_count to total-1)
+    /// For Apple Silicon M1-M4: E-cores first (0 to e_core_count-1), then P-cores
+    /// For Apple Silicon M5: E-cores first (0, always empty), then P-cores, then S-cores
     #[allow(dead_code)] // Kept for potential future use when refresh is needed
     fn get_per_core_utilization(
         &self,
+        s_core_count: usize,
         e_core_count: usize,
         p_core_count: usize,
     ) -> Vec<CoreUtilization> {
         // Refresh CPU usage to get latest data
         self.system.write().unwrap().refresh_cpu_usage();
-        self.get_per_core_utilization_no_refresh(e_core_count, p_core_count)
+        self.get_per_core_utilization_no_refresh(s_core_count, e_core_count, p_core_count)
     }
 
     /// Get per-core CPU utilization WITHOUT refreshing CPU data
     /// OPTIMIZATION: Used when CPU has already been refreshed via ensure_cpu_refreshed()
-    /// For Apple Silicon: E-cores are indexed first (0 to e_core_count-1),
-    /// then P-cores (e_core_count to total-1)
+    /// For Apple Silicon M1-M4: E-cores first (indices 0 to e_core_count-1), then P-cores
+    /// For Apple Silicon M5 Pro/Max: S-cores first (indices 0 to s_core_count-1), then P-cores
     fn get_per_core_utilization_no_refresh(
         &self,
+        s_core_count: usize,
         e_core_count: usize,
         p_core_count: usize,
     ) -> Vec<CoreUtilization> {
@@ -789,19 +951,33 @@ impl MacOsCpuReader {
         let system = self.system.read().unwrap();
         let cpus = system.cpus();
 
+        let has_super = s_core_count > 0;
+
         for (core_id, cpu) in cpus.iter().enumerate() {
             let utilization = cpu.cpu_usage() as f64;
 
-            // Determine core type based on index
-            // Apple Silicon layout: E-cores first (indices 0 to e_core_count-1),
-            // then P-cores (indices e_core_count to total-1)
+            // Determine core type based on index and chip architecture
             let core_type = if self.is_apple_silicon {
-                if core_id < e_core_count {
-                    CoreType::Efficiency
-                } else if core_id < e_core_count + p_core_count {
-                    CoreType::Performance
+                if has_super {
+                    // M5 Pro/Max layout: S-cores first, then P-cores
+                    // sysinfo reports cores in perflevel order:
+                    // perflevel0 (Super) first, then perflevel1 (Performance)
+                    if core_id < s_core_count {
+                        CoreType::Super
+                    } else if core_id < s_core_count + p_core_count {
+                        CoreType::Performance
+                    } else {
+                        CoreType::Standard
+                    }
                 } else {
-                    CoreType::Standard // Fallback for any extra cores
+                    // M1-M4 layout: E-cores first, then P-cores
+                    if core_id < e_core_count {
+                        CoreType::Efficiency
+                    } else if core_id < e_core_count + p_core_count {
+                        CoreType::Performance
+                    } else {
+                        CoreType::Standard
+                    }
                 }
             } else {
                 CoreType::Standard // Intel Macs use standard cores
