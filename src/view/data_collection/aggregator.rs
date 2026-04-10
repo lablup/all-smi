@@ -132,6 +132,15 @@ impl DataAggregator {
             state.utilization_history.push_back(avg_utilization);
             state.memory_history.push_back(avg_memory);
             state.temperature_history.push_back(avg_temperature);
+            state
+                .package_power_history
+                .push_back(current_package_power_watts(state));
+
+            if detect_apple_silicon(state) {
+                state
+                    .ane_power_history
+                    .push_back(current_ane_power_watts(state));
+            }
 
             // Keep only last N entries as configured
             if state.utilization_history.len() > AppConfig::HISTORY_MAX_ENTRIES {
@@ -142,6 +151,12 @@ impl DataAggregator {
             }
             if state.temperature_history.len() > AppConfig::HISTORY_MAX_ENTRIES {
                 state.temperature_history.pop_front();
+            }
+            if state.package_power_history.len() > AppConfig::HISTORY_MAX_ENTRIES {
+                state.package_power_history.pop_front();
+            }
+            if state.ane_power_history.len() > AppConfig::HISTORY_MAX_ENTRIES {
+                state.ane_power_history.pop_front();
             }
         } else if !state.cpu_info.is_empty() {
             // Fallback to CPU-based statistics when no GPU is available
@@ -189,6 +204,7 @@ impl DataAggregator {
         state.utilization_history.push_back(avg_cpu_utilization);
         state.memory_history.push_back(avg_memory_usage);
         state.temperature_history.push_back(avg_temperature);
+        state.package_power_history.push_back(0.0);
 
         // Keep only last N entries as configured
         if state.utilization_history.len() > AppConfig::HISTORY_MAX_ENTRIES {
@@ -199,6 +215,9 @@ impl DataAggregator {
         }
         if state.temperature_history.len() > AppConfig::HISTORY_MAX_ENTRIES {
             state.temperature_history.pop_front();
+        }
+        if state.package_power_history.len() > AppConfig::HISTORY_MAX_ENTRIES {
+            state.package_power_history.pop_front();
         }
     }
 
@@ -273,6 +292,40 @@ impl DataAggregator {
             .sum::<f64>()
             / state.memory_info.len() as f64
     }
+}
+
+fn detect_apple_silicon(state: &AppState) -> bool {
+    state.gpu_info.iter().any(|gpu| {
+        gpu.detail
+            .get("architecture")
+            .map(|arch| arch == "Apple Silicon")
+            .unwrap_or(false)
+    })
+}
+
+fn current_package_power_watts(state: &AppState) -> f64 {
+    if detect_apple_silicon(state) {
+        state
+            .gpu_info
+            .iter()
+            .find_map(|gpu| {
+                gpu.detail
+                    .get("combined_power_mw")
+                    .and_then(|value| value.parse::<f64>().ok())
+                    .map(|mw| mw / 1000.0)
+            })
+            .unwrap_or_else(|| state.gpu_info.iter().map(|gpu| gpu.power_consumption).sum())
+    } else {
+        state.gpu_info.iter().map(|gpu| gpu.power_consumption).sum()
+    }
+}
+
+fn current_ane_power_watts(state: &AppState) -> f64 {
+    state
+        .gpu_info
+        .first()
+        .map(|gpu| gpu.ane_utilization / 1000.0)
+        .unwrap_or(0.0)
 }
 
 impl Default for DataAggregator {

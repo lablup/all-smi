@@ -144,17 +144,17 @@ pub fn print_function_keys<W: Write>(
     let function_keys = if is_remote {
         // Remote mode: only GPU sorting
         format!(
-            "h:Help q:Exit c:CPU Cores ←→:Tabs ↑↓:Scroll PgUp/PgDn:Page d:Default u:Util g:GPU-Mem [{sort_indicator}]"
+            "h:Help q:Exit ←→:Tabs ↑↓:Scroll PgUp/PgDn:Page d:Default u:Util g:GPU-Mem [{sort_indicator}]"
         )
     } else {
         // Local mode: both process and GPU sorting
         if state.gpu_filter_enabled {
             format!(
-                "h:Help q:Exit c:CPU Cores f:Filter ←→:Scroll ↑↓:Scroll p:PID m:Memory g:GPU-Mem [{sort_indicator}] [{filter_indicator}]"
+                "h:Help q:Exit f:Filter ←→:Scroll ↑↓:Scroll p:PID m:Memory g:GPU-Mem [{sort_indicator}] [{filter_indicator}]"
             )
         } else {
             format!(
-                "h:Help q:Exit c:CPU Cores f:Filter ←→:Scroll ↑↓:Scroll p:PID m:Memory g:GPU-Mem [{sort_indicator}]"
+                "h:Help q:Exit f:Filter ←→:Scroll ↑↓:Scroll p:PID m:Memory g:GPU-Mem [{sort_indicator}]"
             )
         }
     };

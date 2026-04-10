@@ -45,6 +45,7 @@ use std::io::Write;
 use crossterm::{queue, style::Color, style::Print};
 
 use crate::app_state::AppState;
+use crate::common::config::ThemeConfig;
 use crate::device::CpuInfo;
 use crate::ui::activity_panel;
 use crate::ui::braille::sparkline_braille;
@@ -215,13 +216,11 @@ fn build_rows(state: &AppState, is_apple: bool, has_ane: bool, has_npu: bool) ->
     let mut rows = Vec::with_capacity(6);
 
     // 1. GPU Utilization
-    // Collect once; clone for power-proxy row to avoid a second VecDeque iteration.
     let gpu_util: Vec<f64> = state.utilization_history.iter().copied().collect();
-    let power_proxy = gpu_util.clone();
     let latest_util = gpu_util.last().copied().unwrap_or(0.0);
     rows.push(SparklineRow {
         label: "GPU Util",
-        color: Color::Blue,
+        color: ThemeConfig::gpu_color(),
         latest_str: format!("{latest_util:.1}%"),
         min_max_str: min_max_badge(&gpu_util),
         history: gpu_util,
@@ -234,7 +233,7 @@ fn build_rows(state: &AppState, is_apple: bool, has_ane: bool, has_npu: bool) ->
     let latest_mem = gpu_mem.last().copied().unwrap_or(0.0);
     rows.push(SparklineRow {
         label: "GPU Mem",
-        color: Color::Green,
+        color: ThemeConfig::memory_color(),
         latest_str: format!("{latest_mem:.1}%"),
         min_max_str: min_max_badge(&gpu_mem),
         history: gpu_mem,
@@ -247,7 +246,7 @@ fn build_rows(state: &AppState, is_apple: bool, has_ane: bool, has_npu: bool) ->
     let latest_temp = gpu_temp.last().copied().unwrap_or(0.0);
     rows.push(SparklineRow {
         label: "GPU Temp",
-        color: Color::Magenta,
+        color: ThemeConfig::thermal_color(),
         latest_str: format!("{latest_temp:.0}\u{00B0}C"),
         min_max_str: min_max_badge(&gpu_temp),
         history: gpu_temp,
@@ -257,19 +256,23 @@ fn build_rows(state: &AppState, is_apple: bool, has_ane: bool, has_npu: bool) ->
 
     // 4. ANE (Apple Silicon -- always shown regardless of current power)
     if has_ane {
-        let ane_mw = state
-            .gpu_info
-            .first()
-            .map(|g| g.ane_utilization)
-            .unwrap_or(0.0);
-        let ane_w = ane_mw / 1000.0;
-        // ANE doesn't have its own history queue; show single-point sparkline
-        let ane_history = vec![ane_w];
+        let ane_w = state.ane_power_history.back().copied().unwrap_or_else(|| {
+            state
+                .gpu_info
+                .first()
+                .map(|g| g.ane_utilization / 1000.0)
+                .unwrap_or(0.0)
+        });
+        let ane_history: Vec<f64> = if state.ane_power_history.is_empty() {
+            vec![ane_w]
+        } else {
+            state.ane_power_history.iter().copied().collect()
+        };
         rows.push(SparklineRow {
             label: "ANE",
-            color: Color::Yellow,
+            color: ThemeConfig::accelerator_color(),
             latest_str: format!("{ane_w:.1}W"),
-            min_max_str: String::new(),
+            min_max_str: min_max_badge(&ane_history),
             history: ane_history,
             range: None,
             badge: None,
@@ -280,7 +283,7 @@ fn build_rows(state: &AppState, is_apple: bool, has_ane: bool, has_npu: bool) ->
     if has_npu {
         rows.push(SparklineRow {
             label: "NPU",
-            color: Color::Yellow,
+            color: ThemeConfig::accelerator_color(),
             latest_str: "0.0W".to_string(),
             min_max_str: String::new(),
             history: vec![0.0],
@@ -290,16 +293,19 @@ fn build_rows(state: &AppState, is_apple: bool, has_ane: bool, has_npu: bool) ->
     }
 
     // 5. Pkg Power
-    let (power_w, power_label) = package_power(state, is_apple);
-    // Reuse the cloned utilization history as a proxy sparkline for power
-    // variation (power closely tracks GPU utilisation on all platforms).
+    let power_w = package_power(state, is_apple);
+    let power_history: Vec<f64> = if state.package_power_history.is_empty() {
+        vec![power_w]
+    } else {
+        state.package_power_history.iter().copied().collect()
+    };
     rows.push(SparklineRow {
-        label: power_label,
-        color: Color::Red,
+        label: "Pkg Power",
+        color: ThemeConfig::power_color(),
         latest_str: format!("{power_w:.1}W"),
-        min_max_str: String::new(), // no min-max for proxy sparkline
-        history: power_proxy,
-        range: Some((0.0, 100.0)),
+        min_max_str: min_max_badge(&power_history),
+        history: power_history,
+        range: None,
         badge: None,
     });
 
@@ -316,23 +322,29 @@ fn draw_top_border<W: Write>(stdout: &mut W, panel_width: usize) {
     let title_space = 1 + title.len() + 1;
     let dashes = inner_width.saturating_sub(title_space + 1);
 
-    print_colored_text(stdout, "\u{256d}\u{2500}", Color::Cyan, None, None);
+    print_colored_text(
+        stdout,
+        "\u{256d}\u{2500}",
+        ThemeConfig::accent_color(),
+        None,
+        None,
+    );
     print_colored_text(stdout, " ", Color::White, None, None);
-    print_colored_text(stdout, title, Color::Cyan, None, None);
+    print_colored_text(stdout, title, ThemeConfig::accent_color(), None, None);
     print_colored_text(stdout, " ", Color::White, None, None);
     for _ in 0..dashes {
-        print_colored_text(stdout, "\u{2500}", Color::Cyan, None, None);
+        print_colored_text(stdout, "\u{2500}", ThemeConfig::accent_color(), None, None);
     }
-    print_colored_text(stdout, "\u{256e}", Color::Cyan, None, None);
+    print_colored_text(stdout, "\u{256e}", ThemeConfig::accent_color(), None, None);
 }
 
 fn draw_bottom_border<W: Write>(stdout: &mut W, panel_width: usize) {
     let inner_width = panel_width.saturating_sub(2);
-    print_colored_text(stdout, "\u{2570}", Color::Cyan, None, None);
+    print_colored_text(stdout, "\u{2570}", ThemeConfig::accent_color(), None, None);
     for _ in 0..inner_width {
-        print_colored_text(stdout, "\u{2500}", Color::Cyan, None, None);
+        print_colored_text(stdout, "\u{2500}", ThemeConfig::accent_color(), None, None);
     }
-    print_colored_text(stdout, "\u{256f}", Color::Cyan, None, None);
+    print_colored_text(stdout, "\u{256f}", ThemeConfig::accent_color(), None, None);
 }
 
 fn draw_sparkline_row<W: Write>(stdout: &mut W, row: &SparklineRow, panel_width: usize) {
@@ -347,7 +359,7 @@ fn draw_sparkline_row<W: Write>(stdout: &mut W, row: &SparklineRow, panel_width:
     let sparkline = sparkline_braille(&row.history, sparkline_width, row.range);
 
     // Left border
-    print_colored_text(stdout, "\u{2502} ", Color::Cyan, None, None);
+    print_colored_text(stdout, "\u{2502} ", ThemeConfig::accent_color(), None, None);
 
     // Label (right-padded to LABEL_WIDTH)
     let label_display = format!("{:<LABEL_WIDTH$}", row.label);
@@ -378,7 +390,7 @@ fn draw_sparkline_row<W: Write>(stdout: &mut W, row: &SparklineRow, panel_width:
     if pad > 0 {
         print_colored_text(stdout, &" ".repeat(pad), Color::White, None, None);
     }
-    print_colored_text(stdout, " \u{2502}", Color::Cyan, None, None);
+    print_colored_text(stdout, " \u{2502}", ThemeConfig::accent_color(), None, None);
 }
 
 // ---------------------------------------------------------------------------
@@ -413,7 +425,7 @@ fn show_npu_row(_state: &AppState) -> bool {
     false
 }
 
-fn package_power(state: &AppState, is_apple: bool) -> (f64, &'static str) {
+fn package_power(state: &AppState, is_apple: bool) -> f64 {
     if is_apple {
         // Apple Silicon: combined CPU+GPU+ANE power from native metrics
         let power_mw = state
@@ -426,11 +438,10 @@ fn package_power(state: &AppState, is_apple: bool) -> (f64, &'static str) {
             })
             .next()
             .unwrap_or(0.0);
-        (power_mw / 1000.0, "Pkg Power")
+        power_mw / 1000.0
     } else {
         // NVIDIA / other: sum GPU board power
-        let total: f64 = state.gpu_info.iter().map(|g| g.power_consumption).sum();
-        (total, "GPU Power")
+        state.gpu_info.iter().map(|g| g.power_consumption).sum()
     }
 }
 
@@ -506,6 +517,9 @@ mod tests {
             state.utilization_history.push_back(i as f64 * 5.0);
             state.memory_history.push_back(i as f64 * 3.0);
             state.temperature_history.push_back(50.0 + i as f64);
+            state
+                .package_power_history
+                .push_back(120.0 + i as f64 * 2.0);
         }
         state
     }
@@ -543,6 +557,8 @@ mod tests {
             state.utilization_history.push_back(i as f64 * 4.0);
             state.memory_history.push_back(i as f64 * 2.5);
             state.temperature_history.push_back(40.0 + i as f64);
+            state.package_power_history.push_back(8.0 + i as f64 * 0.5);
+            state.ane_power_history.push_back(i as f64 * 0.2);
         }
         state
     }
@@ -690,16 +706,14 @@ mod tests {
     #[test]
     fn test_package_power_apple_silicon() {
         let state = make_apple_silicon_state();
-        let (watts, label) = package_power(&state, true);
-        assert_eq!(label, "Pkg Power");
+        let watts = package_power(&state, true);
         assert!((watts - 12.5).abs() < 0.01);
     }
 
     #[test]
     fn test_package_power_nvidia() {
         let state = make_nvidia_state();
-        let (watts, label) = package_power(&state, false);
-        assert_eq!(label, "GPU Power");
+        let watts = package_power(&state, false);
         assert!((watts - 320.0).abs() < 0.01);
     }
 
@@ -723,7 +737,7 @@ mod tests {
         assert_eq!(rows[0].label, "GPU Util");
         assert_eq!(rows[1].label, "GPU Mem");
         assert_eq!(rows[2].label, "GPU Temp");
-        assert_eq!(rows[3].label, "GPU Power");
+        assert_eq!(rows[3].label, "Pkg Power");
         assert!(rows[2].badge.is_none());
     }
 
@@ -736,6 +750,8 @@ mod tests {
         assert_eq!(rows[3].label, "ANE");
         assert_eq!(rows[4].label, "Pkg Power");
         assert!(rows[2].badge.is_none());
+        assert_eq!(rows[3].min_max_str, "0-4");
+        assert_eq!(rows[4].min_max_str, "8-18");
     }
 
     #[test]
@@ -744,7 +760,7 @@ mod tests {
         let rows = build_rows(&state, false, false, true);
         assert_eq!(rows.len(), 5);
         assert_eq!(rows[3].label, "NPU");
-        assert_eq!(rows[4].label, "GPU Power");
+        assert_eq!(rows[4].label, "Pkg Power");
     }
 
     #[test]

@@ -216,6 +216,8 @@ mod tests {
             utilization_history: VecDeque::new(),
             memory_history: VecDeque::new(),
             temperature_history: VecDeque::new(),
+            package_power_history: VecDeque::new(),
+            ane_power_history: VecDeque::new(),
             cpu_utilization_history: VecDeque::new(),
             system_memory_history: VecDeque::new(),
             cpu_temperature_history: VecDeque::new(),

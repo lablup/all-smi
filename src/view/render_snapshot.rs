@@ -100,6 +100,8 @@ pub struct RenderSnapshot {
     pub utilization_history: Vec<f64>,
     pub memory_history: Vec<f64>,
     pub temperature_history: Vec<f64>,
+    pub package_power_history: Vec<f64>,
+    pub ane_power_history: Vec<f64>,
     pub cpu_utilization_history: Vec<f64>,
     pub system_memory_history: Vec<f64>,
     pub cpu_temperature_history: Vec<f64>,
@@ -173,6 +175,8 @@ impl RenderSnapshot {
             utilization_history: state.utilization_history.iter().copied().collect(),
             memory_history: state.memory_history.iter().copied().collect(),
             temperature_history: state.temperature_history.iter().copied().collect(),
+            package_power_history: state.package_power_history.iter().copied().collect(),
+            ane_power_history: state.ane_power_history.iter().copied().collect(),
             cpu_utilization_history: state.cpu_utilization_history.iter().copied().collect(),
             system_memory_history: state.system_memory_history.iter().copied().collect(),
             cpu_temperature_history: state.cpu_temperature_history.iter().copied().collect(),
@@ -249,6 +253,8 @@ impl RenderSnapshot {
         state.utilization_history = self.utilization_history.iter().copied().collect();
         state.memory_history = self.memory_history.iter().copied().collect();
         state.temperature_history = self.temperature_history.iter().copied().collect();
+        state.package_power_history = self.package_power_history.iter().copied().collect();
+        state.ane_power_history = self.ane_power_history.iter().copied().collect();
         state.cpu_utilization_history = self.cpu_utilization_history.iter().copied().collect();
         state.system_memory_history = self.system_memory_history.iter().copied().collect();
         state.cpu_temperature_history = self.cpu_temperature_history.iter().copied().collect();

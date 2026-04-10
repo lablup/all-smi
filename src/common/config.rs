@@ -120,6 +120,34 @@ pub struct ThemeConfig;
 
 #[cfg(feature = "cli")]
 impl ThemeConfig {
+    pub fn accent_color() -> crossterm::style::Color {
+        crossterm::style::Color::Cyan
+    }
+
+    pub fn cpu_color() -> crossterm::style::Color {
+        crossterm::style::Color::Cyan
+    }
+
+    pub fn gpu_color() -> crossterm::style::Color {
+        crossterm::style::Color::Blue
+    }
+
+    pub fn memory_color() -> crossterm::style::Color {
+        crossterm::style::Color::Green
+    }
+
+    pub fn power_color() -> crossterm::style::Color {
+        crossterm::style::Color::Red
+    }
+
+    pub fn thermal_color() -> crossterm::style::Color {
+        crossterm::style::Color::Magenta
+    }
+
+    pub fn accelerator_color() -> crossterm::style::Color {
+        crossterm::style::Color::Yellow
+    }
+
     pub fn progress_bar_color(fill_ratio: f64) -> crossterm::style::Color {
         use crossterm::style::Color;
 

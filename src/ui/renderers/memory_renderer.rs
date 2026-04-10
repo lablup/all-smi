@@ -178,7 +178,7 @@ mod tests {
             used_bytes: 8 * 1024 * 1024 * 1024,
             available_bytes: 8 * 1024 * 1024 * 1024,
             free_bytes: 4 * 1024 * 1024 * 1024,
-            buffers_bytes: 1 * 1024 * 1024 * 1024,
+            buffers_bytes: 1024 * 1024 * 1024,
             cached_bytes: 3 * 1024 * 1024 * 1024,
             swap_total_bytes: 4 * 1024 * 1024 * 1024,
             swap_used_bytes: 512 * 1024 * 1024,
