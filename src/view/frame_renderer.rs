@@ -33,6 +33,7 @@ use crate::device::ProcessInfo;
 use crate::ui::activity_panel;
 use crate::ui::buffer::BufferWriter;
 use crate::ui::dashboard::{draw_dashboard_items, draw_system_view};
+use crate::ui::gpu_sparkline_panel;
 use crate::ui::layout::LayoutCalculator;
 use crate::ui::local_header::draw_local_header_bar;
 use crate::ui::renderer::{
@@ -162,9 +163,14 @@ impl FrameRenderer {
         if view_state.is_local_mode {
             draw_local_header_bar(&mut buffer, &view_state, cols);
 
-            // Activity panel: always-on per-core CPU bars in local mode
+            // Activity panel: CPU per-core bars (left) + GPU sparklines (right)
             if activity_panel::should_show_panel(cols) {
-                activity_panel::render_activity_panel(&mut buffer, &snapshot.cpu_info, width);
+                gpu_sparkline_panel::render_combined_activity_panel(
+                    &mut buffer,
+                    &view_state,
+                    &snapshot.cpu_info,
+                    width,
+                );
             }
         } else {
             // Write remaining header content to buffer
