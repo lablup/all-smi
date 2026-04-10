@@ -31,9 +31,7 @@
 //! | ANE       | `gpu.ane_utilization` (mW)     | Yellow  |
 //! | Pkg Power | `combined_power_mw` / board pwr| Red     |
 //!
-//! The ANE row is only shown on Apple Silicon when `ane_utilization > 0`.
-//! The thermal pressure badge is appended to the GPU Temp row on Apple
-//! Silicon when the `thermal_pressure` detail key is present.
+//! The ANE row is shown on Apple Silicon regardless of current ANE power.
 //!
 //! ## Rendering model
 //!
@@ -246,11 +244,6 @@ fn build_rows(state: &AppState, is_apple: bool, has_ane: bool) -> Vec<SparklineR
     // 3. GPU Temperature
     let gpu_temp: Vec<f64> = state.temperature_history.iter().copied().collect();
     let latest_temp = gpu_temp.last().copied().unwrap_or(0.0);
-    let thermal_badge = if is_apple {
-        thermal_pressure_badge(state)
-    } else {
-        None
-    };
     rows.push(SparklineRow {
         label: "GPU Temp",
         color: Color::Magenta,
@@ -258,7 +251,7 @@ fn build_rows(state: &AppState, is_apple: bool, has_ane: bool) -> Vec<SparklineR
         min_max_str: min_max_badge(&gpu_temp),
         history: gpu_temp,
         range: None, // auto-range: temperature varies
-        badge: thermal_badge,
+        badge: None,
     });
 
     // 4. ANE (Apple Silicon only, when data is present)
@@ -395,23 +388,6 @@ fn has_ane_data(state: &AppState) -> bool {
         .unwrap_or(false)
 }
 
-fn thermal_pressure_badge(state: &AppState) -> Option<(String, Color)> {
-    state
-        .gpu_info
-        .first()
-        .and_then(|gpu| gpu.detail.get("thermal_pressure"))
-        .map(|level| {
-            let color = match level.as_str() {
-                "Nominal" => Color::Green,
-                "Fair" => Color::Yellow,
-                "Serious" => Color::Red,
-                "Critical" => Color::DarkRed,
-                _ => Color::DarkGrey,
-            };
-            (level.clone(), color)
-        })
-}
-
 fn package_power(state: &AppState, is_apple: bool) -> (f64, &'static str) {
     if is_apple {
         // Apple Silicon: combined CPU+GPU+ANE power from native metrics
@@ -515,7 +491,6 @@ mod tests {
 
         let mut detail = HashMap::new();
         detail.insert("architecture".to_string(), "Apple Silicon".to_string());
-        detail.insert("thermal_pressure".to_string(), "Nominal".to_string());
         detail.insert("combined_power_mw".to_string(), "12500".to_string());
 
         state.gpu_info.push(GpuInfo {
@@ -662,21 +637,6 @@ mod tests {
     }
 
     #[test]
-    fn test_thermal_pressure_badge_nominal() {
-        let state = make_apple_silicon_state();
-        let badge = thermal_pressure_badge(&state);
-        assert!(badge.is_some());
-        let (text, color) = badge.unwrap();
-        assert_eq!(text, "Nominal");
-        assert_eq!(color, Color::Green);
-    }
-
-    #[test]
-    fn test_thermal_pressure_badge_none_on_nvidia() {
-        assert!(thermal_pressure_badge(&make_nvidia_state()).is_none());
-    }
-
-    #[test]
     fn test_package_power_apple_silicon() {
         let state = make_apple_silicon_state();
         let (watts, label) = package_power(&state, true);
@@ -724,7 +684,7 @@ mod tests {
         assert_eq!(rows[0].label, "GPU Util");
         assert_eq!(rows[3].label, "ANE");
         assert_eq!(rows[4].label, "Pkg Power");
-        assert!(rows[2].badge.is_some());
+        assert!(rows[2].badge.is_none());
     }
 
     #[test]
