@@ -204,7 +204,8 @@ fn draw_ram_sparkline<W: Write>(stdout: &mut W, state: &AppState) {
     let used_gb = state.memory_info.iter().map(|m| m.used_bytes).sum::<u64>() as f64
         / (1024.0 * 1024.0 * 1024.0);
 
-    let value_str = format!("{used_gb:.0}/{total_gb:.0}GB");
+    let total_str = format!("{total_gb:.0}");
+    let value_str = format!("{used_gb:>width$.0}/{total_str}GB", width = total_str.len());
 
     let history: Vec<f64> = state.system_memory_history.iter().copied().collect();
 
@@ -250,7 +251,7 @@ fn draw_power_sparkline<W: Write>(stdout: &mut W, state: &AppState) {
         state.gpu_info.iter().map(|g| g.power_consumption).sum()
     };
 
-    let value_str = format!("{power_watts:.1}W");
+    let value_str = format!("{power_watts:>5.1}W");
 
     let history: Vec<f64> = state.package_power_history.iter().copied().collect();
     let range = if history.is_empty() {
@@ -273,18 +274,24 @@ fn draw_power_sparkline<W: Write>(stdout: &mut W, state: &AppState) {
 // ─── Formatting helpers ───────────────────────────────────────────────────────
 
 /// Format a `%` value as `"<val>%"` or `"N/A"` when missing.
+///
+/// The numeric part is right-aligned in a 5-char field, producing a
+/// consistent 6-display-column string: `"  0.0%"` through `"100.0%"`.
 fn format_pct(value: Option<f64>) -> String {
     match value {
-        Some(v) => format!("{v:.1}%"),
-        None => "N/A".to_string(),
+        Some(v) => format!("{v:>5.1}%"),
+        None => format!("{:>6}", "N/A"),
     }
 }
 
 /// Format a temperature value as `"<val>°C"` or `"N/A"`.
+///
+/// The numeric part is right-aligned in a 3-char field, producing a
+/// consistent 5-display-column string: `"  0°C"` through `"999°C"`.
 fn format_temp(value: Option<f64>) -> String {
     match value {
-        Some(v) => format!("{v:.0}°C"),
-        None => "N/A".to_string(),
+        Some(v) => format!("{v:>3.0}°C"),
+        None => format!("{:>5}", "N/A"),
     }
 }
 
@@ -338,25 +345,46 @@ mod tests {
 
     #[test]
     fn test_format_pct_some() {
-        assert_eq!(format_pct(Some(0.0)), "0.0%");
-        assert_eq!(format_pct(Some(75.5)), "75.5%");
+        assert_eq!(format_pct(Some(0.0)), "  0.0%");
+        assert_eq!(format_pct(Some(75.5)), " 75.5%");
         assert_eq!(format_pct(Some(100.0)), "100.0%");
     }
 
     #[test]
     fn test_format_pct_none() {
-        assert_eq!(format_pct(None), "N/A");
+        assert_eq!(format_pct(None), "   N/A");
     }
 
     #[test]
     fn test_format_temp_some() {
-        assert_eq!(format_temp(Some(72.0)), "72°C");
-        assert_eq!(format_temp(Some(72.9)), "73°C"); // rounds
+        assert_eq!(format_temp(Some(72.0)), " 72°C");
+        assert_eq!(format_temp(Some(72.9)), " 73°C"); // rounds
     }
 
     #[test]
     fn test_format_temp_none() {
-        assert_eq!(format_temp(None), "N/A");
+        assert_eq!(format_temp(None), "  N/A");
+    }
+
+    #[test]
+    fn test_format_pct_fixed_width() {
+        // All formatted percentages must have the same display width (6 chars)
+        let values = [0.0, 9.9, 10.0, 50.0, 99.9, 100.0];
+        let widths: Vec<usize> = values.iter().map(|&v| format_pct(Some(v)).len()).collect();
+        assert!(
+            widths.windows(2).all(|w| w[0] == w[1]),
+            "all pct widths should be equal: {widths:?}"
+        );
+    }
+
+    #[test]
+    fn test_format_temp_fixed_display_width() {
+        // Verify digit boundaries don't change width
+        // "°" is multi-byte UTF-8, so check specific expected values
+        assert_eq!(format_temp(Some(9.0)), "  9°C");
+        assert_eq!(format_temp(Some(10.0)), " 10°C");
+        assert_eq!(format_temp(Some(99.0)), " 99°C");
+        assert_eq!(format_temp(Some(100.0)), "100°C");
     }
 
     #[test]
