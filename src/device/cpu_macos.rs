@@ -710,11 +710,12 @@ impl MacOsCpuReader {
     }
 
     fn get_e_core_l2_cache_size(&self) -> Result<u32, Box<dyn std::error::Error>> {
-        // M5 Pro/Max has no E-cores
-        if *self.cached_s_core_count.lock().unwrap() != Some(0)
-            && self.cached_s_core_count.lock().unwrap().is_some()
+        // M5 Pro/Max has no E-cores — skip if Super cores are present
         {
-            return Err("No E-cores on M5 Pro/Max".into());
+            let s_count = self.cached_s_core_count.lock().unwrap();
+            if matches!(*s_count, Some(n) if n > 0) {
+                return Err("No E-cores on M5 Pro/Max".into());
+            }
         }
 
         // Check if we have cached value
