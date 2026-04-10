@@ -254,7 +254,7 @@ http://gpu-node3:9090
 
 ### Cluster Management
 
-> Note: The Cluster Overview Dashboard, Live Statistics History, and Tabbed Interface appear only in remote mode (when `--hosts` or `--hostfile` is specified). Local mode shows a simplified single-node view without these sections.
+> Note: The Cluster Overview Dashboard, Live Statistics History, and Tabbed Interface appear only in remote mode (when `--hosts` or `--hostfile` is specified). Local mode replaces these with a compact two-line host summary bar showing hostname, CPU model, architecture, uptime, and live sparkline metrics (CPU%, GPU%, RAM, power, temperature).
 
 - **Cluster Overview Dashboard:** Real-time statistics showing:
   - Total nodes and GPUs across the cluster

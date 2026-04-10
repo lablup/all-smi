@@ -19,6 +19,7 @@ pub mod constants;
 pub mod dashboard;
 pub mod help;
 pub mod layout;
+pub mod local_header;
 pub mod notification;
 pub mod process_renderer;
 pub mod renderer;
