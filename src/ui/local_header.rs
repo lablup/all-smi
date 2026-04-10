@@ -274,9 +274,9 @@ fn draw_power_sparkline<W: Write>(stdout: &mut W, state: &AppState) {
 
     let sparkline = sparkline_braille(&history, SPARKLINE_WIDTH, Some((0.0, 100.0)));
 
-    // Color: use progress_bar_color with a rough power fraction (normalized to 300 W max)
-    // to get a meaningful red/yellow/green gradient without requiring a max-power config.
-    let power_color = Color::Red;
+    // Sparkline color: use ThemeConfig::utilization_color on the proxy GPU
+    // utilization value, consistent with how CPU/GPU/Temp sparklines are colored.
+    let power_color = ThemeConfig::utilization_color(history.last().copied().unwrap_or(0.0));
 
     print_colored_text(stdout, "Pwr", Color::Red, None, None);
     print_colored_text(stdout, " ", Color::White, None, None);
