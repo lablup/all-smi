@@ -68,16 +68,16 @@ jobs:
             os: ubuntu-24.04-arm
             binary_asset: all-smi-linux-aarch64.tar.gz
           
-          # Ubuntu 24.10 (Oracular) - AMD64
-          - distro: oracular
-            version: "24.10"
+          # Ubuntu 26.04 LTS (Resolute) - AMD64
+          - distro: resolute
+            version: "26.04"
             arch: amd64
             os: ubuntu-24.04
             binary_asset: all-smi-linux-x86_64.tar.gz
-          
-          # Ubuntu 24.10 (Oracular) - ARM64  
-          - distro: oracular
-            version: "24.10"
+
+          # Ubuntu 26.04 LTS (Resolute) - ARM64
+          - distro: resolute
+            version: "26.04"
             arch: arm64
             os: ubuntu-24.04-arm
             binary_asset: all-smi-linux-aarch64.tar.gz
