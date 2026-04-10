@@ -305,7 +305,7 @@ fn build_rows(state: &AppState, is_apple: bool, has_ane: bool) -> Vec<SparklineR
 
 fn draw_top_border<W: Write>(stdout: &mut W, panel_width: usize) {
     let title = "GPU Metrics";
-    let inner_width = panel_width.saturating_sub(4); // 2 corners + 2 spacing
+    let inner_width = panel_width.saturating_sub(2); // 2 corner chars (no left margin unlike CPU panel)
     let title_space = 1 + title.len() + 1;
     let dashes = inner_width.saturating_sub(title_space + 1);
 
@@ -320,9 +320,9 @@ fn draw_top_border<W: Write>(stdout: &mut W, panel_width: usize) {
 }
 
 fn draw_bottom_border<W: Write>(stdout: &mut W, panel_width: usize) {
-    let inner_width = panel_width.saturating_sub(4);
+    let inner_width = panel_width.saturating_sub(2);
     print_colored_text(stdout, "\u{2570}", Color::Cyan, None, None);
-    for _ in 0..(inner_width + 1) {
+    for _ in 0..inner_width {
         print_colored_text(stdout, "\u{2500}", Color::Cyan, None, None);
     }
     print_colored_text(stdout, "\u{256f}", Color::Cyan, None, None);
