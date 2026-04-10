@@ -56,9 +56,22 @@ pub fn print_process_info<W: Write>(
     sort_direction: &crate::app_state::SortDirection,
 ) {
     // Don't add extra newlines at the start - the caller should handle positioning
-    queue!(stdout, Print("Processes:\r\n")).unwrap();
-
     let width = cols as usize;
+
+    // Styled title line: "── Processes ───────────────────────"
+    print_colored_text(stdout, "\u{2500}\u{2500} ", Color::Cyan, None, None);
+    print_colored_text(stdout, "Processes", Color::Cyan, None, None);
+    print_colored_text(stdout, " ", Color::DarkGrey, None, None);
+    let title_prefix_cols = 3 + "Processes".len() + 1; // "── Processes "
+    let dashes = width.saturating_sub(title_prefix_cols);
+    print_colored_text(
+        stdout,
+        &"\u{2500}".repeat(dashes),
+        Color::DarkGrey,
+        None,
+        None,
+    );
+    queue!(stdout, Print("\r\n")).unwrap();
 
     // Fixed column widths based on actual data sizes
     // PID: 7 (up to 9999999), USER: 12, PRI: 3, NI: 3, VIRT: 6, RES: 6, S: 1,
