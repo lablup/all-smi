@@ -216,7 +216,9 @@ fn build_rows(state: &AppState, is_apple: bool, has_ane: bool) -> Vec<SparklineR
     let mut rows = Vec::with_capacity(5);
 
     // 1. GPU Utilization
+    // Collect once; clone for power-proxy row to avoid a second VecDeque iteration.
     let gpu_util: Vec<f64> = state.utilization_history.iter().copied().collect();
+    let power_proxy = gpu_util.clone();
     let latest_util = gpu_util.last().copied().unwrap_or(0.0);
     rows.push(SparklineRow {
         label: "GPU Util",
@@ -282,9 +284,8 @@ fn build_rows(state: &AppState, is_apple: bool, has_ane: bool) -> Vec<SparklineR
 
     // 5. Pkg Power
     let (power_w, power_label) = package_power(state, is_apple);
-    // Use GPU utilization history as a proxy sparkline for power variation
-    // (power closely tracks GPU utilisation on all platforms).
-    let power_proxy: Vec<f64> = state.utilization_history.iter().copied().collect();
+    // Reuse the cloned utilization history as a proxy sparkline for power
+    // variation (power closely tracks GPU utilisation on all platforms).
     rows.push(SparklineRow {
         label: power_label,
         color: Color::Red,
