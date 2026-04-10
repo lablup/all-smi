@@ -168,13 +168,18 @@ fn draw_panel_top_border<W: Write>(
             format!("CPU Cores ({core_count} cores, {avg_util:.1}% avg)")
         }
         CollapseStrategy::PECluster => {
-            let apple = info.apple_silicon_info.as_ref().unwrap();
-            format!(
-                "CPU Cores ({}P+{}E, {:.1}% avg)",
-                apple.p_core_count,
-                apple.e_core_count,
-                average_utilization(&info.per_core_utilization),
-            )
+            if let Some(apple) = info.apple_silicon_info.as_ref() {
+                format!(
+                    "CPU Cores ({}P+{}E, {:.1}% avg)",
+                    apple.p_core_count,
+                    apple.e_core_count,
+                    average_utilization(&info.per_core_utilization),
+                )
+            } else {
+                let core_count = info.per_core_utilization.len();
+                let avg_util = average_utilization(&info.per_core_utilization);
+                format!("CPU Cores ({core_count} cores, {avg_util:.1}% avg)")
+            }
         }
         CollapseStrategy::SocketGroup => {
             let socket_count = info.socket_count.max(1);
@@ -198,14 +203,6 @@ fn draw_panel_top_border<W: Write>(
         print_colored_text(stdout, "\u{2500}", Color::Cyan, None, None);
     }
     print_colored_text(stdout, "\u{256e}", Color::Cyan, None, None);
-
-    // Fill rest of the line to full terminal width
-    let used = panel_width;
-    let remaining = panel_width.saturating_sub(used); // we only occupy panel_width
-    // Actually we need to fill the entire terminal width
-    // panel occupies panel_width chars (2 margin + inner), rest is blank
-    // no need to fill - the caller will handle newline
-    let _ = remaining;
 
     queue!(stdout, Print("\r\n")).unwrap();
 }
@@ -246,7 +243,8 @@ fn draw_individual_cores<W: Write>(
     let content_width = panel_width.saturating_sub(6); // 2 margin + 2 border chars + 2 inner padding
     let cores_per_line = calculate_cores_per_line(panel_width);
     let spacing = 2;
-    let core_bar_width = (content_width - (cores_per_line - 1) * spacing) / cores_per_line;
+    let core_bar_width =
+        content_width.saturating_sub((cores_per_line - 1) * spacing) / cores_per_line;
 
     // Separate cores by type
     let mut e_cores: Vec<&CoreUtilization> = Vec::new();
@@ -264,9 +262,7 @@ fn draw_individual_cores<W: Write>(
     // Render in order: E-cores, P-cores, Standard cores
     let ordered_cores: Vec<(&CoreUtilization, &str)> = e_cores
         .iter()
-        .enumerate()
-        .map(|(i, c)| (*c, format_core_label("E", i)))
-        .map(|(c, _)| (c, "E"))
+        .map(|c| (*c, "E"))
         .chain(p_cores.iter().map(|c| (*c, "P")))
         .chain(standard_cores.iter().map(|c| (*c, "C")))
         .collect();
@@ -344,10 +340,6 @@ fn draw_individual_cores<W: Write>(
         print_colored_text(stdout, " \u{2502}", Color::Cyan, None, None);
         queue!(stdout, Print("\r\n")).unwrap();
     }
-}
-
-fn format_core_label(prefix: &str, index: usize) -> String {
-    format!("{prefix}{}", index + 1)
 }
 
 // ---------------------------------------------------------------------------
