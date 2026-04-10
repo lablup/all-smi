@@ -439,8 +439,9 @@ mod tests {
         for total in totals {
             let total_str = format!("{total:.0}");
             let w = total_str.len();
-            let len_0 = format!("{:>w$.0}/{total_str}GB", 0.0_f64).len();
-            let len_total = format!("{:>w$.0}/{total_str}GB", total).len();
+            let zero = 0.0_f64;
+            let len_0 = format!("{zero:>w$.0}/{total_str}GB").len();
+            let len_total = format!("{total:>w$.0}/{total_str}GB").len();
             assert_eq!(
                 len_0, len_total,
                 "RAM format width should be stable for total={total}"
