@@ -56,9 +56,22 @@ pub fn print_process_info<W: Write>(
     sort_direction: &crate::app_state::SortDirection,
 ) {
     // Don't add extra newlines at the start - the caller should handle positioning
-    queue!(stdout, Print("Processes:\r\n")).unwrap();
-
     let width = cols as usize;
+
+    // Styled title line: "── Processes ───────────────────────"
+    print_colored_text(stdout, "\u{2500}\u{2500} ", Color::Cyan, None, None);
+    print_colored_text(stdout, "Processes", Color::Cyan, None, None);
+    print_colored_text(stdout, " ", Color::DarkGrey, None, None);
+    let title_prefix_cols = 3 + "Processes".len() + 1; // "── Processes "
+    let dashes = width.saturating_sub(title_prefix_cols);
+    print_colored_text(
+        stdout,
+        &"\u{2500}".repeat(dashes),
+        Color::DarkGrey,
+        None,
+        None,
+    );
+    queue!(stdout, Print("\r\n")).unwrap();
 
     // Fixed column widths based on actual data sizes
     // PID: 7 (up to 9999999), USER: 12, PRI: 3, NI: 3, VIRT: 6, RES: 6, S: 1,
@@ -178,7 +191,7 @@ pub fn print_process_info<W: Write>(
     let footer_rows = 2usize; // "Showing..." line + "Active..." stats line
 
     // Calculate how many processes we can display
-    // Reserve rows for header section: 1 for "Processes:" title, 1 for header, 1 for separator, 1 for blank line
+    // Reserve rows for header section: 1 for styled title rule, 1 for header, 1 for separator, 1 for blank line
     const RESERVED_HEADER_ROWS: usize = 4;
     let available_rows_for_processes =
         (available_rows as usize).saturating_sub(RESERVED_HEADER_ROWS + footer_rows);

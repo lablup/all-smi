@@ -229,6 +229,7 @@ fn render_cpu_visualization<W: Write>(
 }
 
 /// Render CPU information including model, cores, frequency, and utilization
+#[allow(clippy::too_many_arguments)]
 pub fn print_cpu_info<W: Write>(
     stdout: &mut W,
     _index: usize,
@@ -237,6 +238,7 @@ pub fn print_cpu_info<W: Write>(
     show_per_core: bool,
     cpu_name_scroll_offset: usize,
     hostname_scroll_offset: usize,
+    show_hostname: bool,
 ) {
     // Format CPU name with scrolling if needed (same as GPU: 15 chars)
     let cpu_name = if info.cpu_model.len() > 15 {
@@ -253,14 +255,14 @@ pub fn print_cpu_info<W: Write>(
         format!("{:<15}", info.cpu_model)
     };
 
-    // Format hostname with scrolling if needed (same as GPU: 9 chars)
-    let hostname_display = format_hostname_with_scroll(&info.hostname, hostname_scroll_offset);
-
     // Print CPU info line
     print_colored_text(stdout, "CPU  ", Color::Cyan, None, None);
     print_colored_text(stdout, &cpu_name, Color::White, None, None);
-    print_colored_text(stdout, " @ ", Color::DarkGreen, None, None);
-    print_colored_text(stdout, &hostname_display, Color::White, None, None);
+    if show_hostname {
+        let hostname_display = format_hostname_with_scroll(&info.hostname, hostname_scroll_offset);
+        print_colored_text(stdout, " @ ", Color::DarkGreen, None, None);
+        print_colored_text(stdout, &hostname_display, Color::White, None, None);
+    }
     print_colored_text(stdout, " Arch:", Color::Yellow, None, None);
     print_colored_text(stdout, &info.architecture, Color::White, None, None);
     print_colored_text(stdout, " Sockets:", Color::Yellow, None, None);
@@ -604,5 +606,168 @@ pub fn print_cpu_info<W: Write>(
         print_colored_text(stdout, &" ".repeat(right_padding), Color::White, None, None);
 
         queue!(stdout, Print("\r\n")).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::device::{AppleSiliconCpuInfo, CoreType, CoreUtilization, CpuPlatformType};
+
+    fn make_standard_cpu(hostname: &str, core_count: usize) -> CpuInfo {
+        let per_core: Vec<CoreUtilization> = (0..core_count)
+            .map(|i| CoreUtilization {
+                core_id: i as u32,
+                core_type: CoreType::Standard,
+                utilization: (i as f64 * 10.0) % 100.0,
+            })
+            .collect();
+
+        CpuInfo {
+            host_id: "localhost".to_string(),
+            hostname: hostname.to_string(),
+            instance: String::new(),
+            cpu_model: "Test CPU".to_string(),
+            architecture: "x86_64".to_string(),
+            platform_type: CpuPlatformType::Intel,
+            socket_count: 1,
+            total_cores: core_count as u32,
+            total_threads: core_count as u32 * 2,
+            base_frequency_mhz: 3000,
+            max_frequency_mhz: 4000,
+            cache_size_mb: 16,
+            utilization: 50.0,
+            temperature: Some(65),
+            power_consumption: Some(95.0),
+            per_socket_info: Vec::new(),
+            apple_silicon_info: None,
+            per_core_utilization: per_core,
+            time: String::new(),
+        }
+    }
+
+    fn make_apple_silicon_cpu(hostname: &str) -> CpuInfo {
+        let mut per_core = Vec::new();
+        for i in 0..4 {
+            per_core.push(CoreUtilization {
+                core_id: i as u32,
+                core_type: CoreType::Efficiency,
+                utilization: 20.0 + i as f64 * 5.0,
+            });
+        }
+        for i in 0..8 {
+            per_core.push(CoreUtilization {
+                core_id: (4 + i) as u32,
+                core_type: CoreType::Performance,
+                utilization: 40.0 + i as f64 * 5.0,
+            });
+        }
+        CpuInfo {
+            host_id: "localhost".to_string(),
+            hostname: hostname.to_string(),
+            instance: String::new(),
+            cpu_model: "Apple M2 Pro".to_string(),
+            architecture: "arm64".to_string(),
+            platform_type: CpuPlatformType::AppleSilicon,
+            socket_count: 1,
+            total_cores: 12,
+            total_threads: 12,
+            base_frequency_mhz: 3490,
+            max_frequency_mhz: 3490,
+            cache_size_mb: 16,
+            utilization: 35.0,
+            temperature: None,
+            power_consumption: None,
+            per_socket_info: Vec::new(),
+            apple_silicon_info: Some(AppleSiliconCpuInfo {
+                p_core_count: 8,
+                e_core_count: 4,
+                gpu_core_count: 16,
+                p_core_utilization: 55.0,
+                e_core_utilization: 25.0,
+                ane_ops_per_second: None,
+                p_cluster_frequency_mhz: Some(3490),
+                e_cluster_frequency_mhz: Some(2420),
+                p_core_l2_cache_mb: Some(16),
+                e_core_l2_cache_mb: Some(4),
+            }),
+            per_core_utilization: per_core,
+            time: String::new(),
+        }
+    }
+
+    #[test]
+    fn test_print_cpu_info_with_hostname() {
+        let info = make_standard_cpu("myhost", 8);
+        let mut buf: Vec<u8> = Vec::new();
+        print_cpu_info(&mut buf, 0, &info, 120, false, 0, 0, true);
+        let output = String::from_utf8_lossy(&buf);
+        assert!(output.contains("myhost"));
+        assert!(!buf.is_empty());
+    }
+
+    #[test]
+    fn test_print_cpu_info_without_hostname() {
+        let info = make_standard_cpu("myhost", 8);
+        let mut buf: Vec<u8> = Vec::new();
+        print_cpu_info(&mut buf, 0, &info, 120, false, 0, 0, false);
+        let output = String::from_utf8_lossy(&buf);
+        // hostname is suppressed in local mode
+        assert!(!output.contains("@ myhost"));
+        assert!(!buf.is_empty());
+    }
+
+    #[test]
+    fn test_print_cpu_info_apple_silicon_with_hostname() {
+        let info = make_apple_silicon_cpu("mac-host");
+        let mut buf: Vec<u8> = Vec::new();
+        print_cpu_info(&mut buf, 0, &info, 120, false, 0, 0, true);
+        let output = String::from_utf8_lossy(&buf);
+        assert!(output.contains("mac-host"));
+        assert!(!buf.is_empty());
+    }
+
+    #[test]
+    fn test_print_cpu_info_apple_silicon_without_hostname() {
+        let info = make_apple_silicon_cpu("mac-host");
+        let mut buf: Vec<u8> = Vec::new();
+        print_cpu_info(&mut buf, 0, &info, 120, false, 0, 0, false);
+        let output = String::from_utf8_lossy(&buf);
+        assert!(!output.contains("@ mac-host"));
+        assert!(!buf.is_empty());
+    }
+
+    #[test]
+    fn test_print_cpu_info_long_hostname_scrolls() {
+        let info = make_standard_cpu("very-long-hostname-value", 4);
+        let mut buf: Vec<u8> = Vec::new();
+        print_cpu_info(&mut buf, 0, &info, 120, false, 0, 5, true);
+        assert!(!buf.is_empty());
+    }
+
+    #[test]
+    fn test_format_hostname_with_scroll_short() {
+        assert_eq!(format_hostname_with_scroll("host", 0), "host     ");
+        assert_eq!(format_hostname_with_scroll("host", 99), "host     ");
+    }
+
+    #[test]
+    fn test_format_hostname_with_scroll_exact_nine() {
+        assert_eq!(format_hostname_with_scroll("localhost", 0), "localhost");
+    }
+
+    #[test]
+    fn test_format_hostname_with_scroll_long() {
+        let long = "very-long-hostname";
+        let result = format_hostname_with_scroll(long, 0);
+        assert_eq!(result.len(), 9);
+        assert_eq!(result, "very-long");
+
+        // After scrolling by the full cycle length, it wraps back
+        let scroll_len = long.len() + 3;
+        assert_eq!(
+            format_hostname_with_scroll(long, scroll_len),
+            format_hostname_with_scroll(long, 0)
+        );
     }
 }

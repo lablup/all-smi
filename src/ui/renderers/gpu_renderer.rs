@@ -93,6 +93,7 @@ pub fn print_gpu_info<W: Write>(
     width: usize,
     device_name_scroll_offset: usize,
     hostname_scroll_offset: usize,
+    show_hostname: bool,
 ) {
     // Format device name with scrolling if needed
     let device_name = if info.name.len() > 15 {
@@ -109,9 +110,6 @@ pub fn print_gpu_info<W: Write>(
         format!("{:<15}", info.name)
     };
 
-    // Format hostname with scrolling if needed
-    let hostname_display = format_hostname_with_scroll(&info.hostname, hostname_scroll_offset);
-
     // Calculate values
     let memory_gb = info.used_memory as f64 / (1024.0 * 1024.0 * 1024.0);
     let total_memory_gb = info.total_memory as f64 / (1024.0 * 1024.0 * 1024.0);
@@ -121,7 +119,7 @@ pub fn print_gpu_info<W: Write>(
         0.0
     };
 
-    // Print info line: <device_type> <name> @ <hostname> Util:4.0% Mem:25.2/128GB Temp:0°C Pwr:0.0W
+    // Print info line: <device_type> <name> [@ <hostname>] Util:4.0% Mem:25.2/128GB Temp:0°C Pwr:0.0W
     print_colored_text(
         stdout,
         &format!("{:<5}", info.device_type),
@@ -130,8 +128,11 @@ pub fn print_gpu_info<W: Write>(
         None,
     );
     print_colored_text(stdout, &device_name, Color::White, None, None);
-    print_colored_text(stdout, " @ ", Color::DarkGreen, None, None);
-    print_colored_text(stdout, &hostname_display, Color::White, None, None);
+    if show_hostname {
+        let hostname_display = format_hostname_with_scroll(&info.hostname, hostname_scroll_offset);
+        print_colored_text(stdout, " @ ", Color::DarkGreen, None, None);
+        print_colored_text(stdout, &hostname_display, Color::White, None, None);
+    }
     print_colored_text(stdout, " Util:", Color::Yellow, None, None);
     let util_display = if info.utilization < 0.0 {
         format!("{:>6}", "N/A")

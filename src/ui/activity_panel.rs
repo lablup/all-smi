@@ -211,7 +211,7 @@ fn draw_panel_bottom_border<W: Write>(stdout: &mut W, panel_width: usize, _full_
     let inner_width = panel_width.saturating_sub(4); // 2 margin + 2 corners
     print_colored_text(stdout, "  ", Color::White, None, None);
     print_colored_text(stdout, "\u{2570}", Color::Cyan, None, None);
-    for _ in 0..(inner_width + 1) {
+    for _ in 0..inner_width {
         print_colored_text(stdout, "\u{2500}", Color::Cyan, None, None);
     }
     print_colored_text(stdout, "\u{256f}", Color::Cyan, None, None);
@@ -371,13 +371,19 @@ fn draw_pe_cluster_bars<W: Write>(
         .filter(|c| c.core_type == CoreType::Efficiency)
         .collect();
 
+    // Compute one shared bar_width using the larger block section so that
+    // P-CPU and E-CPU gauges end at the same column.
+    let p_block_width = p_cores.len() + (p_cores.len() / 4);
+    let e_block_width = e_cores.len() + (e_cores.len() / 4);
+    let shared_bar_width = content_width.saturating_sub(p_block_width.max(e_block_width) + 2);
+
     // P-cluster line: bar + utilization blocks
     draw_cluster_line(
         stdout,
         "P-CPU",
         apple.p_core_utilization,
         &p_cores,
-        content_width,
+        shared_bar_width,
         panel_width,
     );
 
@@ -387,7 +393,7 @@ fn draw_pe_cluster_bars<W: Write>(
         "E-CPU",
         apple.e_core_utilization,
         &e_cores,
-        content_width,
+        shared_bar_width,
         panel_width,
     );
 }
@@ -397,17 +403,13 @@ fn draw_cluster_line<W: Write>(
     label: &str,
     utilization: f64,
     cores: &[&CoreUtilization],
-    content_width: usize,
+    bar_width: usize,
     panel_width: usize,
 ) {
     print_colored_text(stdout, "  ", Color::White, None, None);
     print_colored_text(stdout, "\u{2502} ", Color::Cyan, None, None);
 
-    // Calculate how much space the utilization blocks need
-    let block_section_width = cores.len() + (cores.len() / 4); // blocks + group separators
-    let bar_width = content_width.saturating_sub(block_section_width + 2); // 2 for spacing
-
-    // Draw the progress bar
+    // Draw the progress bar using the pre-computed shared bar_width
     draw_bar(stdout, label, utilization, 100.0, bar_width, None);
     print_colored_text(stdout, " ", Color::White, None, None);
 

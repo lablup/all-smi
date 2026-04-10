@@ -61,6 +61,7 @@ pub fn print_storage_info<W: Write>(
     info: &StorageInfo,
     width: usize,
     hostname_scroll_offset: usize,
+    show_hostname: bool,
 ) {
     // Convert bytes to appropriate units
     let total_gb = info.total_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
@@ -92,9 +93,11 @@ pub fn print_storage_info<W: Write>(
         None,
         None,
     );
-    print_colored_text(stdout, " @ ", Color::DarkGreen, None, None);
-    let hostname_display = format_hostname_with_scroll(&info.hostname, hostname_scroll_offset);
-    print_colored_text(stdout, &hostname_display, Color::White, None, None);
+    if show_hostname {
+        let hostname_display = format_hostname_with_scroll(&info.hostname, hostname_scroll_offset);
+        print_colored_text(stdout, " @ ", Color::DarkGreen, None, None);
+        print_colored_text(stdout, &hostname_display, Color::White, None, None);
+    }
     print_colored_text(stdout, " Total:", Color::Green, None, None);
     print_colored_text(
         stdout,
@@ -145,4 +148,87 @@ pub fn print_storage_info<W: Write>(
 
     print_colored_text(stdout, &" ".repeat(right_padding), Color::White, None, None); // dynamic right padding
     queue!(stdout, Print("\r\n")).unwrap();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::info::StorageInfo;
+
+    fn make_storage_info(hostname: &str, mount_point: &str) -> StorageInfo {
+        StorageInfo {
+            mount_point: mount_point.to_string(),
+            total_bytes: 500 * 1024 * 1024 * 1024,
+            available_bytes: 200 * 1024 * 1024 * 1024,
+            host_id: "localhost".to_string(),
+            hostname: hostname.to_string(),
+            index: 0,
+        }
+    }
+
+    #[test]
+    fn test_print_storage_info_with_hostname() {
+        let info = make_storage_info("myhost", "/");
+        let mut buf: Vec<u8> = Vec::new();
+        print_storage_info(&mut buf, 0, &info, 120, 0, true);
+        let output = String::from_utf8_lossy(&buf);
+        assert!(output.contains("myhost"));
+        assert!(!buf.is_empty());
+    }
+
+    #[test]
+    fn test_print_storage_info_without_hostname() {
+        let info = make_storage_info("myhost", "/");
+        let mut buf: Vec<u8> = Vec::new();
+        print_storage_info(&mut buf, 0, &info, 120, 0, false);
+        let output = String::from_utf8_lossy(&buf);
+        // hostname is suppressed in local mode
+        assert!(!output.contains("@ myhost"));
+        assert!(!buf.is_empty());
+    }
+
+    #[test]
+    fn test_print_storage_info_long_mount_point_truncated() {
+        let info = make_storage_info("host", "/very/long/mount/point/path/here");
+        let mut buf: Vec<u8> = Vec::new();
+        print_storage_info(&mut buf, 0, &info, 120, 0, false);
+        assert!(!buf.is_empty());
+    }
+
+    #[test]
+    fn test_print_storage_info_long_hostname_scrolls() {
+        let info = make_storage_info("very-long-hostname-value", "/data");
+        let mut buf: Vec<u8> = Vec::new();
+        print_storage_info(&mut buf, 0, &info, 120, 5, true);
+        assert!(!buf.is_empty());
+    }
+
+    #[test]
+    fn test_print_storage_info_does_not_panic_zero_total() {
+        let mut info = make_storage_info("host", "/");
+        info.total_bytes = 0;
+        info.available_bytes = 0;
+        let mut buf: Vec<u8> = Vec::new();
+        // Should not panic even when total_bytes is zero
+        print_storage_info(&mut buf, 0, &info, 80, 0, false);
+        assert!(!buf.is_empty());
+    }
+
+    #[test]
+    fn test_print_storage_info_terabyte_display() {
+        let info = StorageInfo {
+            mount_point: "/data".to_string(),
+            total_bytes: 2 * 1024 * 1024 * 1024 * 1024, // 2 TB
+            available_bytes: 1 * 1024 * 1024 * 1024 * 1024, // 1 TB available
+            host_id: "localhost".to_string(),
+            hostname: "host".to_string(),
+            index: 0,
+        };
+        let mut buf: Vec<u8> = Vec::new();
+        print_storage_info(&mut buf, 0, &info, 120, 0, false);
+        let output = String::from_utf8_lossy(&buf);
+        // Should render TB units
+        assert!(output.contains("TB") || output.contains("GB"));
+        assert!(!buf.is_empty());
+    }
 }

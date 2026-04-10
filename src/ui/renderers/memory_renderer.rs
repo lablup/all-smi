@@ -61,19 +61,20 @@ pub fn print_memory_info<W: Write>(
     info: &MemoryInfo,
     width: usize,
     hostname_scroll_offset: usize,
+    show_hostname: bool,
 ) {
     // Convert bytes to GB for display
     let total_gb = info.total_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
     let used_gb = info.used_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
     let available_gb = info.available_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
 
-    // Format hostname with scrolling if needed (same as GPU/CPU: 9 chars)
-    let hostname_display = format_hostname_with_scroll(&info.hostname, hostname_scroll_offset);
-
     // Print Memory info line
     print_colored_text(stdout, "Host Memory         ", Color::Cyan, None, None);
-    print_colored_text(stdout, " @ ", Color::DarkGreen, None, None);
-    print_colored_text(stdout, &hostname_display, Color::White, None, None);
+    if show_hostname {
+        let hostname_display = format_hostname_with_scroll(&info.hostname, hostname_scroll_offset);
+        print_colored_text(stdout, " @ ", Color::DarkGreen, None, None);
+        print_colored_text(stdout, &hostname_display, Color::White, None, None);
+    }
     print_colored_text(stdout, " Total:", Color::Green, None, None);
     print_colored_text(
         stdout,
@@ -161,4 +162,67 @@ pub fn print_memory_info<W: Write>(
 
     print_colored_text(stdout, &" ".repeat(right_padding), Color::White, None, None);
     queue!(stdout, Print("\r\n")).unwrap();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::device::MemoryInfo;
+
+    fn make_memory_info(hostname: &str) -> MemoryInfo {
+        MemoryInfo {
+            host_id: "localhost".to_string(),
+            hostname: hostname.to_string(),
+            instance: String::new(),
+            total_bytes: 16 * 1024 * 1024 * 1024,
+            used_bytes: 8 * 1024 * 1024 * 1024,
+            available_bytes: 8 * 1024 * 1024 * 1024,
+            free_bytes: 4 * 1024 * 1024 * 1024,
+            buffers_bytes: 1 * 1024 * 1024 * 1024,
+            cached_bytes: 3 * 1024 * 1024 * 1024,
+            swap_total_bytes: 4 * 1024 * 1024 * 1024,
+            swap_used_bytes: 512 * 1024 * 1024,
+            swap_free_bytes: 3584 * 1024 * 1024,
+            utilization: 50.0,
+            time: String::new(),
+        }
+    }
+
+    #[test]
+    fn test_print_memory_info_with_hostname() {
+        let info = make_memory_info("myhost");
+        let mut buf: Vec<u8> = Vec::new();
+        print_memory_info(&mut buf, 0, &info, 120, 0, true);
+        let output = String::from_utf8_lossy(&buf);
+        assert!(output.contains("myhost"));
+        assert!(!buf.is_empty());
+    }
+
+    #[test]
+    fn test_print_memory_info_without_hostname() {
+        let info = make_memory_info("myhost");
+        let mut buf: Vec<u8> = Vec::new();
+        print_memory_info(&mut buf, 0, &info, 120, 0, false);
+        let output = String::from_utf8_lossy(&buf);
+        // hostname is suppressed in local mode
+        assert!(!output.contains("@ myhost"));
+        assert!(!buf.is_empty());
+    }
+
+    #[test]
+    fn test_print_memory_info_long_hostname_scrolls() {
+        let info = make_memory_info("very-long-hostname-value");
+        let mut buf: Vec<u8> = Vec::new();
+        print_memory_info(&mut buf, 0, &info, 120, 3, true);
+        assert!(!buf.is_empty());
+    }
+
+    #[test]
+    fn test_print_memory_info_narrow_width() {
+        let info = make_memory_info("host");
+        let mut buf: Vec<u8> = Vec::new();
+        // Should not panic with a narrow terminal width
+        print_memory_info(&mut buf, 0, &info, 30, 0, false);
+        assert!(!buf.is_empty());
+    }
 }
