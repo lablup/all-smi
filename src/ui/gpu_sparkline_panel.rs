@@ -70,10 +70,10 @@ pub fn gpu_content_rows(state: &AppState) -> usize {
     if state.gpu_info.is_empty() {
         return 0;
     }
-    let is_apple = detect_apple_silicon(state);
-    let has_ane = is_apple && has_ane_data(state);
-    // GPU Util + GPU Mem + GPU Temp + (ANE?) + Pkg Power
-    3 + usize::from(has_ane) + 1
+    let ane = show_ane_row(state);
+    let npu = show_npu_row(state);
+    // GPU Util + GPU Mem + GPU Temp + (ANE?) + (NPU?) + Pkg Power
+    3 + usize::from(ane) + usize::from(npu) + 1
 }
 
 /// Render the combined Activity panel (CPU left half + GPU right half).
@@ -156,8 +156,9 @@ fn render_gpu_lines(state: &AppState, panel_width: usize) -> Vec<String> {
     }
 
     let is_apple = detect_apple_silicon(state);
-    let has_ane = is_apple && has_ane_data(state);
-    let rows = build_rows(state, is_apple, has_ane);
+    let ane = show_ane_row(state);
+    let npu = show_npu_row(state);
+    let rows = build_rows(state, is_apple, ane, npu);
 
     let mut lines: Vec<String> = Vec::with_capacity(rows.len() + 2);
 
@@ -210,8 +211,8 @@ struct SparklineRow {
 // Row construction
 // ---------------------------------------------------------------------------
 
-fn build_rows(state: &AppState, is_apple: bool, has_ane: bool) -> Vec<SparklineRow> {
-    let mut rows = Vec::with_capacity(5);
+fn build_rows(state: &AppState, is_apple: bool, has_ane: bool, has_npu: bool) -> Vec<SparklineRow> {
+    let mut rows = Vec::with_capacity(6);
 
     // 1. GPU Utilization
     // Collect once; clone for power-proxy row to avoid a second VecDeque iteration.
@@ -254,7 +255,7 @@ fn build_rows(state: &AppState, is_apple: bool, has_ane: bool) -> Vec<SparklineR
         badge: None,
     });
 
-    // 4. ANE (Apple Silicon only, when data is present)
+    // 4. ANE (Apple Silicon -- always shown regardless of current power)
     if has_ane {
         let ane_mw = state
             .gpu_info
@@ -270,6 +271,19 @@ fn build_rows(state: &AppState, is_apple: bool, has_ane: bool) -> Vec<SparklineR
             latest_str: format!("{ane_w:.1}W"),
             min_max_str: String::new(),
             history: ane_history,
+            range: None,
+            badge: None,
+        });
+    }
+
+    // 4b. NPU (Intel/Windows -- scaffolding for future NPU reader)
+    if has_npu {
+        rows.push(SparklineRow {
+            label: "NPU",
+            color: Color::Yellow,
+            latest_str: "0.0W".to_string(),
+            min_max_str: String::new(),
+            history: vec![0.0],
             range: None,
             badge: None,
         });
@@ -380,12 +394,24 @@ fn detect_apple_silicon(state: &AppState) -> bool {
     })
 }
 
-fn has_ane_data(state: &AppState) -> bool {
-    state
-        .gpu_info
-        .first()
-        .map(|g| g.ane_utilization > 0.0)
-        .unwrap_or(false)
+/// Whether the ANE row should be shown in the GPU Metrics panel.
+///
+/// Returns `true` on Apple Silicon regardless of current ANE power.
+/// An ANE at 0 W is a meaningful "idle" reading and the row is
+/// load-bearing for platform identity even when the Neural Engine
+/// is completely idle.
+fn show_ane_row(state: &AppState) -> bool {
+    detect_apple_silicon(state)
+}
+
+/// Whether an NPU row should be shown in the GPU Metrics panel.
+///
+/// Currently returns `false` -- no Intel/Windows NPU reader exists yet.
+/// When an NPU telemetry reader is added (Meteor Lake / Core Ultra),
+/// flip this to check for NPU presence via `src/api/metrics/npu/common.rs`.
+#[allow(clippy::unnecessary_wraps)]
+fn show_npu_row(_state: &AppState) -> bool {
+    false
 }
 
 fn package_power(state: &AppState, is_apple: bool) -> (f64, &'static str) {
@@ -631,9 +657,31 @@ mod tests {
     }
 
     #[test]
-    fn test_has_ane_data() {
-        assert!(!has_ane_data(&make_nvidia_state()));
-        assert!(has_ane_data(&make_apple_silicon_state()));
+    fn test_show_ane_row() {
+        assert!(!show_ane_row(&make_nvidia_state()));
+        assert!(show_ane_row(&make_apple_silicon_state()));
+    }
+
+    #[test]
+    fn test_show_ane_row_even_when_ane_idle() {
+        // ANE row should be shown even when ane_utilization is 0
+        let mut state = make_apple_silicon_state();
+        state.gpu_info[0].ane_utilization = 0.0;
+        assert!(show_ane_row(&state));
+    }
+
+    #[test]
+    fn test_show_npu_row_returns_false() {
+        assert!(!show_npu_row(&make_nvidia_state()));
+        assert!(!show_npu_row(&make_apple_silicon_state()));
+    }
+
+    #[test]
+    fn test_gpu_content_rows_apple_with_zero_ane_still_shows_row() {
+        let mut state = make_apple_silicon_state();
+        state.gpu_info[0].ane_utilization = 0.0;
+        // GPU Util + GPU Mem + GPU Temp + ANE (always-on) + Pkg Power = 5
+        assert_eq!(gpu_content_rows(&state), 5);
     }
 
     #[test]
@@ -667,7 +715,7 @@ mod tests {
     #[test]
     fn test_build_rows_nvidia() {
         let state = make_nvidia_state();
-        let rows = build_rows(&state, false, false);
+        let rows = build_rows(&state, false, false, false);
         assert_eq!(rows.len(), 4);
         assert_eq!(rows[0].label, "GPU Util");
         assert_eq!(rows[1].label, "GPU Mem");
@@ -679,12 +727,21 @@ mod tests {
     #[test]
     fn test_build_rows_apple_silicon() {
         let state = make_apple_silicon_state();
-        let rows = build_rows(&state, true, true);
+        let rows = build_rows(&state, true, true, false);
         assert_eq!(rows.len(), 5);
         assert_eq!(rows[0].label, "GPU Util");
         assert_eq!(rows[3].label, "ANE");
         assert_eq!(rows[4].label, "Pkg Power");
         assert!(rows[2].badge.is_none());
+    }
+
+    #[test]
+    fn test_build_rows_with_npu_scaffolding() {
+        let state = make_nvidia_state();
+        let rows = build_rows(&state, false, false, true);
+        assert_eq!(rows.len(), 5);
+        assert_eq!(rows[3].label, "NPU");
+        assert_eq!(rows[4].label, "GPU Power");
     }
 
     #[test]
