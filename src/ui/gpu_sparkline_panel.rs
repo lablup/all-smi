@@ -409,7 +409,6 @@ fn show_ane_row(state: &AppState) -> bool {
 /// Currently returns `false` -- no Intel/Windows NPU reader exists yet.
 /// When an NPU telemetry reader is added (Meteor Lake / Core Ultra),
 /// flip this to check for NPU presence via `src/api/metrics/npu/common.rs`.
-#[allow(clippy::unnecessary_wraps)]
 fn show_npu_row(_state: &AppState) -> bool {
     false
 }
