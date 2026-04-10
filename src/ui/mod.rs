@@ -18,6 +18,7 @@ pub mod buffer;
 pub mod chrome;
 pub mod constants;
 pub mod dashboard;
+pub mod gpu_sparkline_panel;
 pub mod help;
 pub mod layout;
 pub mod local_header;

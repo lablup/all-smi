@@ -16,6 +16,7 @@
 use crate::app_state::AppState;
 use crate::cli::ViewArgs;
 use crate::ui::activity_panel;
+use crate::ui::gpu_sparkline_panel;
 
 pub struct LayoutCalculator;
 
@@ -60,9 +61,15 @@ impl LayoutCalculator {
         let header_lines = Self::calculate_header_lines(state);
         let function_keys_lines = 1; // Reserve space for function keys
 
-        // In local mode, the Activity panel consumes additional rows
+        // In local mode, the Activity panel (CPU left + GPU right) consumes
+        // additional rows.  Both halves render on the same terminal rows, so
+        // we take the maximum height of the two.
         let activity_panel_lines = if state.is_local_mode {
-            activity_panel::panel_height(&state.cpu_info, cols)
+            let cpu_lines = activity_panel::panel_height(&state.cpu_info, cols);
+            let gpu_content = gpu_sparkline_panel::gpu_content_rows(state) as u16;
+            // GPU panel has top+bottom borders (+2) when it has content
+            let gpu_lines = if gpu_content > 0 { gpu_content + 2 } else { 0 };
+            cpu_lines.max(gpu_lines)
         } else {
             0
         };
