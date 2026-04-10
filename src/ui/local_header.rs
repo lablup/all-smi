@@ -387,6 +387,67 @@ mod tests {
         assert_eq!(format_temp(Some(100.0)), "100°C");
     }
 
+    /// Replicate the inline power formatting from [`draw_power_sparkline`] and
+    /// assert that all values produce a string of exactly 6 characters.
+    #[test]
+    fn test_format_power_fixed_width() {
+        // The inline formula is: format!("{power_watts:>5.1}W")
+        // 5-char numeric field + "W" = 6 chars total for 0.0 through 999.9 W.
+        let values = [0.0_f64, 9.9, 10.0, 99.9, 100.0, 999.9];
+        for &w in &values {
+            let s = format!("{w:>5.1}W");
+            assert_eq!(
+                s.len(),
+                6,
+                "power format for {w} should be 6 chars, got {s:?}"
+            );
+        }
+        // Spot-check specific expected strings
+        assert_eq!(format!("{:>5.1}W", 0.0_f64), "  0.0W");
+        assert_eq!(format!("{:>5.1}W", 10.5_f64), " 10.5W");
+        assert_eq!(format!("{:>5.1}W", 999.9_f64), "999.9W");
+    }
+
+    /// Replicate the inline RAM formatting from [`draw_ram_sparkline`] and
+    /// assert that the `used` field is always padded to the same width as
+    /// `total`, keeping the `/` separator in a fixed column.
+    #[test]
+    fn test_format_ram_fixed_separator_position() {
+        // The inline formula:
+        //   let total_str = format!("{total_gb:.0}");
+        //   format!("{used_gb:>width$.0}/{total_str}GB", width = total_str.len())
+        let cases: &[(f64, f64, &str)] = &[
+            // total=16 → 2-digit field → used is padded to width 2
+            (0.0, 16.0, " 0/16GB"),
+            (8.0, 16.0, " 8/16GB"),
+            (16.0, 16.0, "16/16GB"),
+            // total=128 → 3-digit field → used is padded to width 3
+            (0.0, 128.0, "  0/128GB"),
+            (64.0, 128.0, " 64/128GB"),
+            (128.0, 128.0, "128/128GB"),
+        ];
+        for &(used, total, expected) in cases {
+            let total_str = format!("{total:.0}");
+            let value_str = format!("{used:>width$.0}/{total_str}GB", width = total_str.len());
+            assert_eq!(
+                value_str, expected,
+                "RAM format for {used}/{total} GB should be {expected:?}, got {value_str:?}"
+            );
+        }
+        // All strings for a given total_gb must have the same byte length
+        let totals = [16.0_f64, 128.0];
+        for total in totals {
+            let total_str = format!("{total:.0}");
+            let w = total_str.len();
+            let len_0 = format!("{:>w$.0}/{total_str}GB", 0.0_f64).len();
+            let len_total = format!("{:>w$.0}/{total_str}GB", total).len();
+            assert_eq!(
+                len_0, len_total,
+                "RAM format width should be stable for total={total}"
+            );
+        }
+    }
+
     #[test]
     fn test_draw_local_header_bar_does_not_panic_empty_state() {
         use crate::app_state::AppState;
