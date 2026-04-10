@@ -130,20 +130,20 @@ pub fn render_led_grid_lines(state: &AppState, grid_width: usize, max_rows: usiz
 }
 
 /// Compute average GPU utilization per node (host address).
-fn compute_node_utils(state: &AppState, nodes: &[&String]) -> HashMap<String, f64> {
-    let mut utils: HashMap<String, f64> = HashMap::new();
-    for node in nodes {
-        let node_gpus: Vec<_> = state
-            .gpu_info
-            .iter()
-            .filter(|gpu| &gpu.host_id == *node)
-            .collect();
-        if !node_gpus.is_empty() {
-            let avg = node_gpus.iter().map(|g| g.utilization).sum::<f64>() / node_gpus.len() as f64;
-            utils.insert(node.to_string(), avg);
-        }
+///
+/// Uses a single O(G) pass over all GPUs instead of O(N*G) nested filtering.
+fn compute_node_utils(state: &AppState, _nodes: &[&String]) -> HashMap<String, f64> {
+    // Accumulate (sum, count) per host_id in one pass over gpu_info.
+    let mut accum: HashMap<&str, (f64, usize)> = HashMap::with_capacity(state.gpu_info.len());
+    for gpu in &state.gpu_info {
+        let entry = accum.entry(gpu.host_id.as_str()).or_insert((0.0, 0));
+        entry.0 += gpu.utilization;
+        entry.1 += 1;
     }
-    utils
+    accum
+        .into_iter()
+        .map(|(host, (sum, count))| (host.to_string(), sum / count as f64))
+        .collect()
 }
 
 /// Determine LED symbol and color for a single node.
