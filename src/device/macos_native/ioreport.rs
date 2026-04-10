@@ -696,8 +696,10 @@ pub struct IOReportMetrics {
     pub package_power: f64,
 
     // CPU frequency metrics (in MHz)
+    pub s_cluster_freq: u32,
     pub e_cluster_freq: u32,
     pub p_cluster_freq: u32,
+    pub s_cluster_residency: f64,
     pub e_cluster_residency: f64,
     pub p_cluster_residency: f64,
 
@@ -706,6 +708,7 @@ pub struct IOReportMetrics {
     pub gpu_residency: f64,
 
     // Raw per-cluster data for Ultra chips
+    pub s_cluster_data: Vec<(u32, f64)>, // (freq_mhz, residency_percent) - Super cores (M5)
     pub e_cluster_data: Vec<(u32, f64)>, // (freq_mhz, residency_percent)
     pub p_cluster_data: Vec<(u32, f64)>,
 }
@@ -715,6 +718,7 @@ impl IOReportMetrics {
     pub fn from_sample(iterator: IOReportIterator, duration_ns: u64) -> Self {
         let mut metrics = Self::default();
 
+        let mut s_cluster_freqs: Vec<(u32, f64)> = vec![];
         let mut e_cluster_freqs: Vec<(u32, f64)> = vec![];
         let mut p_cluster_freqs: Vec<(u32, f64)> = vec![];
         let mut gpu_freqs: Vec<(u32, f64)> = vec![];
@@ -725,7 +729,12 @@ impl IOReportMetrics {
                     Self::process_energy_channel(&item, duration_ns, &mut metrics);
                 }
                 ("CPU Stats", "CPU Core Performance States") => {
-                    Self::process_cpu_channel(&item, &mut e_cluster_freqs, &mut p_cluster_freqs);
+                    Self::process_cpu_channel(
+                        &item,
+                        &mut s_cluster_freqs,
+                        &mut e_cluster_freqs,
+                        &mut p_cluster_freqs,
+                    );
                 }
                 ("GPU Stats", "GPU Performance States") => {
                     if item.channel == "GPUPH" {
@@ -737,9 +746,14 @@ impl IOReportMetrics {
         }
 
         // Calculate averages for clusters
+        metrics.s_cluster_data = s_cluster_freqs.clone();
         metrics.e_cluster_data = e_cluster_freqs.clone();
         metrics.p_cluster_data = p_cluster_freqs.clone();
 
+        if let Some((freq, residency)) = Self::calculate_cluster_average(&s_cluster_freqs) {
+            metrics.s_cluster_freq = freq;
+            metrics.s_cluster_residency = residency;
+        }
         if let Some((freq, residency)) = Self::calculate_cluster_average(&e_cluster_freqs) {
             metrics.e_cluster_freq = freq;
             metrics.e_cluster_residency = residency;
@@ -780,6 +794,7 @@ impl IOReportMetrics {
 
     fn process_cpu_channel(
         item: &IOReportChannelItem,
+        s_cluster_freqs: &mut Vec<(u32, f64)>,
         e_cluster_freqs: &mut Vec<(u32, f64)>,
         p_cluster_freqs: &mut Vec<(u32, f64)>,
     ) {
@@ -792,9 +807,20 @@ impl IOReportMetrics {
         let channel = &item.channel;
 
         // Determine cluster type from channel name
-        if channel.starts_with("E") || channel.contains("ECPU") {
+        // M5 Pro/Max uses MCPU0/MCPU0x for Super cores, MCPU1/MCPU1x for Performance cluster 1
+        // and PCPU/PCPUx for Performance cluster 2
+        // M1-M4 uses ECPU/ECPUx for Efficiency cores and PCPU/PCPUx for Performance cores
+        if channel.starts_with("MCPU0") {
+            // M5 Super core cluster (MCPU0, MCPU00-MCPU05)
+            s_cluster_freqs.push((freq, residency));
+        } else if channel.starts_with("MCPU1") {
+            // M5 Performance cluster 1 (MCPU1, MCPU10-MCPU15)
+            p_cluster_freqs.push((freq, residency));
+        } else if channel.starts_with('E') || channel.contains("ECPU") {
+            // M1-M4 Efficiency cores (ECPU, ECPUx)
             e_cluster_freqs.push((freq, residency));
-        } else if channel.starts_with("P") || channel.contains("PCPU") {
+        } else if channel.starts_with('P') || channel.contains("PCPU") {
+            // Performance cores: PCPU/PCPUx (shared by M1-M4 and M5 Performance cluster 2)
             p_cluster_freqs.push((freq, residency));
         }
     }

@@ -171,6 +171,21 @@ impl<'a> CpuMetricExporter<'a> {
                 ("index", &index.to_string()),
             ];
 
+            // S-core count (M5 Pro/Max Super cores)
+            if apple_info.s_core_count > 0 {
+                builder
+                    .help(
+                        "all_smi_cpu_s_core_count",
+                        "Apple Silicon S-core (Super) count",
+                    )
+                    .type_("all_smi_cpu_s_core_count", "gauge")
+                    .metric(
+                        "all_smi_cpu_s_core_count",
+                        &base_labels,
+                        apple_info.s_core_count,
+                    );
+            }
+
             // P-core count
             builder
                 .help("all_smi_cpu_p_core_count", "Apple Silicon P-core count")
@@ -200,6 +215,21 @@ impl<'a> CpuMetricExporter<'a> {
                     &base_labels,
                     apple_info.gpu_core_count,
                 );
+
+            // S-core utilization (M5 Pro/Max)
+            if apple_info.s_core_count > 0 {
+                builder
+                    .help(
+                        "all_smi_cpu_s_core_utilization",
+                        "Apple Silicon S-core (Super) utilization percentage",
+                    )
+                    .type_("all_smi_cpu_s_core_utilization", "gauge")
+                    .metric(
+                        "all_smi_cpu_s_core_utilization",
+                        &base_labels,
+                        apple_info.s_core_utilization,
+                    );
+            }
 
             // P-core utilization
             builder
@@ -274,6 +304,7 @@ impl<'a> CpuMetricExporter<'a> {
 
             for core in &info.per_core_utilization {
                 let core_type_str = match core.core_type {
+                    crate::device::CoreType::Super => "S",
                     crate::device::CoreType::Performance => "P",
                     crate::device::CoreType::Efficiency => "E",
                     crate::device::CoreType::Standard => "C",

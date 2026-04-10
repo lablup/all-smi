@@ -169,12 +169,18 @@ fn draw_panel_top_border<W: Write>(
         }
         CollapseStrategy::PECluster => {
             if let Some(apple) = info.apple_silicon_info.as_ref() {
-                format!(
-                    "CPU Cores ({}P+{}E, {:.1}% avg)",
-                    apple.p_core_count,
-                    apple.e_core_count,
-                    average_utilization(&info.per_core_utilization),
-                )
+                let avg = average_utilization(&info.per_core_utilization);
+                if apple.s_core_count > 0 {
+                    format!(
+                        "CPU Cores ({}S+{}P, {avg:.1}% avg)",
+                        apple.s_core_count, apple.p_core_count,
+                    )
+                } else {
+                    format!(
+                        "CPU Cores ({}P+{}E, {avg:.1}% avg)",
+                        apple.p_core_count, apple.e_core_count,
+                    )
+                }
             } else {
                 let core_count = info.per_core_utilization.len();
                 let avg_util = average_utilization(&info.per_core_utilization);
@@ -247,22 +253,25 @@ fn draw_individual_cores<W: Write>(
         content_width.saturating_sub((cores_per_line - 1) * spacing) / cores_per_line;
 
     // Separate cores by type
+    let mut s_cores: Vec<&CoreUtilization> = Vec::new();
     let mut e_cores: Vec<&CoreUtilization> = Vec::new();
     let mut p_cores: Vec<&CoreUtilization> = Vec::new();
     let mut standard_cores: Vec<&CoreUtilization> = Vec::new();
 
     for core in per_core {
         match core.core_type {
+            CoreType::Super => s_cores.push(core),
             CoreType::Efficiency => e_cores.push(core),
             CoreType::Performance => p_cores.push(core),
             CoreType::Standard => standard_cores.push(core),
         }
     }
 
-    // Render in order: E-cores, P-cores, Standard cores
-    let ordered_cores: Vec<(&CoreUtilization, &str)> = e_cores
+    // Render in order: S-cores, E-cores, P-cores, Standard cores
+    let ordered_cores: Vec<(&CoreUtilization, &str)> = s_cores
         .iter()
-        .map(|c| (*c, "E"))
+        .map(|c| (*c, "S"))
+        .chain(e_cores.iter().map(|c| (*c, "E")))
         .chain(p_cores.iter().map(|c| (*c, "P")))
         .chain(standard_cores.iter().map(|c| (*c, "C")))
         .collect();
@@ -360,6 +369,11 @@ fn draw_pe_cluster_bars<W: Write>(
     let content_width = panel_width.saturating_sub(6);
 
     // Collect per-core utilization blocks for each cluster
+    let s_cores: Vec<&CoreUtilization> = info
+        .per_core_utilization
+        .iter()
+        .filter(|c| c.core_type == CoreType::Super)
+        .collect();
     let p_cores: Vec<&CoreUtilization> = info
         .per_core_utilization
         .iter()
@@ -371,31 +385,59 @@ fn draw_pe_cluster_bars<W: Write>(
         .filter(|c| c.core_type == CoreType::Efficiency)
         .collect();
 
-    // Compute one shared bar_width using the larger block section so that
-    // P-CPU and E-CPU gauges end at the same column.
-    let p_block_width = p_cores.len() + (p_cores.len() / 4);
-    let e_block_width = e_cores.len() + (e_cores.len() / 4);
-    let shared_bar_width = content_width.saturating_sub(p_block_width.max(e_block_width) + 2);
+    if apple.s_core_count > 0 {
+        // M5 Pro/Max: S-CPU + P-CPU gauges
+        let s_block_width = s_cores.len() + (s_cores.len() / 4);
+        let p_block_width = p_cores.len() + (p_cores.len() / 4);
+        let shared_bar_width = content_width.saturating_sub(s_block_width.max(p_block_width) + 2);
 
-    // P-cluster line: bar + utilization blocks
-    draw_cluster_line(
-        stdout,
-        "P-CPU",
-        apple.p_core_utilization,
-        &p_cores,
-        shared_bar_width,
-        panel_width,
-    );
+        // S-cluster line: bar + utilization blocks
+        draw_cluster_line(
+            stdout,
+            "S-CPU",
+            apple.s_core_utilization,
+            &s_cores,
+            shared_bar_width,
+            panel_width,
+        );
 
-    // E-cluster line: bar + utilization blocks
-    draw_cluster_line(
-        stdout,
-        "E-CPU",
-        apple.e_core_utilization,
-        &e_cores,
-        shared_bar_width,
-        panel_width,
-    );
+        // P-cluster line: bar + utilization blocks
+        draw_cluster_line(
+            stdout,
+            "P-CPU",
+            apple.p_core_utilization,
+            &p_cores,
+            shared_bar_width,
+            panel_width,
+        );
+    } else {
+        // M1-M4: P-CPU + E-CPU gauges
+        // Compute one shared bar_width using the larger block section so that
+        // P-CPU and E-CPU gauges end at the same column.
+        let p_block_width = p_cores.len() + (p_cores.len() / 4);
+        let e_block_width = e_cores.len() + (e_cores.len() / 4);
+        let shared_bar_width = content_width.saturating_sub(p_block_width.max(e_block_width) + 2);
+
+        // P-cluster line: bar + utilization blocks
+        draw_cluster_line(
+            stdout,
+            "P-CPU",
+            apple.p_core_utilization,
+            &p_cores,
+            shared_bar_width,
+            panel_width,
+        );
+
+        // E-cluster line: bar + utilization blocks
+        draw_cluster_line(
+            stdout,
+            "E-CPU",
+            apple.e_core_utilization,
+            &e_cores,
+            shared_bar_width,
+            panel_width,
+        );
+    }
 }
 
 fn draw_cluster_line<W: Write>(
@@ -590,14 +632,18 @@ mod tests {
             power_consumption: None,
             per_socket_info: Vec::new(),
             apple_silicon_info: Some(AppleSiliconCpuInfo {
+                s_core_count: 0,
                 p_core_count: p_count as u32,
                 e_core_count: e_count as u32,
                 gpu_core_count: 16,
+                s_core_utilization: 0.0,
                 p_core_utilization: 55.0,
                 e_core_utilization: 25.0,
                 ane_ops_per_second: None,
+                s_cluster_frequency_mhz: None,
                 p_cluster_frequency_mhz: Some(3490),
                 e_cluster_frequency_mhz: Some(2420),
+                s_core_l2_cache_mb: None,
                 p_core_l2_cache_mb: Some(16),
                 e_core_l2_cache_mb: Some(4),
             }),

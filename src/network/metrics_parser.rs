@@ -345,6 +345,15 @@ impl MetricsParser {
             }
             "cpu_temperature_celsius" => cpu_info.temperature = Some(value as u32),
             "cpu_power_consumption_watts" => cpu_info.power_consumption = Some(value),
+            "cpu_s_core_count" => {
+                self.ensure_apple_silicon_info(cpu_info);
+                crate::update_optional_field!(
+                    cpu_info,
+                    apple_silicon_info,
+                    s_core_count,
+                    value as u32
+                );
+            }
             "cpu_p_core_count" => {
                 self.ensure_apple_silicon_info(cpu_info);
                 crate::update_optional_field!(
@@ -361,6 +370,15 @@ impl MetricsParser {
                     apple_silicon_info,
                     e_core_count,
                     value as u32
+                );
+            }
+            "cpu_s_core_utilization" => {
+                self.ensure_apple_silicon_info(cpu_info);
+                crate::update_optional_field!(
+                    cpu_info,
+                    apple_silicon_info,
+                    s_core_utilization,
+                    value
                 );
             }
             "cpu_p_core_utilization" => {
@@ -388,6 +406,7 @@ impl MetricsParser {
                     && let Ok(core_id) = core_id_str.parse::<u32>()
                 {
                     let core_type = match core_type_str.as_str() {
+                        "S" => crate::device::CoreType::Super,
                         "P" => crate::device::CoreType::Performance,
                         "E" => crate::device::CoreType::Efficiency,
                         _ => crate::device::CoreType::Standard,
@@ -516,14 +535,18 @@ impl MetricsParser {
     fn ensure_apple_silicon_info(&self, cpu_info: &mut CpuInfo) {
         if cpu_info.apple_silicon_info.is_none() {
             cpu_info.apple_silicon_info = Some(AppleSiliconCpuInfo {
+                s_core_count: 0,
                 p_core_count: 0,
                 e_core_count: 0,
                 gpu_core_count: 0,
+                s_core_utilization: 0.0,
                 p_core_utilization: 0.0,
                 e_core_utilization: 0.0,
                 ane_ops_per_second: None,
+                s_cluster_frequency_mhz: None,
                 p_cluster_frequency_mhz: None,
                 e_cluster_frequency_mhz: None,
+                s_core_l2_cache_mb: None,
                 p_core_l2_cache_mb: None,
                 e_core_l2_cache_mb: None,
             });
