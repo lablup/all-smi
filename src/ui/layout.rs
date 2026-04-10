@@ -44,9 +44,9 @@ impl LayoutCalculator {
             // System overview dashboard card (2 rows) + label separator row
             lines += 4;
 
-            // Live statistics section
-            if !state.utilization_history.is_empty() {
-                lines += 5; // Header + 3 history lines + separator
+            // Live statistics section (remote sparkline panel)
+            if !state.utilization_history.is_empty() || !state.cpu_utilization_history.is_empty() {
+                lines += 5; // Separator + header + 3 sparkline rows
             }
 
             // Tabs section
