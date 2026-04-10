@@ -268,6 +268,17 @@ impl<'a> CpuMetricExporter<'a> {
                     .metric("all_smi_cpu_ane_ops_per_second", &base_labels, ane_ops);
             }
 
+            // S-cluster frequency (M5 Pro/Max)
+            if let Some(s_freq) = apple_info.s_cluster_frequency_mhz {
+                builder
+                    .help(
+                        "all_smi_cpu_s_cluster_frequency_mhz",
+                        "Apple Silicon S-cluster (Super) frequency in MHz",
+                    )
+                    .type_("all_smi_cpu_s_cluster_frequency_mhz", "gauge")
+                    .metric("all_smi_cpu_s_cluster_frequency_mhz", &base_labels, s_freq);
+            }
+
             // P-cluster frequency
             if let Some(p_freq) = apple_info.p_cluster_frequency_mhz {
                 builder

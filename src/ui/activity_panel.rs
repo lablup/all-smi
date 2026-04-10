@@ -276,6 +276,7 @@ fn draw_individual_cores<W: Write>(
         .chain(standard_cores.iter().map(|c| (*c, "C")))
         .collect();
 
+    let mut s_idx = 0usize;
     let mut e_idx = 0usize;
     let mut p_idx = 0usize;
     let mut c_idx = 0usize;
@@ -288,6 +289,10 @@ fn draw_individual_cores<W: Write>(
         }
 
         let idx = match *prefix {
+            "S" => {
+                s_idx += 1;
+                s_idx
+            }
             "E" => {
                 e_idx += 1;
                 e_idx
