@@ -331,6 +331,93 @@ pub fn draw_dashboard_items<W: Write>(stdout: &mut W, state: &AppState, cols: u1
     remote_sparkline_panel::draw_remote_sparkline_panel(stdout, state, cols);
 }
 
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app_state::{AppState, ConnectionStatus};
+    use crate::device::GpuInfo;
+    use std::collections::HashMap;
+
+    fn make_local_state() -> AppState {
+        let mut state = AppState::new();
+        state.is_local_mode = true;
+        state
+    }
+
+    fn make_remote_state(node_count: usize) -> AppState {
+        let mut state = AppState::new();
+        state.is_local_mode = false;
+        state.tabs = vec!["All".to_string()];
+        for i in 0..node_count {
+            let host = format!("host-{i}");
+            state.tabs.push(host.clone());
+            let mut cs = ConnectionStatus::new(host.clone(), format!("http://{host}:9090"));
+            cs.mark_success();
+            state.connection_status.insert(host.clone(), cs);
+            state.gpu_info.push(GpuInfo {
+                uuid: format!("gpu-{i}"),
+                time: String::new(),
+                name: "Test GPU".to_string(),
+                device_type: "GPU".to_string(),
+                host_id: host.clone(),
+                hostname: host.clone(),
+                instance: host,
+                utilization: (i as f64 * 10.0) % 100.0,
+                ane_utilization: 0.0,
+                dla_utilization: None,
+                tensorcore_utilization: None,
+                temperature: 60,
+                used_memory: 2048,
+                total_memory: 8192,
+                frequency: 1500,
+                power_consumption: 200.0,
+                gpu_core_count: None,
+                detail: HashMap::new(),
+            });
+        }
+        state.current_tab = 0;
+        state
+    }
+
+    #[test]
+    fn test_draw_system_view_local_does_not_panic() {
+        let state = make_local_state();
+        let mut buf: Vec<u8> = Vec::new();
+        draw_system_view(&mut buf, &state, 160);
+        assert!(!buf.is_empty());
+    }
+
+    #[test]
+    fn test_draw_system_view_remote_does_not_panic() {
+        let state = make_remote_state(8);
+        let mut buf: Vec<u8> = Vec::new();
+        draw_system_view(&mut buf, &state, 160);
+        assert!(!buf.is_empty());
+    }
+
+    #[test]
+    fn test_draw_system_view_remote_narrow_terminal() {
+        // Narrow terminal: grid_width will be zero or negative — no panic.
+        let state = make_remote_state(4);
+        let mut buf: Vec<u8> = Vec::new();
+        draw_system_view(&mut buf, &state, 80);
+        assert!(!buf.is_empty());
+    }
+
+    #[test]
+    fn test_draw_dashboard_items_does_not_panic() {
+        let state = make_remote_state(2);
+        let mut buf: Vec<u8> = Vec::new();
+        draw_dashboard_items(&mut buf, &state, 160);
+        // Should at least write the separator
+        assert!(!buf.is_empty());
+    }
+}
+
 fn print_dashboard_row<W: Write>(
     stdout: &mut W,
     items: &[(&str, String, Color)],

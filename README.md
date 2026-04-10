@@ -261,7 +261,8 @@ http://gpu-node3:9090
   - Average utilization and memory usage
   - Temperature statistics with standard deviation
   - Total and average power consumption
-- **Live Statistics History:** Visual graphs showing utilization, memory, and temperature trends
+  - Per-node LED grid (rendered beside the overview cards): one dot per node, colored by GPU utilization, with filled/hollow/crossed symbols for selected/connected/disconnected states
+- **Live Statistics History:** Full-width braille sparkline panel showing GPU and CPU utilization, memory, and temperature side by side
 - **Tabbed Interface:** Switch between "All" view and individual host tabs
 - **Adaptive Update Intervals:**
   - Local monitoring: 1 second (Apple Silicon) or 2 seconds (others)

@@ -322,4 +322,41 @@ mod tests {
         assert_eq!(led.symbol, '\u{2297}');
         assert_eq!(led.color, Color::DarkGrey);
     }
+
+    #[test]
+    fn test_write_led_row_within_bounds() {
+        let state = make_remote_state(3);
+        let grid_lines = render_led_grid_lines(&state, 10, 4);
+        assert!(!grid_lines.is_empty());
+
+        let mut buf: Vec<u8> = Vec::new();
+        write_led_row(&mut buf, &grid_lines, 0, 10);
+        // Row 0 is within the grid — buf must receive bytes
+        assert!(!buf.is_empty());
+    }
+
+    #[test]
+    fn test_write_led_row_beyond_grid() {
+        let state = make_remote_state(3);
+        let grid_lines = render_led_grid_lines(&state, 10, 4);
+
+        let mut buf: Vec<u8> = Vec::new();
+        // Row index beyond the generated rows triggers padding path
+        write_led_row(&mut buf, &grid_lines, grid_lines.len() + 5, 10);
+        // Padding is non-empty (spaces + ANSI resets)
+        assert!(!buf.is_empty());
+    }
+
+    #[test]
+    fn test_compute_node_utils_single_pass() {
+        let state = make_remote_state(4);
+        let nodes: Vec<&String> = state.tabs.iter().skip(1).collect();
+        let utils = compute_node_utils(&state, &nodes);
+        // Each node has exactly one GPU; average equals that GPU's utilization.
+        assert_eq!(utils.len(), 4);
+        // host-0 has utilization 0.0 % 100 = 0.0
+        assert!((utils["host-0"] - 0.0).abs() < 1e-6);
+        // host-1 has utilization 10.0
+        assert!((utils["host-1"] - 10.0).abs() < 1e-6);
+    }
 }
