@@ -15,7 +15,7 @@
 /// UI layout calculation utilities
 use crate::app_state::AppState;
 use crate::cli::ViewArgs;
-// use crate::common::config::AppConfig;
+use crate::ui::activity_panel;
 
 pub struct LayoutCalculator;
 
@@ -60,13 +60,21 @@ impl LayoutCalculator {
         let header_lines = Self::calculate_header_lines(state);
         let function_keys_lines = 1; // Reserve space for function keys
 
+        // In local mode, the Activity panel consumes additional rows
+        let activity_panel_lines = if state.is_local_mode {
+            activity_panel::panel_height(&state.cpu_info, cols)
+        } else {
+            0
+        };
+
         let available_rows = rows
             .saturating_sub(header_lines)
+            .saturating_sub(activity_panel_lines)
             .saturating_sub(function_keys_lines);
 
         ContentArea {
             x: 0,
-            y: header_lines,
+            y: header_lines + activity_panel_lines,
             width: cols,
             height: available_rows,
             available_rows: available_rows as usize,

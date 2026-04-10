@@ -158,7 +158,6 @@ fn handle_navigation_keys(key_code: KeyCode, state: &mut AppState, args: &ViewAr
         KeyCode::Char('u') => state.sort_criteria = SortCriteria::Utilization,
         KeyCode::Char('g') => state.sort_criteria = SortCriteria::GpuMemory,
         KeyCode::Char('d') => state.sort_criteria = SortCriteria::Default,
-        KeyCode::Char('c') => state.show_per_core_cpu = !state.show_per_core_cpu,
         KeyCode::Char('f') => {
             let was_enabled = state.gpu_filter_enabled;
             state.gpu_filter_enabled = !state.gpu_filter_enabled;

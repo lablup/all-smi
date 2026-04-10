@@ -35,7 +35,6 @@ pub struct UiLoop {
     previous_show_help: bool,
     previous_loading: bool,
     previous_tab: usize,
-    previous_show_per_core_cpu: bool,
     last_render_time: std::time::Instant,
     resize_occurred: bool,
     /// Track the last rendered data version to skip re-rendering unchanged data
@@ -75,7 +74,6 @@ impl UiLoop {
             previous_show_help: false,
             previous_loading: false,
             previous_tab: 0,
-            previous_show_per_core_cpu: false,
             last_render_time: std::time::Instant::now(),
             resize_occurred: false,
             last_rendered_data_version: 0,
@@ -197,7 +195,6 @@ impl UiLoop {
                 let force_clear = state.show_help != self.previous_show_help
                     || state.loading != self.previous_loading
                     || state.current_tab != self.previous_tab
-                    || state.show_per_core_cpu != self.previous_show_per_core_cpu
                     || state.gpu_filter_enabled != self.previous_gpu_filter_enabled
                     || self.resize_occurred;
 
@@ -250,7 +247,6 @@ impl UiLoop {
                 self.previous_show_help = state.show_help;
                 self.previous_loading = state.loading;
                 self.previous_tab = state.current_tab;
-                self.previous_show_per_core_cpu = state.show_per_core_cpu;
                 self.previous_gpu_filter_enabled = state.gpu_filter_enabled;
                 self.last_rendered_data_version = state.data_version;
                 self.previous_gpu_scroll_offset = state.gpu_scroll_offset;

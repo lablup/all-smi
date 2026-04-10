@@ -30,6 +30,7 @@ use crossterm::{
 use crate::app_state::AppState;
 use crate::cli::ViewArgs;
 use crate::device::ProcessInfo;
+use crate::ui::activity_panel;
 use crate::ui::buffer::BufferWriter;
 use crate::ui::dashboard::{draw_dashboard_items, draw_system_view};
 use crate::ui::layout::LayoutCalculator;
@@ -160,6 +161,11 @@ impl FrameRenderer {
         // In local mode we show the compact two-line host summary bar instead.
         if view_state.is_local_mode {
             draw_local_header_bar(&mut buffer, &view_state, cols);
+
+            // Activity panel: always-on per-core CPU bars in local mode
+            if activity_panel::should_show_panel(cols) {
+                activity_panel::render_activity_panel(&mut buffer, &snapshot.cpu_info, width);
+            }
         } else {
             // Write remaining header content to buffer
             print_colored_text(&mut buffer, "Cluster Overview\r\n", Color::Cyan, None, None);
@@ -405,7 +411,7 @@ impl FrameRenderer {
                 i,
                 cpu_info,
                 width,
-                snapshot.show_per_core_cpu,
+                false,
                 cpu_name_scroll_offset,
                 hostname_scroll_offset,
             );
@@ -540,6 +546,8 @@ impl FrameRenderer {
         let width = cols as usize;
 
         // CPU information for local mode
+        // Per-core bars are now always shown in the Activity panel above,
+        // so we pass show_per_core=false here to avoid duplication.
         for (i, cpu_info) in snapshot.cpu_info.iter().enumerate() {
             let cpu_name_scroll_offset = snapshot
                 .cpu_name_scroll_offsets
@@ -556,7 +564,7 @@ impl FrameRenderer {
                 i,
                 cpu_info,
                 width,
-                snapshot.show_per_core_cpu,
+                false,
                 cpu_name_scroll_offset,
                 hostname_scroll_offset,
             );

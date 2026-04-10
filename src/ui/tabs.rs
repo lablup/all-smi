@@ -213,7 +213,6 @@ mod tests {
             frame_counter: 0,
             storage_info: Vec::new(),
             show_help: false,
-            show_per_core_cpu: false,
             utilization_history: VecDeque::new(),
             memory_history: VecDeque::new(),
             temperature_history: VecDeque::new(),

@@ -174,7 +174,6 @@ fn render_shortcuts_section(
         ("", "", ""),
         ("Display Control:", "", "header"),
         ("  H", "Toggle this help screen", "shortcut"),
-        ("  C", "Toggle per-core CPU display", "shortcut"),
         ("  F", "Toggle GPU process filter", "shortcut"),
         ("  Q", "Exit application", "shortcut"),
         ("  ESC", "Close help or exit", "shortcut"),

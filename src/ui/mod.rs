@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub mod activity_panel;
 pub mod braille;
 pub mod buffer;
 pub mod chrome;
