@@ -61,19 +61,20 @@ pub fn print_memory_info<W: Write>(
     info: &MemoryInfo,
     width: usize,
     hostname_scroll_offset: usize,
+    show_hostname: bool,
 ) {
     // Convert bytes to GB for display
     let total_gb = info.total_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
     let used_gb = info.used_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
     let available_gb = info.available_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
 
-    // Format hostname with scrolling if needed (same as GPU/CPU: 9 chars)
-    let hostname_display = format_hostname_with_scroll(&info.hostname, hostname_scroll_offset);
-
     // Print Memory info line
     print_colored_text(stdout, "Host Memory         ", Color::Cyan, None, None);
-    print_colored_text(stdout, " @ ", Color::DarkGreen, None, None);
-    print_colored_text(stdout, &hostname_display, Color::White, None, None);
+    if show_hostname {
+        let hostname_display = format_hostname_with_scroll(&info.hostname, hostname_scroll_offset);
+        print_colored_text(stdout, " @ ", Color::DarkGreen, None, None);
+        print_colored_text(stdout, &hostname_display, Color::White, None, None);
+    }
     print_colored_text(stdout, " Total:", Color::Green, None, None);
     print_colored_text(
         stdout,

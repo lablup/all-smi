@@ -408,17 +408,24 @@ impl UiLoop {
             })
             .collect();
 
-        let gpu_hostname_updates: Vec<_> = state
-            .gpu_info
-            .iter()
-            .filter_map(|gpu| {
-                if gpu.hostname.len() > 9 && processed_hostnames.insert(gpu.host_id.clone()) {
-                    Some((gpu.host_id.clone(), gpu.hostname.len()))
-                } else {
-                    None
-                }
-            })
-            .collect();
+        // Skip hostname scroll animation in local mode -- the hostname is
+        // not rendered on any device row, so advancing the offset would
+        // just burn CPU for no visible effect.
+        let gpu_hostname_updates: Vec<_> = if state.is_local_mode {
+            Vec::new()
+        } else {
+            state
+                .gpu_info
+                .iter()
+                .filter_map(|gpu| {
+                    if gpu.hostname.len() > 9 && processed_hostnames.insert(gpu.host_id.clone()) {
+                        Some((gpu.host_id.clone(), gpu.hostname.len()))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
 
         // Collect CPU keys and lengths
         let cpu_updates: Vec<_> = state
@@ -434,17 +441,21 @@ impl UiLoop {
             })
             .collect();
 
-        let cpu_hostname_updates: Vec<_> = state
-            .cpu_info
-            .iter()
-            .filter_map(|cpu| {
-                if cpu.hostname.len() > 9 && processed_hostnames.insert(cpu.host_id.clone()) {
-                    Some((cpu.host_id.clone(), cpu.hostname.len()))
-                } else {
-                    None
-                }
-            })
-            .collect();
+        let cpu_hostname_updates: Vec<_> = if state.is_local_mode {
+            Vec::new()
+        } else {
+            state
+                .cpu_info
+                .iter()
+                .filter_map(|cpu| {
+                    if cpu.hostname.len() > 9 && processed_hostnames.insert(cpu.host_id.clone()) {
+                        Some((cpu.host_id.clone(), cpu.hostname.len()))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
 
         // Apply GPU device name scroll updates in-place
         for (key, name_len) in gpu_updates {

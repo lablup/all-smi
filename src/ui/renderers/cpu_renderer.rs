@@ -229,6 +229,7 @@ fn render_cpu_visualization<W: Write>(
 }
 
 /// Render CPU information including model, cores, frequency, and utilization
+#[allow(clippy::too_many_arguments)]
 pub fn print_cpu_info<W: Write>(
     stdout: &mut W,
     _index: usize,
@@ -237,6 +238,7 @@ pub fn print_cpu_info<W: Write>(
     show_per_core: bool,
     cpu_name_scroll_offset: usize,
     hostname_scroll_offset: usize,
+    show_hostname: bool,
 ) {
     // Format CPU name with scrolling if needed (same as GPU: 15 chars)
     let cpu_name = if info.cpu_model.len() > 15 {
@@ -253,14 +255,14 @@ pub fn print_cpu_info<W: Write>(
         format!("{:<15}", info.cpu_model)
     };
 
-    // Format hostname with scrolling if needed (same as GPU: 9 chars)
-    let hostname_display = format_hostname_with_scroll(&info.hostname, hostname_scroll_offset);
-
     // Print CPU info line
     print_colored_text(stdout, "CPU  ", Color::Cyan, None, None);
     print_colored_text(stdout, &cpu_name, Color::White, None, None);
-    print_colored_text(stdout, " @ ", Color::DarkGreen, None, None);
-    print_colored_text(stdout, &hostname_display, Color::White, None, None);
+    if show_hostname {
+        let hostname_display = format_hostname_with_scroll(&info.hostname, hostname_scroll_offset);
+        print_colored_text(stdout, " @ ", Color::DarkGreen, None, None);
+        print_colored_text(stdout, &hostname_display, Color::White, None, None);
+    }
     print_colored_text(stdout, " Arch:", Color::Yellow, None, None);
     print_colored_text(stdout, &info.architecture, Color::White, None, None);
     print_colored_text(stdout, " Sockets:", Color::Yellow, None, None);

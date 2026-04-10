@@ -282,6 +282,7 @@ impl FrameRenderer {
                 cols as usize,
                 device_name_scroll_offset,
                 hostname_scroll_offset,
+                !view_state.is_local_mode,
             );
         }
     }
@@ -420,6 +421,7 @@ impl FrameRenderer {
                 false,
                 cpu_name_scroll_offset,
                 hostname_scroll_offset,
+                true,
             );
         }
 
@@ -431,7 +433,7 @@ impl FrameRenderer {
                 .get(&memory_info.host_id)
                 .copied()
                 .unwrap_or(0);
-            print_memory_info(buffer, i, memory_info, width, hostname_scroll_offset);
+            print_memory_info(buffer, i, memory_info, width, hostname_scroll_offset, true);
         }
 
         // Storage with scroll offset
@@ -447,7 +449,7 @@ impl FrameRenderer {
                 .get(&storage_info.host_id)
                 .copied()
                 .unwrap_or(0);
-            print_storage_info(buffer, i, storage_info, width, hostname_scroll_offset);
+            print_storage_info(buffer, i, storage_info, width, hostname_scroll_offset, true);
         }
     }
 
@@ -573,6 +575,7 @@ impl FrameRenderer {
                 false,
                 cpu_name_scroll_offset,
                 hostname_scroll_offset,
+                false,
             );
         }
 
@@ -583,7 +586,7 @@ impl FrameRenderer {
                 .get(&memory_info.host_id)
                 .copied()
                 .unwrap_or(0);
-            print_memory_info(buffer, i, memory_info, width, hostname_scroll_offset);
+            print_memory_info(buffer, i, memory_info, width, hostname_scroll_offset, false);
         }
 
         // Storage information for local mode
@@ -593,7 +596,14 @@ impl FrameRenderer {
                 .get(&storage_info.host_id)
                 .copied()
                 .unwrap_or(0);
-            print_storage_info(buffer, i, storage_info, width, hostname_scroll_offset);
+            print_storage_info(
+                buffer,
+                i,
+                storage_info,
+                width,
+                hostname_scroll_offset,
+                false,
+            );
         }
 
         // Process information for local mode (if available)
