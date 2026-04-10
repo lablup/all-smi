@@ -191,7 +191,7 @@ pub fn print_process_info<W: Write>(
     let footer_rows = 2usize; // "Showing..." line + "Active..." stats line
 
     // Calculate how many processes we can display
-    // Reserve rows for header section: 1 for "Processes:" title, 1 for header, 1 for separator, 1 for blank line
+    // Reserve rows for header section: 1 for styled title rule, 1 for header, 1 for separator, 1 for blank line
     const RESERVED_HEADER_ROWS: usize = 4;
     let available_rows_for_processes =
         (available_rows as usize).saturating_sub(RESERVED_HEADER_ROWS + footer_rows);
