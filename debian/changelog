@@ -1,3 +1,18 @@
+all-smi (0.20.0-0) jammy; urgency=medium
+
+  * Redesign local-mode TUI with dedicated Activity panel
+  * Add braille sparkline utility module for GPU/ANE/Pkg Power visualization
+  * Gate Cluster Overview and tabs behind remote mode for cleaner local UI
+  * Add local-mode one-line host summary bar
+  * Promote CPU per-core view to always-on local Activity panel
+  * Add GPU / ANE / Pkg Power sparkline stack to Activity panel
+  * Relocate per-node LED grid next to Cluster Overview in remote mode
+  * Polish local mode Activity panel (border, P/E gauge alignment, ANE row, Processes header)
+  * Add Apple M5 Pro/Max Super core (S-CPU) and new IOReport channel support
+  * Complete remaining epic 152 TUI integration gaps
+
+ -- Jeongkyu Shin <inureyes@gmail.com>  Thu, 10 Apr 2026 00:00:00 +0000
+
 all-smi (0.19.0-0) jammy; urgency=medium
 
   * Fix Apple Silicon SMC `flt` float sensor decoding (little-endian) to restore real CPU/GPU die temperatures

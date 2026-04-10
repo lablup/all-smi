@@ -1,6 +1,6 @@
 [package]
 name = "all-smi"
-version = "0.19.0"
+version = "0.20.0"
 description = "Command-line utility for monitoring GPU hardware. It provides a real-time view of GPU utilization, memory usage, temperature, power consumption, and other metrics."
 authors = ["Jeongkyu Shin <inureyes@gmail.com>"]
 license = "Apache-2.0"
