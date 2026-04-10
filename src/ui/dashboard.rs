@@ -331,6 +331,46 @@ pub fn draw_dashboard_items<W: Write>(stdout: &mut W, state: &AppState, cols: u1
     remote_sparkline_panel::draw_remote_sparkline_panel(stdout, state, cols);
 }
 
+fn print_dashboard_row<W: Write>(
+    stdout: &mut W,
+    items: &[(&str, String, Color)],
+    _total_width: usize,
+) {
+    const ITEM_WIDTH: usize = 15; // Fixed width for each dashboard item
+
+    // Print labels row
+    print_colored_text(stdout, "│", Color::DarkGrey, None, None);
+    for (label, _, color) in items {
+        // Truncate label if too long, ensuring it fits in 15 characters minus padding and separator
+        let max_label_len = ITEM_WIDTH.saturating_sub(3);
+        let truncated_label = if label.len() > max_label_len {
+            &label[..max_label_len]
+        } else {
+            label
+        };
+        let formatted_label = format!(" {truncated_label:<max_label_len$}");
+        print_colored_text(stdout, &formatted_label, *color, None, None);
+        print_colored_text(stdout, "│", Color::DarkGrey, None, None);
+    }
+    queue!(stdout, Print("\r\n")).unwrap();
+
+    // Print values row
+    print_colored_text(stdout, "│", Color::DarkGrey, None, None);
+    for (_, value, _) in items {
+        // Truncate value if too long, ensuring it fits in 15 characters minus padding and separator
+        let max_value_len = ITEM_WIDTH.saturating_sub(3);
+        let truncated_value = if value.len() > max_value_len {
+            &value[..max_value_len]
+        } else {
+            value
+        };
+        let formatted_value = format!(" {truncated_value:<max_value_len$}");
+        print_colored_text(stdout, &formatted_value, Color::White, None, None);
+        print_colored_text(stdout, "│", Color::DarkGrey, None, None);
+    }
+    queue!(stdout, Print("\r\n")).unwrap();
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -416,44 +456,4 @@ mod tests {
         // Should at least write the separator
         assert!(!buf.is_empty());
     }
-}
-
-fn print_dashboard_row<W: Write>(
-    stdout: &mut W,
-    items: &[(&str, String, Color)],
-    _total_width: usize,
-) {
-    const ITEM_WIDTH: usize = 15; // Fixed width for each dashboard item
-
-    // Print labels row
-    print_colored_text(stdout, "│", Color::DarkGrey, None, None);
-    for (label, _, color) in items {
-        // Truncate label if too long, ensuring it fits in 15 characters minus padding and separator
-        let max_label_len = ITEM_WIDTH.saturating_sub(3);
-        let truncated_label = if label.len() > max_label_len {
-            &label[..max_label_len]
-        } else {
-            label
-        };
-        let formatted_label = format!(" {truncated_label:<max_label_len$}");
-        print_colored_text(stdout, &formatted_label, *color, None, None);
-        print_colored_text(stdout, "│", Color::DarkGrey, None, None);
-    }
-    queue!(stdout, Print("\r\n")).unwrap();
-
-    // Print values row
-    print_colored_text(stdout, "│", Color::DarkGrey, None, None);
-    for (_, value, _) in items {
-        // Truncate value if too long, ensuring it fits in 15 characters minus padding and separator
-        let max_value_len = ITEM_WIDTH.saturating_sub(3);
-        let truncated_value = if value.len() > max_value_len {
-            &value[..max_value_len]
-        } else {
-            value
-        };
-        let formatted_value = format!(" {truncated_value:<max_value_len$}");
-        print_colored_text(stdout, &formatted_value, Color::White, None, None);
-        print_colored_text(stdout, "│", Color::DarkGrey, None, None);
-    }
-    queue!(stdout, Print("\r\n")).unwrap();
 }

@@ -219,7 +219,7 @@ mod tests {
         let info = StorageInfo {
             mount_point: "/data".to_string(),
             total_bytes: 2 * 1024 * 1024 * 1024 * 1024, // 2 TB
-            available_bytes: 1 * 1024 * 1024 * 1024 * 1024, // 1 TB available
+            available_bytes: 1024 * 1024 * 1024 * 1024, // 1 TB available
             host_id: "localhost".to_string(),
             hostname: "host".to_string(),
             index: 0,
