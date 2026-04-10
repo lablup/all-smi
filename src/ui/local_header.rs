@@ -91,11 +91,11 @@ fn draw_identity_line<W: Write>(stdout: &mut W, state: &AppState) {
 
     // " · arch <arch>"
     print_colored_text(stdout, " · arch ", Color::DarkGrey, None, None);
-    print_colored_text(stdout, arch, Color::Cyan, None, None);
+    print_colored_text(stdout, arch, ThemeConfig::accent_color(), None, None);
 
     // " · up <uptime>"
     print_colored_text(stdout, " · up ", Color::DarkGrey, None, None);
-    print_colored_text(stdout, &uptime_str, Color::Green, None, None);
+    print_colored_text(stdout, &uptime_str, ThemeConfig::memory_color(), None, None);
 
     // Right-side "● Live" indicator — blinks on even frame counts
     // `frame_counter` is incremented on every render tick by the UI loop
@@ -125,7 +125,7 @@ fn draw_metrics_line<W: Write>(stdout: &mut W, state: &AppState) {
             .copied()
             .collect::<Vec<_>>(),
         format_pct(state.cpu_utilization_history.back().copied()),
-        Color::Cyan,
+        ThemeConfig::cpu_color(),
         Some((0.0, 100.0)),
     );
 
@@ -141,7 +141,7 @@ fn draw_metrics_line<W: Write>(stdout: &mut W, state: &AppState) {
             .copied()
             .collect::<Vec<_>>(),
         format_pct(state.utilization_history.back().copied()),
-        Color::Blue,
+        ThemeConfig::gpu_color(),
         Some((0.0, 100.0)),
     );
 
@@ -167,7 +167,7 @@ fn draw_metrics_line<W: Write>(stdout: &mut W, state: &AppState) {
             .copied()
             .collect::<Vec<_>>(),
         format_temp(state.cpu_temperature_history.back().copied()),
-        Color::Magenta,
+        ThemeConfig::thermal_color(),
         None, // auto-range: temperature varies between platforms
     );
 
@@ -191,13 +191,7 @@ fn draw_metric_sparkline<W: Write>(
     print_colored_text(stdout, " ", Color::White, None, None);
     print_colored_text(stdout, &value_str, Color::White, None, None);
     print_colored_text(stdout, " ", Color::DarkGrey, None, None);
-    print_colored_text(
-        stdout,
-        &sparkline,
-        ThemeConfig::utilization_color(history.last().copied().unwrap_or(0.0)),
-        None,
-        None,
-    );
+    print_colored_text(stdout, &sparkline, color, None, None);
 }
 
 /// Draw the RAM metric: `RAM <used>/<total>GB <sparkline>`.
@@ -216,19 +210,11 @@ fn draw_ram_sparkline<W: Write>(stdout: &mut W, state: &AppState) {
 
     let sparkline = sparkline_braille(&history, SPARKLINE_WIDTH, Some((0.0, 100.0)));
 
-    let current_pct = state.system_memory_history.back().copied().unwrap_or(0.0);
-
-    print_colored_text(stdout, "RAM", Color::Green, None, None);
+    print_colored_text(stdout, "RAM", ThemeConfig::memory_color(), None, None);
     print_colored_text(stdout, " ", Color::White, None, None);
     print_colored_text(stdout, &value_str, Color::White, None, None);
     print_colored_text(stdout, " ", Color::DarkGrey, None, None);
-    print_colored_text(
-        stdout,
-        &sparkline,
-        ThemeConfig::progress_bar_color(current_pct / 100.0),
-        None,
-        None,
-    );
+    print_colored_text(stdout, &sparkline, ThemeConfig::memory_color(), None, None);
 }
 
 /// Draw the power metric: `Pwr <W>W <sparkline>`.
@@ -236,10 +222,8 @@ fn draw_ram_sparkline<W: Write>(stdout: &mut W, state: &AppState) {
 /// For Apple Silicon: reads `combined_power_mw` from `gpu.detail`.
 /// For Linux/NVIDIA: sums `gpu.power_consumption` across all GPUs.
 ///
-/// The sparkline is derived from live computed power values since there is no
-/// dedicated power history VecDeque; we render just the current value label
-/// and a static sparkline from the GPU utilization history as a proxy for
-/// power variation (a common heuristic used in monitoring tools).
+/// The sparkline tracks the dedicated package-power history maintained by the
+/// data aggregator.
 fn draw_power_sparkline<W: Write>(stdout: &mut W, state: &AppState) {
     let is_apple_silicon = state.gpu_info.iter().any(|gpu| {
         gpu.detail
@@ -268,21 +252,22 @@ fn draw_power_sparkline<W: Write>(stdout: &mut W, state: &AppState) {
 
     let value_str = format!("{power_watts:.1}W");
 
-    // Use GPU utilization history as a proxy sparkline for power variation.
-    // This is intentional: power closely tracks GPU utilisation on all platforms.
-    let history: Vec<f64> = state.utilization_history.iter().copied().collect();
+    let history: Vec<f64> = state.package_power_history.iter().copied().collect();
+    let range = if history.is_empty() {
+        None
+    } else {
+        Some((
+            0.0,
+            history.iter().copied().fold(0.0, f64::max).max(power_watts),
+        ))
+    };
+    let sparkline = sparkline_braille(&history, SPARKLINE_WIDTH, range);
 
-    let sparkline = sparkline_braille(&history, SPARKLINE_WIDTH, Some((0.0, 100.0)));
-
-    // Sparkline color: use ThemeConfig::utilization_color on the proxy GPU
-    // utilization value, consistent with how CPU/GPU/Temp sparklines are colored.
-    let power_color = ThemeConfig::utilization_color(history.last().copied().unwrap_or(0.0));
-
-    print_colored_text(stdout, "Pwr", Color::Red, None, None);
+    print_colored_text(stdout, "Pwr", ThemeConfig::power_color(), None, None);
     print_colored_text(stdout, " ", Color::White, None, None);
     print_colored_text(stdout, &value_str, Color::White, None, None);
     print_colored_text(stdout, " ", Color::DarkGrey, None, None);
-    print_colored_text(stdout, &sparkline, power_color, None, None);
+    print_colored_text(stdout, &sparkline, ThemeConfig::power_color(), None, None);
 }
 
 // ─── Formatting helpers ───────────────────────────────────────────────────────

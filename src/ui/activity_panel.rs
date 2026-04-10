@@ -68,7 +68,7 @@ pub fn core_collapse_strategy(cpu_info: &CpuInfo, width: usize) -> CollapseStrat
 
 /// Returns `true` if the Activity panel should be shown at the given width.
 pub fn should_show_panel(cols: u16) -> bool {
-    cols >= MIN_PANEL_WIDTH
+    cols > MIN_PANEL_WIDTH
 }
 
 /// Calculate the number of terminal rows the Activity panel will consume.
@@ -691,7 +691,8 @@ mod tests {
     #[test]
     fn test_should_show_panel() {
         assert!(!should_show_panel(79));
-        assert!(should_show_panel(80));
+        assert!(!should_show_panel(80));
+        assert!(should_show_panel(81));
         assert!(should_show_panel(120));
     }
 

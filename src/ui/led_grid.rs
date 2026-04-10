@@ -26,9 +26,9 @@
 //! Color follows `ThemeConfig::utilization_color()`: DarkGrey < 20%, Green
 //! 20-50%, Yellow 50-80%, Red > 80%.
 //!
-//! The grid wraps into multiple rows when node count exceeds available columns,
-//! capped at the allotted height (typically 4 rows matching the dashboard card
-//! height).
+//! The grid wraps into multiple rows when node count exceeds available columns.
+//! If the node count still exceeds the allotted height, the display paginates
+//! over time instead of clipping nodes permanently.
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -45,6 +45,9 @@ const MAX_GRID_ROWS: usize = 4;
 /// Minimum width (in columns) to attempt rendering the LED grid.
 /// Below this threshold we skip the grid entirely to avoid clutter.
 const MIN_GRID_WIDTH: usize = 4;
+
+/// Number of rendered frames before rotating to the next LED-grid page.
+const PAGE_ROTATION_FRAMES: u64 = 12;
 
 /// Information about a single node for LED rendering.
 struct NodeLed {
@@ -97,18 +100,31 @@ pub fn render_led_grid_lines(state: &AppState, grid_width: usize, max_rows: usiz
     // Layout: how many nodes per row, capped by max_rows
     let nodes_per_row = grid_width.max(1);
     let effective_max_rows = max_rows.min(MAX_GRID_ROWS);
-    let total_rows = leds.len().div_ceil(nodes_per_row).min(effective_max_rows);
+    if effective_max_rows == 0 {
+        return Vec::new();
+    }
+
+    let page_capacity = nodes_per_row * effective_max_rows;
+    let total_pages = leds.len().div_ceil(page_capacity).max(1);
+    let page_index = ((state.frame_counter / PAGE_ROTATION_FRAMES) as usize) % total_pages;
+    let visible_start = page_index * page_capacity;
+    let visible_end = (visible_start + page_capacity).min(leds.len());
+    let visible_leds = &leds[visible_start..visible_end];
+    let total_rows = visible_leds
+        .len()
+        .div_ceil(nodes_per_row)
+        .min(effective_max_rows);
 
     let mut lines = Vec::with_capacity(total_rows);
     for row in 0..total_rows {
         let start = row * nodes_per_row;
-        let end = (start + nodes_per_row).min(leds.len());
-        if start >= leds.len() {
+        let end = (start + nodes_per_row).min(visible_leds.len());
+        if start >= visible_leds.len() {
             // Remaining rows are empty padding
             lines.push(" ".repeat(grid_width));
             continue;
         }
-        let row_leds = &leds[start..end];
+        let row_leds = &visible_leds[start..end];
         let mut buf: Vec<u8> = Vec::with_capacity(grid_width * 4);
         for led in row_leds {
             print_colored_text(&mut buf, &led.symbol.to_string(), led.color, None, None);
@@ -276,8 +292,21 @@ mod tests {
     fn test_led_grid_caps_at_max_rows() {
         let state = make_remote_state(200);
         let lines = render_led_grid_lines(&state, 10, 4);
-        // 200 nodes / 10 per row = 20 rows, capped to 4
+        // Only the current page is rendered, bounded by the allotted height.
         assert_eq!(lines.len(), 4);
+    }
+
+    #[test]
+    fn test_led_grid_paginates_instead_of_clipping() {
+        let mut state = make_remote_state(200);
+        state.current_tab = 121;
+        let first_page = render_led_grid_lines(&state, 10, 4);
+        state.frame_counter = PAGE_ROTATION_FRAMES * 3;
+        let later_page = render_led_grid_lines(&state, 10, 4);
+        assert_eq!(first_page.len(), 4);
+        assert_eq!(later_page.len(), 4);
+        assert!(!first_page.iter().any(|line| line.contains('●')));
+        assert!(later_page.iter().any(|line| line.contains('●')));
     }
 
     #[test]
