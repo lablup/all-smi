@@ -109,15 +109,24 @@ count by (lib_name, lib_version) (all_smi_gpu_info) > 1
 
 ### NVIDIA GPU Specific Metrics
 
-| Metric                                  | Description                              | Unit  | Labels                  |
-|-----------------------------------------|------------------------------------------|-------|-------------------------|
-| `all_smi_gpu_pcie_gen_current`          | Current PCIe generation                  | -     | `gpu_index`, `gpu_name` |
-| `all_smi_gpu_pcie_width_current`        | Current PCIe link width                  | -     | `gpu_index`, `gpu_name` |
-| `all_smi_gpu_performance_state`         | GPU performance state (P0=0, P1=1, etc.) | -     | `gpu_index`, `gpu_name` |
-| `all_smi_gpu_clock_graphics_max_mhz`    | Maximum graphics clock                   | MHz   | `gpu_index`, `gpu_name` |
-| `all_smi_gpu_clock_memory_max_mhz`      | Maximum memory clock                     | MHz   | `gpu_index`, `gpu_name` |
-| `all_smi_gpu_power_limit_current_watts` | Current power limit                      | watts | `gpu_index`, `gpu_name` |
-| `all_smi_gpu_power_limit_max_watts`     | Maximum power limit                      | watts | `gpu_index`, `gpu_name` |
+| Metric                                                    | Description                                                        | Unit    | Labels                               |
+|-----------------------------------------------------------|--------------------------------------------------------------------|---------|--------------------------------------|
+| `all_smi_gpu_pcie_gen_current`                            | Current PCIe generation                                            | -       | `gpu`, `instance`, `uuid`, `index`   |
+| `all_smi_gpu_pcie_width_current`                          | Current PCIe link width                                            | -       | `gpu`, `instance`, `uuid`, `index`   |
+| `all_smi_gpu_performance_state`                           | GPU performance state (P0=0 … P15=15; omitted when not reported)  | -       | `gpu`, `instance`, `uuid`, `index`   |
+| `all_smi_gpu_temperature_threshold_slowdown_celsius`      | Slowdown temperature threshold                                     | celsius | `gpu`, `instance`, `uuid`, `index`   |
+| `all_smi_gpu_temperature_threshold_shutdown_celsius`      | Shutdown temperature threshold                                     | celsius | `gpu`, `instance`, `uuid`, `index`   |
+| `all_smi_gpu_temperature_threshold_max_operating_celsius` | Maximum operating temperature threshold                            | celsius | `gpu`, `instance`, `uuid`, `index`   |
+| `all_smi_gpu_temperature_threshold_acoustic_celsius`      | Acoustic (fan-noise) temperature threshold                         | celsius | `gpu`, `instance`, `uuid`, `index`   |
+| `all_smi_gpu_clock_graphics_max_mhz`                      | Maximum graphics clock                                             | MHz     | `gpu`, `instance`, `uuid`, `index`   |
+| `all_smi_gpu_clock_memory_max_mhz`                        | Maximum memory clock                                               | MHz     | `gpu`, `instance`, `uuid`, `index`   |
+| `all_smi_gpu_power_limit_current_watts`                   | Current power limit                                                | watts   | `gpu`, `instance`, `uuid`, `index`   |
+| `all_smi_gpu_power_limit_max_watts`                       | Maximum power limit                                                | watts   | `gpu`, `instance`, `uuid`, `index`   |
+
+**Notes:**
+- Threshold metrics (`temperature_threshold_*`) and `performance_state` are NVIDIA-only. Each metric is emitted only when the driver exposes the value; hosts where the driver does not report a given threshold simply omit that metric line.
+- `performance_state` maps NVML `PerformanceState` variants: P0 (maximum performance) = 0 through P15 = 15. The `Unknown` sentinel is suppressed (`None`) rather than emitted.
+- The acoustic threshold is available on newer drivers and some GPU SKUs; older drivers leave it absent.
 
 ### NVIDIA vGPU Metrics
 
@@ -531,6 +540,21 @@ sum(all_smi_gpu_power_consumption_watts)
 
 # Power efficiency (utilization per watt)
 all_smi_gpu_utilization / all_smi_gpu_power_consumption_watts
+```
+
+### NVIDIA Thermal Thresholds and P-State
+```promql
+# GPUs within 5°C of the slowdown threshold (approaching throttle)
+all_smi_gpu_temperature_threshold_slowdown_celsius - all_smi_gpu_temperature_celsius < 5
+
+# GPUs within 2°C of the shutdown threshold (critical)
+all_smi_gpu_temperature_threshold_shutdown_celsius - all_smi_gpu_temperature_celsius < 2
+
+# Thermal headroom to slowdown per GPU
+all_smi_gpu_temperature_threshold_slowdown_celsius - all_smi_gpu_temperature_celsius
+
+# GPUs currently in a degraded performance state (not P0)
+all_smi_gpu_performance_state > 0
 ```
 
 ### NVIDIA vGPU Specific

@@ -17,6 +17,8 @@ use std::io::Write;
 use crossterm::{queue, style::Color, style::Print};
 
 use crate::device::GpuInfo;
+use crate::device::VgpuHostInfo;
+use crate::device::types::{ThermalProximity, ThermalProximityConfig};
 use crate::ui::text::print_colored_text;
 use crate::ui::widgets::draw_bar;
 
@@ -35,6 +37,59 @@ impl GpuRenderer {
     pub fn new() -> Self {
         Self
     }
+}
+
+/// Compute the number of terminal lines [`print_gpu_info`] will emit for a
+/// single GPU, including any optional thermal/P-state row and any nested
+/// vGPU section.
+///
+/// Layout pieces, in render order:
+///   1. The base info line (always 1 line).
+///   2. The optional thermal/P-state row (1 line when any of the 5 new
+///      fields are populated; 0 otherwise).
+///   3. The gauge row (always 1 line).
+///   4. A nested vGPU section, when a matching [`VgpuHostInfo`] is present
+///      and the host is "active": 1 header line + 1 line per vGPU instance.
+///
+/// The vGPU matching here mirrors `find_matching_vgpu_host` in
+/// `view::frame_renderer` (UUID first, then hostname + gpu_name fallback)
+/// so that layout math agrees with what is actually rendered.
+///
+/// Used by the layout calculator and the PgUp/PgDn handlers to size the
+/// scrollable GPU area correctly when the new thermal/P-state row is
+/// present, since it can grow rows from 2 to 3 lines apiece.
+pub fn gpu_render_line_count(gpu: &GpuInfo, vgpu_info: &[VgpuHostInfo]) -> usize {
+    // Base: info line + gauges line.
+    let mut lines: usize = 2;
+
+    // Optional thermal-threshold / P-state row.
+    let has_thermal_or_pstate = gpu.temperature_threshold_slowdown.is_some()
+        || gpu.temperature_threshold_shutdown.is_some()
+        || gpu.temperature_threshold_max_operating.is_some()
+        || gpu.temperature_threshold_acoustic.is_some()
+        || gpu.performance_state.is_some();
+    if has_thermal_or_pstate {
+        lines += 1;
+    }
+
+    // Optional vGPU section: header + one row per instance. The matching
+    // logic must stay in lockstep with `find_matching_vgpu_host` in
+    // `view::frame_renderer`.
+    let matched = vgpu_info
+        .iter()
+        .find(|v| v.gpu_uuid == gpu.uuid)
+        .or_else(|| {
+            vgpu_info
+                .iter()
+                .find(|v| v.hostname == gpu.hostname && v.gpu_name == gpu.name)
+        });
+    if let Some(host) = matched
+        && host.is_vgpu_active()
+    {
+        lines += 1 + host.vgpus.len();
+    }
+
+    lines
 }
 
 /// Helper function to format hostname with scrolling.
@@ -160,17 +215,27 @@ pub fn print_gpu_info<W: Write>(
     // decoding was broken; with the SMC `flt ` little-endian fix in place the
     // Tg* sensors return real die temperatures (~50 °C idle), so the numeric
     // reading is now meaningful and consistent with other platforms.
-    let temp_display = if info.detail.get("metrics_available") == Some(&"false".to_string()) {
-        format!("{:>7}", "N/A")
-    } else if info.temperature == 0 {
-        // SMC didn't yield a usable reading and we have no fallback — show N/A
-        // rather than a misleading "0 °C".
-        format!("{:>7}", "N/A")
-    } else {
-        format!("{:>4}°C", info.temperature)
-    };
+    let (temp_display, temp_color) =
+        if info.detail.get("metrics_available") == Some(&"false".to_string()) {
+            (format!("{:>7}", "N/A"), Color::White)
+        } else if info.temperature == 0 {
+            // SMC didn't yield a usable reading and we have no fallback — show N/A
+            // rather than a misleading "0 °C".
+            (format!("{:>7}", "N/A"), Color::White)
+        } else {
+            // Highlight the current temperature when it is within the
+            // configured margin of the slowdown/shutdown thresholds reported
+            // by NVML. `thermal_proximity` returns `Normal` (→ white) when no
+            // thresholds are available, so non-NVIDIA paths are unaffected.
+            let colour = match info.thermal_proximity(ThermalProximityConfig::default()) {
+                ThermalProximity::Shutdown => Color::Red,
+                ThermalProximity::Slowdown => Color::Yellow,
+                ThermalProximity::Normal => Color::White,
+            };
+            (format!("{:>4}°C", info.temperature), colour)
+        };
 
-    print_colored_text(stdout, &temp_display, Color::White, None, None);
+    print_colored_text(stdout, &temp_display, temp_color, None, None);
 
     // Display GPU frequency
     if info.frequency > 0 {
@@ -268,6 +333,14 @@ pub fn print_gpu_info<W: Write>(
 
     queue!(stdout, Print("\r\n")).unwrap();
 
+    // Optional secondary row: thermal thresholds + current P-state.
+    //
+    // Only rendered when at least one piece of threshold/P-state data is
+    // available, so Apple Silicon / AMD / Jetson rows that never populate
+    // these fields keep their current two-row layout. The row is indented
+    // to line up under the device name so it visually hangs off the GPU.
+    render_thermal_pstate_row(stdout, info);
+
     // Calculate gauge widths with 5 char padding on each side and 2 space separation
     let available_width = width.saturating_sub(10); // 5 padding each side
     let is_apple_silicon = info.name.contains("Apple") || info.name.contains("Metal");
@@ -349,9 +422,127 @@ pub fn print_gpu_info<W: Write>(
     queue!(stdout, Print("\r\n")).unwrap();
 }
 
+/// Render the compact thermal-threshold / P-state row beneath a GPU. No-op
+/// when the GPU reports none of the new NVML fields — so non-NVIDIA rows
+/// and older drivers skip the row entirely and the TUI keeps its historical
+/// two-line layout.
+fn render_thermal_pstate_row<W: Write>(stdout: &mut W, info: &GpuInfo) {
+    let has_any_threshold = info.temperature_threshold_slowdown.is_some()
+        || info.temperature_threshold_shutdown.is_some()
+        || info.temperature_threshold_max_operating.is_some()
+        || info.temperature_threshold_acoustic.is_some();
+    if !has_any_threshold && info.performance_state.is_none() {
+        return;
+    }
+
+    // 5-char indent aligns with the gauge row below.
+    print_colored_text(stdout, "     ", Color::White, None, None);
+
+    let proximity = info.thermal_proximity(ThermalProximityConfig::default());
+    let warn_color = match proximity {
+        ThermalProximity::Shutdown => Some(Color::Red),
+        ThermalProximity::Slowdown => Some(Color::Yellow),
+        ThermalProximity::Normal => None,
+    };
+
+    // Track whether any field has already been written so that only the
+    // second and subsequent fields get a leading separator space. Without
+    // this, a partial report (e.g. only P-State populated) would begin the
+    // row with two spaces — one from the indent above, one from the field
+    // itself — corrupting alignment.
+    let mut emitted_any = false;
+
+    // Slowdown threshold — colour it yellow when the current temperature is
+    // bumping up against it, red when shutdown is imminent. When no warning
+    // is active, render neutrally.
+    if let Some(slowdown) = info.temperature_threshold_slowdown {
+        emitted_any = true;
+        print_colored_text(stdout, "Slowdown:", Color::DarkYellow, None, None);
+        let color = warn_color.unwrap_or(Color::White);
+        print_colored_text(stdout, &format!("{slowdown}°C"), color, None, None);
+    }
+
+    if let Some(shutdown) = info.temperature_threshold_shutdown {
+        if emitted_any {
+            print_colored_text(stdout, " ", Color::White, None, None);
+        }
+        emitted_any = true;
+        print_colored_text(stdout, "Shutdown:", Color::DarkRed, None, None);
+        let color = match proximity {
+            ThermalProximity::Shutdown => Color::Red,
+            _ => Color::White,
+        };
+        print_colored_text(stdout, &format!("{shutdown}°C"), color, None, None);
+    }
+
+    if let Some(gpu_max) = info.temperature_threshold_max_operating {
+        if emitted_any {
+            print_colored_text(stdout, " ", Color::White, None, None);
+        }
+        emitted_any = true;
+        print_colored_text(stdout, "MaxOp:", Color::DarkGreen, None, None);
+        print_colored_text(stdout, &format!("{gpu_max}°C"), Color::White, None, None);
+    }
+
+    if let Some(acoustic) = info.temperature_threshold_acoustic {
+        if emitted_any {
+            print_colored_text(stdout, " ", Color::White, None, None);
+        }
+        emitted_any = true;
+        print_colored_text(stdout, "Acoustic:", Color::DarkCyan, None, None);
+        print_colored_text(stdout, &format!("{acoustic}°C"), Color::White, None, None);
+    }
+
+    if let Some(pstate) = info.performance_state {
+        if emitted_any {
+            print_colored_text(stdout, " ", Color::White, None, None);
+        }
+        print_colored_text(stdout, "P-State:", Color::DarkBlue, None, None);
+        // Highlight P0 (maximum performance) green and P15 (idle) dim; mid
+        // states render neutrally. Helps spot a throttled GPU at a glance.
+        let color = match pstate {
+            0 => Color::Green,
+            15 => Color::DarkGrey,
+            _ => Color::White,
+        };
+        print_colored_text(stdout, &format!("P{pstate}"), color, None, None);
+    }
+
+    queue!(stdout, Print("\r\n")).unwrap();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+
+    fn make_gpu(temp: u32) -> GpuInfo {
+        GpuInfo {
+            uuid: "gpu-0".to_string(),
+            time: String::new(),
+            name: "Test GPU".to_string(),
+            device_type: "GPU".to_string(),
+            host_id: "h".to_string(),
+            hostname: "h".to_string(),
+            instance: "h".to_string(),
+            utilization: 0.0,
+            ane_utilization: 0.0,
+            dla_utilization: None,
+            tensorcore_utilization: None,
+            temperature: temp,
+            used_memory: 0,
+            total_memory: 0,
+            frequency: 0,
+            power_consumption: 0.0,
+            gpu_core_count: None,
+            temperature_threshold_slowdown: Some(93),
+            temperature_threshold_shutdown: Some(98),
+            temperature_threshold_max_operating: Some(87),
+            temperature_threshold_acoustic: None,
+            performance_state: Some(2),
+            detail: HashMap::new(),
+        }
+    }
 
     #[test]
     fn test_format_hostname_with_scroll() {
@@ -382,5 +573,336 @@ mod tests {
         let renderer = GpuRenderer::new();
         // Just verify it can be created
         let _ = renderer;
+    }
+
+    // --- thermal proximity classification ---
+
+    #[test]
+    fn thermal_proximity_normal_when_far_from_thresholds() {
+        let gpu = make_gpu(60);
+        assert_eq!(
+            gpu.thermal_proximity(ThermalProximityConfig::default()),
+            ThermalProximity::Normal
+        );
+    }
+
+    #[test]
+    fn thermal_proximity_slowdown_within_margin() {
+        // Slowdown at 93°C, margin 5°C → 88°C or higher triggers Slowdown.
+        let gpu = make_gpu(89);
+        assert_eq!(
+            gpu.thermal_proximity(ThermalProximityConfig::default()),
+            ThermalProximity::Slowdown
+        );
+    }
+
+    #[test]
+    fn thermal_proximity_shutdown_takes_priority_over_slowdown() {
+        // Shutdown at 98°C, margin 2°C → 96°C or higher triggers Shutdown.
+        // Even though slowdown also applies, shutdown wins.
+        let gpu = make_gpu(97);
+        assert_eq!(
+            gpu.thermal_proximity(ThermalProximityConfig::default()),
+            ThermalProximity::Shutdown
+        );
+    }
+
+    #[test]
+    fn thermal_proximity_zero_thresholds_are_ignored() {
+        // Defensive: if NVML somehow reports zero, treat as "unavailable"
+        // rather than classifying every temperature as at-threshold.
+        let mut gpu = make_gpu(10);
+        gpu.temperature_threshold_slowdown = Some(0);
+        gpu.temperature_threshold_shutdown = Some(0);
+        assert_eq!(
+            gpu.thermal_proximity(ThermalProximityConfig::default()),
+            ThermalProximity::Normal
+        );
+    }
+
+    #[test]
+    fn thermal_proximity_none_thresholds_are_normal() {
+        let mut gpu = make_gpu(95);
+        gpu.temperature_threshold_slowdown = None;
+        gpu.temperature_threshold_shutdown = None;
+        assert_eq!(
+            gpu.thermal_proximity(ThermalProximityConfig::default()),
+            ThermalProximity::Normal
+        );
+    }
+
+    #[test]
+    fn thermal_proximity_respects_custom_margins() {
+        // With a 10°C slowdown margin, slowdown fires at 83°C given a
+        // 93°C threshold.
+        let gpu = make_gpu(83);
+        assert_eq!(
+            gpu.thermal_proximity(ThermalProximityConfig {
+                slowdown_margin: 10,
+                shutdown_margin: 2,
+            }),
+            ThermalProximity::Slowdown
+        );
+    }
+
+    #[test]
+    fn thermal_proximity_saturates_on_extreme_values() {
+        // Defensive: malformed remote input can yield `u32::MAX` for the
+        // temperature (via `saturating_u32` in the network parser) and a
+        // pathological config could carry `u32::MAX` margins. The
+        // computation MUST NOT panic — it should saturate instead.
+        let mut gpu = make_gpu(u32::MAX);
+        gpu.temperature_threshold_slowdown = Some(50);
+        gpu.temperature_threshold_shutdown = Some(50);
+        let cfg = ThermalProximityConfig {
+            slowdown_margin: u32::MAX,
+            shutdown_margin: u32::MAX,
+        };
+        // With saturation, both sums saturate to u32::MAX, so the shutdown
+        // branch fires first and we end up classified as Shutdown.
+        assert_eq!(gpu.thermal_proximity(cfg), ThermalProximity::Shutdown);
+    }
+
+    // --- render row no-op and emission checks ---
+
+    #[test]
+    fn render_thermal_pstate_row_is_noop_when_no_data() {
+        let mut gpu = make_gpu(50);
+        gpu.temperature_threshold_slowdown = None;
+        gpu.temperature_threshold_shutdown = None;
+        gpu.temperature_threshold_max_operating = None;
+        gpu.temperature_threshold_acoustic = None;
+        gpu.performance_state = None;
+        let mut buf: Vec<u8> = Vec::new();
+        render_thermal_pstate_row(&mut buf, &gpu);
+        assert!(
+            buf.is_empty(),
+            "expected no output when nothing is reported"
+        );
+    }
+
+    #[test]
+    fn render_thermal_pstate_row_emits_labels_when_data_present() {
+        let gpu = make_gpu(50);
+        let mut buf: Vec<u8> = Vec::new();
+        render_thermal_pstate_row(&mut buf, &gpu);
+        let rendered = String::from_utf8(buf).expect("valid utf-8");
+        assert!(rendered.contains("Slowdown:"), "{rendered}");
+        assert!(rendered.contains("Shutdown:"), "{rendered}");
+        assert!(rendered.contains("MaxOp:"), "{rendered}");
+        assert!(rendered.contains("P-State:"), "{rendered}");
+        assert!(rendered.contains("93°C"), "{rendered}");
+        assert!(rendered.contains("98°C"), "{rendered}");
+        assert!(rendered.contains("87°C"), "{rendered}");
+        assert!(rendered.contains("P2"), "{rendered}");
+    }
+
+    #[test]
+    fn render_thermal_pstate_row_emits_pstate_only_when_only_pstate_present() {
+        let mut gpu = make_gpu(50);
+        gpu.temperature_threshold_slowdown = None;
+        gpu.temperature_threshold_shutdown = None;
+        gpu.temperature_threshold_max_operating = None;
+        gpu.temperature_threshold_acoustic = None;
+        gpu.performance_state = Some(8);
+        let mut buf: Vec<u8> = Vec::new();
+        render_thermal_pstate_row(&mut buf, &gpu);
+        let rendered = String::from_utf8(buf).expect("valid utf-8");
+        assert!(rendered.contains("P-State:"), "{rendered}");
+        assert!(rendered.contains("P8"), "{rendered}");
+        assert!(
+            !rendered.contains("Slowdown:"),
+            "should not render Slowdown without data: {rendered}"
+        );
+    }
+
+    #[test]
+    fn render_pstate_only_has_no_double_leading_space() {
+        // When only performance_state is populated the row must not start
+        // with two consecutive spaces. The indent ("     ") is always
+        // emitted, but no extra separator space should precede the first
+        // field on the row.
+        let mut gpu = make_gpu(50);
+        gpu.temperature_threshold_slowdown = None;
+        gpu.temperature_threshold_shutdown = None;
+        gpu.temperature_threshold_max_operating = None;
+        gpu.temperature_threshold_acoustic = None;
+        gpu.performance_state = Some(3);
+        let mut buf: Vec<u8> = Vec::new();
+        render_thermal_pstate_row(&mut buf, &gpu);
+        // Strip ANSI escape sequences to get the plain text.
+        let raw = String::from_utf8(buf).expect("valid utf-8");
+        // Remove all ESC [...m sequences.
+        let plain: String = {
+            let mut out = String::new();
+            let mut chars = raw.chars().peekable();
+            while let Some(c) = chars.next() {
+                if c == '\x1b' {
+                    // consume up to and including the final 'm'
+                    for ch in chars.by_ref() {
+                        if ch == 'm' {
+                            break;
+                        }
+                    }
+                } else {
+                    out.push(c);
+                }
+            }
+            out
+        };
+        // The row must contain "P-State:" and "P3".
+        assert!(plain.contains("P-State:"), "missing P-State: in {plain:?}");
+        assert!(plain.contains("P3"), "missing P3 in {plain:?}");
+        // After the fixed 5-char indent the next printable character must
+        // not be another space — that would indicate a double leading space.
+        let after_indent = plain.trim_start_matches(' ');
+        assert!(
+            !after_indent.starts_with(' '),
+            "double leading space detected in {plain:?}"
+        );
+    }
+
+    #[test]
+    fn render_thermal_pstate_row_includes_acoustic_when_present() {
+        let mut gpu = make_gpu(50);
+        gpu.temperature_threshold_acoustic = Some(75);
+        let mut buf: Vec<u8> = Vec::new();
+        render_thermal_pstate_row(&mut buf, &gpu);
+        let rendered = String::from_utf8(buf).expect("valid utf-8");
+        assert!(rendered.contains("Acoustic:"), "{rendered}");
+        assert!(rendered.contains("75°C"), "{rendered}");
+    }
+
+    // --- gpu_render_line_count tests ---
+
+    fn make_vgpu_host(gpu_uuid: &str, instances: usize) -> VgpuHostInfo {
+        use crate::device::types::VgpuInfo;
+        let vgpus = (0..instances)
+            .map(|i| VgpuInfo {
+                instance_id: i as u32,
+                uuid: format!("vgpu-{i}"),
+                vm_id: String::new(),
+                vgpu_type_name: "GRID".into(),
+                fb_used_bytes: 0,
+                fb_total_bytes: 1 << 30,
+                gpu_utilization: Some(0),
+                memory_utilization: Some(0),
+                is_active: true,
+            })
+            .collect();
+        VgpuHostInfo {
+            host_id: "h".to_string(),
+            hostname: "h".to_string(),
+            instance: "h".to_string(),
+            gpu_index: 0,
+            gpu_uuid: gpu_uuid.to_string(),
+            gpu_name: "Test GPU".to_string(),
+            host_mode: "Sriov".to_string(),
+            scheduler_policy: 1,
+            scheduler_arr_mode: 2,
+            is_arr_supported: true,
+            vgpus,
+            detail: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn line_count_is_two_for_minimal_non_nvidia_gpu() {
+        // Apple Silicon / AMD / Jetson: no thermal threshold fields, no
+        // P-state, no vGPU. Layout collapses to the historical two rows.
+        let mut gpu = make_gpu(40);
+        gpu.temperature_threshold_slowdown = None;
+        gpu.temperature_threshold_shutdown = None;
+        gpu.temperature_threshold_max_operating = None;
+        gpu.temperature_threshold_acoustic = None;
+        gpu.performance_state = None;
+        assert_eq!(gpu_render_line_count(&gpu, &[]), 2);
+    }
+
+    #[test]
+    fn line_count_grows_to_three_when_thermal_or_pstate_present() {
+        // Each of the 5 new fields independently bumps the row count to 3.
+        for setter in [
+            |g: &mut GpuInfo| g.temperature_threshold_slowdown = Some(93),
+            |g: &mut GpuInfo| g.temperature_threshold_shutdown = Some(98),
+            |g: &mut GpuInfo| g.temperature_threshold_max_operating = Some(87),
+            |g: &mut GpuInfo| g.temperature_threshold_acoustic = Some(75),
+            |g: &mut GpuInfo| g.performance_state = Some(2),
+        ] {
+            let mut gpu = make_gpu(40);
+            gpu.temperature_threshold_slowdown = None;
+            gpu.temperature_threshold_shutdown = None;
+            gpu.temperature_threshold_max_operating = None;
+            gpu.temperature_threshold_acoustic = None;
+            gpu.performance_state = None;
+            setter(&mut gpu);
+            assert_eq!(
+                gpu_render_line_count(&gpu, &[]),
+                3,
+                "expected 3 lines for {gpu:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn line_count_includes_vgpu_section_when_uuid_matches() {
+        // Active vGPU host with N instances adds 1 header + N rows.
+        let mut gpu = make_gpu(40);
+        gpu.temperature_threshold_slowdown = None;
+        gpu.temperature_threshold_shutdown = None;
+        gpu.temperature_threshold_max_operating = None;
+        gpu.temperature_threshold_acoustic = None;
+        gpu.performance_state = None;
+        gpu.uuid = "GPU-A".to_string();
+        let host = make_vgpu_host("GPU-A", 3);
+        // 2 base + 0 thermal + (1 header + 3 instances) = 6
+        assert_eq!(gpu_render_line_count(&gpu, std::slice::from_ref(&host)), 6);
+    }
+
+    #[test]
+    fn line_count_falls_back_to_hostname_and_name_when_uuid_does_not_match() {
+        // Remote-mode metrics may carry a missing/empty UUID; the fallback
+        // matcher uses hostname + gpu_name. Layout math must agree with
+        // `find_matching_vgpu_host`.
+        let mut gpu = make_gpu(40);
+        gpu.temperature_threshold_slowdown = None;
+        gpu.temperature_threshold_shutdown = None;
+        gpu.temperature_threshold_max_operating = None;
+        gpu.temperature_threshold_acoustic = None;
+        gpu.performance_state = None;
+        gpu.uuid = "GPU-A".to_string();
+        gpu.hostname = "h".to_string();
+        gpu.name = "Test GPU".to_string();
+        // Host has a *different* uuid but matching hostname + gpu_name.
+        let host = make_vgpu_host("GPU-OTHER", 2);
+        assert_eq!(gpu_render_line_count(&gpu, std::slice::from_ref(&host)), 5);
+    }
+
+    #[test]
+    fn line_count_ignores_disabled_vgpu_host_with_no_instances() {
+        let mut gpu = make_gpu(40);
+        gpu.temperature_threshold_slowdown = None;
+        gpu.temperature_threshold_shutdown = None;
+        gpu.temperature_threshold_max_operating = None;
+        gpu.temperature_threshold_acoustic = None;
+        gpu.performance_state = None;
+        gpu.uuid = "GPU-A".to_string();
+        let mut host = make_vgpu_host("GPU-A", 0);
+        host.host_mode = "Disabled".to_string();
+        // Disabled host with no instances renders nothing → count stays at 2.
+        assert_eq!(gpu_render_line_count(&gpu, std::slice::from_ref(&host)), 2);
+    }
+
+    #[test]
+    fn line_count_combines_thermal_and_vgpu_contributions() {
+        // Realistic NVIDIA datacentre case: thermal row present and vGPU
+        // host with two instances.
+        let mut gpu = make_gpu(40);
+        gpu.uuid = "GPU-A".to_string();
+        // make_gpu sets slowdown/shutdown/max_op + P-state; that's the
+        // thermal row +1 line.
+        let host = make_vgpu_host("GPU-A", 2);
+        // 2 base + 1 thermal + (1 header + 2 instances) = 6
+        assert_eq!(gpu_render_line_count(&gpu, std::slice::from_ref(&host)), 6);
     }
 }

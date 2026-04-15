@@ -509,6 +509,11 @@ mod tests {
             frequency: 2100,
             power_consumption: 320.0,
             gpu_core_count: None,
+            temperature_threshold_slowdown: None,
+            temperature_threshold_shutdown: None,
+            temperature_threshold_max_operating: None,
+            temperature_threshold_acoustic: None,
+            performance_state: None,
             detail,
         });
 
@@ -550,6 +555,11 @@ mod tests {
             frequency: 1398,
             power_consumption: 8.0,
             gpu_core_count: Some(16),
+            temperature_threshold_slowdown: None,
+            temperature_threshold_shutdown: None,
+            temperature_threshold_max_operating: None,
+            temperature_threshold_acoustic: None,
+            performance_state: None,
             detail,
         });
 

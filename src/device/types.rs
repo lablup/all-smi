@@ -50,7 +50,104 @@ pub struct GpuInfo {
     pub frequency: u32,
     pub power_consumption: f64,
     pub gpu_core_count: Option<u32>, // Number of GPU cores (e.g., Apple Silicon)
+    /// Slowdown temperature threshold in Celsius. HW throttling engages at or
+    /// above this value. `None` when the driver / device does not report it
+    /// (older drivers, non-NVIDIA) — callers must treat this as "unknown" and
+    /// render nothing rather than substituting a default.
+    #[serde(default)]
+    pub temperature_threshold_slowdown: Option<u32>,
+    /// Shutdown temperature threshold in Celsius. The GPU powers off at or
+    /// above this value to protect the silicon. `None` when unavailable.
+    #[serde(default)]
+    pub temperature_threshold_shutdown: Option<u32>,
+    /// Maximum operating temperature threshold (`GpuMax`) in Celsius. The
+    /// GPU may throttle below base clock at or above this point. `None`
+    /// when unavailable.
+    #[serde(default)]
+    pub temperature_threshold_max_operating: Option<u32>,
+    /// Current acoustic temperature threshold in Celsius, if the driver
+    /// exposes one (typically consumer cards). `None` on datacenter GPUs
+    /// and older drivers.
+    #[serde(default)]
+    pub temperature_threshold_acoustic: Option<u32>,
+    /// Current performance state (P-state). `0` is the highest-performance
+    /// state and `15` is the lowest. `None` when the GPU does not expose a
+    /// P-state (e.g. non-NVIDIA, MIG child devices, driver too old).
+    #[serde(default)]
+    pub performance_state: Option<u32>,
     pub detail: HashMap<String, String>,
+}
+
+/// Proximity classification for the current GPU temperature relative to the
+/// slowdown / shutdown thresholds. Used by the TUI to highlight dangerous
+/// thermal conditions and by tests to lock in the classification contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThermalProximity {
+    /// No threshold data, or the current temperature is comfortably below
+    /// every reported threshold (default rendering).
+    Normal,
+    /// Current temperature is within [`ThermalProximityConfig::slowdown_margin`]
+    /// Celsius of the slowdown threshold, or already at/above it. Render
+    /// the current temperature in yellow.
+    Slowdown,
+    /// Current temperature is within [`ThermalProximityConfig::shutdown_margin`]
+    /// Celsius of the shutdown threshold, or already at/above it. Render
+    /// the current temperature in red.
+    Shutdown,
+}
+
+/// Thresholds that decide when the TUI highlights the current GPU temperature.
+/// Centralised here so the renderer, exporter documentation, and tests agree
+/// on the numbers without scattering magic values across the codebase.
+#[derive(Debug, Clone, Copy)]
+pub struct ThermalProximityConfig {
+    /// Margin in Celsius from the slowdown threshold at which the TUI
+    /// switches to a `Slowdown` warning state.
+    pub slowdown_margin: u32,
+    /// Margin in Celsius from the shutdown threshold at which the TUI
+    /// switches to a `Shutdown` warning state. `Shutdown` wins over
+    /// `Slowdown` when both apply.
+    pub shutdown_margin: u32,
+}
+
+impl Default for ThermalProximityConfig {
+    fn default() -> Self {
+        Self {
+            slowdown_margin: 5,
+            shutdown_margin: 2,
+        }
+    }
+}
+
+impl GpuInfo {
+    /// Classify the current temperature against the reported thresholds.
+    ///
+    /// Returns [`ThermalProximity::Normal`] when no threshold data is
+    /// available — the feature MUST gracefully degrade on older drivers or
+    /// non-NVIDIA GPUs.
+    pub fn thermal_proximity(&self, cfg: ThermalProximityConfig) -> ThermalProximity {
+        // Shutdown wins unconditionally over slowdown.
+        //
+        // `saturating_add` defends against malformed remote inputs: the
+        // network parser's `saturating_u32` helper can produce `u32::MAX`
+        // when a scrape contains nonsense values, and an unchecked
+        // `temperature + margin` would panic in debug builds. Saturating
+        // simply yields `u32::MAX` in that pathological case and the
+        // comparison still produces a sane (and harmless) result.
+        if let Some(shutdown) = self.temperature_threshold_shutdown
+            && shutdown > 0
+            && self.temperature.saturating_add(cfg.shutdown_margin) >= shutdown
+        {
+            return ThermalProximity::Shutdown;
+        }
+        if let Some(slowdown) = self.temperature_threshold_slowdown
+            && slowdown > 0
+            && self.temperature.saturating_add(cfg.slowdown_margin) >= slowdown
+        {
+            return ThermalProximity::Slowdown;
+        }
+        ThermalProximity::Normal
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]

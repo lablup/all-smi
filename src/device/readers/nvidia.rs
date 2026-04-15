@@ -21,6 +21,7 @@ use crate::device::readers::nvidia_vgpu::collect_vgpu_info;
 use crate::device::types::{GpuInfo, ProcessInfo, VgpuHostInfo};
 use crate::utils::{get_hostname, with_global_system};
 use chrono::Local;
+use nvml_wrapper::enum_wrappers::device::{PerformanceState, TemperatureThreshold};
 use nvml_wrapper::enums::device::{DeviceArchitecture, UsedGpuMemory};
 use nvml_wrapper::error::NvmlError;
 use nvml_wrapper::{Nvml, cuda_driver_version_major, cuda_driver_version_minor};
@@ -29,6 +30,33 @@ use std::sync::{Mutex, OnceLock};
 
 // Global status for NVML error messages
 static NVML_STATUS: Mutex<Option<String>> = Mutex::new(None);
+
+/// Cached per-device temperature thresholds.
+///
+/// NVML reports slowdown / shutdown / GpuMax / acoustic thresholds as hardware
+/// properties that do not change at runtime, so we query them once per device
+/// and hand back copies on every `get_gpu_info` call. Any field that NVML
+/// reports as `NotSupported` — common on older drivers or non-datacenter
+/// SKUs — stays `None` and the UI / exporter will render it as unavailable.
+#[derive(Debug, Clone, Copy, Default)]
+struct ThermalThresholds {
+    slowdown: Option<u32>,
+    shutdown: Option<u32>,
+    max_operating: Option<u32>,
+    acoustic: Option<u32>,
+}
+
+impl ThermalThresholds {
+    /// Whether this snapshot carries any supported threshold. Used to avoid
+    /// permanently caching a fully-empty record produced by transient NVML
+    /// errors (e.g. `Uninitialized` or driver hiccups on the very first call).
+    fn has_any_value(&self) -> bool {
+        self.slowdown.is_some()
+            || self.shutdown.is_some()
+            || self.max_operating.is_some()
+            || self.acoustic.is_some()
+    }
+}
 
 pub struct NvidiaGpuReader {
     /// Cached driver version (fetched only once)
@@ -39,6 +67,36 @@ pub struct NvidiaGpuReader {
     device_static_info: OnceLock<HashMap<u32, DeviceStaticInfo>>,
     /// Cached NVML handle (initialized once, reused across calls)
     nvml: Mutex<Option<Nvml>>,
+    /// Cached temperature thresholds per device index. Populated lazily on
+    /// the first successful read and reused for the lifetime of the process.
+    thermal_thresholds: Mutex<HashMap<u32, ThermalThresholds>>,
+}
+
+/// Map the NVML [`PerformanceState`] enum to the integer used by the
+/// Prometheus exporter and the TUI. `P0` → 0, `P15` → 15, `Unknown` → `None`.
+///
+/// Kept as a pure function for unit-testing without requiring a real NVML
+/// handle.
+fn performance_state_to_u32(state: PerformanceState) -> Option<u32> {
+    match state {
+        PerformanceState::Zero => Some(0),
+        PerformanceState::One => Some(1),
+        PerformanceState::Two => Some(2),
+        PerformanceState::Three => Some(3),
+        PerformanceState::Four => Some(4),
+        PerformanceState::Five => Some(5),
+        PerformanceState::Six => Some(6),
+        PerformanceState::Seven => Some(7),
+        PerformanceState::Eight => Some(8),
+        PerformanceState::Nine => Some(9),
+        PerformanceState::Ten => Some(10),
+        PerformanceState::Eleven => Some(11),
+        PerformanceState::Twelve => Some(12),
+        PerformanceState::Thirteen => Some(13),
+        PerformanceState::Fourteen => Some(14),
+        PerformanceState::Fifteen => Some(15),
+        PerformanceState::Unknown => None,
+    }
 }
 
 impl Default for NvidiaGpuReader {
@@ -54,7 +112,54 @@ impl NvidiaGpuReader {
             cuda_version: OnceLock::new(),
             device_static_info: OnceLock::new(),
             nvml: Mutex::new(Nvml::init().ok()),
+            thermal_thresholds: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Fetch cached thermal thresholds for `index`, populating the cache on
+    /// the first call. All NVML errors (notably `NotSupported` and
+    /// `FunctionNotFound`) are swallowed and leave the respective field as
+    /// `None` — this feature MUST degrade gracefully on older drivers.
+    ///
+    /// Caching policy: a fully-empty snapshot (every field `None`) is NOT
+    /// stored, so a transient NVML error on the first call (`Uninitialized`,
+    /// driver hiccup) will not lock every threshold to `None` for the
+    /// process lifetime. Devices that genuinely never report any threshold
+    /// will pay 4 NVML calls per poll instead of one cached read — an
+    /// acceptable trade since these calls are cheap.
+    fn thermal_thresholds_for(
+        &self,
+        device: &nvml_wrapper::Device,
+        index: u32,
+    ) -> ThermalThresholds {
+        if let Ok(cache) = self.thermal_thresholds.lock()
+            && let Some(existing) = cache.get(&index)
+        {
+            return *existing;
+        }
+
+        let thresholds = ThermalThresholds {
+            slowdown: device
+                .temperature_threshold(TemperatureThreshold::Slowdown)
+                .ok(),
+            shutdown: device
+                .temperature_threshold(TemperatureThreshold::Shutdown)
+                .ok(),
+            max_operating: device
+                .temperature_threshold(TemperatureThreshold::GpuMax)
+                .ok(),
+            acoustic: device
+                .temperature_threshold(TemperatureThreshold::AcousticCurr)
+                .ok(),
+        };
+
+        if thresholds.has_any_value()
+            && let Ok(mut cache) = self.thermal_thresholds.lock()
+        {
+            cache.insert(index, thresholds);
+        }
+
+        thresholds
     }
 
     /// Get cached driver version, initializing if needed
@@ -175,6 +280,15 @@ impl NvidiaGpuReader {
                         )
                     };
 
+                    // Best-effort thermal threshold read (cached per device).
+                    let thresholds = self.thermal_thresholds_for(&device, i);
+                    // Best-effort current P-state read. `NotSupported` /
+                    // driver-too-old / MIG child device all degrade to `None`.
+                    let performance_state = device
+                        .performance_state()
+                        .ok()
+                        .and_then(performance_state_to_u32);
+
                     let info = GpuInfo {
                         uuid: device.uuid().unwrap_or_else(|_| format!("GPU-{i}")),
                         time: Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
@@ -208,6 +322,11 @@ impl NvidiaGpuReader {
                             .map(|p| p as f64 / 1000.0)
                             .unwrap_or(0.0),
                         gpu_core_count: None,
+                        temperature_threshold_slowdown: thresholds.slowdown,
+                        temperature_threshold_shutdown: thresholds.shutdown,
+                        temperature_threshold_max_operating: thresholds.max_operating,
+                        temperature_threshold_acoustic: thresholds.acoustic,
+                        performance_state,
                         detail,
                     };
                     gpu_info.push(info);
@@ -664,6 +783,14 @@ fn get_gpu_info_nvidia_smi() -> Vec<GpuInfo> {
                     power_consumption: parts[8].replace("[N/A]", "0").parse::<f64>().unwrap_or(0.0)
                         / 1000.0,
                     gpu_core_count: None,
+                    // nvidia-smi CSV path does not surface thresholds / P-state;
+                    // they stay unavailable. The NVML path above is the
+                    // preferred source when the library is present.
+                    temperature_threshold_slowdown: None,
+                    temperature_threshold_shutdown: None,
+                    temperature_threshold_max_operating: None,
+                    temperature_threshold_acoustic: None,
+                    performance_state: None,
                     detail,
                 })
             } else {
@@ -897,5 +1024,100 @@ Cached:          4096000 kB
         let (total, used) = parse_meminfo_content(content);
         assert_eq!(total, 0);
         assert_eq!(used, 0);
+    }
+
+    // --- performance_state_to_u32 tests ---
+
+    #[test]
+    fn performance_state_to_u32_maps_extremes() {
+        assert_eq!(performance_state_to_u32(PerformanceState::Zero), Some(0));
+        assert_eq!(
+            performance_state_to_u32(PerformanceState::Fifteen),
+            Some(15)
+        );
+    }
+
+    #[test]
+    fn performance_state_to_u32_maps_midrange() {
+        assert_eq!(performance_state_to_u32(PerformanceState::Two), Some(2));
+        assert_eq!(performance_state_to_u32(PerformanceState::Eight), Some(8));
+        assert_eq!(performance_state_to_u32(PerformanceState::Twelve), Some(12));
+    }
+
+    #[test]
+    fn performance_state_to_u32_returns_none_for_unknown() {
+        // `Unknown` is the sentinel NVML returns when the driver cannot
+        // report a P-state; MUST translate to `None` so downstream surfaces
+        // render "unavailable" rather than pretending the GPU is at P0.
+        assert_eq!(performance_state_to_u32(PerformanceState::Unknown), None);
+    }
+
+    // --- ThermalThresholds caching predicate tests ---
+
+    #[test]
+    fn thermal_thresholds_has_any_value_is_false_when_all_none() {
+        // Regression: a transient NVML error (Uninitialized / driver hiccup)
+        // on the very first call could yield this snapshot. Caching it would
+        // permanently lock every threshold to `None` for the process
+        // lifetime, so `has_any_value` MUST return `false` here.
+        let empty = ThermalThresholds::default();
+        assert!(!empty.has_any_value());
+    }
+
+    #[test]
+    fn thermal_thresholds_has_any_value_is_true_when_any_field_set() {
+        // Any single populated field is enough to consider the snapshot
+        // worth caching — the device clearly reported something.
+        let only_slowdown = ThermalThresholds {
+            slowdown: Some(93),
+            ..Default::default()
+        };
+        assert!(only_slowdown.has_any_value());
+
+        let only_shutdown = ThermalThresholds {
+            shutdown: Some(98),
+            ..Default::default()
+        };
+        assert!(only_shutdown.has_any_value());
+
+        let only_max_op = ThermalThresholds {
+            max_operating: Some(87),
+            ..Default::default()
+        };
+        assert!(only_max_op.has_any_value());
+
+        let only_acoustic = ThermalThresholds {
+            acoustic: Some(75),
+            ..Default::default()
+        };
+        assert!(only_acoustic.has_any_value());
+    }
+
+    #[test]
+    fn performance_state_to_u32_covers_every_variant() {
+        // Guard against future nvml-wrapper enum additions silently
+        // producing `None` values — if a new variant is added, this test
+        // will fail until the mapping is extended.
+        let variants = [
+            PerformanceState::Zero,
+            PerformanceState::One,
+            PerformanceState::Two,
+            PerformanceState::Three,
+            PerformanceState::Four,
+            PerformanceState::Five,
+            PerformanceState::Six,
+            PerformanceState::Seven,
+            PerformanceState::Eight,
+            PerformanceState::Nine,
+            PerformanceState::Ten,
+            PerformanceState::Eleven,
+            PerformanceState::Twelve,
+            PerformanceState::Thirteen,
+            PerformanceState::Fourteen,
+            PerformanceState::Fifteen,
+        ];
+        for (expected, variant) in variants.iter().enumerate() {
+            assert_eq!(performance_state_to_u32(*variant), Some(expected as u32));
+        }
     }
 }

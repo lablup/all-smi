@@ -296,6 +296,11 @@ mod tests {
             frequency: 1500,
             power_consumption: 250.0,
             gpu_core_count: None,
+            temperature_threshold_slowdown: None,
+            temperature_threshold_shutdown: None,
+            temperature_threshold_max_operating: None,
+            temperature_threshold_acoustic: None,
+            performance_state: None,
             detail: HashMap::new(),
         }
     }

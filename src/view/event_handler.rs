@@ -19,6 +19,7 @@ use crossterm::{
 
 use crate::app_state::{AppState, SortCriteria};
 use crate::cli::ViewArgs;
+use crate::ui::layout::LayoutCalculator;
 
 /// Get the actual number of visible process rows from the last rendered frame.
 /// Falls back to a conservative estimate if the renderer hasn't set it yet.
@@ -264,7 +265,11 @@ fn handle_page_up(state: &mut AppState, args: &ViewArgs) {
         };
 
         let gpu_display_rows = available_rows.saturating_sub(storage_display_rows);
-        let lines_per_gpu = 2; // Each GPU takes 2 lines (labels + progress bars on same line)
+        // Per-GPU line count is dynamic now: NVIDIA rows with thermal /
+        // P-state data emit 3 lines, vGPU-enabled GPUs emit even more.
+        // Use the maximum line count any visible GPU would render so the
+        // page size never overshoots the rendered area.
+        let lines_per_gpu = LayoutCalculator::max_gpu_lines_for_tab(state).max(2);
         let max_gpu_items = gpu_display_rows / lines_per_gpu;
         let page_size = max_gpu_items.max(1); // At least 1 item per page
 
@@ -306,7 +311,11 @@ fn handle_page_down(state: &mut AppState, args: &ViewArgs) {
         };
 
         let gpu_display_rows = available_rows.saturating_sub(storage_display_rows);
-        let lines_per_gpu = 2; // Each GPU takes 2 lines (labels + progress bars on same line)
+        // Per-GPU line count is dynamic now: NVIDIA rows with thermal /
+        // P-state data emit 3 lines, vGPU-enabled GPUs emit even more.
+        // Use the maximum line count any visible GPU would render so the
+        // page size never overshoots the rendered area.
+        let lines_per_gpu = LayoutCalculator::max_gpu_lines_for_tab(state).max(2);
         let max_gpu_items = gpu_display_rows / lines_per_gpu;
         let page_size = max_gpu_items.max(1); // At least 1 item per page
 

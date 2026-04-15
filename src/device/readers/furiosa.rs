@@ -497,6 +497,13 @@ fn create_gpu_info_from_cli_cached(
         frequency,
         power_consumption: power,
         gpu_core_count: None,
+        // Furiosa RNGD exposes temperature only; no NVML thermal threshold
+        // or P-state equivalents exist for this accelerator.
+        temperature_threshold_slowdown: None,
+        temperature_threshold_shutdown: None,
+        temperature_threshold_max_operating: None,
+        temperature_threshold_acoustic: None,
+        performance_state: None,
         detail,
     })
 }
@@ -576,6 +583,13 @@ fn create_gpu_info_from_device_2025_cached(
         frequency: freq_mhz,
         power_consumption: *power,
         gpu_core_count,
+        // Furiosa RNGD exposes temperature only; no NVML thermal threshold
+        // or P-state equivalents exist for this accelerator.
+        temperature_threshold_slowdown: None,
+        temperature_threshold_shutdown: None,
+        temperature_threshold_max_operating: None,
+        temperature_threshold_acoustic: None,
+        performance_state: None,
         detail,
     })
 }
@@ -637,6 +651,13 @@ fn create_gpu_info_from_device_2025(
         frequency: freq_mhz,
         power_consumption: *power,
         gpu_core_count: Some(info.core_num()),
+        // Furiosa RNGD exposes temperature only; no NVML thermal threshold
+        // or P-state equivalents exist for this accelerator.
+        temperature_threshold_slowdown: None,
+        temperature_threshold_shutdown: None,
+        temperature_threshold_max_operating: None,
+        temperature_threshold_acoustic: None,
+        performance_state: None,
         detail,
     })
 }
