@@ -380,6 +380,11 @@ mod tests {
                 frequency: 1500,
                 power_consumption: 100.0,
                 gpu_core_count: None,
+                temperature_threshold_slowdown: None,
+                temperature_threshold_shutdown: None,
+                temperature_threshold_max_operating: None,
+                temperature_threshold_acoustic: None,
+                performance_state: None,
                 detail: {
                     let mut m = std::collections::HashMap::new();
                     m.insert("index".to_string(), i.to_string());
@@ -458,6 +463,11 @@ mod tests {
                 frequency: 1500,
                 power_consumption: 100.0,
                 gpu_core_count: None,
+                temperature_threshold_slowdown: None,
+                temperature_threshold_shutdown: None,
+                temperature_threshold_max_operating: None,
+                temperature_threshold_acoustic: None,
+                performance_state: None,
                 detail: std::collections::HashMap::new(),
             });
         }

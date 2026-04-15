@@ -236,6 +236,14 @@ impl GpuReader for AppleSiliconNativeGpuReader {
             frequency: metrics.frequency.unwrap_or(0),
             power_consumption: metrics.power_consumption.unwrap_or(0.0),
             gpu_core_count: apple_info.and_then(|i| i.gpu_core_count),
+            // Apple Silicon reports thermal pressure as a qualitative enum
+            // (Nominal / Fair / Serious / Critical) via the `detail` map, not
+            // as NVML-style numeric thresholds. Leave these fields empty.
+            temperature_threshold_slowdown: None,
+            temperature_threshold_shutdown: None,
+            temperature_threshold_max_operating: None,
+            temperature_threshold_acoustic: None,
+            performance_state: None,
             detail,
         }]
     }

@@ -272,6 +272,13 @@ fn create_gpu_info_from_device(
         frequency: 0, // Intel Gaudi doesn't report frequency via hl-smi CSV
         power_consumption: device.power_draw,
         gpu_core_count: None,
+        // Intel Gaudi surfaces temperature only; NVML threshold / P-state
+        // APIs do not apply.
+        temperature_threshold_slowdown: None,
+        temperature_threshold_shutdown: None,
+        temperature_threshold_max_operating: None,
+        temperature_threshold_acoustic: None,
+        performance_state: None,
         detail,
     })
 }

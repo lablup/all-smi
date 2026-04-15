@@ -512,6 +512,13 @@ impl GpuReader for AmdGpuReader {
                 frequency,
                 power_consumption,
                 gpu_core_count: None,
+                // AMD GPUs surface temperature through libamdgpu_top; NVML
+                // thermal-threshold and P-state APIs do not apply here.
+                temperature_threshold_slowdown: None,
+                temperature_threshold_shutdown: None,
+                temperature_threshold_max_operating: None,
+                temperature_threshold_acoustic: None,
+                performance_state: None,
                 detail,
             };
             gpu_info.push(info);

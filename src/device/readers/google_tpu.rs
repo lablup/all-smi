@@ -972,6 +972,13 @@ fn create_gpu_info_from_device(
         frequency: 0, // TPU doesn't report frequency in the same way
         power_consumption: device.power_draw,
         gpu_core_count: Some(device.core_count),
+        // Google TPU exposes only a single temperature reading; no NVML
+        // thermal-threshold / P-state equivalents.
+        temperature_threshold_slowdown: None,
+        temperature_threshold_shutdown: None,
+        temperature_threshold_max_operating: None,
+        temperature_threshold_acoustic: None,
+        performance_state: None,
         detail,
     })
 }

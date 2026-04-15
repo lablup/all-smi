@@ -382,6 +382,13 @@ fn create_gpu_info(
         frequency,
         power_consumption: power,
         gpu_core_count: None,
+        // Tenstorrent telemetry does not expose NVML-style thermal
+        // thresholds or P-states; leave the extended fields unavailable.
+        temperature_threshold_slowdown: None,
+        temperature_threshold_shutdown: None,
+        temperature_threshold_max_operating: None,
+        temperature_threshold_acoustic: None,
+        performance_state: None,
         detail,
     })
 }

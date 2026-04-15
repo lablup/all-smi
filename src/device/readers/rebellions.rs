@@ -415,6 +415,13 @@ fn create_gpu_info_from_device(
         frequency: 0, // Rebellions doesn't report frequency
         power_consumption: power,
         gpu_core_count: None,
+        // Rebellions NPUs expose a single temperature sensor without NVML-style
+        // threshold / P-state metadata. Leave the new fields unavailable.
+        temperature_threshold_slowdown: None,
+        temperature_threshold_shutdown: None,
+        temperature_threshold_max_operating: None,
+        temperature_threshold_acoustic: None,
+        performance_state: None,
         detail,
     })
 }

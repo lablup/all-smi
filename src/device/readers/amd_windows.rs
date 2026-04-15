@@ -169,6 +169,13 @@ impl AmdWindowsGpuReader {
                     frequency: 0,         // Not available via WMI
                     power_consumption: 0.0, // Not available via WMI
                     gpu_core_count: None,
+                    // AMD-on-Windows surfaces nothing beyond the basic WMI
+                    // query — NVML thermal thresholds / P-states do not apply.
+                    temperature_threshold_slowdown: None,
+                    temperature_threshold_shutdown: None,
+                    temperature_threshold_max_operating: None,
+                    temperature_threshold_acoustic: None,
+                    performance_state: None,
                     detail,
                 });
             }
