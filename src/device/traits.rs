@@ -12,7 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::device::{ChassisInfo, CpuInfo, GpuInfo, MemoryInfo, ProcessInfo, VgpuHostInfo};
+use crate::device::{
+    ChassisInfo, CpuInfo, GpuInfo, MemoryInfo, MigGpuInfo, ProcessInfo, VgpuHostInfo,
+};
 use std::collections::HashSet;
 
 pub trait GpuReader: Send + Sync {
@@ -40,6 +42,18 @@ pub trait GpuReader: Send + Sync {
     /// vGPU MUST ensure that a missing-host case returns an empty vector
     /// rather than panicking or producing synthetic rows.
     fn get_vgpu_info(&self) -> Vec<VgpuHostInfo> {
+        Vec::new()
+    }
+
+    /// Collect per-GPU MIG (Multi-Instance GPU) host and instance information.
+    ///
+    /// Returns an empty vector on non-MIG hardware (consumer cards, older
+    /// architectures than Ampere) or when the reader does not support MIG at
+    /// all (the default). Implementations that do support MIG MUST ensure
+    /// that any NVML failure (driver too old, `NotSupported`, missing
+    /// permissions to enumerate instances) degrades gracefully to an empty
+    /// vector rather than panicking or producing synthetic rows.
+    fn get_mig_info(&self) -> Vec<MigGpuInfo> {
         Vec::new()
     }
 }

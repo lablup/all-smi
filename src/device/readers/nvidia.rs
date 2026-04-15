@@ -17,8 +17,9 @@ use crate::device::common::constants::BYTES_PER_MB;
 use crate::device::common::{execute_command_default, parse_csv_line};
 use crate::device::process_list::{get_all_processes, merge_gpu_processes};
 use crate::device::readers::common_cache::{DetailBuilder, DeviceStaticInfo, MAX_DEVICES};
+use crate::device::readers::nvidia_mig::collect_mig_info;
 use crate::device::readers::nvidia_vgpu::collect_vgpu_info;
-use crate::device::types::{GpuInfo, ProcessInfo, VgpuHostInfo};
+use crate::device::types::{GpuInfo, MigGpuInfo, ProcessInfo, VgpuHostInfo};
 use crate::utils::{get_hostname, with_global_system};
 use chrono::Local;
 use nvml_wrapper::enum_wrappers::device::{PerformanceState, TemperatureThreshold};
@@ -388,6 +389,14 @@ impl GpuReader for NvidiaGpuReader {
         // Degrade to an empty vector on any NVML failure. Callers MUST treat
         // an empty response as "not vGPU-capable" and render nothing.
         self.with_nvml(collect_vgpu_info).unwrap_or_default()
+    }
+
+    fn get_mig_info(&self) -> Vec<MigGpuInfo> {
+        // Degrade to an empty vector on any NVML failure (driver too old,
+        // pre-Ampere GPUs, MIG not enabled, missing permissions). Callers
+        // MUST treat an empty response as "not MIG-capable" and render
+        // nothing.
+        self.with_nvml(collect_mig_info).unwrap_or_default()
     }
 }
 
