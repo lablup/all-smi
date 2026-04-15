@@ -43,6 +43,12 @@ use crate::utils::get_hostname;
 /// the UUID length at 80 bytes; we allocate 96 for safety.
 const VGPU_STRING_BUFFER: usize = 96;
 
+/// Defensive upper bound for the number of active vGPU instances per physical
+/// device. NVIDIA's own documentation caps current GPUs at well under this,
+/// so if NVML claims more we treat it as driver misbehaviour and bail before
+/// committing to a huge allocation.
+const MAX_VGPU_INSTANCES_PER_DEVICE: usize = 256;
+
 /// Convert the high-level [`HostVgpuMode`] enum into the stable string label
 /// we surface to the UI and Prometheus exporter.
 fn host_mode_label(mode: HostVgpuMode) -> &'static str {
@@ -215,11 +221,23 @@ fn active_vgpus_ffi(nvml: &Nvml, device: &nvml_wrapper::Device) -> Vec<u32> {
         if count == 0 {
             return Vec::new();
         }
-        let mut buf: Vec<u32> = vec![0; count as usize];
-        if nvml_try(sym(handle, &mut count, buf.as_mut_ptr())).is_err() {
+        // A misbehaving driver could report a huge count here (up to
+        // `u32::MAX`); clamp defensively to avoid an enormous allocation.
+        if count as usize > MAX_VGPU_INSTANCES_PER_DEVICE {
             return Vec::new();
         }
-        buf.truncate(count as usize);
+        // Use a separate `count_in` for the fetch so the buffer capacity
+        // stays explicit: NVML may update `count_in` to reflect how many
+        // entries it actually wrote, and we truncate after the call.
+        let mut count_in: c_uint = count;
+        let mut buf: Vec<u32> = vec![0; count as usize];
+        if nvml_try(sym(handle, &mut count_in, buf.as_mut_ptr())).is_err() {
+            return Vec::new();
+        }
+        // Defence-in-depth: never grow the buffer past the originally
+        // allocated length, even if NVML writes back a larger count.
+        let written = (count_in as usize).min(buf.len());
+        buf.truncate(written);
         buf
     }
 }
