@@ -684,7 +684,10 @@ impl VgpuParseState {
                     .or_insert_with(|| VgpuInfo {
                         instance_id: vgpu_id,
                         uuid: labels.get("vgpu_uuid").cloned().unwrap_or_default(),
-                        vm_id: String::new(),
+                        // Keep vm_id round-tripping through the Prometheus
+                        // exporter so remote mode can display the same `vm=`
+                        // column as local mode.
+                        vm_id: labels.get("vgpu_vm_id").cloned().unwrap_or_default(),
                         vgpu_type_name: labels.get("vgpu_type").cloned().unwrap_or_default(),
                         fb_used_bytes: 0,
                         fb_total_bytes: 0,

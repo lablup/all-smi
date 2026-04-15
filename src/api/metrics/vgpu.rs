@@ -231,7 +231,7 @@ impl<'a> VgpuMetricExporter<'a> {
         vgpu: &'b crate::device::VgpuInfo,
         gpu_index_str: &'b str,
         instance_id_str: &'b str,
-    ) -> [(&'b str, &'b str); 8] {
+    ) -> [(&'b str, &'b str); 9] {
         [
             ("gpu_index", gpu_index_str),
             ("gpu_uuid", host.gpu_uuid.as_str()),
@@ -241,6 +241,9 @@ impl<'a> VgpuMetricExporter<'a> {
             ("vgpu_id", instance_id_str),
             ("vgpu_uuid", vgpu.uuid.as_str()),
             ("vgpu_type", vgpu.vgpu_type_name.as_str()),
+            // Surface the owning VM id so remote scrapers can reconstruct
+            // the TUI `vm=` column. Empty when NVML does not expose one.
+            ("vgpu_vm_id", vgpu.vm_id.as_str()),
         ]
     }
 }

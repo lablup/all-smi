@@ -209,8 +209,11 @@ fn format_instance_labels(
     gpu_uuid: &str,
 ) -> String {
     let vgpu_type = synth_vgpu_type(j);
+    // Keep vgpu_vm_id in the mock labels so integration tests exercising the
+    // exporter -> parser round-trip see the same label set the real reader
+    // now emits (see api/metrics/vgpu.rs).
     format!(
-        "gpu_index=\"{i}\", gpu_uuid=\"{gpu_uuid}\", gpu=\"{gpu_name}\", instance=\"{instance_name}\", host=\"{instance_name}\", vgpu_id=\"{vgpu_id}\", vgpu_uuid=\"GRID-mock-{i}-{j}\", vgpu_type=\"{vgpu_type}\"",
+        "gpu_index=\"{i}\", gpu_uuid=\"{gpu_uuid}\", gpu=\"{gpu_name}\", instance=\"{instance_name}\", host=\"{instance_name}\", vgpu_id=\"{vgpu_id}\", vgpu_uuid=\"GRID-mock-{i}-{j}\", vgpu_type=\"{vgpu_type}\", vgpu_vm_id=\"vm-mock-{i}-{j}\"",
         vgpu_id = synth_vgpu_id(i, j)
     )
 }
