@@ -22,11 +22,20 @@
 //!
 //! # Caching policy
 //!
-//! [`HardwareDetailCache`] memoises the two static-per-device fields — NUMA
-//! node id and GSP firmware version — so they are only fetched once per
-//! process lifetime. Cache insertions happen only when at least one field
-//! resolved successfully; a transient NVML error on the first call does not
-//! lock the cache to `None` for the process lifetime.
+//! [`HardwareDetailCache`] memoises the three static-per-device fields —
+//! NUMA node id, GSP firmware mode, and GSP firmware version — in independent
+//! per-field caches so each field is fetched only once per process lifetime.
+//!
+//! Cache insertion is conditional on the NVML result:
+//! - `Ok(value)` → cached as `Some(value)`.
+//! - `Err(NotSupported | FunctionNotFound)` → cached as `None` (permanently
+//!   unavailable; will not be retried).
+//! - Any other error (transient: `Unknown`, `GpuIsLost`, etc.) → NOT cached;
+//!   the next poll will retry that field independently.
+//!
+//! This guarantees a transient failure on field A (e.g. GSP mode during a
+//! driver hiccup) does not permanently lock field B (e.g. NUMA node) to
+//! `None`, and vice versa.
 //!
 //! NvLink enumeration and GPM support detection are NOT cached because their
 //! state can change at runtime (links can drop, GPM streaming can be toggled
@@ -60,23 +69,39 @@ pub struct HardwareDetails {
     pub gsp_firmware_version: Option<String>,
 }
 
-impl HardwareDetails {
-    /// Whether this snapshot carries any supported value. Guards the cache
-    /// against storing an all-empty record produced by transient NVML
-    /// failures on the first poll.
-    fn has_any_value(&self) -> bool {
-        self.numa_node_id.is_some()
-            || self.gsp_firmware_mode.is_some()
-            || self.gsp_firmware_version.is_some()
-    }
+/// Determines whether an NVML error should be treated as a permanent
+/// "not available" condition (so `None` can be cached) or as a transient
+/// failure that should be retried on the next poll.
+///
+/// `NotSupported` and `FunctionNotFound` are driver/hardware capabilities
+/// that cannot change at runtime, so caching `None` is correct.  All other
+/// errors (e.g. `Unknown`, `GpuIsLost`, `DriverNotLoaded`) are transient
+/// and must NOT be cached so the next poll retries.
+fn is_permanent_unavailable(err: &NvmlError) -> bool {
+    matches!(err, NvmlError::NotSupported | NvmlError::FunctionNotFound)
 }
 
-/// Cache keyed by NVML device index. Shared state is held behind a single
-/// `Mutex` so the cache insertion is race-free — the sampler only locks
-/// twice per miss (once to probe, once to insert) and blocking callers stay
-/// O(number of GPUs).
+/// Per-field cache entry.  `Some(value)` means the field was read
+/// successfully.  `None` means the driver permanently does not support
+/// this field (e.g. `NotSupported`).  The entry being absent from the map
+/// means the field has never been fetched or only experienced transient
+/// errors so far.
+type FieldCache<T> = Mutex<HashMap<u32, Option<T>>>;
+
+/// Cache keyed by NVML device index. Each hardware-detail field has its
+/// own independent cache so a transient error on one field does not
+/// permanently lock another field to `None`.
+///
+/// Cache insertion semantics per field:
+/// - NVML returns `Ok(value)` → cache `Some(value)`.
+/// - NVML returns a *permanent* error (`NotSupported`, `FunctionNotFound`)
+///   → cache `None` (permanently unavailable).
+/// - NVML returns a *transient* error (anything else) → do NOT insert;
+///   the next poll will retry.
 pub struct HardwareDetailCache {
-    entries: Mutex<HashMap<u32, HardwareDetails>>,
+    numa: FieldCache<i32>,
+    gsp_mode: FieldCache<u8>,
+    gsp_version: FieldCache<String>,
 }
 
 impl Default for HardwareDetailCache {
@@ -88,83 +113,123 @@ impl Default for HardwareDetailCache {
 impl HardwareDetailCache {
     pub fn new() -> Self {
         Self {
-            entries: Mutex::new(HashMap::new()),
+            numa: Mutex::new(HashMap::new()),
+            gsp_mode: Mutex::new(HashMap::new()),
+            gsp_version: Mutex::new(HashMap::new()),
         }
     }
 
-    /// Fetch hardware details for `index`, populating the cache on the
-    /// first successful call. All NVML errors (notably `NotSupported` and
-    /// `FunctionNotFound`) are swallowed and leave the respective field as
-    /// `None` — this feature MUST degrade gracefully on older drivers.
+    /// Fetch hardware details for `index`, consulting and updating the
+    /// per-field caches independently.  A transient NVML error on one field
+    /// leaves that field uncached so the next poll will retry it; a
+    /// permanent error (`NotSupported`, `FunctionNotFound`) caches `None`
+    /// so we stop querying it on every poll.
     pub fn get_or_fetch(&self, device: &nvml_wrapper::Device, index: u32) -> HardwareDetails {
-        if let Ok(cache) = self.entries.lock()
-            && let Some(existing) = cache.get(&index)
-        {
-            return existing.clone();
+        HardwareDetails {
+            numa_node_id: self
+                .get_or_fetch_field(&self.numa, index, || numa_node_id_result(device)),
+            gsp_firmware_mode: self
+                .get_or_fetch_field(&self.gsp_mode, index, || gsp_firmware_mode_result(device)),
+            gsp_firmware_version: self.get_or_fetch_field(&self.gsp_version, index, || {
+                gsp_firmware_version_result(device)
+            }),
+        }
+    }
+
+    /// Generic per-field cache lookup and conditional insertion.
+    ///
+    /// * If the map already contains an entry for `index` (even `None`),
+    ///   return it immediately without calling `fetch`.
+    /// * Otherwise call `fetch`:
+    ///   - `Ok(v)`  → cache `Some(v)`, return `Some(v)`.
+    ///   - `Err(e)` where `e` is a permanent-unavailable variant → cache
+    ///     `None`, return `None`.
+    ///   - `Err(e)` where `e` is transient → do NOT cache, return `None`
+    ///     (the next poll will retry).
+    fn get_or_fetch_field<T, F>(&self, cache: &FieldCache<T>, index: u32, fetch: F) -> Option<T>
+    where
+        T: Clone,
+        F: FnOnce() -> Result<T, NvmlError>,
+    {
+        // Probe: return immediately if any entry (even `None`) is cached.
+        if let Ok(map) = cache.lock() {
+            if let Some(cached) = map.get(&index) {
+                return cached.clone();
+            }
         }
 
-        let details = HardwareDetails {
-            numa_node_id: numa_node_id(device),
-            gsp_firmware_mode: gsp_firmware_mode(device),
-            gsp_firmware_version: gsp_firmware_version(device),
-        };
-
-        if details.has_any_value()
-            && let Ok(mut cache) = self.entries.lock()
-        {
-            cache.insert(index, details.clone());
+        // Miss: call the NVML function.
+        match fetch() {
+            Ok(value) => {
+                if let Ok(mut map) = cache.lock() {
+                    map.insert(index, Some(value.clone()));
+                }
+                Some(value)
+            }
+            Err(ref e) if is_permanent_unavailable(e) => {
+                if let Ok(mut map) = cache.lock() {
+                    map.insert(index, None);
+                }
+                None
+            }
+            Err(_transient) => {
+                // Do NOT cache — retry next poll.
+                None
+            }
         }
-        details
     }
 }
 
-/// Read the NUMA node id via NVML. Canonicalises the sentinel
-/// `u32::MAX` (which some driver versions return when no NUMA topology is
-/// present) to `None` so the UI and exporter can omit the metric rather
-/// than emit a bogus number.
-fn numa_node_id(device: &nvml_wrapper::Device) -> Option<i32> {
+/// Read the NUMA node id via NVML, returning the raw `Result` so the
+/// cache layer can distinguish transient from permanent errors.
+///
+/// Canonicalises the sentinel `u32::MAX` (which some driver versions return
+/// when no NUMA topology is present) to `NvmlError::NotSupported` so it is
+/// treated as permanently unavailable and cached as `None`.
+fn numa_node_id_result(device: &nvml_wrapper::Device) -> Result<i32, NvmlError> {
     // `Device::numa_node_id()` is available on all platforms in
     // nvml-wrapper 0.12.1 — no `cfg(target_os = "linux")` gate is needed.
     // Returns `u32` per the C API: negative values are not possible, but
     // drivers sometimes return the all-bits-set sentinel when no NUMA
     // topology is present.
-    let raw = device.numa_node_id().ok()?;
-    // Treat the classic "no NUMA" sentinel as `None`. Valid NUMA node ids
-    // fit easily into `i32` on any real system.
+    let raw = device.numa_node_id()?;
+    // Treat the classic "no NUMA" sentinel as permanently unsupported.
     if raw == u32::MAX {
-        return None;
+        return Err(NvmlError::NotSupported);
     }
-    i32::try_from(raw).ok()
+    i32::try_from(raw).map_err(|_| NvmlError::NotSupported)
 }
 
 /// Encode the GSP firmware mode as a 3-valued byte matching the
 /// `all_smi_gsp_firmware_mode` gauge contract (0=disabled, 1=enabled,
-/// 2=default).
-fn gsp_firmware_mode(device: &nvml_wrapper::Device) -> Option<u8> {
-    let mode = device.gsp_firmware_mode().ok()?;
+/// 2=default), returning the raw `Result` for cache-layer error
+/// classification.
+fn gsp_firmware_mode_result(device: &nvml_wrapper::Device) -> Result<u8, NvmlError> {
+    let mode = device.gsp_firmware_mode()?;
     // `mode.default == true` takes precedence: the driver reports that
-    // firmware operates in its default mode regardless of the enabled
-    // flag.
+    // firmware operates in its default mode regardless of the enabled flag.
     if mode.default {
-        Some(2)
+        Ok(2)
     } else if mode.enabled {
-        Some(1)
+        Ok(1)
     } else {
-        Some(0)
+        Ok(0)
     }
 }
 
-/// Read the GSP firmware version string. Trims any trailing NUL bytes
-/// NVML leaves in the buffer — the high-level wrapper already takes
-/// care of this, but the defensive trim future-proofs against any
-/// buffer encoding surprises.
-fn gsp_firmware_version(device: &nvml_wrapper::Device) -> Option<String> {
-    let raw = device.gsp_firmware_version().ok()?;
+/// Read the GSP firmware version string, returning the raw `Result` for
+/// cache-layer error classification.
+///
+/// Trims trailing NUL bytes NVML leaves in the buffer — the high-level
+/// wrapper already handles this, but the defensive trim future-proofs
+/// against any buffer encoding surprises.
+fn gsp_firmware_version_result(device: &nvml_wrapper::Device) -> Result<String, NvmlError> {
+    let raw = device.gsp_firmware_version()?;
     let trimmed = raw.trim_end_matches('\0').trim().to_string();
     if trimmed.is_empty() {
-        return None;
+        return Err(NvmlError::NotSupported);
     }
-    Some(trimmed)
+    Ok(trimmed)
 }
 
 /// Enumerate NvLinks for `device` and classify the remote endpoint of
@@ -308,38 +373,124 @@ fn err_unsupported() -> NvmlError {
 mod tests {
     use super::*;
 
+    // ------------------------------------------------------------------
+    // HardwareDetailCache field-level caching behaviour
+    // ------------------------------------------------------------------
+
+    /// Verify that a permanent-unavailable error (`NotSupported`) is cached
+    /// as `None` so the fetcher is never called again.
     #[test]
-    fn hardware_details_has_any_value_false_when_all_none() {
-        let empty = HardwareDetails::default();
-        assert!(!empty.has_any_value());
+    fn field_cache_permanent_error_caches_none() {
+        let cache: FieldCache<i32> = Mutex::new(HashMap::new());
+        let hw = HardwareDetailCache::new();
+
+        let mut call_count = 0u32;
+        let result = hw.get_or_fetch_field(&cache, 0, || {
+            call_count += 1;
+            Err(NvmlError::NotSupported)
+        });
+        assert!(result.is_none());
+        assert_eq!(call_count, 1);
+
+        // Second call must hit the cache — fetcher must NOT be called.
+        let result2 = hw.get_or_fetch_field(&cache, 0, || {
+            call_count += 1;
+            Ok(42) // would override None if caching were broken
+        });
+        assert!(result2.is_none(), "cached None should persist");
+        assert_eq!(call_count, 1, "fetcher must not be called on cache hit");
     }
 
+    /// Verify that a transient error does NOT get cached, so the next poll
+    /// retries the field.
     #[test]
-    fn hardware_details_has_any_value_true_when_numa_set() {
-        let d = HardwareDetails {
-            numa_node_id: Some(0),
-            ..Default::default()
-        };
-        assert!(d.has_any_value());
+    fn field_cache_transient_error_is_not_cached() {
+        let cache: FieldCache<i32> = Mutex::new(HashMap::new());
+        let hw = HardwareDetailCache::new();
+
+        let mut call_count = 0u32;
+
+        // First call: transient error — should NOT be cached.
+        let result = hw.get_or_fetch_field(&cache, 0, || {
+            call_count += 1;
+            Err(NvmlError::Unknown)
+        });
+        assert!(result.is_none());
+        assert_eq!(call_count, 1);
+
+        // Second call: success — fetcher must be called again because the
+        // transient error was not cached.
+        let result2 = hw.get_or_fetch_field(&cache, 0, || {
+            call_count += 1;
+            Ok(7)
+        });
+        assert_eq!(result2, Some(7));
+        assert_eq!(
+            call_count, 2,
+            "fetcher must be called again after transient miss"
+        );
     }
 
+    /// Verify that a successful fetch is cached and returns the same value
+    /// without calling the fetcher a second time.
     #[test]
-    fn hardware_details_has_any_value_true_when_mode_set() {
-        let d = HardwareDetails {
-            gsp_firmware_mode: Some(2),
-            ..Default::default()
-        };
-        assert!(d.has_any_value());
+    fn field_cache_success_is_cached() {
+        let cache: FieldCache<i32> = Mutex::new(HashMap::new());
+        let hw = HardwareDetailCache::new();
+
+        let mut call_count = 0u32;
+        let _ = hw.get_or_fetch_field(&cache, 0, || {
+            call_count += 1;
+            Ok(42)
+        });
+        let result2 = hw.get_or_fetch_field(&cache, 0, || {
+            call_count += 1;
+            Ok(99)
+        });
+        assert_eq!(result2, Some(42));
+        assert_eq!(call_count, 1, "fetcher must not be called on cache hit");
     }
 
+    /// Verify that per-field caches are independent: a transient error on
+    /// one field (e.g. gsp_mode) does not affect cached values on another
+    /// field (e.g. numa).
     #[test]
-    fn hardware_details_has_any_value_true_when_version_set() {
-        let d = HardwareDetails {
-            gsp_firmware_version: Some("550.54.15".to_string()),
-            ..Default::default()
-        };
-        assert!(d.has_any_value());
+    fn field_caches_are_independent() {
+        let hw = HardwareDetailCache::new();
+
+        // Pre-populate gsp_mode with a successful value.
+        let _ = hw.get_or_fetch_field(&hw.gsp_mode, 0, || Ok(2u8));
+
+        // Simulate a transient error on numa — must not clear the gsp_mode cache.
+        let numa_result = hw.get_or_fetch_field(&hw.numa, 0, || Err(NvmlError::Unknown));
+        assert!(numa_result.is_none());
+
+        // gsp_mode cache must still hold its value.
+        let mut mode_calls = 0u32;
+        let mode_result = hw.get_or_fetch_field(&hw.gsp_mode, 0, || {
+            mode_calls += 1;
+            Ok(99u8) // should never be reached
+        });
+        assert_eq!(mode_result, Some(2u8));
+        assert_eq!(
+            mode_calls, 0,
+            "gsp_mode fetcher must not be called — already cached"
+        );
     }
+
+    /// Verify `is_permanent_unavailable` classifies the correct variants.
+    #[test]
+    fn permanent_unavailable_classification() {
+        assert!(is_permanent_unavailable(&NvmlError::NotSupported));
+        assert!(is_permanent_unavailable(&NvmlError::FunctionNotFound));
+        assert!(!is_permanent_unavailable(&NvmlError::Unknown));
+        assert!(!is_permanent_unavailable(&NvmlError::GpuLost));
+        assert!(!is_permanent_unavailable(&NvmlError::DriverNotLoaded));
+    }
+
+    // ------------------------------------------------------------------
+    // Remote-device type mapping
+    // ------------------------------------------------------------------
 
     #[test]
     fn remote_device_type_mapping_is_stable() {
