@@ -610,6 +610,16 @@ struct VgpuParseState {
     instances: HashMap<(String, u32), VgpuInfo>,
 }
 
+/// Per-scrape cap on distinct physical vGPU-capable GPUs. Matches the
+/// `MAX_DEVICES_PER_TYPE` bound used for every other metric family so a
+/// malicious remote exporter cannot exhaust memory by advertising unbounded
+/// `gpu_uuid` values.
+const MAX_VGPU_HOSTS: usize = 256;
+/// Per-scrape cap on distinct `(gpu_uuid, vgpu_id)` tuples (~16 vGPUs * 256
+/// hosts). New-key insertions past this limit are dropped; updates to
+/// already-tracked instances proceed normally.
+const MAX_VGPU_INSTANCES: usize = 4096;
+
 impl VgpuParseState {
     fn new() -> Self {
         Self {
@@ -627,6 +637,12 @@ impl VgpuParseState {
     ) {
         let gpu_uuid = labels.get("gpu_uuid").cloned().unwrap_or_default();
         if gpu_uuid.is_empty() {
+            return;
+        }
+
+        // Drop samples for new hosts once the cap is reached. Updates to an
+        // already-tracked host UUID always flow through.
+        if !self.hosts.contains_key(&gpu_uuid) && self.hosts.len() >= MAX_VGPU_HOSTS {
             return;
         }
 
@@ -678,9 +694,17 @@ impl VgpuParseState {
                 else {
                     return;
                 };
+                let instance_key = (gpu_uuid.clone(), vgpu_id);
+                // Drop new-instance samples once the cap is reached. Updates
+                // to an already-tracked instance always flow through.
+                if !self.instances.contains_key(&instance_key)
+                    && self.instances.len() >= MAX_VGPU_INSTANCES
+                {
+                    return;
+                }
                 let entry = self
                     .instances
-                    .entry((gpu_uuid.clone(), vgpu_id))
+                    .entry(instance_key)
                     .or_insert_with(|| VgpuInfo {
                         instance_id: vgpu_id,
                         uuid: labels.get("vgpu_uuid").cloned().unwrap_or_default(),
@@ -1251,6 +1275,56 @@ all_smi_cpu_utilization{cpu_model="AMD", instance="node1", hostname="node1", ind
         assert!(
             vgpu.is_empty(),
             "No vGPU rows must be emitted for a bare-metal host"
+        );
+    }
+
+    #[test]
+    fn vgpu_parser_caps_host_count() {
+        let parser = create_test_parser();
+        let re = create_test_regex();
+        let host = "127.0.0.1:10103";
+
+        // Feed 2 * MAX_VGPU_HOSTS unique host UUIDs. Only the first
+        // MAX_VGPU_HOSTS may survive; the rest must be dropped silently.
+        let mut text = String::new();
+        for i in 0..(2 * MAX_VGPU_HOSTS) {
+            text.push_str(&format!(
+                r#"all_smi_vgpu_host_mode{{gpu_index="0", gpu_uuid="GPU-{i}", gpu="NVIDIA A100", instance="node1", host="node1", host_mode="Sriov"}} 1
+"#
+            ));
+        }
+        let (_gpu, _cpu, _mem, _storage, vgpu) = parser.parse_metrics(&text, host, &re);
+        assert_eq!(vgpu.len(), MAX_VGPU_HOSTS, "host count must not exceed cap");
+    }
+
+    #[test]
+    fn vgpu_parser_caps_instance_count() {
+        let parser = create_test_parser();
+        let re = create_test_regex();
+        let host = "127.0.0.1:10104";
+
+        // Generate a single host with 2 * MAX_VGPU_INSTANCES unique vGPU ids.
+        // Each is emitted via a vgpu_utilization line — we pick a scrape-style
+        // metric so the new-instance branch is the one being gated. After
+        // parsing, at most MAX_VGPU_INSTANCES instances may appear.
+        let mut text = String::new();
+        // Establish the host first so the host row exists.
+        text.push_str(
+            r#"all_smi_vgpu_host_mode{gpu_index="0", gpu_uuid="GPU-A", gpu="NVIDIA A100", instance="node1", host="node1", host_mode="Sriov"} 1
+"#,
+        );
+        for i in 0..(2 * MAX_VGPU_INSTANCES) {
+            text.push_str(&format!(
+                r#"all_smi_vgpu_utilization{{gpu_index="0", gpu_uuid="GPU-A", gpu="NVIDIA A100", instance="node1", host="node1", vgpu_id="{i}", vgpu_uuid="GRID-{i}", vgpu_type="GRID A100-8C"}} 1
+"#
+            ));
+        }
+        let (_gpu, _cpu, _mem, _storage, vgpu) = parser.parse_metrics(&text, host, &re);
+        assert_eq!(vgpu.len(), 1, "single host must still exist");
+        assert_eq!(
+            vgpu[0].vgpus.len(),
+            MAX_VGPU_INSTANCES,
+            "instance count must not exceed cap"
         );
     }
 }
