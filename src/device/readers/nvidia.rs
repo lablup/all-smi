@@ -46,6 +46,18 @@ struct ThermalThresholds {
     acoustic: Option<u32>,
 }
 
+impl ThermalThresholds {
+    /// Whether this snapshot carries any supported threshold. Used to avoid
+    /// permanently caching a fully-empty record produced by transient NVML
+    /// errors (e.g. `Uninitialized` or driver hiccups on the very first call).
+    fn has_any_value(&self) -> bool {
+        self.slowdown.is_some()
+            || self.shutdown.is_some()
+            || self.max_operating.is_some()
+            || self.acoustic.is_some()
+    }
+}
+
 pub struct NvidiaGpuReader {
     /// Cached driver version (fetched only once)
     driver_version: OnceLock<String>,
@@ -108,6 +120,13 @@ impl NvidiaGpuReader {
     /// the first call. All NVML errors (notably `NotSupported` and
     /// `FunctionNotFound`) are swallowed and leave the respective field as
     /// `None` — this feature MUST degrade gracefully on older drivers.
+    ///
+    /// Caching policy: a fully-empty snapshot (every field `None`) is NOT
+    /// stored, so a transient NVML error on the first call (`Uninitialized`,
+    /// driver hiccup) will not lock every threshold to `None` for the
+    /// process lifetime. Devices that genuinely never report any threshold
+    /// will pay 4 NVML calls per poll instead of one cached read — an
+    /// acceptable trade since these calls are cheap.
     fn thermal_thresholds_for(
         &self,
         device: &nvml_wrapper::Device,
@@ -134,7 +153,9 @@ impl NvidiaGpuReader {
                 .ok(),
         };
 
-        if let Ok(mut cache) = self.thermal_thresholds.lock() {
+        if thresholds.has_any_value()
+            && let Ok(mut cache) = self.thermal_thresholds.lock()
+        {
             cache.insert(index, thresholds);
         }
 
@@ -1029,6 +1050,47 @@ Cached:          4096000 kB
         // report a P-state; MUST translate to `None` so downstream surfaces
         // render "unavailable" rather than pretending the GPU is at P0.
         assert_eq!(performance_state_to_u32(PerformanceState::Unknown), None);
+    }
+
+    // --- ThermalThresholds caching predicate tests ---
+
+    #[test]
+    fn thermal_thresholds_has_any_value_is_false_when_all_none() {
+        // Regression: a transient NVML error (Uninitialized / driver hiccup)
+        // on the very first call could yield this snapshot. Caching it would
+        // permanently lock every threshold to `None` for the process
+        // lifetime, so `has_any_value` MUST return `false` here.
+        let empty = ThermalThresholds::default();
+        assert!(!empty.has_any_value());
+    }
+
+    #[test]
+    fn thermal_thresholds_has_any_value_is_true_when_any_field_set() {
+        // Any single populated field is enough to consider the snapshot
+        // worth caching — the device clearly reported something.
+        let only_slowdown = ThermalThresholds {
+            slowdown: Some(93),
+            ..Default::default()
+        };
+        assert!(only_slowdown.has_any_value());
+
+        let only_shutdown = ThermalThresholds {
+            shutdown: Some(98),
+            ..Default::default()
+        };
+        assert!(only_shutdown.has_any_value());
+
+        let only_max_op = ThermalThresholds {
+            max_operating: Some(87),
+            ..Default::default()
+        };
+        assert!(only_max_op.has_any_value());
+
+        let only_acoustic = ThermalThresholds {
+            acoustic: Some(75),
+            ..Default::default()
+        };
+        assert!(only_acoustic.has_any_value());
     }
 
     #[test]
