@@ -127,15 +127,22 @@ impl GpuInfo {
     /// non-NVIDIA GPUs.
     pub fn thermal_proximity(&self, cfg: ThermalProximityConfig) -> ThermalProximity {
         // Shutdown wins unconditionally over slowdown.
+        //
+        // `saturating_add` defends against malformed remote inputs: the
+        // network parser's `saturating_u32` helper can produce `u32::MAX`
+        // when a scrape contains nonsense values, and an unchecked
+        // `temperature + margin` would panic in debug builds. Saturating
+        // simply yields `u32::MAX` in that pathological case and the
+        // comparison still produces a sane (and harmless) result.
         if let Some(shutdown) = self.temperature_threshold_shutdown
             && shutdown > 0
-            && self.temperature + cfg.shutdown_margin >= shutdown
+            && self.temperature.saturating_add(cfg.shutdown_margin) >= shutdown
         {
             return ThermalProximity::Shutdown;
         }
         if let Some(slowdown) = self.temperature_threshold_slowdown
             && slowdown > 0
-            && self.temperature + cfg.slowdown_margin >= slowdown
+            && self.temperature.saturating_add(cfg.slowdown_margin) >= slowdown
         {
             return ThermalProximity::Slowdown;
         }
