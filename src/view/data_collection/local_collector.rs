@@ -29,8 +29,8 @@ use crate::app_state::AppState;
 use crate::device::platform_detection::has_tenstorrent;
 use crate::device::{
     ChassisInfo, ChassisReader, CpuInfo, CpuReader, GpuInfo, GpuReader, MemoryInfo, MemoryReader,
-    ProcessInfo, create_chassis_reader, get_cpu_readers, get_gpu_readers, get_memory_readers,
-    get_nvml_status_message,
+    ProcessInfo, VgpuHostInfo, create_chassis_reader, get_cpu_readers, get_gpu_readers,
+    get_memory_readers, get_nvml_status_message,
     platform_detection::has_nvidia,
     process_list::{merge_gpu_processes, update_process_cache},
 };
@@ -251,6 +251,7 @@ impl LocalCollector {
         // Use Arc references instead of cloning the entire Arc<RwLock<_>>
         let gpu_readers_1 = Arc::clone(&self.gpu_readers);
         let gpu_readers_2 = Arc::clone(&self.gpu_readers);
+        let gpu_readers_vgpu = Arc::clone(&self.gpu_readers);
         let cpu_readers = Arc::clone(&self.cpu_readers);
         let memory_readers = Arc::clone(&self.memory_readers);
         let chassis_reader = Arc::clone(&self.chassis_reader);
@@ -264,6 +265,7 @@ impl LocalCollector {
             all_processes,
             all_storage_info,
             all_chassis_info,
+            all_vgpu_info,
         ) = {
             let status_tx_gpu = status_tx.clone();
             let status_tx_cpu = status_tx.clone();
@@ -372,6 +374,16 @@ impl LocalCollector {
                         .into_iter()
                         .collect();
                     info
+                },
+                // vGPU info collection (only NVIDIA readers produce data; others
+                // return an empty vector via the default trait implementation).
+                async move {
+                    let readers = gpu_readers_vgpu.read().await;
+                    let info: Vec<VgpuHostInfo> = readers
+                        .iter()
+                        .flat_map(|reader| reader.get_vgpu_info())
+                        .collect();
+                    info
                 }
             )
         };
@@ -414,6 +426,7 @@ impl LocalCollector {
             process_info: all_processes_merged,
             storage_info: all_storage_info,
             chassis_info: all_chassis_info,
+            vgpu_info: all_vgpu_info,
             connection_statuses: Vec::new(),
         }
     }
@@ -444,6 +457,13 @@ impl LocalCollector {
             gpu_processes.extend(procs);
             gpu_pids.extend(pids);
         }
+
+        // vGPU info collection — performed on the same readers set so it
+        // shares NVML handle caching with the main GPU collection.
+        let all_vgpu_info: Vec<VgpuHostInfo> = gpu_readers
+            .iter()
+            .flat_map(|reader| reader.get_vgpu_info())
+            .collect();
 
         // Determine if we should do a full refresh or selective refresh
         let cycle = self.refresh_cycle.fetch_add(1, Ordering::Relaxed);
@@ -526,6 +546,7 @@ impl LocalCollector {
             process_info: all_processes,
             storage_info: all_storage_info,
             chassis_info: all_chassis_info,
+            vgpu_info: all_vgpu_info,
             connection_statuses: Vec::new(),
         }
     }
@@ -683,6 +704,7 @@ impl DataCollectionStrategy for LocalCollector {
 
         state.storage_info = data.storage_info;
         state.chassis_info = data.chassis_info;
+        state.vgpu_info = data.vgpu_info;
 
         // Mark data as changed to trigger UI update
         state.mark_data_changed();

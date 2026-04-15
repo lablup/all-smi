@@ -47,7 +47,7 @@ pub use crate::client::{AllSmi, AllSmiConfig, DeviceType};
 pub use crate::error::{Error, Result};
 
 // Core data types - GPU/NPU
-pub use crate::device::{GpuInfo, ProcessInfo};
+pub use crate::device::{GpuInfo, ProcessInfo, VgpuHostInfo, VgpuInfo};
 
 // Core data types - CPU
 pub use crate::device::{

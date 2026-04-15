@@ -52,7 +52,8 @@
 
 use crate::device::{
     ChassisInfo, ChassisReader, CpuInfo, CpuReader, GpuInfo, GpuReader, MemoryInfo, MemoryReader,
-    ProcessInfo, create_chassis_reader, get_cpu_readers, get_gpu_readers, get_memory_readers,
+    ProcessInfo, VgpuHostInfo, create_chassis_reader, get_cpu_readers, get_gpu_readers,
+    get_memory_readers,
 };
 use crate::error::Result;
 use crate::storage::{StorageInfo, StorageReader, create_storage_reader};
@@ -291,6 +292,35 @@ impl AllSmi {
             all_processes.extend(reader.get_process_info());
         }
         all_processes
+    }
+
+    /// Get NVIDIA vGPU information for every vGPU-enabled host GPU.
+    ///
+    /// Returns an empty vector on bare-metal or non-NVIDIA hosts. Each
+    /// [`VgpuHostInfo`] record carries the host mode, scheduler metadata, and
+    /// a list of active vGPU instances. Non-NVIDIA readers return empty via
+    /// the trait default.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use all_smi::AllSmi;
+    ///
+    /// let smi = AllSmi::new()?;
+    /// for host in smi.get_vgpu_info() {
+    ///     println!("{}: {} (ARR {})", host.gpu_name, host.host_mode, host.scheduler_arr_mode);
+    ///     for vgpu in &host.vgpus {
+    ///         println!("  {} - util {:?}%", vgpu.vgpu_type_name, vgpu.gpu_utilization);
+    ///     }
+    /// }
+    /// # Ok::<(), all_smi::Error>(())
+    /// ```
+    pub fn get_vgpu_info(&self) -> Vec<VgpuHostInfo> {
+        let mut all_vgpu = Vec::new();
+        for reader in &self.gpu_readers {
+            all_vgpu.extend(reader.get_vgpu_info());
+        }
+        all_vgpu
     }
 
     /// Get information about system CPUs.

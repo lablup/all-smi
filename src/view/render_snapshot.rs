@@ -22,7 +22,7 @@
 use std::collections::HashMap;
 
 use crate::app_state::{AppState, ConnectionStatus, SortCriteria, SortDirection};
-use crate::device::{ChassisInfo, CpuInfo, GpuInfo, MemoryInfo, ProcessInfo};
+use crate::device::{ChassisInfo, CpuInfo, GpuInfo, MemoryInfo, ProcessInfo, VgpuHostInfo};
 use crate::storage::info::StorageInfo;
 use crate::ui::notification::NotificationManager;
 use crate::utils::RuntimeEnvironment;
@@ -88,6 +88,8 @@ pub struct RenderSnapshot {
     pub process_info: Vec<ProcessInfo>,
     pub chassis_info: Vec<ChassisInfo>,
     pub storage_info: Vec<StorageInfo>,
+    /// Per-GPU vGPU host info (NVIDIA vGPU only). Empty on bare-metal.
+    pub vgpu_info: Vec<VgpuHostInfo>,
 
     // Connection tracking (remote mode)
     pub connection_status: HashMap<String, ConnectionStatus>,
@@ -163,6 +165,7 @@ impl RenderSnapshot {
             process_info: state.process_info.clone(),
             chassis_info: state.chassis_info.clone(),
             storage_info: state.storage_info.clone(),
+            vgpu_info: state.vgpu_info.clone(),
 
             // Connection tracking
             connection_status: state.connection_status.clone(),
@@ -241,6 +244,7 @@ impl RenderSnapshot {
         state.process_info = self.process_info.clone();
         state.chassis_info = self.chassis_info.clone();
         state.storage_info = self.storage_info.clone();
+        state.vgpu_info = self.vgpu_info.clone();
 
         // Connection tracking
         state.connection_status = self.connection_status.clone();
