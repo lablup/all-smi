@@ -38,7 +38,6 @@
 //! * Per-instance metric reads are independently best-effort — a single
 //!   failed `utilization_rates` call does not drop the whole instance row.
 
-use std::ffi::CStr;
 use std::os::raw::c_uint;
 
 use nvml_wrapper::Nvml;
@@ -247,16 +246,6 @@ fn is_mig_profile_token(token: &str) -> bool {
     }
     // First character must be a digit (e.g. `1g.5gb`).
     token.chars().next().is_some_and(|c| c.is_ascii_digit())
-}
-
-/// Decode a NUL-terminated NVML C string buffer. Used by the few raw-FFI
-/// helpers above when nvml-wrapper does not provide a Rust accessor; kept
-/// here in the MIG module so it stays close to its sole caller.
-#[allow(dead_code)]
-fn decode_cstr(buf: &[i8]) -> String {
-    // SAFETY: NVML guarantees NUL termination within the supplied buffer.
-    let cstr = unsafe { CStr::from_ptr(buf.as_ptr() as *const _) };
-    cstr.to_str().unwrap_or("").to_string()
 }
 
 #[cfg(test)]
