@@ -19,7 +19,7 @@ use crossterm::{queue, style::Color, style::Print};
 use crate::device::GpuInfo;
 use crate::device::MigGpuInfo;
 use crate::device::VgpuHostInfo;
-use crate::device::types::{ThermalProximity, ThermalProximityConfig};
+use crate::device::types::{NvLinkRemoteType, ThermalProximity, ThermalProximityConfig};
 use crate::ui::text::print_colored_text;
 use crate::ui::widgets::draw_bar;
 
@@ -41,17 +41,19 @@ impl GpuRenderer {
 }
 
 /// Compute the number of terminal lines [`print_gpu_info`] will emit for a
-/// single GPU, including any optional thermal/P-state row and any nested
-/// vGPU / MIG section.
+/// single GPU, including any optional thermal/P-state row, the extended
+/// hardware-details row (issue #132), and any nested vGPU / MIG section.
 ///
 /// Layout pieces, in render order:
 ///   1. The base info line (always 1 line).
-///   2. The optional thermal/P-state row (1 line when any of the 5 new
-///      fields are populated; 0 otherwise).
-///   3. The gauge row (always 1 line).
-///   4. A nested vGPU section, when a matching [`VgpuHostInfo`] is present
+///   2. The optional thermal/P-state row (1 line when any of the 5 thermal
+///      fields or the P-state is populated; 0 otherwise).
+///   3. The optional hardware-details row (1 line when NUMA, GSP firmware,
+///      or NvLink topology is populated; 0 otherwise).
+///   4. The gauge row (always 1 line).
+///   5. A nested vGPU section, when a matching [`VgpuHostInfo`] is present
 ///      and the host is "active": 1 header line + 1 line per vGPU instance.
-///   5. A nested MIG section, when a matching [`MigGpuInfo`] is present and
+///   6. A nested MIG section, when a matching [`MigGpuInfo`] is present and
 ///      the host is "active": 1 header line + 1 line per MIG instance.
 ///
 /// The vGPU/MIG matching here mirrors `find_matching_vgpu_host` /
@@ -60,8 +62,8 @@ impl GpuRenderer {
 /// actually rendered.
 ///
 /// Used by the layout calculator and the PgUp/PgDn handlers to size the
-/// scrollable GPU area correctly when the new thermal/P-state row is
-/// present, since it can grow rows from 2 to 3 lines apiece.
+/// scrollable GPU area correctly when optional rows are present, since they
+/// can grow rows from 2 to 4 lines apiece.
 pub fn gpu_render_line_count(
     gpu: &GpuInfo,
     vgpu_info: &[VgpuHostInfo],
@@ -77,6 +79,14 @@ pub fn gpu_render_line_count(
         || gpu.temperature_threshold_acoustic.is_some()
         || gpu.performance_state.is_some();
     if has_thermal_or_pstate {
+        lines += 1;
+    }
+
+    // Optional hardware-details row (issue #132). Rendered when NUMA,
+    // GSP firmware, or NvLink topology is present. GPM metrics are shown
+    // only inline on the same row if NUMA/GSP/NvLink is also present, so
+    // they don't by themselves trigger the row.
+    if gpu_has_hardware_details_row(gpu) {
         lines += 1;
     }
 
@@ -200,6 +210,7 @@ pub fn print_gpu_info<W: Write>(
     };
 
     // Print info line: <device_type> <name> [@ <hostname>] Util:4.0% Mem:25.2/128GB Temp:0°C Pwr:0.0W
+    // (The info / gauges / thermal / HW rows are produced further below.)
     print_colored_text(
         stdout,
         &format!("{:<5}", info.device_type),
@@ -365,6 +376,12 @@ pub fn print_gpu_info<W: Write>(
     // these fields keep their current two-row layout. The row is indented
     // to line up under the device name so it visually hangs off the GPU.
     render_thermal_pstate_row(stdout, info);
+
+    // Optional tertiary row: extended hardware details (issue #132).
+    //
+    // Rendered when NUMA placement, GSP firmware, or NvLink topology is
+    // reported. Keeps the same 5-column indent as the thermal row above.
+    render_hardware_details_row(stdout, info);
 
     // Calculate gauge widths with 5 char padding on each side and 2 space separation
     let available_width = width.saturating_sub(10); // 5 padding each side
@@ -536,6 +553,144 @@ fn render_thermal_pstate_row<W: Write>(stdout: &mut W, info: &GpuInfo) {
     queue!(stdout, Print("\r\n")).unwrap();
 }
 
+/// Return true when a GPU carries at least one hardware-detail field that
+/// the TUI cares about surfacing: NUMA node, GSP firmware mode/version,
+/// or NvLink topology. GPM metrics alone do NOT trigger the row since
+/// they render alongside the other details when present.
+fn gpu_has_hardware_details_row(gpu: &GpuInfo) -> bool {
+    gpu.numa_node_id.is_some()
+        || gpu.gsp_firmware_mode.is_some()
+        || gpu.gsp_firmware_version.is_some()
+        || !gpu.nvlink_remote_devices.is_empty()
+}
+
+/// Human-readable label for the GSP firmware mode gauge, used in the TUI
+/// hardware-details row. Mirrors the `all_smi_gpu_gsp_firmware_mode` code
+/// emitted by the exporter (`0=disabled`, `1=enabled`, `2=default`).
+fn gsp_firmware_mode_label(code: u8) -> &'static str {
+    match code {
+        0 => "disabled",
+        1 => "enabled",
+        2 => "default",
+        _ => "unknown",
+    }
+}
+
+/// Render the compact hardware-details row beneath a GPU (issue #132).
+///
+/// Example output (trailing spaces / ANSI colour codes omitted for
+/// readability):
+///
+/// ```text
+///      HW  NUMA:0  GSP:enabled v550.54.15  NVLink:6x(gpu=5,sw=1)  GPM:SM=0.67 MemBW=0.42
+/// ```
+///
+/// No-op when none of the issue-#132 fields are populated, so non-NVIDIA
+/// rows and older drivers keep their historical layout.
+fn render_hardware_details_row<W: Write>(stdout: &mut W, info: &GpuInfo) {
+    if !gpu_has_hardware_details_row(info) {
+        return;
+    }
+
+    // 5-char indent aligns with the other secondary rows.
+    print_colored_text(stdout, "     ", Color::White, None, None);
+    print_colored_text(stdout, "HW", Color::DarkMagenta, None, None);
+
+    if let Some(numa) = info.numa_node_id {
+        print_colored_text(stdout, " NUMA:", Color::DarkYellow, None, None);
+        print_colored_text(stdout, &format!("{numa}"), Color::White, None, None);
+    }
+
+    if let Some(mode_code) = info.gsp_firmware_mode {
+        print_colored_text(stdout, " GSP:", Color::DarkGreen, None, None);
+        print_colored_text(
+            stdout,
+            gsp_firmware_mode_label(mode_code),
+            Color::White,
+            None,
+            None,
+        );
+    }
+    if let Some(ref version) = info.gsp_firmware_version {
+        // Terse prefix to signal "firmware version" without stealing a
+        // whole column. The value is rendered in parentheses when the
+        // mode is also shown to visually group the two.
+        print_colored_text(stdout, " v", Color::DarkGrey, None, None);
+        print_colored_text(stdout, version, Color::White, None, None);
+    }
+
+    if !info.nvlink_remote_devices.is_empty() {
+        let total = info.nvlink_remote_devices.len();
+        let (gpu_count, switch_count, ibmnpu_count, unknown_count) =
+            count_nvlink_remote_types(&info.nvlink_remote_devices);
+        print_colored_text(stdout, " NVLink:", Color::DarkCyan, None, None);
+        // Summary: "6x(gpu=5,sw=1)" — compact and still machine-parseable
+        // if someone wants to grep.
+        let mut parts: Vec<String> = Vec::with_capacity(4);
+        if gpu_count > 0 {
+            parts.push(format!("gpu={gpu_count}"));
+        }
+        if switch_count > 0 {
+            parts.push(format!("sw={switch_count}"));
+        }
+        if ibmnpu_count > 0 {
+            parts.push(format!("ibmnpu={ibmnpu_count}"));
+        }
+        if unknown_count > 0 {
+            parts.push(format!("?={unknown_count}"));
+        }
+        let summary = if parts.is_empty() {
+            format!("{total}x")
+        } else {
+            format!("{total}x({})", parts.join(","))
+        };
+        print_colored_text(stdout, &summary, Color::White, None, None);
+    }
+
+    // GPM metrics render last so they appear after the topology info.
+    // Only surfaces when at least one scalar is populated — a supported-
+    // but-unsampled snapshot (`Some(GpmMetrics::default())`) produces
+    // nothing so the TUI never shows stale zeros.
+    if let Some(ref gpm) = info.gpm_metrics
+        && (gpm.sm_occupancy.is_some() || gpm.memory_bandwidth_utilization.is_some())
+    {
+        print_colored_text(stdout, " GPM:", Color::DarkBlue, None, None);
+        if let Some(sm) = gpm.sm_occupancy {
+            print_colored_text(stdout, "SM=", Color::DarkGrey, None, None);
+            print_colored_text(stdout, &format!("{sm:.2}"), Color::White, None, None);
+        }
+        if let Some(mem) = gpm.memory_bandwidth_utilization {
+            if gpm.sm_occupancy.is_some() {
+                print_colored_text(stdout, " ", Color::White, None, None);
+            }
+            print_colored_text(stdout, "MemBW=", Color::DarkGrey, None, None);
+            print_colored_text(stdout, &format!("{mem:.2}"), Color::White, None, None);
+        }
+    }
+
+    queue!(stdout, Print("\r\n")).unwrap();
+}
+
+/// Tally NvLinks by remote-type classification for the summary column.
+/// Returns `(gpu, switch, ibmnpu, unknown)` counts.
+fn count_nvlink_remote_types(
+    links: &[crate::device::NvLinkRemoteDevice],
+) -> (usize, usize, usize, usize) {
+    let mut gpu_count = 0;
+    let mut switch_count = 0;
+    let mut ibmnpu_count = 0;
+    let mut unknown_count = 0;
+    for link in links {
+        match link.remote_type {
+            NvLinkRemoteType::Gpu => gpu_count += 1,
+            NvLinkRemoteType::Switch => switch_count += 1,
+            NvLinkRemoteType::IbmNpu => ibmnpu_count += 1,
+            NvLinkRemoteType::Unknown => unknown_count += 1,
+        }
+    }
+    (gpu_count, switch_count, ibmnpu_count, unknown_count)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -565,6 +720,11 @@ mod tests {
             temperature_threshold_max_operating: Some(87),
             temperature_threshold_acoustic: None,
             performance_state: Some(2),
+            numa_node_id: None,
+            gsp_firmware_mode: None,
+            gsp_firmware_version: None,
+            nvlink_remote_devices: Vec::new(),
+            gpm_metrics: None,
             detail: HashMap::new(),
         }
     }
@@ -1048,5 +1208,213 @@ mod tests {
             gpu_render_line_count(&gpu, &[], std::slice::from_ref(&mig_host)),
             2
         );
+    }
+
+    // --- hardware-details row (issue #132) tests ---
+
+    fn bare_gpu() -> GpuInfo {
+        let mut gpu = make_gpu(40);
+        gpu.temperature_threshold_slowdown = None;
+        gpu.temperature_threshold_shutdown = None;
+        gpu.temperature_threshold_max_operating = None;
+        gpu.temperature_threshold_acoustic = None;
+        gpu.performance_state = None;
+        gpu
+    }
+
+    #[test]
+    fn hw_row_noop_when_no_hardware_details() {
+        let gpu = bare_gpu();
+        let mut buf: Vec<u8> = Vec::new();
+        render_hardware_details_row(&mut buf, &gpu);
+        assert!(
+            buf.is_empty(),
+            "expected no output when no hw details populated"
+        );
+    }
+
+    #[test]
+    fn hw_row_renders_numa_when_populated() {
+        let mut gpu = bare_gpu();
+        gpu.numa_node_id = Some(1);
+        let mut buf: Vec<u8> = Vec::new();
+        render_hardware_details_row(&mut buf, &gpu);
+        let rendered = String::from_utf8(buf).expect("valid utf-8");
+        assert!(rendered.contains("HW"), "{rendered}");
+        assert!(rendered.contains("NUMA:"), "{rendered}");
+        assert!(rendered.contains('1'), "{rendered}");
+    }
+
+    #[test]
+    fn hw_row_renders_gsp_mode_label() {
+        for (code, label) in [(0u8, "disabled"), (1, "enabled"), (2, "default")] {
+            let mut gpu = bare_gpu();
+            gpu.gsp_firmware_mode = Some(code);
+            let mut buf: Vec<u8> = Vec::new();
+            render_hardware_details_row(&mut buf, &gpu);
+            let rendered = String::from_utf8(buf).expect("valid utf-8");
+            assert!(
+                rendered.contains(label),
+                "expected '{label}' in: {rendered}"
+            );
+        }
+    }
+
+    /// Strip ANSI escape sequences from a rendered TUI row so substring
+    /// assertions aren't confused by colour control codes embedded inside
+    /// labels like `v550.54.15` that get split across multiple
+    /// `print_colored_text` calls.
+    fn strip_ansi(raw: &str) -> String {
+        let mut out = String::with_capacity(raw.len());
+        let mut chars = raw.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == '\x1b' {
+                // Consume up to and including the terminator (e.g. 'm'
+                // for CSI SGR sequences, or any letter for other CSI).
+                for ch in chars.by_ref() {
+                    if ch.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn hw_row_renders_gsp_version_prefix() {
+        let mut gpu = bare_gpu();
+        gpu.gsp_firmware_version = Some("550.54.15".to_string());
+        let mut buf: Vec<u8> = Vec::new();
+        render_hardware_details_row(&mut buf, &gpu);
+        let rendered = strip_ansi(&String::from_utf8(buf).expect("valid utf-8"));
+        assert!(rendered.contains("v550.54.15"), "{rendered}");
+    }
+
+    #[test]
+    fn hw_row_renders_nvlink_summary_with_type_counts() {
+        use crate::device::{NvLinkRemoteDevice, NvLinkRemoteType};
+        let mut gpu = bare_gpu();
+        gpu.nvlink_remote_devices = vec![
+            NvLinkRemoteDevice {
+                link_index: 0,
+                remote_type: NvLinkRemoteType::Gpu,
+            },
+            NvLinkRemoteDevice {
+                link_index: 1,
+                remote_type: NvLinkRemoteType::Gpu,
+            },
+            NvLinkRemoteDevice {
+                link_index: 2,
+                remote_type: NvLinkRemoteType::Gpu,
+            },
+            NvLinkRemoteDevice {
+                link_index: 3,
+                remote_type: NvLinkRemoteType::Gpu,
+            },
+            NvLinkRemoteDevice {
+                link_index: 4,
+                remote_type: NvLinkRemoteType::Gpu,
+            },
+            NvLinkRemoteDevice {
+                link_index: 5,
+                remote_type: NvLinkRemoteType::Switch,
+            },
+        ];
+        let mut buf: Vec<u8> = Vec::new();
+        render_hardware_details_row(&mut buf, &gpu);
+        let rendered = String::from_utf8(buf).expect("valid utf-8");
+        assert!(rendered.contains("NVLink:"), "{rendered}");
+        assert!(rendered.contains("6x"), "{rendered}");
+        assert!(rendered.contains("gpu=5"), "{rendered}");
+        assert!(rendered.contains("sw=1"), "{rendered}");
+    }
+
+    #[test]
+    fn hw_row_omits_gpm_when_only_support_probe_populated() {
+        // Reader emits `Some(GpmMetrics::default())` on Hopper+ until the
+        // two-sample handshake lands. Until then the TUI must not show
+        // "GPM:" at all — a zero reading would be misleading.
+        use crate::device::GpmMetrics;
+        let mut gpu = bare_gpu();
+        gpu.numa_node_id = Some(0);
+        gpu.gpm_metrics = Some(GpmMetrics::default());
+        let mut buf: Vec<u8> = Vec::new();
+        render_hardware_details_row(&mut buf, &gpu);
+        let rendered = String::from_utf8(buf).expect("valid utf-8");
+        assert!(
+            !rendered.contains("GPM:"),
+            "GPM label should be hidden when no values sampled: {rendered}"
+        );
+    }
+
+    #[test]
+    fn hw_row_renders_gpm_values_when_populated() {
+        use crate::device::GpmMetrics;
+        let mut gpu = bare_gpu();
+        gpu.numa_node_id = Some(0);
+        gpu.gpm_metrics = Some(GpmMetrics {
+            sm_occupancy: Some(0.67),
+            memory_bandwidth_utilization: Some(0.42),
+        });
+        let mut buf: Vec<u8> = Vec::new();
+        render_hardware_details_row(&mut buf, &gpu);
+        let rendered = strip_ansi(&String::from_utf8(buf).expect("valid utf-8"));
+        assert!(rendered.contains("GPM:"), "{rendered}");
+        assert!(rendered.contains("SM=0.67"), "{rendered}");
+        assert!(rendered.contains("MemBW=0.42"), "{rendered}");
+    }
+
+    #[test]
+    fn hw_row_accounts_for_line_in_gpu_render_line_count() {
+        // NUMA alone bumps the row count from 2 -> 3.
+        let mut gpu = bare_gpu();
+        gpu.numa_node_id = Some(0);
+        assert_eq!(gpu_render_line_count(&gpu, &[], &[]), 3);
+    }
+
+    #[test]
+    fn hw_row_and_thermal_row_both_counted() {
+        // Both optional rows present: 2 base + thermal + hw = 4.
+        let gpu = make_gpu(50); // make_gpu populates thermals + pstate
+        let mut gpu = gpu;
+        gpu.numa_node_id = Some(0);
+        assert_eq!(gpu_render_line_count(&gpu, &[], &[]), 4);
+    }
+
+    #[test]
+    fn hw_row_gpm_only_does_not_emit_row() {
+        // Support-only GPM must not trigger the row — the row is reserved
+        // for topology / firmware / NUMA info that a human would inspect.
+        use crate::device::GpmMetrics;
+        let mut gpu = bare_gpu();
+        gpu.gpm_metrics = Some(GpmMetrics::default());
+        assert_eq!(gpu_render_line_count(&gpu, &[], &[]), 2);
+    }
+
+    #[test]
+    fn count_nvlink_remote_types_classifies_all_variants() {
+        use crate::device::{NvLinkRemoteDevice, NvLinkRemoteType};
+        let links = vec![
+            NvLinkRemoteDevice {
+                link_index: 0,
+                remote_type: NvLinkRemoteType::Gpu,
+            },
+            NvLinkRemoteDevice {
+                link_index: 1,
+                remote_type: NvLinkRemoteType::Switch,
+            },
+            NvLinkRemoteDevice {
+                link_index: 2,
+                remote_type: NvLinkRemoteType::IbmNpu,
+            },
+            NvLinkRemoteDevice {
+                link_index: 3,
+                remote_type: NvLinkRemoteType::Unknown,
+            },
+        ];
+        assert_eq!(count_nvlink_remote_types(&links), (1, 1, 1, 1));
     }
 }
