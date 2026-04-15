@@ -162,8 +162,10 @@ impl MetricsParser {
         let mut labels: HashMap<String, String> = HashMap::with_capacity(16);
         let mut label_count = 0;
 
-        // Optimized parsing without intermediate allocations
-        for label in labels_str.split(',') {
+        // Quote-aware splitting: only split on commas that appear outside of
+        // a double-quoted value, so that a VM-owner-controlled label value
+        // containing `",` cannot break out and inject fake labels.
+        for label in split_labels_respecting_quotes(labels_str) {
             if label_count >= MAX_LABELS {
                 break;
             }
@@ -173,9 +175,14 @@ impl MetricsParser {
                 let key = &label[..eq_pos];
                 let value = &label[eq_pos + 1..];
 
-                // Sanitize and validate in one pass
+                // Sanitize the key (trim whitespace + any stray quotes).
                 let key_clean = sanitize_label_value(key);
-                let value_clean = sanitize_label_value(value);
+                // For the value we strip the surrounding quotes ourselves
+                // and un-escape the Prometheus exposition escape sequences
+                // produced by `MetricBuilder::metric`. We never fall back to
+                // the naive sanitizer for quoted values — doing so would
+                // leave `\"` / `\\` / `\n` / `\r` escapes in place.
+                let value_clean = unescape_label_value(value);
 
                 // Check lengths and insert
                 if key_clean.len() <= MAX_LABEL_LENGTH && value_clean.len() <= MAX_LABEL_LENGTH {
@@ -595,6 +602,102 @@ impl Default for MetricsParser {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Split a Prometheus label list on top-level commas only — commas inside a
+/// double-quoted value are preserved as literal content. Backslash escapes
+/// inside quoted values are honoured so an author cannot terminate the quote
+/// by writing `\"`.
+///
+/// This is a security-critical counterpart to `MetricBuilder::metric`'s
+/// escaping: if we split naively on `,` a malicious label value like
+/// `vgpu_vm_id="evil\", fake=\"x"` breaks out and injects an attacker-
+/// controlled label, enabling cross-host metric spoofing.
+fn split_labels_respecting_quotes(labels_str: &str) -> Vec<&str> {
+    let bytes = labels_str.as_bytes();
+    let mut out: Vec<&str> = Vec::with_capacity(16);
+    let mut start = 0usize;
+    let mut i = 0usize;
+    let mut in_quotes = false;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if in_quotes {
+            if b == b'\\' && i + 1 < bytes.len() {
+                // Skip the escaped byte so `\"` doesn't terminate the quote.
+                i += 2;
+                continue;
+            }
+            if b == b'"' {
+                in_quotes = false;
+            }
+            i += 1;
+        } else {
+            match b {
+                b'"' => {
+                    in_quotes = true;
+                    i += 1;
+                }
+                b',' => {
+                    out.push(&labels_str[start..i]);
+                    i += 1;
+                    start = i;
+                }
+                _ => {
+                    i += 1;
+                }
+            }
+        }
+    }
+    out.push(&labels_str[start..]);
+    out
+}
+
+/// Strip the surrounding double quotes from a Prometheus label value and
+/// un-escape the escape sequences emitted by `MetricBuilder::metric`
+/// (`\\`, `\"`, `\n`, `\r`). If the value is not quoted, fall back to the
+/// shared sanitizer so callers see consistent trimming behaviour for legacy
+/// unquoted inputs.
+fn unescape_label_value(raw: &str) -> String {
+    let trimmed = raw.trim();
+    let inner = match (trimmed.strip_prefix('"'), trimmed.ends_with('"')) {
+        (Some(s), true) if trimmed.len() >= 2 => &s[..s.len() - 1],
+        _ => return sanitize_label_value(raw),
+    };
+
+    let mut out = String::with_capacity(inner.len());
+    let mut chars = inner.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('\\') => out.push('\\'),
+            Some('"') => out.push('"'),
+            Some('n') => out.push('\n'),
+            Some('r') => out.push('\r'),
+            Some(other) => {
+                // Unknown escape: keep the backslash and the following char
+                // verbatim so we do not silently lose data.
+                out.push('\\');
+                out.push(other);
+            }
+            None => out.push('\\'),
+        }
+    }
+
+    // Run through the shared sanitizer only for the length truncation
+    // behaviour, since `inner` has already had its quotes removed and any
+    // stray leading/trailing whitespace inside the quotes is intentional.
+    const MAX_LABEL_VALUE_LENGTH: usize = 1024;
+    if out.len() > MAX_LABEL_VALUE_LENGTH {
+        let mut end = MAX_LABEL_VALUE_LENGTH;
+        while !out.is_char_boundary(end) {
+            end -= 1;
+        }
+        out.truncate(end);
+    }
+    out
 }
 
 /// Accumulator used while parsing vGPU Prometheus lines.
@@ -1326,5 +1429,32 @@ all_smi_cpu_utilization{cpu_model="AMD", instance="node1", hostname="node1", ind
             MAX_VGPU_INSTANCES,
             "instance count must not exceed cap"
         );
+    }
+
+    #[test]
+    fn parse_labels_is_quote_aware_against_comma_injection() {
+        let parser = create_test_parser();
+        // A malicious VM-controlled value embeds `",` and `\"` so a naive
+        // splitter would turn one label into three. The quote-aware
+        // implementation must see exactly three labels.
+        let labels_str = r#"gpu_uuid="a",vgpu_vm_id="pwned\", fake=\"evil",vgpu_id="0""#;
+        let labels = parser.parse_labels(labels_str);
+        assert_eq!(labels.len(), 3, "got labels: {labels:?}");
+        assert_eq!(labels.get("gpu_uuid").unwrap(), "a");
+        assert_eq!(labels.get("vgpu_id").unwrap(), "0");
+        // vm_id must contain the attacker's payload verbatim, but never be
+        // interpreted as additional labels.
+        assert_eq!(labels.get("vgpu_vm_id").unwrap(), r#"pwned", fake="evil"#);
+        assert!(!labels.contains_key("fake"), "no injected label allowed");
+    }
+
+    #[test]
+    fn parse_labels_unescapes_newline_and_carriage_return() {
+        let parser = create_test_parser();
+        // Prometheus escape sequences must be reversed on ingest so the
+        // parser sees the same bytes the exporter originally held.
+        let labels_str = r#"key="line1\nline2\rend""#;
+        let labels = parser.parse_labels(labels_str);
+        assert_eq!(labels.get("key").unwrap(), "line1\nline2\rend");
     }
 }
