@@ -281,3 +281,64 @@ fn parser_gpm_accepts_only_the_fields_present() {
     assert!((gpm.sm_occupancy.unwrap() - 0.55).abs() < 1e-4);
     assert!(gpm.memory_bandwidth_utilization.is_none());
 }
+
+#[test]
+fn parser_rejects_fractional_gsp_firmware_mode() {
+    // Exporter only emits integer 0/1/2. A fractional value like 1.5 would
+    // saturate to 1 without an explicit .fract() guard, silently producing a
+    // wrong code. The parser must reject it and leave the field as `None`.
+    let text = concat!(
+        "all_smi_gpu_utilization{gpu=\"NVIDIA A100\", instance=\"node-1\", \
+         uuid=\"GPU-FRAC\", index=\"0\"} 10\n",
+        "all_smi_gpu_gsp_firmware_mode{gpu=\"NVIDIA A100\", instance=\"node-1\", \
+         uuid=\"GPU-FRAC\", index=\"0\"} 1.5\n",
+    );
+    let parser = MetricsParser::new();
+    let (parsed, _, _, _, _, _) = parser.parse_metrics(text, "node-1:9090", &regex());
+    assert_eq!(parsed.len(), 1);
+    assert!(
+        parsed[0].gsp_firmware_mode.is_none(),
+        "fractional GSP firmware mode must be rejected, got {:?}",
+        parsed[0].gsp_firmware_mode
+    );
+}
+
+#[test]
+fn parser_rejects_negative_numa_node_id() {
+    // A value like -0.5 truncates to 0 via `value as i32`, silently placing
+    // the GPU in NUMA node 0. The `value >= 0.0` guard must reject it.
+    let text = concat!(
+        "all_smi_gpu_utilization{gpu=\"NVIDIA A100\", instance=\"node-1\", \
+         uuid=\"GPU-NEG\", index=\"0\"} 10\n",
+        "all_smi_gpu_numa_node_id{gpu=\"NVIDIA A100\", instance=\"node-1\", \
+         uuid=\"GPU-NEG\", index=\"0\"} -0.5\n",
+    );
+    let parser = MetricsParser::new();
+    let (parsed, _, _, _, _, _) = parser.parse_metrics(text, "node-1:9090", &regex());
+    assert_eq!(parsed.len(), 1);
+    assert!(
+        parsed[0].numa_node_id.is_none(),
+        "negative NUMA node id must be rejected, got {:?}",
+        parsed[0].numa_node_id
+    );
+}
+
+#[test]
+fn parser_rejects_fractional_numa_node_id() {
+    // NUMA node ids are always integers. A fractional value (e.g. 1.7)
+    // would truncate to 1 without the .fract() guard.
+    let text = concat!(
+        "all_smi_gpu_utilization{gpu=\"NVIDIA A100\", instance=\"node-1\", \
+         uuid=\"GPU-FRAC2\", index=\"0\"} 10\n",
+        "all_smi_gpu_numa_node_id{gpu=\"NVIDIA A100\", instance=\"node-1\", \
+         uuid=\"GPU-FRAC2\", index=\"0\"} 1.7\n",
+    );
+    let parser = MetricsParser::new();
+    let (parsed, _, _, _, _, _) = parser.parse_metrics(text, "node-1:9090", &regex());
+    assert_eq!(parsed.len(), 1);
+    assert!(
+        parsed[0].numa_node_id.is_none(),
+        "fractional NUMA node id must be rejected, got {:?}",
+        parsed[0].numa_node_id
+    );
+}

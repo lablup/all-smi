@@ -328,7 +328,9 @@ impl MetricsParser {
                 // in that range so a malicious or buggy upstream cannot emit
                 // an out-of-range value (e.g. 9999) that the TUI would
                 // render as "P9999" and corrupt the secondary row layout.
-                if (0.0..=15.0).contains(&value) {
+                // Fractional inputs (e.g. 1.5) are also rejected — the
+                // exporter only emits integer performance state indices.
+                if (0.0..=15.0).contains(&value) && value.fract() == 0.0 {
                     gpu_info.performance_state = saturating_u32(value);
                 }
             }
@@ -336,18 +338,23 @@ impl MetricsParser {
                 // NUMA node ids are non-negative on every real system.
                 // Cap at a paranoid ceiling so a hostile upstream cannot
                 // inject huge values: no real machine exposes more than
-                // ~256 NUMA nodes today. Negative inputs and NaN drop.
-                if let Some(node) = saturating_i32(value)
+                // ~256 NUMA nodes today. Negative inputs, NaN, and
+                // fractional values (e.g. -0.5 → saturates to 0 without
+                // this guard) are all dropped.
+                if value >= 0.0
+                    && value.fract() == 0.0
+                    && let Some(node) = saturating_i32(value)
                     && (0..=MAX_NUMA_NODE_ID).contains(&node)
                 {
                     gpu_info.numa_node_id = Some(node);
                 }
             }
             "gpu_gsp_firmware_mode" => {
-                // Exporter emits exactly 0/1/2. Accept only that range so
-                // a malicious upstream cannot seed the UI with a bogus
-                // code. Out-of-range values leave the field as `None`.
-                if (0.0..=2.0).contains(&value) {
+                // Exporter emits exactly 0/1/2. Accept only integer values
+                // in that range so a malicious upstream cannot seed the UI
+                // with a bogus code. Fractional inputs (e.g. 1.5) saturate
+                // to 1 without this guard, producing a silently wrong code.
+                if (0.0..=2.0).contains(&value) && value.fract() == 0.0 {
                     gpu_info.gsp_firmware_mode =
                         saturating_u32(value).and_then(|v| u8::try_from(v).ok());
                 }
