@@ -14,10 +14,14 @@
 
 //! Integration tests for the NVIDIA MIG pipeline.
 //!
-//! Exercises the Prometheus-format round-trip from exporter text (crafted to
-//! mirror what `api::metrics::mig::MigMetricExporter` emits) through the
-//! remote metrics parser, asserting that every field survives unchanged.
+//! Exercises the Prometheus-format round-trip from the real
+//! `api::metrics::mig::MigMetricExporter` through the remote metrics parser,
+//! asserting that every field (including every label) survives unchanged.
+//! Using the live exporter output — rather than hand-crafted text — keeps the
+//! integration test honest whenever the exporter's label set drifts.
 
+use all_smi::api::metrics::MetricExporter;
+use all_smi::api::metrics::mig::MigMetricExporter;
 use all_smi::prelude::*;
 use regex::Regex;
 
@@ -25,47 +29,62 @@ fn regex() -> Regex {
     Regex::new(r"^all_smi_([^\{]+)\{([^}]+)\} ([\d\.]+)$").unwrap()
 }
 
-/// Replicate the exporter output format. Kept close to
-/// `api/metrics/mig.rs`; if that exporter adds new metrics, this test should
-/// be updated in lockstep.
+/// Build a representative MIG host fixture covering every label the exporter
+/// is required to emit (including the historically forgotten
+/// `compute_instance_id`).
+fn sample_host() -> MigGpuInfo {
+    MigGpuInfo {
+        host_id: "node-42".to_string(),
+        hostname: "node-42".to_string(),
+        instance: "node-42".to_string(),
+        gpu_index: 3,
+        gpu_uuid: "GPU-MIG".to_string(),
+        gpu_name: "NVIDIA A100".to_string(),
+        mig_mode: true,
+        instances: vec![MigInstanceInfo {
+            instance_id: 2,
+            gpu_instance_id: Some(5),
+            compute_instance_id: Some(0),
+            uuid: "MIG-2".to_string(),
+            profile_name: "3g.20gb".to_string(),
+            utilization_gpu: Some(64),
+            utilization_memory: Some(18),
+            memory_used_bytes: 8 * (1 << 30),
+            memory_total_bytes: 20 * (1 << 30),
+        }],
+    }
+}
+
+/// Produce the exporter's own output string. Any label the exporter stops
+/// emitting is lost here first — which is exactly the regression the
+/// round-trip test below is supposed to catch.
 fn exported_metrics_text() -> String {
-    let mut out = String::new();
-    out.push_str("# HELP all_smi_gpu_mig_mode NVIDIA MIG mode\n");
-    out.push_str("# TYPE all_smi_gpu_mig_mode gauge\n");
-    out.push_str(concat!(
-        "all_smi_gpu_mig_mode{gpu_index=\"3\", gpu_uuid=\"GPU-MIG\", ",
-        "gpu=\"NVIDIA A100\", instance=\"node-42\", host=\"node-42\"} 1\n"
-    ));
-    // instance metrics
-    out.push_str("# HELP all_smi_mig_instance_utilization_gpu\n");
-    out.push_str("# TYPE all_smi_mig_instance_utilization_gpu gauge\n");
-    out.push_str(concat!(
-        "all_smi_mig_instance_utilization_gpu{gpu_index=\"3\", gpu_uuid=\"GPU-MIG\", gpu=\"NVIDIA A100\", ",
-        "instance=\"node-42\", host=\"node-42\", mig_instance=\"2\", mig_uuid=\"MIG-2\", ",
-        "mig_profile=\"3g.20gb\", gpu_instance_id=\"5\", compute_instance_id=\"0\"} 64\n"
-    ));
-    out.push_str("# HELP all_smi_mig_instance_utilization_memory\n");
-    out.push_str("# TYPE all_smi_mig_instance_utilization_memory gauge\n");
-    out.push_str(concat!(
-        "all_smi_mig_instance_utilization_memory{gpu_index=\"3\", gpu_uuid=\"GPU-MIG\", gpu=\"NVIDIA A100\", ",
-        "instance=\"node-42\", host=\"node-42\", mig_instance=\"2\", mig_uuid=\"MIG-2\", ",
-        "mig_profile=\"3g.20gb\", gpu_instance_id=\"5\", compute_instance_id=\"0\"} 18\n"
-    ));
-    out.push_str("# HELP all_smi_mig_instance_memory_used_bytes\n");
-    out.push_str("# TYPE all_smi_mig_instance_memory_used_bytes gauge\n");
-    out.push_str(concat!(
-        "all_smi_mig_instance_memory_used_bytes{gpu_index=\"3\", gpu_uuid=\"GPU-MIG\", gpu=\"NVIDIA A100\", ",
-        "instance=\"node-42\", host=\"node-42\", mig_instance=\"2\", mig_uuid=\"MIG-2\", ",
-        "mig_profile=\"3g.20gb\", gpu_instance_id=\"5\", compute_instance_id=\"0\"} 8589934592\n"
-    ));
-    out.push_str("# HELP all_smi_mig_instance_memory_total_bytes\n");
-    out.push_str("# TYPE all_smi_mig_instance_memory_total_bytes gauge\n");
-    out.push_str(concat!(
-        "all_smi_mig_instance_memory_total_bytes{gpu_index=\"3\", gpu_uuid=\"GPU-MIG\", gpu=\"NVIDIA A100\", ",
-        "instance=\"node-42\", host=\"node-42\", mig_instance=\"2\", mig_uuid=\"MIG-2\", ",
-        "mig_profile=\"3g.20gb\", gpu_instance_id=\"5\", compute_instance_id=\"0\"} 21474836480\n"
-    ));
-    out
+    let hosts = vec![sample_host()];
+    MigMetricExporter::new(&hosts).export_metrics()
+}
+
+#[test]
+fn mig_exporter_emits_every_required_label() {
+    // Sanity check on the exporter output itself — fail loudly if any label
+    // the downstream parser relies on is silently dropped at the source.
+    let output = exported_metrics_text();
+    for label in [
+        "gpu_index=\"3\"",
+        "gpu_uuid=\"GPU-MIG\"",
+        "gpu=\"NVIDIA A100\"",
+        "instance=\"node-42\"",
+        "host=\"node-42\"",
+        "mig_instance=\"2\"",
+        "mig_uuid=\"MIG-2\"",
+        "mig_profile=\"3g.20gb\"",
+        "gpu_instance_id=\"5\"",
+        "compute_instance_id=\"0\"",
+    ] {
+        assert!(
+            output.contains(label),
+            "exporter output missing label fragment `{label}`:\n{output}"
+        );
+    }
 }
 
 #[test]
@@ -90,6 +109,9 @@ fn mig_metrics_parser_roundtrip_preserves_all_fields() {
     assert_eq!(inst.uuid, "MIG-2");
     assert_eq!(inst.profile_name, "3g.20gb");
     assert_eq!(inst.gpu_instance_id, Some(5));
+    // Regression guard: the exporter historically omitted compute_instance_id
+    // from its label set, so the parser had nothing to populate. Using the
+    // real exporter output here ensures the label survives every round-trip.
     assert_eq!(inst.compute_instance_id, Some(0));
     assert_eq!(inst.utilization_gpu, Some(64));
     assert_eq!(inst.utilization_memory, Some(18));

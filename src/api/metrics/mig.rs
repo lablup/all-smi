@@ -175,7 +175,7 @@ impl<'a> MigMetricExporter<'a> {
         rows
     }
 
-    fn instance_labels<'b>(row: &'b Row<'a>) -> [(&'b str, &'b str); 9] {
+    fn instance_labels<'b>(row: &'b Row<'a>) -> [(&'b str, &'b str); 10] {
         [
             ("gpu_index", row.gpu_index_str.as_str()),
             ("gpu_uuid", row.host.gpu_uuid.as_str()),
@@ -189,6 +189,7 @@ impl<'a> MigMetricExporter<'a> {
             // could not report them. The remote parser tolerates empty values
             // so that round-tripping stays lossless.
             ("gpu_instance_id", row.gpu_instance_id_str.as_str()),
+            ("compute_instance_id", row.compute_instance_id_str.as_str()),
         ]
     }
 }
@@ -203,12 +204,10 @@ struct Row<'a> {
     gpu_index_str: String,
     instance_id_str: String,
     /// Stringified `gpu_instance_id` (empty when NVML did not report it).
-    /// Currently unused at the label level but kept for forward compatibility
-    /// — emitted via [`MigMetricExporter::instance_labels`].
+    /// Emitted via [`MigMetricExporter::instance_labels`].
     gpu_instance_id_str: String,
-    /// Stringified `compute_instance_id`. Same forward-compatibility note as
-    /// above. Reserved for a future label rev that wants to expose it directly.
-    #[allow(dead_code)]
+    /// Stringified `compute_instance_id` (empty when NVML did not report it).
+    /// Emitted via [`MigMetricExporter::instance_labels`].
     compute_instance_id_str: String,
 }
 
@@ -285,6 +284,18 @@ mod tests {
         assert!(output.contains("mig_uuid=\"MIG-xxx\""));
         assert!(output.contains("mig_profile=\"1g.5gb\""));
         assert!(output.contains("gpu_instance_id=\"7\""));
+        assert!(output.contains("compute_instance_id=\"0\""));
+    }
+
+    #[test]
+    fn empty_compute_instance_id_renders_empty_string_label() {
+        let mut host = sample_host();
+        host.instances[0].compute_instance_id = None;
+        let hosts = vec![host];
+        let exporter = MigMetricExporter::new(&hosts);
+        let output = exporter.export_metrics();
+        // Empty label values are always present; the parser tolerates them.
+        assert!(output.contains("compute_instance_id=\"\""));
     }
 
     #[test]
