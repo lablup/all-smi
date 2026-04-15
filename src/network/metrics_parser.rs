@@ -1088,6 +1088,17 @@ impl MigParseState {
         let hosts_with_mode = &self.hosts_with_mode;
         self.hosts
             .retain(|uuid, h| hosts_with_mode.contains(uuid) || !h.instances.is_empty());
+        // Enforce the invariant: mig_mode must be true whenever instances are
+        // present. A remote feed may emit `all_smi_mig_instance_*` lines for a
+        // UUID without a corresponding `gpu_mig_mode` line. The retain above
+        // keeps such hosts alive via the `!h.instances.is_empty()` arm, but
+        // they would carry `mig_mode=false`, which is a contradictory "ghost"
+        // state that no real exporter produces. Infer the mode from presence.
+        for host in self.hosts.values_mut() {
+            if !host.instances.is_empty() {
+                host.mig_mode = true;
+            }
+        }
         let mut out: Vec<MigGpuInfo> = self.hosts.into_values().collect();
         out.sort_by_key(|h| h.gpu_index);
         out
@@ -1962,5 +1973,30 @@ all_smi_mig_instance_utilization_gpu{gpu_index="0", gpu_uuid="GPU-A", gpu="NVIDI
         assert_eq!(mig[0].instances.len(), 1);
         assert!(mig[0].instances[0].gpu_instance_id.is_none());
         assert!(mig[0].instances[0].compute_instance_id.is_none());
+    }
+
+    #[test]
+    fn mig_parser_infers_mig_mode_from_instance_presence() {
+        // When a remote feed emits `all_smi_mig_instance_*` lines for a UUID
+        // without a `gpu_mig_mode` line, the host would survive the retain
+        // (via the `!instances.is_empty()` arm) but carry `mig_mode=false` —
+        // a contradictory "ghost" state. The parser must infer `mig_mode=true`
+        // whenever instances are present.
+        let parser = create_test_parser();
+        let re = create_test_regex();
+        let host = "127.0.0.1:10208";
+
+        // No gpu_mig_mode line — only instance metrics.
+        let text = r#"
+all_smi_mig_instance_utilization_gpu{gpu_index="0", gpu_uuid="GPU-G", gpu="NVIDIA A100", instance="node1", host="node1", mig_instance="0", mig_uuid="MIG-G1", mig_profile="1g.5gb", gpu_instance_id="7", compute_instance_id="0"} 42
+"#;
+        let (_, _, _, _, _, mig) = parser.parse_metrics(text, host, &re);
+        assert_eq!(mig.len(), 1, "host must survive via instance presence");
+        assert!(
+            mig[0].mig_mode,
+            "mig_mode must be inferred as true when instances are present"
+        );
+        assert_eq!(mig[0].instances.len(), 1);
+        assert_eq!(mig[0].instances[0].uuid, "MIG-G1");
     }
 }
