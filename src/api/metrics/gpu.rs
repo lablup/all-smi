@@ -454,6 +454,11 @@ mod tests {
             temperature_threshold_max_operating: Some(85),
             temperature_threshold_acoustic: Some(77),
             performance_state: Some(2),
+            numa_node_id: None,
+            gsp_firmware_mode: None,
+            gsp_firmware_version: None,
+            nvlink_remote_devices: Vec::new(),
+            gpm_metrics: None,
             detail: HashMap::new(),
         }
     }

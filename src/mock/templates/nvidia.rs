@@ -55,6 +55,12 @@ impl NvidiaMockGenerator {
         // dev and `cargo test --features mock` see the feature populated.
         self.add_thermal_threshold_metrics(&mut template, gpus);
 
+        // NVIDIA-specific: Hardware details (issue #132). NUMA node id,
+        // GSP firmware mode + version, NvLink topology, plus GPM gauges.
+        // Synthetic but representative so the TUI, exporter, and remote
+        // parser round-trip paths all see the feature populated.
+        self.add_hardware_detail_metrics(&mut template, gpus);
+
         // NVIDIA-specific: Process metrics
         self.add_process_metrics(&mut template, gpus);
 
@@ -146,6 +152,128 @@ impl NvidiaMockGenerator {
             );
             template.push_str(&format!(
                 "all_smi_gpu_performance_state{{{labels}}} {{{{PSTATE_{i}}}}}\n"
+            ));
+        }
+    }
+
+    /// Synthesize extended hardware-detail metrics (issue #132):
+    ///   * NUMA node id alternating between 0 and 1 across GPUs
+    ///   * GSP firmware mode `1=enabled` for every GPU
+    ///   * GSP firmware version string `"550.54.15"` for every GPU
+    ///   * 6 active NvLinks per GPU, 5 remote=gpu + 1 remote=switch
+    ///   * GPM gauges at fixed-plausible values in the 0.45-0.88 band
+    ///
+    /// Fixed values rather than random numbers keep the mock output stable
+    /// across scrapes — hardware details never change at runtime on real
+    /// devices, and stable mock values simplify test assertions.
+    fn add_hardware_detail_metrics(&self, template: &mut String, gpus: &[GpuMetrics]) {
+        const GSP_MODE: u8 = 1;
+        const GSP_VERSION: &str = "550.54.15";
+        const NVLINK_COUNT: u32 = 6;
+        const SM_OCCUPANCY: f32 = 0.67;
+        const MEMORY_BW_UTIL: f32 = 0.42;
+
+        // --- NUMA node id ---
+        template.push_str(
+            "# HELP all_smi_gpu_numa_node_id NUMA node the GPU is attached to \
+             (metric is omitted when the host has no NUMA topology or the driver does not report one)\n",
+        );
+        template.push_str("# TYPE all_smi_gpu_numa_node_id gauge\n");
+        for (i, gpu) in gpus.iter().enumerate() {
+            let numa = (i as u32) % 2;
+            let labels = format!(
+                "gpu=\"{}\", instance=\"{}\", uuid=\"{}\", index=\"{i}\"",
+                self.gpu_name, self.instance_name, gpu.uuid
+            );
+            template.push_str(&format!("all_smi_gpu_numa_node_id{{{labels}}} {numa}\n"));
+        }
+
+        // --- GSP firmware mode ---
+        template.push_str(
+            "# HELP all_smi_gpu_gsp_firmware_mode GSP firmware mode \
+             (0=disabled, 1=enabled, 2=default); omitted when the driver does not expose the GSP firmware API\n",
+        );
+        template.push_str("# TYPE all_smi_gpu_gsp_firmware_mode gauge\n");
+        for (i, gpu) in gpus.iter().enumerate() {
+            let labels = format!(
+                "gpu=\"{}\", instance=\"{}\", uuid=\"{}\", index=\"{i}\"",
+                self.gpu_name, self.instance_name, gpu.uuid
+            );
+            template.push_str(&format!(
+                "all_smi_gpu_gsp_firmware_mode{{{labels}}} {GSP_MODE}\n"
+            ));
+        }
+
+        // --- GSP firmware version info ---
+        template.push_str(
+            "# HELP all_smi_gpu_gsp_firmware_version_info GSP firmware version, encoded as a constant 1 \
+             with the version in a `version` label; omitted when unsupported\n",
+        );
+        template.push_str("# TYPE all_smi_gpu_gsp_firmware_version_info gauge\n");
+        for (i, gpu) in gpus.iter().enumerate() {
+            let labels = format!(
+                "gpu=\"{}\", instance=\"{}\", uuid=\"{}\", index=\"{i}\", version=\"{GSP_VERSION}\"",
+                self.gpu_name, self.instance_name, gpu.uuid
+            );
+            template.push_str(&format!(
+                "all_smi_gpu_gsp_firmware_version_info{{{labels}}} 1\n"
+            ));
+        }
+
+        // --- NvLink remote device types ---
+        template.push_str(
+            "# HELP all_smi_nvlink_remote_device_type NvLink remote endpoint classification per active link. \
+             Value is always 1; classification is carried in the `remote_type` label (gpu / switch / ibmnpu / unknown).\n",
+        );
+        template.push_str("# TYPE all_smi_nvlink_remote_device_type gauge\n");
+        for (i, gpu) in gpus.iter().enumerate() {
+            // 5 remote=gpu, 1 remote=switch — typical NVLink topology on
+            // HGX-style 8-GPU boards.
+            for link in 0..NVLINK_COUNT {
+                let remote_type = if link == NVLINK_COUNT - 1 {
+                    "switch"
+                } else {
+                    "gpu"
+                };
+                let labels = format!(
+                    "gpu=\"{}\", instance=\"{}\", uuid=\"{}\", index=\"{i}\", link_index=\"{link}\", remote_type=\"{remote_type}\"",
+                    self.gpu_name, self.instance_name, gpu.uuid
+                );
+                template.push_str(&format!(
+                    "all_smi_nvlink_remote_device_type{{{labels}}} 1\n"
+                ));
+            }
+        }
+
+        // --- GPM metrics (Hopper+ only in reality; the mock pretends
+        // every GPU is GPM-capable so the TUI / exporter paths see data).
+        template.push_str(
+            "# HELP all_smi_gpu_sm_occupancy GPM-reported SM occupancy fraction (0.0-1.0); \
+             omitted on devices that do not support GPM (pre-Hopper)\n",
+        );
+        template.push_str("# TYPE all_smi_gpu_sm_occupancy gauge\n");
+        for (i, gpu) in gpus.iter().enumerate() {
+            let labels = format!(
+                "gpu=\"{}\", instance=\"{}\", uuid=\"{}\", index=\"{i}\"",
+                self.gpu_name, self.instance_name, gpu.uuid
+            );
+            template.push_str(&format!(
+                "all_smi_gpu_sm_occupancy{{{labels}}} {SM_OCCUPANCY:.2}\n"
+            ));
+        }
+
+        template.push_str(
+            "# HELP all_smi_gpu_memory_bandwidth_utilization GPM-reported memory bandwidth utilization fraction (0.0-1.0); \
+             omitted on devices that do not support GPM (pre-Hopper)\n",
+        );
+        template.push_str("# TYPE all_smi_gpu_memory_bandwidth_utilization gauge\n");
+        for (i, gpu) in gpus.iter().enumerate() {
+            let labels = format!(
+                "gpu=\"{}\", instance=\"{}\", uuid=\"{}\", index=\"{i}\"",
+                self.gpu_name, self.instance_name, gpu.uuid
+            );
+            template.push_str(&format!(
+                "all_smi_gpu_memory_bandwidth_utilization{{{labels}}} {MEMORY_BW_UTIL:.2}\n"
             ));
         }
     }
@@ -615,6 +743,138 @@ mod tests {
         assert!(
             !rendered.contains("{{PSTATE_"),
             "unresolved PSTATE placeholder in rendered output"
+        );
+    }
+
+    // --- hardware-detail mock template tests (issue #132) ---
+
+    fn make_multi_gpu_metrics(count: usize) -> Vec<GpuMetrics> {
+        (0..count)
+            .map(|i| GpuMetrics {
+                uuid: format!("GPU-{i}"),
+                utilization: 50.0,
+                memory_used_bytes: 1024,
+                memory_total_bytes: 8192,
+                temperature_celsius: 65,
+                power_consumption_watts: 200.0,
+                frequency_mhz: 1500,
+                ane_utilization_watts: 0.0,
+                thermal_pressure_level: None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn mock_template_includes_all_hardware_detail_metrics() {
+        let gen_ = NvidiaMockGenerator::new(None, "mock-node".to_string());
+        let gpus = make_gpu_metrics();
+        let tpl = gen_.build_nvidia_template(&gpus, &make_cpu_metrics(), &make_memory_metrics());
+
+        assert!(
+            tpl.contains("all_smi_gpu_numa_node_id{"),
+            "mock template missing NUMA metric:\n{tpl}"
+        );
+        assert!(
+            tpl.contains("all_smi_gpu_gsp_firmware_mode{"),
+            "mock template missing GSP firmware mode metric:\n{tpl}"
+        );
+        assert!(
+            tpl.contains("all_smi_gpu_gsp_firmware_version_info{"),
+            "mock template missing GSP firmware version info metric:\n{tpl}"
+        );
+        assert!(
+            tpl.contains("all_smi_nvlink_remote_device_type{"),
+            "mock template missing NvLink metric:\n{tpl}"
+        );
+        assert!(
+            tpl.contains("all_smi_gpu_sm_occupancy{"),
+            "mock template missing SM occupancy metric:\n{tpl}"
+        );
+        assert!(
+            tpl.contains("all_smi_gpu_memory_bandwidth_utilization{"),
+            "mock template missing memory bandwidth utilization metric:\n{tpl}"
+        );
+    }
+
+    #[test]
+    fn mock_template_emits_six_nvlinks_per_gpu() {
+        let gen_ = NvidiaMockGenerator::new(None, "mock-node".to_string());
+        let gpus = make_multi_gpu_metrics(2);
+        let tpl = gen_.build_nvidia_template(&gpus, &make_cpu_metrics(), &make_memory_metrics());
+        let nvlink_lines: Vec<_> = tpl
+            .lines()
+            .filter(|l| l.starts_with("all_smi_nvlink_remote_device_type{"))
+            .collect();
+        // 2 GPUs * 6 links = 12 lines.
+        assert_eq!(
+            nvlink_lines.len(),
+            12,
+            "expected 12 NvLink rows (2 GPUs x 6 links):\n{}",
+            nvlink_lines.join("\n")
+        );
+        // 5 gpu + 1 switch per GPU = 10 gpu + 2 switch total.
+        let gpu_remote_count = nvlink_lines
+            .iter()
+            .filter(|l| l.contains(r#"remote_type="gpu""#))
+            .count();
+        let switch_remote_count = nvlink_lines
+            .iter()
+            .filter(|l| l.contains(r#"remote_type="switch""#))
+            .count();
+        assert_eq!(gpu_remote_count, 10);
+        assert_eq!(switch_remote_count, 2);
+    }
+
+    #[test]
+    fn mock_template_numa_alternates_between_zero_and_one() {
+        let gen_ = NvidiaMockGenerator::new(None, "mock-node".to_string());
+        let gpus = make_multi_gpu_metrics(4);
+        let tpl = gen_.build_nvidia_template(&gpus, &make_cpu_metrics(), &make_memory_metrics());
+        // Extract just the NUMA metric lines.
+        let numa_lines: Vec<_> = tpl
+            .lines()
+            .filter(|l| l.starts_with("all_smi_gpu_numa_node_id{"))
+            .collect();
+        assert_eq!(numa_lines.len(), 4);
+        // GPU 0 → 0, GPU 1 → 1, GPU 2 → 0, GPU 3 → 1.
+        for (i, line) in numa_lines.iter().enumerate() {
+            let expected = (i as u32) % 2;
+            assert!(
+                line.ends_with(&format!(" {expected}")),
+                "GPU {i} NUMA line expected to end with ' {expected}', got: {line}"
+            );
+        }
+    }
+
+    #[test]
+    fn mock_template_emits_gsp_firmware_version_label() {
+        let gen_ = NvidiaMockGenerator::new(None, "mock-node".to_string());
+        let gpus = make_gpu_metrics();
+        let tpl = gen_.build_nvidia_template(&gpus, &make_cpu_metrics(), &make_memory_metrics());
+        assert!(
+            tpl.contains(r#"version="550.54.15""#),
+            "mock template missing GSP firmware version label:\n{tpl}"
+        );
+    }
+
+    #[test]
+    fn mock_template_gpm_values_are_in_0_to_1_range() {
+        let gen_ = NvidiaMockGenerator::new(None, "mock-node".to_string());
+        let gpus = make_gpu_metrics();
+        let tpl = gen_.build_nvidia_template(&gpus, &make_cpu_metrics(), &make_memory_metrics());
+        // Parse the SM occupancy line and sanity-check the value band.
+        let sm_line = tpl
+            .lines()
+            .find(|l| l.starts_with("all_smi_gpu_sm_occupancy{"))
+            .expect("SM occupancy line");
+        let value: f32 = sm_line
+            .rsplit(' ')
+            .next()
+            .and_then(|s| s.parse().ok())
+            .expect("SM occupancy value");
+        assert!(
+            (0.0..=1.0).contains(&value),
+            "SM occupancy out of range: {value}"
         );
     }
 }

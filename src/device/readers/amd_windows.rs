@@ -170,12 +170,19 @@ impl AmdWindowsGpuReader {
                     power_consumption: 0.0, // Not available via WMI
                     gpu_core_count: None,
                     // AMD-on-Windows surfaces nothing beyond the basic WMI
-                    // query — NVML thermal thresholds / P-states do not apply.
+                    // query — NVML thermal thresholds / P-states and NVIDIA
+                    // hardware details (NUMA, GSP firmware, NvLink, GPM) do
+                    // not apply.
                     temperature_threshold_slowdown: None,
                     temperature_threshold_shutdown: None,
                     temperature_threshold_max_operating: None,
                     temperature_threshold_acoustic: None,
                     performance_state: None,
+                    numa_node_id: None,
+                    gsp_firmware_mode: None,
+                    gsp_firmware_version: None,
+                    nvlink_remote_devices: Vec::new(),
+                    gpm_metrics: None,
                     detail,
                 });
             }

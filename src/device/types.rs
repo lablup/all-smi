@@ -75,7 +75,108 @@ pub struct GpuInfo {
     /// P-state (e.g. non-NVIDIA, MIG child devices, driver too old).
     #[serde(default)]
     pub performance_state: Option<u32>,
+    /// NUMA node the GPU is attached to. `None` when the host has no NUMA
+    /// topology (non-Linux platforms, driver too old, or an NVML
+    /// `NotSupported` response). Valid values are non-negative; a value of
+    /// -1 in NVML's raw encoding is canonicalised to `None` rather than
+    /// rendered as a negative number.
+    #[serde(default)]
+    pub numa_node_id: Option<i32>,
+    /// GSP firmware mode, encoded as `0=disabled`, `1=enabled`, `2=default`.
+    /// `None` when the driver does not expose the GSP firmware family
+    /// (pre-R525 drivers, non-datacenter SKUs).
+    #[serde(default)]
+    pub gsp_firmware_mode: Option<u8>,
+    /// GSP firmware version string (e.g. `"550.54.15"`). `None` when
+    /// unavailable. Cached once per device since the version is static for
+    /// the lifetime of the process.
+    #[serde(default)]
+    pub gsp_firmware_version: Option<String>,
+    /// Active NvLinks and their remote endpoint classification. Empty when
+    /// the GPU has no active links, when NvLink APIs are not supported by
+    /// the driver, or on non-NVIDIA paths.
+    #[serde(default)]
+    pub nvlink_remote_devices: Vec<NvLinkRemoteDevice>,
+    /// GPU Performance Monitoring metrics snapshot, when supported
+    /// (Hopper+). `None` everywhere else — non-NVIDIA paths and older
+    /// architectures must never populate this field.
+    #[serde(default)]
+    pub gpm_metrics: Option<GpmMetrics>,
     pub detail: HashMap<String, String>,
+}
+
+/// Remote endpoint classification for a single NvLink reported as active on
+/// a parent GPU. Populated by the NVIDIA reader via NVML and round-tripped
+/// through the Prometheus exporter so remote scrapers see the same topology.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct NvLinkRemoteDevice {
+    /// Zero-based link index (0..18 on current NVIDIA hardware). Matches
+    /// the `link` argument of `nvmlDeviceGetNvLinkRemoteDeviceType`.
+    pub link_index: u32,
+    /// Classification of the node sitting on the other side of the link.
+    pub remote_type: NvLinkRemoteType,
+}
+
+/// NvLink remote device classification as returned by
+/// `nvmlDeviceGetNvLinkRemoteDeviceType`. Serialised as lowercase strings so
+/// the Prometheus exporter can surface them as label values without further
+/// encoding.
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum NvLinkRemoteType {
+    /// Remote endpoint is another GPU.
+    Gpu,
+    /// Remote endpoint is an IBM NPU (POWER9 systems).
+    IbmNpu,
+    /// Remote endpoint is an NvSwitch.
+    Switch,
+    /// Remote endpoint is unknown or not classified by the driver.
+    #[default]
+    Unknown,
+}
+
+impl NvLinkRemoteType {
+    /// Stable lowercase label used for Prometheus values and the network
+    /// parser. MUST stay in sync with the serde `rename_all` annotation so
+    /// the serialised JSON and the exported label encoding agree.
+    pub fn as_label(self) -> &'static str {
+        match self {
+            Self::Gpu => "gpu",
+            Self::IbmNpu => "ibmnpu",
+            Self::Switch => "switch",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    /// Inverse of [`NvLinkRemoteType::as_label`]. Unknown inputs map to
+    /// [`NvLinkRemoteType::Unknown`] rather than returning an error — the
+    /// parser must never reject metric lines, only classify them.
+    pub fn from_label(value: &str) -> Self {
+        match value {
+            "gpu" => Self::Gpu,
+            "ibmnpu" => Self::IbmNpu,
+            "switch" => Self::Switch,
+            _ => Self::Unknown,
+        }
+    }
+}
+
+/// Optional GPU Performance Monitoring (GPM) metrics snapshot. Populated
+/// only when the device reports `gpm_support() == true` (Hopper+ on a
+/// driver that exposes the GPM family). All fields are `Option<f32>` so
+/// individual metric failures do not invalidate the rest of the snapshot.
+///
+/// Values are expressed as a fraction in `[0.0, 1.0]` to match Prometheus'
+/// convention for utilization gauges — the NVML `*_UTIL` family reports
+/// percentages which the reader divides by 100 on the way in.
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Default)]
+pub struct GpmMetrics {
+    /// Fraction of warps active vs theoretical maximum, averaged across
+    /// all SMs. Maps to `NVML_GPM_METRIC_SM_OCCUPANCY` / 100.
+    pub sm_occupancy: Option<f32>,
+    /// Fraction of memory bandwidth in use, averaged across the polling
+    /// window. Maps to `NVML_GPM_METRIC_DRAM_BW_UTIL` / 100.
+    pub memory_bandwidth_utilization: Option<f32>,
 }
 
 /// Proximity classification for the current GPU temperature relative to the

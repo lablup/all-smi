@@ -514,6 +514,11 @@ mod tests {
             temperature_threshold_max_operating: None,
             temperature_threshold_acoustic: None,
             performance_state: None,
+            numa_node_id: None,
+            gsp_firmware_mode: None,
+            gsp_firmware_version: None,
+            nvlink_remote_devices: Vec::new(),
+            gpm_metrics: None,
             detail,
         });
 
@@ -560,6 +565,11 @@ mod tests {
             temperature_threshold_max_operating: None,
             temperature_threshold_acoustic: None,
             performance_state: None,
+            numa_node_id: None,
+            gsp_firmware_mode: None,
+            gsp_firmware_version: None,
+            nvlink_remote_devices: Vec::new(),
+            gpm_metrics: None,
             detail,
         });
 

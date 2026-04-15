@@ -128,6 +128,32 @@ count by (lib_name, lib_version) (all_smi_gpu_info) > 1
 - `performance_state` maps NVML `PerformanceState` variants: P0 (maximum performance) = 0 through P15 = 15. The `Unknown` sentinel is suppressed (`None`) rather than emitted.
 - The acoustic threshold is available on newer drivers and some GPU SKUs; older drivers leave it absent.
 
+### NVIDIA Hardware Details Metrics
+
+Extended NVIDIA hardware detail metrics (NUMA topology, GSP firmware, NvLink topology, and GPU Performance Monitoring). All metrics in this group share the same four-label base set as other NVIDIA-specific metrics (`gpu`, `instance`, `uuid`, `index`) and are omitted entirely for non-NVIDIA devices, on older drivers that do not expose the underlying NVML APIs, or when the field value is unavailable.
+
+| Metric                                    | Description                                                                                                      | Unit  | Labels                                                               |
+|-------------------------------------------|------------------------------------------------------------------------------------------------------------------|-------|----------------------------------------------------------------------|
+| `all_smi_gpu_numa_node_id`                | NUMA node the GPU is attached to; omitted when the host has no NUMA topology or the driver does not report one   | gauge | `gpu`, `instance`, `uuid`, `index`                                   |
+| `all_smi_gpu_gsp_firmware_mode`           | GSP firmware mode: `0`=disabled, `1`=enabled, `2`=default; omitted on pre-R525 drivers or non-datacenter SKUs  | gauge | `gpu`, `instance`, `uuid`, `index`                                   |
+| `all_smi_gpu_gsp_firmware_version_info`   | Info-style metric (value always 1) carrying the GSP firmware version string in a `version` label                | gauge | `gpu`, `instance`, `uuid`, `index`, `version`                        |
+| `all_smi_nvlink_remote_device_type`       | Info-style metric (value always 1) per active NvLink; classification in `remote_type` label                     | gauge | `gpu`, `instance`, `uuid`, `index`, `link_index`, `remote_type`      |
+| `all_smi_gpu_sm_occupancy`                | GPM-reported SM occupancy fraction (0.0–1.0); omitted on pre-Hopper GPUs or when GPM has not yet sampled        | gauge | `gpu`, `instance`, `uuid`, `index`                                   |
+| `all_smi_gpu_memory_bandwidth_utilization`| GPM-reported DRAM bandwidth utilization fraction (0.0–1.0); omitted when GPM is unsupported or unsampled        | gauge | `gpu`, `instance`, `uuid`, `index`                                   |
+
+**Label values for `all_smi_nvlink_remote_device_type`:**
+
+| Label        | Values                                   | Description                                       |
+|--------------|------------------------------------------|---------------------------------------------------|
+| `link_index` | `"0"`, `"1"`, …                         | NvLink port index on the GPU                      |
+| `remote_type`| `"gpu"`, `"switch"`, `"ibmnpu"`, `"unknown"` | Classification of the remote endpoint        |
+
+**Notes:**
+- `all_smi_gpu_numa_node_id`: NVML reports `-1` for GPUs without a NUMA attachment; this value is canonicalised to `None` and the metric is omitted rather than emitting a negative number.
+- `all_smi_gpu_gsp_firmware_version_info`: the `version` label carries a string such as `"550.54.15"`. Because the version is static for the lifetime of the driver, it is cached after the first successful NVML call.
+- `all_smi_nvlink_remote_device_type`: one metric row is emitted per active NvLink. A GPU with no active links produces no rows for this metric family.
+- `all_smi_gpu_sm_occupancy` and `all_smi_gpu_memory_bandwidth_utilization`: GPM requires a two-sample handshake before values are available. Until the handshake completes the exporter holds `None` for both fields and emits nothing, preventing spurious zero readings. These metrics are currently plumbing only — values are populated on Hopper and later hardware when the GPM handshake succeeds.
+
 ### NVIDIA vGPU Metrics
 
 NVIDIA vGPU metrics are emitted only on hosts with vGPU SR-IOV enabled. Non-vGPU hosts produce no output for these metric families.
