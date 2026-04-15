@@ -19,8 +19,8 @@ use chrono::Local;
 use regex::Regex;
 
 use crate::device::{
-    AppleSiliconCpuInfo, CpuInfo, CpuPlatformType, GpuInfo, MemoryInfo, MigGpuInfo,
-    MigInstanceInfo, VgpuHostInfo, VgpuInfo,
+    AppleSiliconCpuInfo, CpuInfo, CpuPlatformType, GpmMetrics, GpuInfo, MemoryInfo, MigGpuInfo,
+    MigInstanceInfo, NvLinkRemoteDevice, NvLinkRemoteType, VgpuHostInfo, VgpuInfo,
 };
 use crate::storage::info::StorageInfo;
 
@@ -84,7 +84,10 @@ impl MetricsParser {
 
                 // Process different metric types with size limits.
                 // Route vGPU and MIG lines first so they aren't swallowed by
-                // the broader `gpu_` prefix below.
+                // the broader `gpu_` prefix below. `nvlink_*` metrics from
+                // issue #132 are also hardware-detail lines that must join
+                // the per-GPU accumulator — they carry the same `uuid`
+                // label set as the rest of the GPU rows.
                 if metric_name.starts_with("vgpu_") {
                     vgpu_state.process(&metric_name, &labels, value, host);
                 } else if metric_name == "gpu_mig_mode" || metric_name.starts_with("mig_instance_")
@@ -92,6 +95,7 @@ impl MetricsParser {
                     mig_state.process(&metric_name, &labels, value, host);
                 } else if metric_name.starts_with("gpu_")
                     || metric_name.starts_with("npu_")
+                    || metric_name.starts_with("nvlink_")
                     || metric_name == "ane_utilization"
                 {
                     if gpu_info_map.len() < MAX_DEVICES_PER_TYPE {
@@ -250,6 +254,18 @@ impl MetricsParser {
                 temperature_threshold_max_operating: None,
                 temperature_threshold_acoustic: None,
                 performance_state: None,
+                // Hardware details (issue #132) land via dedicated
+                // `all_smi_gpu_numa_node_id`, `all_smi_gpu_gsp_firmware_*`,
+                // `all_smi_nvlink_remote_device_type`, and GPM metric
+                // handlers further down. Until those lines are seen in
+                // the scrape these fields stay at their "unavailable"
+                // defaults, matching the local graceful-degradation
+                // contract.
+                numa_node_id: None,
+                gsp_firmware_mode: None,
+                gsp_firmware_version: None,
+                nvlink_remote_devices: Vec::new(),
+                gpm_metrics: None,
                 detail,
             }
         });
@@ -314,6 +330,82 @@ impl MetricsParser {
                 // render as "P9999" and corrupt the secondary row layout.
                 if (0.0..=15.0).contains(&value) {
                     gpu_info.performance_state = saturating_u32(value);
+                }
+            }
+            "gpu_numa_node_id" => {
+                // NUMA node ids are non-negative on every real system.
+                // Cap at a paranoid ceiling so a hostile upstream cannot
+                // inject huge values: no real machine exposes more than
+                // ~256 NUMA nodes today. Negative inputs and NaN drop.
+                if let Some(node) = saturating_i32(value)
+                    && (0..=MAX_NUMA_NODE_ID).contains(&node)
+                {
+                    gpu_info.numa_node_id = Some(node);
+                }
+            }
+            "gpu_gsp_firmware_mode" => {
+                // Exporter emits exactly 0/1/2. Accept only that range so
+                // a malicious upstream cannot seed the UI with a bogus
+                // code. Out-of-range values leave the field as `None`.
+                if (0.0..=2.0).contains(&value) {
+                    gpu_info.gsp_firmware_mode =
+                        saturating_u32(value).and_then(|v| u8::try_from(v).ok());
+                }
+            }
+            "gpu_gsp_firmware_version_info" => {
+                // The numeric value is always 1 (info-style metric). The
+                // payload is the `version` label.
+                if let Some(version) = labels.get("version") {
+                    let trimmed = version.trim();
+                    if !trimmed.is_empty() && trimmed.len() <= MAX_GSP_VERSION_LEN {
+                        gpu_info.gsp_firmware_version = Some(trimmed.to_string());
+                    }
+                }
+            }
+            "nvlink_remote_device_type" => {
+                // Info-style metric with `link_index` and `remote_type`
+                // labels. Enforce a defensive per-GPU cap so a malicious
+                // upstream cannot explode the `nvlink_remote_devices` vec
+                // by emitting thousands of distinct link indices.
+                let Some(link_index) = labels.get("link_index").and_then(|s| s.parse::<u32>().ok())
+                else {
+                    return;
+                };
+                if link_index >= MAX_NVLINK_PER_GPU {
+                    return;
+                }
+                let remote_type = labels
+                    .get("remote_type")
+                    .map(|s| NvLinkRemoteType::from_label(s))
+                    .unwrap_or_default();
+                // Coalesce duplicate link_index emissions — most recent
+                // sample wins — so a scrape that contains the same link
+                // multiple times doesn't multiply the vector length.
+                if let Some(existing) = gpu_info
+                    .nvlink_remote_devices
+                    .iter_mut()
+                    .find(|l| l.link_index == link_index)
+                {
+                    existing.remote_type = remote_type;
+                } else if gpu_info.nvlink_remote_devices.len() < MAX_NVLINK_PER_GPU as usize {
+                    gpu_info.nvlink_remote_devices.push(NvLinkRemoteDevice {
+                        link_index,
+                        remote_type,
+                    });
+                }
+            }
+            "gpu_sm_occupancy" => {
+                // GPM fractional utilization — expected in [0.0, 1.0].
+                // Values outside that band come from a buggy upstream and
+                // are dropped rather than clamped so dashboards can
+                // distinguish "unavailable" from "definitely zero".
+                if value.is_finite() && (0.0..=1.0).contains(&value) {
+                    ensure_gpm_metrics(gpu_info).sm_occupancy = Some(value as f32);
+                }
+            }
+            "gpu_memory_bandwidth_utilization" => {
+                if value.is_finite() && (0.0..=1.0).contains(&value) {
+                    ensure_gpm_metrics(gpu_info).memory_bandwidth_utilization = Some(value as f32);
                 }
             }
             "npu_firmware_info" => {
@@ -671,6 +763,48 @@ fn saturating_u32(value: f64) -> Option<u32> {
         return Some(u32::MAX);
     }
     Some(value as u32)
+}
+
+/// Saturating cast of a Prometheus `f64` value to `Option<i32>` for the
+/// NUMA node id field.
+///
+/// * Values above `i32::MAX` saturate to `i32::MAX`.
+/// * Values below `i32::MIN` saturate to `i32::MIN`.
+/// * `NaN` yields `None`.
+fn saturating_i32(value: f64) -> Option<i32> {
+    if value.is_nan() {
+        return None;
+    }
+    if value >= i32::MAX as f64 {
+        return Some(i32::MAX);
+    }
+    if value <= i32::MIN as f64 {
+        return Some(i32::MIN);
+    }
+    Some(value as i32)
+}
+
+/// Maximum NvLinks per GPU accepted from a remote scrape. Current NVIDIA
+/// hardware caps at 18 physical links; 32 leaves headroom for future
+/// generations while still rejecting absurd input.
+pub(crate) const MAX_NVLINK_PER_GPU: u32 = 32;
+
+/// Maximum NUMA node id accepted from a remote scrape. No real system
+/// exposes more than a few hundred NUMA nodes; 4096 is paranoid.
+const MAX_NUMA_NODE_ID: i32 = 4096;
+
+/// Maximum GSP firmware version string length accepted from a remote
+/// scrape. NVIDIA's GSP version strings are well under 32 bytes; 128
+/// truncates any obviously pathological label.
+const MAX_GSP_VERSION_LEN: usize = 128;
+
+/// Lazily populate the GPM metrics slot on a [`GpuInfo`] so we do not
+/// allocate an empty struct unless at least one GPM field was observed.
+fn ensure_gpm_metrics(gpu_info: &mut GpuInfo) -> &mut GpmMetrics {
+    if gpu_info.gpm_metrics.is_none() {
+        gpu_info.gpm_metrics = Some(GpmMetrics::default());
+    }
+    gpu_info.gpm_metrics.as_mut().expect("just populated above")
 }
 
 fn split_labels_respecting_quotes(labels_str: &str) -> Vec<&str> {
