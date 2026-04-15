@@ -133,6 +133,12 @@ impl<'a> VgpuMetricExporter<'a> {
     }
 
     fn export_instance_metrics(&self, builder: &mut MetricBuilder) {
+        // Precompute the flattened host/vGPU rows once so the five metric
+        // families below iterate over borrowed slices without re-allocating
+        // `gpu_index`/`instance_id` strings per family. For N instances this
+        // reduces per-scrape allocations from 5*2*N to 2*N.
+        let rows = self.collect_rows();
+
         // Emit HELP/TYPE once per metric family to keep the output terse when
         // there are many instances. Missing values simply produce no line.
         builder
@@ -141,9 +147,9 @@ impl<'a> VgpuMetricExporter<'a> {
                 "Per-vGPU GPU utilization percentage (0-100) as reported by NVML accounting",
             )
             .type_("all_smi_vgpu_utilization", "gauge");
-        for (host, vgpu, gpu_index_str, instance_id_str) in self.iter_instances() {
-            if let Some(util) = vgpu.gpu_utilization {
-                let labels = Self::instance_labels(host, vgpu, &gpu_index_str, &instance_id_str);
+        for row in &rows {
+            if let Some(util) = row.vgpu.gpu_utilization {
+                let labels = Self::instance_labels(row);
                 builder.metric("all_smi_vgpu_utilization", &labels, util);
             }
         }
@@ -154,9 +160,9 @@ impl<'a> VgpuMetricExporter<'a> {
                 "Per-vGPU memory bandwidth utilization percentage (0-100)",
             )
             .type_("all_smi_vgpu_memory_utilization", "gauge");
-        for (host, vgpu, gpu_index_str, instance_id_str) in self.iter_instances() {
-            if let Some(util) = vgpu.memory_utilization {
-                let labels = Self::instance_labels(host, vgpu, &gpu_index_str, &instance_id_str);
+        for row in &rows {
+            if let Some(util) = row.vgpu.memory_utilization {
+                let labels = Self::instance_labels(row);
                 builder.metric("all_smi_vgpu_memory_utilization", &labels, util);
             }
         }
@@ -167,12 +173,12 @@ impl<'a> VgpuMetricExporter<'a> {
                 "Per-vGPU framebuffer memory used in bytes",
             )
             .type_("all_smi_vgpu_memory_used_bytes", "gauge");
-        for (host, vgpu, gpu_index_str, instance_id_str) in self.iter_instances() {
-            let labels = Self::instance_labels(host, vgpu, &gpu_index_str, &instance_id_str);
+        for row in &rows {
+            let labels = Self::instance_labels(row);
             builder.metric(
                 "all_smi_vgpu_memory_used_bytes",
                 &labels,
-                vgpu.fb_used_bytes,
+                row.vgpu.fb_used_bytes,
             );
         }
 
@@ -182,12 +188,12 @@ impl<'a> VgpuMetricExporter<'a> {
                 "Per-vGPU framebuffer memory budget in bytes",
             )
             .type_("all_smi_vgpu_memory_total_bytes", "gauge");
-        for (host, vgpu, gpu_index_str, instance_id_str) in self.iter_instances() {
-            let labels = Self::instance_labels(host, vgpu, &gpu_index_str, &instance_id_str);
+        for row in &rows {
+            let labels = Self::instance_labels(row);
             builder.metric(
                 "all_smi_vgpu_memory_total_bytes",
                 &labels,
-                vgpu.fb_total_bytes,
+                row.vgpu.fb_total_bytes,
             );
         }
 
@@ -197,55 +203,63 @@ impl<'a> VgpuMetricExporter<'a> {
                 "Per-vGPU liveness (1=accounting PID active, 0=idle)",
             )
             .type_("all_smi_vgpu_active", "gauge");
-        for (host, vgpu, gpu_index_str, instance_id_str) in self.iter_instances() {
-            let labels = Self::instance_labels(host, vgpu, &gpu_index_str, &instance_id_str);
+        for row in &rows {
+            let labels = Self::instance_labels(row);
             builder.metric(
                 "all_smi_vgpu_active",
                 &labels,
-                if vgpu.is_active { 1 } else { 0 },
+                if row.vgpu.is_active { 1 } else { 0 },
             );
         }
     }
 
-    fn iter_instances(
-        &self,
-    ) -> impl Iterator<
-        Item = (
-            &'a VgpuHostInfo,
-            &'a crate::device::VgpuInfo,
-            String,
-            String,
-        ),
-    > {
-        self.vgpu_info.iter().flat_map(|host| {
+    /// Flatten the nested host/vGPU structure into a single `Vec<Row>` where
+    /// each row borrows its host and vGPU and owns only the two small
+    /// stringified indices. Exists purely to amortize allocation across the
+    /// five per-instance metric families in `export_instance_metrics`.
+    fn collect_rows(&self) -> Vec<Row<'a>> {
+        let total: usize = self.vgpu_info.iter().map(|h| h.vgpus.len()).sum();
+        let mut rows = Vec::with_capacity(total);
+        for host in self.vgpu_info {
             let gpu_index_str = host.gpu_index.to_string();
-            host.vgpus.iter().map(move |vgpu| {
-                let instance_id_str = vgpu.instance_id.to_string();
-                (host, vgpu, gpu_index_str.clone(), instance_id_str)
-            })
-        })
+            for vgpu in &host.vgpus {
+                rows.push(Row {
+                    host,
+                    vgpu,
+                    gpu_index_str: gpu_index_str.clone(),
+                    instance_id_str: vgpu.instance_id.to_string(),
+                });
+            }
+        }
+        rows
     }
 
-    fn instance_labels<'b>(
-        host: &'b VgpuHostInfo,
-        vgpu: &'b crate::device::VgpuInfo,
-        gpu_index_str: &'b str,
-        instance_id_str: &'b str,
-    ) -> [(&'b str, &'b str); 9] {
+    fn instance_labels<'b>(row: &'b Row<'a>) -> [(&'b str, &'b str); 9] {
         [
-            ("gpu_index", gpu_index_str),
-            ("gpu_uuid", host.gpu_uuid.as_str()),
-            ("gpu", host.gpu_name.as_str()),
-            ("instance", host.instance.as_str()),
-            ("host", host.hostname.as_str()),
-            ("vgpu_id", instance_id_str),
-            ("vgpu_uuid", vgpu.uuid.as_str()),
-            ("vgpu_type", vgpu.vgpu_type_name.as_str()),
+            ("gpu_index", row.gpu_index_str.as_str()),
+            ("gpu_uuid", row.host.gpu_uuid.as_str()),
+            ("gpu", row.host.gpu_name.as_str()),
+            ("instance", row.host.instance.as_str()),
+            ("host", row.host.hostname.as_str()),
+            ("vgpu_id", row.instance_id_str.as_str()),
+            ("vgpu_uuid", row.vgpu.uuid.as_str()),
+            ("vgpu_type", row.vgpu.vgpu_type_name.as_str()),
             // Surface the owning VM id so remote scrapers can reconstruct
             // the TUI `vm=` column. Empty when NVML does not expose one.
-            ("vgpu_vm_id", vgpu.vm_id.as_str()),
+            ("vgpu_vm_id", row.vgpu.vm_id.as_str()),
         ]
     }
+}
+
+/// Borrowed view of a single `(host, vGPU)` pair used by
+/// `VgpuMetricExporter::export_instance_metrics`. Owns only the two small
+/// stringified indices so that the five downstream metric families can
+/// iterate without re-allocating them.
+struct Row<'a> {
+    host: &'a VgpuHostInfo,
+    vgpu: &'a crate::device::VgpuInfo,
+    gpu_index_str: String,
+    instance_id_str: String,
 }
 
 impl<'a> MetricExporter for VgpuMetricExporter<'a> {
