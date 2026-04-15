@@ -127,7 +127,7 @@ impl NvidiaMockGenerator {
         // `render_nvidia_response` only needs one replace pass.
         template.push_str(
             "# HELP all_smi_gpu_performance_state GPU performance state \
-             (0=P0 fastest, 15=P15 idlest, -1=not reported)\n",
+             (0=P0 fastest, 15=P15 idlest; metric is omitted when the device does not report a P-state)\n",
         );
         template.push_str("# TYPE all_smi_gpu_performance_state gauge\n");
         for (i, gpu) in gpus.iter().enumerate() {

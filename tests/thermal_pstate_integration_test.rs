@@ -59,7 +59,7 @@ fn full_exposition() -> String {
         "all_smi_gpu_temperature_threshold_acoustic_celsius{gpu=\"NVIDIA A100\", \
          instance=\"node-7\", uuid=\"GPU-RT\", index=\"0\"} 77\n",
         "# HELP all_smi_gpu_performance_state \
-         GPU performance state (0=P0 fastest, 15=P15 idlest, -1=not reported)\n",
+         GPU performance state (0=P0 fastest, 15=P15 idlest; metric is omitted when the device does not report a P-state)\n",
         "# TYPE all_smi_gpu_performance_state gauge\n",
         "all_smi_gpu_performance_state{gpu=\"NVIDIA A100\", instance=\"node-7\", \
          uuid=\"GPU-RT\", index=\"0\"} 4\n",
@@ -136,14 +136,15 @@ fn non_nvidia_path_leaves_fields_none() {
 }
 
 #[test]
-fn performance_state_negative_one_means_unavailable() {
-    // Contract: the exporter emits `-1` for "not reported"; the parser MUST
-    // preserve that as `None`, not a bogus `u32` reading.
+fn performance_state_omission_means_unavailable() {
+    // Contract: when the device does not report a P-state, the exporter
+    // omits the `all_smi_gpu_performance_state` line entirely (Prometheus
+    // convention for "no data"). The parser MUST surface that absence as
+    // `None` rather than synthesising a reading.
     //
-    // The regex used by the parser is anchored to `\d\.` for the value
-    // (unsigned decimals), so a literal `-1` won't even match the line. We
-    // simulate what happens when a legacy scraper emits a positive sentinel
-    // by just omitting the metric entirely; the result must be `None`.
+    // We model the wire format directly: build a scrape with util +
+    // temperature lines but no P-state line, and assert the parsed
+    // record has `performance_state == None`.
     let parser = MetricsParser::new();
     let text = concat!(
         "all_smi_gpu_utilization{gpu=\"NVIDIA A100\", instance=\"node-7\", \

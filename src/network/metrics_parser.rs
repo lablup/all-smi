@@ -298,8 +298,12 @@ impl MetricsParser {
                 gpu_info.temperature_threshold_acoustic = saturating_u32(value);
             }
             "gpu_performance_state" => {
-                // Exporter emits -1 when the device did not report a P-state.
-                // Preserve that absence on round-trip.
+                // The exporter omits this metric when the device did not
+                // report a P-state (Prometheus convention for "no data"),
+                // so an absent line round-trips to `None` naturally. Guard
+                // against legacy scrapers that may have emitted negative
+                // sentinel values by treating any negative value as
+                // "unavailable" too.
                 if value >= 0.0 {
                     gpu_info.performance_state = saturating_u32(value);
                 }

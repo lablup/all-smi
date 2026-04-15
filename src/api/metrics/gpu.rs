@@ -293,13 +293,15 @@ impl<'a> GpuMetricExporter<'a> {
         // Performance state — first prefer the structured per-device field
         // populated by the NVIDIA reader, fall back to the legacy
         // `detail.performance_state` string so mock servers and older
-        // collectors keep working. When neither is available, emit `-1` so
-        // downstream dashboards can distinguish "unsupported" from P0.
+        // collectors keep working. When neither is available, the metric
+        // is omitted entirely (Prometheus convention for "no data") so
+        // dashboards can distinguish "unsupported" from P0 by absence
+        // rather than relying on a sentinel value.
         if let Some(pstate) = info.performance_state {
             builder
                 .help(
                     "all_smi_gpu_performance_state",
-                    "GPU performance state (0=P0 fastest, 15=P15 idlest, -1=not reported)",
+                    "GPU performance state (0=P0 fastest, 15=P15 idlest; metric is omitted when the device does not report a P-state)",
                 )
                 .type_("all_smi_gpu_performance_state", "gauge")
                 .metric("all_smi_gpu_performance_state", &base_labels, pstate as f64);
@@ -310,7 +312,7 @@ impl<'a> GpuMetricExporter<'a> {
             builder
                 .help(
                     "all_smi_gpu_performance_state",
-                    "GPU performance state (0=P0 fastest, 15=P15 idlest, -1=not reported)",
+                    "GPU performance state (0=P0 fastest, 15=P15 idlest; metric is omitted when the device does not report a P-state)",
                 )
                 .type_("all_smi_gpu_performance_state", "gauge")
                 .metric("all_smi_gpu_performance_state", &base_labels, state_num);
