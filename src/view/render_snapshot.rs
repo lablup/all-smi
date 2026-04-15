@@ -22,7 +22,9 @@
 use std::collections::HashMap;
 
 use crate::app_state::{AppState, ConnectionStatus, SortCriteria, SortDirection};
-use crate::device::{ChassisInfo, CpuInfo, GpuInfo, MemoryInfo, ProcessInfo, VgpuHostInfo};
+use crate::device::{
+    ChassisInfo, CpuInfo, GpuInfo, MemoryInfo, MigGpuInfo, ProcessInfo, VgpuHostInfo,
+};
 use crate::storage::info::StorageInfo;
 use crate::ui::notification::NotificationManager;
 use crate::utils::RuntimeEnvironment;
@@ -90,6 +92,9 @@ pub struct RenderSnapshot {
     pub storage_info: Vec<StorageInfo>,
     /// Per-GPU vGPU host info (NVIDIA vGPU only). Empty on bare-metal.
     pub vgpu_info: Vec<VgpuHostInfo>,
+    /// Per-GPU MIG host info (NVIDIA datacenter GPUs with MIG enabled). Empty
+    /// on consumer cards, pre-Ampere architectures, and non-MIG hosts.
+    pub mig_info: Vec<MigGpuInfo>,
 
     // Connection tracking (remote mode)
     pub connection_status: HashMap<String, ConnectionStatus>,
@@ -166,6 +171,7 @@ impl RenderSnapshot {
             chassis_info: state.chassis_info.clone(),
             storage_info: state.storage_info.clone(),
             vgpu_info: state.vgpu_info.clone(),
+            mig_info: state.mig_info.clone(),
 
             // Connection tracking
             connection_status: state.connection_status.clone(),
@@ -245,6 +251,7 @@ impl RenderSnapshot {
         state.chassis_info = self.chassis_info.clone();
         state.storage_info = self.storage_info.clone();
         state.vgpu_info = self.vgpu_info.clone();
+        state.mig_info = self.mig_info.clone();
 
         // Connection tracking
         state.connection_status = self.connection_status.clone();

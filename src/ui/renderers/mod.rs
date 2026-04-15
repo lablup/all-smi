@@ -16,6 +16,7 @@ pub mod chassis_renderer;
 pub mod cpu_renderer;
 pub mod gpu_renderer;
 pub mod memory_renderer;
+pub mod mig_renderer;
 pub mod storage_renderer;
 pub mod vgpu_renderer;
 pub mod widgets;
@@ -25,6 +26,7 @@ pub use chassis_renderer::print_chassis_info;
 pub use cpu_renderer::print_cpu_info;
 pub use gpu_renderer::print_gpu_info;
 pub use memory_renderer::print_memory_info;
+pub use mig_renderer::print_mig_section;
 pub use storage_renderer::print_storage_info;
 pub use vgpu_renderer::print_vgpu_section;
 

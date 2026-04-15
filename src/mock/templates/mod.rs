@@ -21,6 +21,7 @@ pub mod disk;
 pub mod furiosa;
 pub mod gaudi;
 pub mod jetson;
+pub mod mig;
 pub mod nvidia;
 pub mod rebellions;
 pub mod tenstorrent;

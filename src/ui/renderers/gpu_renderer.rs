@@ -17,6 +17,7 @@ use std::io::Write;
 use crossterm::{queue, style::Color, style::Print};
 
 use crate::device::GpuInfo;
+use crate::device::MigGpuInfo;
 use crate::device::VgpuHostInfo;
 use crate::device::types::{ThermalProximity, ThermalProximityConfig};
 use crate::ui::text::print_colored_text;
@@ -41,7 +42,7 @@ impl GpuRenderer {
 
 /// Compute the number of terminal lines [`print_gpu_info`] will emit for a
 /// single GPU, including any optional thermal/P-state row and any nested
-/// vGPU section.
+/// vGPU / MIG section.
 ///
 /// Layout pieces, in render order:
 ///   1. The base info line (always 1 line).
@@ -50,15 +51,22 @@ impl GpuRenderer {
 ///   3. The gauge row (always 1 line).
 ///   4. A nested vGPU section, when a matching [`VgpuHostInfo`] is present
 ///      and the host is "active": 1 header line + 1 line per vGPU instance.
+///   5. A nested MIG section, when a matching [`MigGpuInfo`] is present and
+///      the host is "active": 1 header line + 1 line per MIG instance.
 ///
-/// The vGPU matching here mirrors `find_matching_vgpu_host` in
-/// `view::frame_renderer` (UUID first, then hostname + gpu_name fallback)
-/// so that layout math agrees with what is actually rendered.
+/// The vGPU/MIG matching here mirrors `find_matching_vgpu_host` /
+/// `find_matching_mig_gpu` in `view::frame_renderer` (UUID first, then
+/// hostname + gpu_name fallback) so that layout math agrees with what is
+/// actually rendered.
 ///
 /// Used by the layout calculator and the PgUp/PgDn handlers to size the
 /// scrollable GPU area correctly when the new thermal/P-state row is
 /// present, since it can grow rows from 2 to 3 lines apiece.
-pub fn gpu_render_line_count(gpu: &GpuInfo, vgpu_info: &[VgpuHostInfo]) -> usize {
+pub fn gpu_render_line_count(
+    gpu: &GpuInfo,
+    vgpu_info: &[VgpuHostInfo],
+    mig_info: &[MigGpuInfo],
+) -> usize {
     // Base: info line + gauges line.
     let mut lines: usize = 2;
 
@@ -87,6 +95,23 @@ pub fn gpu_render_line_count(gpu: &GpuInfo, vgpu_info: &[VgpuHostInfo]) -> usize
         && host.is_vgpu_active()
     {
         lines += 1 + host.vgpus.len();
+    }
+
+    // Optional MIG section: header + one row per instance. The matching
+    // logic must stay in lockstep with `find_matching_mig_gpu` in
+    // `view::frame_renderer`.
+    let mig_matched = mig_info
+        .iter()
+        .find(|m| m.gpu_uuid == gpu.uuid)
+        .or_else(|| {
+            mig_info
+                .iter()
+                .find(|m| m.hostname == gpu.hostname && m.gpu_name == gpu.name)
+        });
+    if let Some(host) = mig_matched
+        && host.is_mig_active()
+    {
+        lines += 1 + host.instances.len();
     }
 
     lines
@@ -816,7 +841,7 @@ mod tests {
         gpu.temperature_threshold_max_operating = None;
         gpu.temperature_threshold_acoustic = None;
         gpu.performance_state = None;
-        assert_eq!(gpu_render_line_count(&gpu, &[]), 2);
+        assert_eq!(gpu_render_line_count(&gpu, &[], &[]), 2);
     }
 
     #[test]
@@ -837,7 +862,7 @@ mod tests {
             gpu.performance_state = None;
             setter(&mut gpu);
             assert_eq!(
-                gpu_render_line_count(&gpu, &[]),
+                gpu_render_line_count(&gpu, &[], &[]),
                 3,
                 "expected 3 lines for {gpu:?}"
             );
@@ -856,7 +881,10 @@ mod tests {
         gpu.uuid = "GPU-A".to_string();
         let host = make_vgpu_host("GPU-A", 3);
         // 2 base + 0 thermal + (1 header + 3 instances) = 6
-        assert_eq!(gpu_render_line_count(&gpu, std::slice::from_ref(&host)), 6);
+        assert_eq!(
+            gpu_render_line_count(&gpu, std::slice::from_ref(&host), &[]),
+            6
+        );
     }
 
     #[test]
@@ -875,7 +903,10 @@ mod tests {
         gpu.name = "Test GPU".to_string();
         // Host has a *different* uuid but matching hostname + gpu_name.
         let host = make_vgpu_host("GPU-OTHER", 2);
-        assert_eq!(gpu_render_line_count(&gpu, std::slice::from_ref(&host)), 5);
+        assert_eq!(
+            gpu_render_line_count(&gpu, std::slice::from_ref(&host), &[]),
+            5
+        );
     }
 
     #[test]
@@ -890,7 +921,10 @@ mod tests {
         let mut host = make_vgpu_host("GPU-A", 0);
         host.host_mode = "Disabled".to_string();
         // Disabled host with no instances renders nothing → count stays at 2.
-        assert_eq!(gpu_render_line_count(&gpu, std::slice::from_ref(&host)), 2);
+        assert_eq!(
+            gpu_render_line_count(&gpu, std::slice::from_ref(&host), &[]),
+            2
+        );
     }
 
     #[test]
@@ -903,6 +937,116 @@ mod tests {
         // thermal row +1 line.
         let host = make_vgpu_host("GPU-A", 2);
         // 2 base + 1 thermal + (1 header + 2 instances) = 6
-        assert_eq!(gpu_render_line_count(&gpu, std::slice::from_ref(&host)), 6);
+        assert_eq!(
+            gpu_render_line_count(&gpu, std::slice::from_ref(&host), &[]),
+            6
+        );
+    }
+
+    fn make_mig_host(gpu_uuid: &str, instances: usize) -> MigGpuInfo {
+        use crate::device::types::MigInstanceInfo;
+        let entries = (0..instances)
+            .map(|i| MigInstanceInfo {
+                instance_id: i as u32,
+                gpu_instance_id: Some((i as u32) + 1),
+                compute_instance_id: Some(0),
+                uuid: format!("MIG-{i}"),
+                profile_name: "1g.5gb".into(),
+                utilization_gpu: Some(0),
+                utilization_memory: Some(0),
+                memory_used_bytes: 0,
+                memory_total_bytes: 5 << 30,
+            })
+            .collect();
+        MigGpuInfo {
+            host_id: "h".to_string(),
+            hostname: "h".to_string(),
+            instance: "h".to_string(),
+            gpu_index: 0,
+            gpu_uuid: gpu_uuid.to_string(),
+            gpu_name: "Test GPU".to_string(),
+            mig_mode: true,
+            instances: entries,
+        }
+    }
+
+    #[test]
+    fn line_count_includes_mig_section_when_uuid_matches() {
+        let mut gpu = make_gpu(40);
+        gpu.temperature_threshold_slowdown = None;
+        gpu.temperature_threshold_shutdown = None;
+        gpu.temperature_threshold_max_operating = None;
+        gpu.temperature_threshold_acoustic = None;
+        gpu.performance_state = None;
+        gpu.uuid = "GPU-A".to_string();
+        let mig_host = make_mig_host("GPU-A", 4);
+        // 2 base + 0 thermal + (1 MIG header + 4 instances) = 7
+        assert_eq!(
+            gpu_render_line_count(&gpu, &[], std::slice::from_ref(&mig_host)),
+            7
+        );
+    }
+
+    #[test]
+    fn line_count_falls_back_to_hostname_for_mig_when_uuid_missing() {
+        let mut gpu = make_gpu(40);
+        gpu.temperature_threshold_slowdown = None;
+        gpu.temperature_threshold_shutdown = None;
+        gpu.temperature_threshold_max_operating = None;
+        gpu.temperature_threshold_acoustic = None;
+        gpu.performance_state = None;
+        gpu.uuid = "GPU-A".to_string();
+        gpu.hostname = "h".to_string();
+        gpu.name = "Test GPU".to_string();
+        // MIG host has a different UUID but matching hostname + gpu_name.
+        let mig_host = make_mig_host("GPU-OTHER", 2);
+        // 2 base + (1 header + 2 instances) = 5
+        assert_eq!(
+            gpu_render_line_count(&gpu, &[], std::slice::from_ref(&mig_host)),
+            5
+        );
+    }
+
+    #[test]
+    fn line_count_combines_vgpu_and_mig_contributions() {
+        // Pathological but supported: a single GPU could in theory carry both
+        // vGPU and MIG records (e.g. a vGPU host that scrapes a MIG-enabled
+        // physical card via NVML on a passthrough-style setup). Exercise the
+        // additive path.
+        let mut gpu = make_gpu(40);
+        gpu.temperature_threshold_slowdown = None;
+        gpu.temperature_threshold_shutdown = None;
+        gpu.temperature_threshold_max_operating = None;
+        gpu.temperature_threshold_acoustic = None;
+        gpu.performance_state = None;
+        gpu.uuid = "GPU-A".to_string();
+        let vgpu_host = make_vgpu_host("GPU-A", 2);
+        let mig_host = make_mig_host("GPU-A", 3);
+        // 2 base + 0 thermal + (1+2 vGPU) + (1+3 MIG) = 9
+        assert_eq!(
+            gpu_render_line_count(
+                &gpu,
+                std::slice::from_ref(&vgpu_host),
+                std::slice::from_ref(&mig_host),
+            ),
+            9
+        );
+    }
+
+    #[test]
+    fn line_count_ignores_mig_host_with_no_instances_and_disabled_mode() {
+        let mut gpu = make_gpu(40);
+        gpu.temperature_threshold_slowdown = None;
+        gpu.temperature_threshold_shutdown = None;
+        gpu.temperature_threshold_max_operating = None;
+        gpu.temperature_threshold_acoustic = None;
+        gpu.performance_state = None;
+        gpu.uuid = "GPU-A".to_string();
+        let mut mig_host = make_mig_host("GPU-A", 0);
+        mig_host.mig_mode = false;
+        assert_eq!(
+            gpu_render_line_count(&gpu, &[], std::slice::from_ref(&mig_host)),
+            2
+        );
     }
 }

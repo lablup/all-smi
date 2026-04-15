@@ -38,8 +38,8 @@ use crate::ui::layout::LayoutCalculator;
 use crate::ui::local_header::draw_local_header_bar;
 use crate::ui::renderer::{
     print_chassis_info, print_cpu_info, print_function_keys, print_gpu_info,
-    print_loading_indicator, print_memory_info, print_process_info, print_storage_info,
-    print_vgpu_section,
+    print_loading_indicator, print_memory_info, print_mig_section, print_process_info,
+    print_storage_info, print_vgpu_section,
 };
 use crate::ui::tabs::draw_tabs;
 use crate::ui::text::print_colored_text;
@@ -291,6 +291,13 @@ impl FrameRenderer {
             // hostname+gpu-name fallback for remote-mode data without UUID.
             if let Some(vgpu_host) = find_matching_vgpu_host(&snapshot.vgpu_info, gpu_info) {
                 print_vgpu_section(buffer, vgpu_host, cols as usize);
+            }
+
+            // If this GPU has MIG mode enabled, render the nested MIG section
+            // directly beneath the GPU row using the same UUID-first matching
+            // strategy as the vGPU section above.
+            if let Some(mig_host) = find_matching_mig_gpu(&snapshot.mig_info, gpu_info) {
+                print_mig_section(buffer, mig_host, cols as usize);
             }
         }
     }
@@ -694,6 +701,27 @@ fn find_matching_vgpu_host<'a>(
     vgpu_info
         .iter()
         .find(|v| v.hostname == gpu.hostname && v.gpu_name == gpu.name)
+}
+
+/// Locate the [`crate::device::MigGpuInfo`] record matching a given GPU row.
+///
+/// Same precedence as [`find_matching_vgpu_host`]:
+/// 1. Exact `gpu_uuid` match (authoritative).
+/// 2. Fallback: same `hostname` + matching `gpu_name` — used when UUID
+///    propagation is missing (e.g. remote mode with incomplete metrics).
+///
+/// Returns `None` when no match is found, keeping the MIG section from
+/// appearing under unrelated GPU rows.
+fn find_matching_mig_gpu<'a>(
+    mig_info: &'a [crate::device::MigGpuInfo],
+    gpu: &crate::device::GpuInfo,
+) -> Option<&'a crate::device::MigGpuInfo> {
+    if let Some(host) = mig_info.iter().find(|m| m.gpu_uuid == gpu.uuid) {
+        return Some(host);
+    }
+    mig_info
+        .iter()
+        .find(|m| m.hostname == gpu.hostname && m.gpu_name == gpu.name)
 }
 
 #[cfg(test)]

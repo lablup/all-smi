@@ -12,7 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::device::{ChassisInfo, CpuInfo, GpuInfo, MemoryInfo, ProcessInfo, VgpuHostInfo};
+use crate::device::{
+    ChassisInfo, CpuInfo, GpuInfo, MemoryInfo, MigGpuInfo, ProcessInfo, VgpuHostInfo,
+};
 use crate::storage::info::StorageInfo;
 use crate::ui::notification::NotificationManager;
 use crate::utils::RuntimeEnvironment;
@@ -83,6 +85,9 @@ pub struct AppState {
     /// Per-GPU vGPU host info for NVIDIA vGPU-enabled hosts.
     /// Empty on bare-metal or non-NVIDIA systems.
     pub vgpu_info: Vec<VgpuHostInfo>,
+    /// Per-GPU MIG host info for NVIDIA MIG-enabled hosts (A100/A30/H100/H200).
+    /// Empty on consumer cards, pre-Ampere datacenter GPUs, and non-MIG hosts.
+    pub mig_info: Vec<MigGpuInfo>,
     pub selected_process_index: usize,
     pub start_index: usize,
     pub sort_criteria: SortCriteria,
@@ -180,6 +185,7 @@ impl AppState {
             process_info: Vec::new(),
             chassis_info: Vec::new(),
             vgpu_info: Vec::new(),
+            mig_info: Vec::new(),
             selected_process_index: 0,
             start_index: 0,
             sort_criteria: SortCriteria::Default,
