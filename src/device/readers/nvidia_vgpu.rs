@@ -34,7 +34,7 @@ use std::os::raw::c_uint;
 
 use nvml_wrapper::Nvml;
 use nvml_wrapper::enum_wrappers::device::HostVgpuMode;
-use nvml_wrapper::error::nvml_try;
+use nvml_wrapper::error::{nvml_try, nvml_try_count};
 
 use crate::device::types::{VgpuHostInfo, VgpuInfo};
 use crate::utils::get_hostname;
@@ -63,19 +63,6 @@ fn host_mode_code(mode: HostVgpuMode) -> u32 {
     match mode {
         HostVgpuMode::NonSriov => 0,
         HostVgpuMode::Sriov => 1,
-    }
-}
-
-/// Read-only reference to the host vGPU mode encoded for Prometheus.
-///
-/// Called from `api/metrics/vgpu.rs` — kept near the other constants so the
-/// mapping stays in a single place.
-#[allow(dead_code)]
-pub fn parse_host_mode_code(label: &str) -> u32 {
-    match label {
-        "Sriov" => 1,
-        "NonSriov" => 0,
-        _ => u32::MAX,
     }
 }
 
@@ -121,14 +108,15 @@ pub fn collect_vgpu_info(nvml: &Nvml) -> Vec<VgpuHostInfo> {
             .map(|caps| caps.is_arr_mode_supported)
             .unwrap_or(false);
 
-        // Collect active vGPU instances.
-        let vgpus = match device.active_vgpus() {
-            Ok(instances) => instances
-                .into_iter()
-                .map(|id| collect_single_vgpu(nvml, &device, id))
-                .collect(),
-            Err(_) => Vec::new(),
-        };
+        // Collect active vGPU instances via the raw NVML FFI. The high-level
+        // `device.active_vgpus()` helper is `#[cfg(target_os = "linux")]`
+        // in nvml-wrapper 0.12.1, which would break the Windows build. Using
+        // the raw symbol keeps the reader cross-platform while preserving the
+        // graceful-degradation contract: any NVML error becomes an empty vec.
+        let vgpus = active_vgpus_ffi(nvml, &device)
+            .into_iter()
+            .map(|id| collect_single_vgpu(nvml, &device, id))
+            .collect();
 
         let mut detail = HashMap::new();
         detail.insert("vgpu_capable".to_string(), "true".to_string());
@@ -193,6 +181,46 @@ fn collect_single_vgpu(nvml: &Nvml, device: &nvml_wrapper::Device, instance_id: 
         gpu_utilization,
         memory_utilization,
         is_active,
+    }
+}
+
+/// Query the active vGPU instances for a device via the raw NVML FFI.
+///
+/// This is a platform-portable alternative to `Device::active_vgpus()`
+/// (which is `#[cfg(target_os = "linux")]` in nvml-wrapper 0.12.1). By going
+/// through the raw symbol we keep the NVIDIA reader — and therefore the
+/// whole crate — compiling on Windows where `NvidiaGpuReader` is still used.
+///
+/// Returns an empty vector if the symbol is unavailable, if NVML reports
+/// any error (including `NotSupported` on bare-metal), or if the first
+/// count probe returns zero.
+fn active_vgpus_ffi(nvml: &Nvml, device: &nvml_wrapper::Device) -> Vec<u32> {
+    let Ok(sym) = nvml.lib().nvmlDeviceGetActiveVgpus.as_ref() else {
+        return Vec::new();
+    };
+
+    // SAFETY: `Device::handle()` returns the same `nvmlDevice_t` that NVML
+    // expects. We pass correctly-sized out pointers and respect NVML's
+    // two-phase protocol: first call with a null buffer to fetch `count`,
+    // then allocate and call again to populate the instance handles.
+    unsafe {
+        let handle = device.handle();
+        let mut count: c_uint = 0;
+        // Count probe: NVML returns either Success or InsufficientSize with
+        // the required `count` written into our out-param. `nvml_try_count`
+        // accepts both as success, so we only bail on real errors.
+        if nvml_try_count(sym(handle, &mut count, core::ptr::null_mut())).is_err() {
+            return Vec::new();
+        }
+        if count == 0 {
+            return Vec::new();
+        }
+        let mut buf: Vec<u32> = vec![0; count as usize];
+        if nvml_try(sym(handle, &mut count, buf.as_mut_ptr())).is_err() {
+            return Vec::new();
+        }
+        buf.truncate(count as usize);
+        buf
     }
 }
 
@@ -304,12 +332,5 @@ mod tests {
     fn host_mode_code_is_stable() {
         assert_eq!(host_mode_code(HostVgpuMode::NonSriov), 0);
         assert_eq!(host_mode_code(HostVgpuMode::Sriov), 1);
-    }
-
-    #[test]
-    fn parse_host_mode_code_round_trips() {
-        assert_eq!(parse_host_mode_code("NonSriov"), 0);
-        assert_eq!(parse_host_mode_code("Sriov"), 1);
-        assert_eq!(parse_host_mode_code("Disabled"), u32::MAX);
     }
 }
