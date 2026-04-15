@@ -55,9 +55,16 @@ pub fn sanitize_label_value(s: &str) -> String {
     let trimmed = s.trim();
     let cleaned = trimmed.trim_matches('"');
 
-    // Truncate excessively long values to prevent memory exhaustion
+    // Truncate excessively long values to prevent memory exhaustion.
+    // Walk back to a char boundary so UTF-8 input whose byte
+    // `[MAX_LABEL_VALUE_LENGTH]` lands in the middle of a multi-byte codepoint
+    // does not panic via the slice operation.
     if cleaned.len() > MAX_LABEL_VALUE_LENGTH {
-        cleaned[..MAX_LABEL_VALUE_LENGTH].to_string()
+        let mut end = MAX_LABEL_VALUE_LENGTH;
+        while !cleaned.is_char_boundary(end) {
+            end -= 1;
+        }
+        cleaned[..end].to_string()
     } else {
         cleaned.to_string()
     }
@@ -103,6 +110,22 @@ mod tests {
     fn test_sanitize_label_value() {
         assert_eq!(sanitize_label_value(r#" "hello" "#), "hello".to_string());
         assert_eq!(sanitize_label_value("world"), "world".to_string());
+    }
+
+    #[test]
+    fn test_sanitize_label_value_utf8_boundary_truncation() {
+        // Construct an input where byte index 1024 falls inside a multi-byte
+        // codepoint. We prepend 1023 ASCII bytes, then a 3-byte UTF-8 char.
+        // Without the char-boundary walk this call would panic.
+        const MAX_LABEL_VALUE_LENGTH: usize = 1024;
+        let mut s = String::with_capacity(MAX_LABEL_VALUE_LENGTH + 8);
+        s.push_str(&"a".repeat(MAX_LABEL_VALUE_LENGTH - 1));
+        s.push('가'); // 3 bytes in UTF-8
+        let out = sanitize_label_value(&s);
+        assert!(out.len() <= MAX_LABEL_VALUE_LENGTH);
+        // The multi-byte char must be dropped entirely, not sliced.
+        assert!(!out.contains('가'));
+        assert_eq!(out.len(), MAX_LABEL_VALUE_LENGTH - 1);
     }
 
     #[test]
