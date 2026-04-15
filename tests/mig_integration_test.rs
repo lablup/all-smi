@@ -107,10 +107,12 @@ fn mig_parser_is_empty_on_bare_metal_metrics() {
         "all_smi_cpu_utilization{cpu_model=\"AMD\", instance=\"x\", hostname=\"x\", index=\"0\"} 20\n",
     );
 
-    let (gpu, _cpu, _mem, _storage, _vgpu, parsed) =
-        parser.parse_metrics(non_mig, "x", &regex());
+    let (gpu, _cpu, _mem, _storage, _vgpu, parsed) = parser.parse_metrics(non_mig, "x", &regex());
     assert_eq!(gpu.len(), 1, "sanity: GPU row still parsed");
-    assert!(parsed.is_empty(), "MIG parser must stay quiet on bare-metal");
+    assert!(
+        parsed.is_empty(),
+        "MIG parser must stay quiet on bare-metal"
+    );
 }
 
 #[test]

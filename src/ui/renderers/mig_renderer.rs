@@ -164,7 +164,10 @@ mod tests {
         let host = host_with(Vec::new(), false);
         let mut buf: Vec<u8> = Vec::new();
         print_mig_section(&mut buf, &host, 80);
-        assert!(buf.is_empty(), "Disabled host with no instances must be silent");
+        assert!(
+            buf.is_empty(),
+            "Disabled host with no instances must be silent"
+        );
     }
 
     #[test]

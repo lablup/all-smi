@@ -52,8 +52,8 @@
 
 use crate::device::{
     ChassisInfo, ChassisReader, CpuInfo, CpuReader, GpuInfo, GpuReader, MemoryInfo, MemoryReader,
-    MigGpuInfo, ProcessInfo, VgpuHostInfo, create_chassis_reader, get_cpu_readers,
-    get_gpu_readers, get_memory_readers,
+    MigGpuInfo, ProcessInfo, VgpuHostInfo, create_chassis_reader, get_cpu_readers, get_gpu_readers,
+    get_memory_readers,
 };
 use crate::error::Result;
 use crate::storage::{StorageInfo, StorageReader, create_storage_reader};

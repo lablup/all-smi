@@ -103,7 +103,8 @@ fn thermal_and_pstate_round_trip_handles_partial_reports() {
     // Older drivers: only slowdown + shutdown known. The others must stay
     // `None` after parse, not default to 0.
     let parser = MetricsParser::new();
-    let (parsed, _, _, _, _, _) = parser.parse_metrics(&partial_exposition(), "node-7:9090", &regex());
+    let (parsed, _, _, _, _, _) =
+        parser.parse_metrics(&partial_exposition(), "node-7:9090", &regex());
     assert_eq!(parsed.len(), 1);
     let gpu = &parsed[0];
     assert_eq!(gpu.temperature_threshold_slowdown, Some(91));

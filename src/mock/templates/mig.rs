@@ -141,8 +141,16 @@ pub fn render_mig_response(mut response: String, gpus: &[GpuMetrics]) -> String 
             // a small fraction stay idle to exercise the "no util reported"
             // path on the consumer side.
             let active = rng.random_bool(0.7);
-            let util = if active { rng.random_range(10..90_u32) } else { 0 };
-            let mem_util = if active { rng.random_range(5..60_u32) } else { 0 };
+            let util = if active {
+                rng.random_range(10..90_u32)
+            } else {
+                0
+            };
+            let mem_util = if active {
+                rng.random_range(5..60_u32)
+            } else {
+                0
+            };
             let used = if active {
                 rng.random_range((fb_total / 10)..(fb_total * 9 / 10))
             } else {
@@ -253,7 +261,9 @@ mod tests {
         add_mig_template(&mut template, "node", "NVIDIA A100", &gpus);
 
         // 2 GPUs * 5 profiles = 10 placeholder rows in the utilization family.
-        let count = template.matches("all_smi_mig_instance_utilization_gpu{").count();
+        let count = template
+            .matches("all_smi_mig_instance_utilization_gpu{")
+            .count();
         assert_eq!(count, 10);
     }
 

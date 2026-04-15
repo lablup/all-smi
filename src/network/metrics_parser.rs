@@ -19,8 +19,8 @@ use chrono::Local;
 use regex::Regex;
 
 use crate::device::{
-    AppleSiliconCpuInfo, CpuInfo, CpuPlatformType, GpuInfo, MemoryInfo, MigGpuInfo, MigInstanceInfo,
-    VgpuHostInfo, VgpuInfo,
+    AppleSiliconCpuInfo, CpuInfo, CpuPlatformType, GpuInfo, MemoryInfo, MigGpuInfo,
+    MigInstanceInfo, VgpuHostInfo, VgpuInfo,
 };
 use crate::storage::info::StorageInfo;
 
@@ -87,8 +87,7 @@ impl MetricsParser {
                 // the broader `gpu_` prefix below.
                 if metric_name.starts_with("vgpu_") {
                     vgpu_state.process(&metric_name, &labels, value, host);
-                } else if metric_name == "gpu_mig_mode"
-                    || metric_name.starts_with("mig_instance_")
+                } else if metric_name == "gpu_mig_mode" || metric_name.starts_with("mig_instance_")
                 {
                     mig_state.process(&metric_name, &labels, value, host);
                 } else if metric_name.starts_with("gpu_")
