@@ -163,13 +163,19 @@ impl GpuReader for NvidiaJetsonGpuReader {
             power_consumption,
             gpu_core_count: None,
             // Jetson uses `/sys/class/thermal` readings rather than NVML
-            // thermal-threshold APIs, so the extended thresholds and P-state
-            // are not available on this platform.
+            // thermal-threshold APIs, so the extended thresholds, P-state,
+            // and NVIDIA hardware details (NUMA/GSP/NvLink/GPM) are not
+            // available on this platform.
             temperature_threshold_slowdown: None,
             temperature_threshold_shutdown: None,
             temperature_threshold_max_operating: None,
             temperature_threshold_acoustic: None,
             performance_state: None,
+            numa_node_id: None,
+            gsp_firmware_mode: None,
+            gsp_firmware_version: None,
+            nvlink_remote_devices: Vec::new(),
+            gpm_metrics: None,
             detail: static_info.detail.clone(),
         };
 

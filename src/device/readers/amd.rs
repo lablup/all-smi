@@ -519,6 +519,15 @@ impl GpuReader for AmdGpuReader {
                 temperature_threshold_max_operating: None,
                 temperature_threshold_acoustic: None,
                 performance_state: None,
+                // NVIDIA-specific hardware details (NUMA, GSP firmware,
+                // NvLink, GPM) do not apply to AMD — leave them at the
+                // "unavailable" defaults so consumers render them as
+                // missing rather than zero.
+                numa_node_id: None,
+                gsp_firmware_mode: None,
+                gsp_firmware_version: None,
+                nvlink_remote_devices: Vec::new(),
+                gpm_metrics: None,
                 detail,
             };
             gpu_info.push(info);

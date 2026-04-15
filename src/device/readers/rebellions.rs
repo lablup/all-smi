@@ -416,12 +416,18 @@ fn create_gpu_info_from_device(
         power_consumption: power,
         gpu_core_count: None,
         // Rebellions NPUs expose a single temperature sensor without NVML-style
-        // threshold / P-state metadata. Leave the new fields unavailable.
+        // threshold / P-state or NVIDIA hardware-detail
+        // (NUMA/GSP/NvLink/GPM) metadata. Leave the new fields unavailable.
         temperature_threshold_slowdown: None,
         temperature_threshold_shutdown: None,
         temperature_threshold_max_operating: None,
         temperature_threshold_acoustic: None,
         performance_state: None,
+        numa_node_id: None,
+        gsp_firmware_mode: None,
+        gsp_firmware_version: None,
+        nvlink_remote_devices: Vec::new(),
+        gpm_metrics: None,
         detail,
     })
 }

@@ -273,12 +273,18 @@ fn create_gpu_info_from_device(
         power_consumption: device.power_draw,
         gpu_core_count: None,
         // Intel Gaudi surfaces temperature only; NVML threshold / P-state
-        // APIs do not apply.
+        // APIs and NVIDIA hardware details (NUMA/GSP/NvLink/GPM) do not
+        // apply.
         temperature_threshold_slowdown: None,
         temperature_threshold_shutdown: None,
         temperature_threshold_max_operating: None,
         temperature_threshold_acoustic: None,
         performance_state: None,
+        numa_node_id: None,
+        gsp_firmware_mode: None,
+        gsp_firmware_version: None,
+        nvlink_remote_devices: Vec::new(),
+        gpm_metrics: None,
         detail,
     })
 }

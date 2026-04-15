@@ -383,12 +383,18 @@ fn create_gpu_info(
         power_consumption: power,
         gpu_core_count: None,
         // Tenstorrent telemetry does not expose NVML-style thermal
-        // thresholds or P-states; leave the extended fields unavailable.
+        // thresholds, P-states, or NVIDIA hardware details
+        // (NUMA/GSP/NvLink/GPM); leave the extended fields unavailable.
         temperature_threshold_slowdown: None,
         temperature_threshold_shutdown: None,
         temperature_threshold_max_operating: None,
         temperature_threshold_acoustic: None,
         performance_state: None,
+        numa_node_id: None,
+        gsp_firmware_mode: None,
+        gsp_firmware_version: None,
+        nvlink_remote_devices: Vec::new(),
+        gpm_metrics: None,
         detail,
     })
 }

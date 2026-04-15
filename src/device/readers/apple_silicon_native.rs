@@ -239,11 +239,18 @@ impl GpuReader for AppleSiliconNativeGpuReader {
             // Apple Silicon reports thermal pressure as a qualitative enum
             // (Nominal / Fair / Serious / Critical) via the `detail` map, not
             // as NVML-style numeric thresholds. Leave these fields empty.
+            // NVIDIA-specific hardware details (NUMA, GSP firmware, NvLink,
+            // GPM) do not apply to Apple Silicon either.
             temperature_threshold_slowdown: None,
             temperature_threshold_shutdown: None,
             temperature_threshold_max_operating: None,
             temperature_threshold_acoustic: None,
             performance_state: None,
+            numa_node_id: None,
+            gsp_firmware_mode: None,
+            gsp_firmware_version: None,
+            nvlink_remote_devices: Vec::new(),
+            gpm_metrics: None,
             detail,
         }]
     }

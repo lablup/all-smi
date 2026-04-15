@@ -385,6 +385,11 @@ mod tests {
                 temperature_threshold_max_operating: None,
                 temperature_threshold_acoustic: None,
                 performance_state: None,
+                numa_node_id: None,
+                gsp_firmware_mode: None,
+                gsp_firmware_version: None,
+                nvlink_remote_devices: Vec::new(),
+                gpm_metrics: None,
                 detail: {
                     let mut m = std::collections::HashMap::new();
                     m.insert("index".to_string(), i.to_string());
@@ -468,6 +473,11 @@ mod tests {
                 temperature_threshold_max_operating: None,
                 temperature_threshold_acoustic: None,
                 performance_state: None,
+                numa_node_id: None,
+                gsp_firmware_mode: None,
+                gsp_firmware_version: None,
+                nvlink_remote_devices: Vec::new(),
+                gpm_metrics: None,
                 detail: std::collections::HashMap::new(),
             });
         }
