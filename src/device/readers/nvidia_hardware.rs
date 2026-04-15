@@ -152,10 +152,10 @@ impl HardwareDetailCache {
         F: FnOnce() -> Result<T, NvmlError>,
     {
         // Probe: return immediately if any entry (even `None`) is cached.
-        if let Ok(map) = cache.lock() {
-            if let Some(cached) = map.get(&index) {
-                return cached.clone();
-            }
+        if let Ok(map) = cache.lock()
+            && let Some(cached) = map.get(&index)
+        {
+            return cached.clone();
         }
 
         // Miss: call the NVML function.

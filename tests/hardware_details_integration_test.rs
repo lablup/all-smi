@@ -353,12 +353,11 @@ fn parser_rejects_gsp_version_with_control_chars() {
     // The metric format uses Prometheus label syntax, so the `version` label
     // value is a quoted string inside `{...}`. We include a literal ESC
     // character (U+001B) inside the label to simulate the injection.
-    let text = format!(
-        "all_smi_gpu_utilization{{gpu=\"NVIDIA A100\", instance=\"node-1\", \
-         uuid=\"GPU-ESC\", index=\"0\"}} 10\n\
-         all_smi_gpu_gsp_firmware_version_info{{gpu=\"NVIDIA A100\", instance=\"node-1\", \
-         uuid=\"GPU-ESC\", index=\"0\", version=\"\x1b[2J\x1b[H\"}} 1\n"
-    );
+    let text = "all_smi_gpu_utilization{gpu=\"NVIDIA A100\", instance=\"node-1\", \
+         uuid=\"GPU-ESC\", index=\"0\"} 10\n\
+         all_smi_gpu_gsp_firmware_version_info{gpu=\"NVIDIA A100\", instance=\"node-1\", \
+         uuid=\"GPU-ESC\", index=\"0\", version=\"\x1b[2J\x1b[H\"} 1\n"
+        .to_string();
     let parser = MetricsParser::new();
     let (parsed, _, _, _, _, _) = parser.parse_metrics(&text, "node-1:9090", &regex());
     assert_eq!(parsed.len(), 1);
