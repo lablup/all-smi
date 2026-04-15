@@ -59,9 +59,20 @@ pub fn print_mig_section<W: Write>(stdout: &mut W, host: &MigGpuInfo, _width: us
 
     queue!(stdout, Print("\r\n")).unwrap();
 
-    for (i, inst) in host.instances.iter().enumerate() {
+    for inst in host.instances.iter() {
         print_colored_text(stdout, "      [", Color::DarkGrey, None, None);
-        print_colored_text(stdout, &i.to_string(), Color::Cyan, None, None);
+        // Show NVML's `instance_id` (the slot NVML enumerated the instance
+        // at), not the vec index. These diverge whenever the instances are
+        // sparse — e.g. slots 0, 1, 4 present but 2 and 3 unprovisioned —
+        // and using the vec index would silently disagree with the
+        // `mig_instance` label the Prometheus exporter emits.
+        print_colored_text(
+            stdout,
+            &inst.instance_id.to_string(),
+            Color::Cyan,
+            None,
+            None,
+        );
         print_colored_text(stdout, "] ", Color::DarkGrey, None, None);
 
         let profile_display = if inst.profile_name.is_empty() {
@@ -241,6 +252,65 @@ mod tests {
         print_mig_section(&mut buf, &host, 80);
         let plain = strip_ansi(&String::from_utf8_lossy(&buf));
         assert!(plain.contains("unknown"));
+    }
+
+    #[test]
+    fn renders_nvml_instance_id_for_sparse_instances() {
+        // Regression: when NVML enumerates MIG instances at non-contiguous
+        // slots (e.g. 0, 1, 4 — typical after teardown of some partitions),
+        // the TUI used to print the vec index instead of the real
+        // `instance_id`. That disagreed with the Prometheus `mig_instance`
+        // label and made the UI lie about which slot each row belongs to.
+        let instances = vec![
+            MigInstanceInfo {
+                instance_id: 0,
+                gpu_instance_id: Some(1),
+                compute_instance_id: Some(0),
+                uuid: "MIG-0".into(),
+                profile_name: "1g.5gb".into(),
+                utilization_gpu: Some(10),
+                utilization_memory: Some(10),
+                memory_used_bytes: 0,
+                memory_total_bytes: 5 * (1 << 30),
+            },
+            MigInstanceInfo {
+                instance_id: 1,
+                gpu_instance_id: Some(2),
+                compute_instance_id: Some(0),
+                uuid: "MIG-1".into(),
+                profile_name: "1g.5gb".into(),
+                utilization_gpu: Some(20),
+                utilization_memory: Some(20),
+                memory_used_bytes: 0,
+                memory_total_bytes: 5 * (1 << 30),
+            },
+            MigInstanceInfo {
+                instance_id: 4,
+                gpu_instance_id: Some(5),
+                compute_instance_id: Some(0),
+                uuid: "MIG-4".into(),
+                profile_name: "1g.5gb".into(),
+                utilization_gpu: Some(40),
+                utilization_memory: Some(40),
+                memory_used_bytes: 0,
+                memory_total_bytes: 5 * (1 << 30),
+            },
+        ];
+        let host = host_with(instances, true);
+        let mut buf: Vec<u8> = Vec::new();
+        print_mig_section(&mut buf, &host, 100);
+        let plain = strip_ansi(&String::from_utf8_lossy(&buf));
+
+        assert!(plain.contains("[0]"), "missing [0] in:\n{plain}");
+        assert!(plain.contains("[1]"), "missing [1] in:\n{plain}");
+        assert!(
+            plain.contains("[4]"),
+            "missing [4] (NVML instance_id) in:\n{plain}"
+        );
+        assert!(
+            !plain.contains("[2]"),
+            "must not print the enumeration index `[2]` when instance_id is sparse:\n{plain}"
+        );
     }
 
     #[test]
