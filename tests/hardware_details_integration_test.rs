@@ -342,3 +342,48 @@ fn parser_rejects_fractional_numa_node_id() {
         parsed[0].numa_node_id
     );
 }
+
+#[test]
+fn parser_rejects_gsp_version_with_control_chars() {
+    // A malicious remote could emit a version string containing ANSI escape
+    // sequences (e.g. ESC[2J ESC[H to clear the terminal). The parser must
+    // reject such strings so the TUI never executes injected escape codes
+    // when rendering the hardware row.
+    //
+    // The metric format uses Prometheus label syntax, so the `version` label
+    // value is a quoted string inside `{...}`. We include a literal ESC
+    // character (U+001B) inside the label to simulate the injection.
+    let text = format!(
+        "all_smi_gpu_utilization{{gpu=\"NVIDIA A100\", instance=\"node-1\", \
+         uuid=\"GPU-ESC\", index=\"0\"}} 10\n\
+         all_smi_gpu_gsp_firmware_version_info{{gpu=\"NVIDIA A100\", instance=\"node-1\", \
+         uuid=\"GPU-ESC\", index=\"0\", version=\"\x1b[2J\x1b[H\"}} 1\n"
+    );
+    let parser = MetricsParser::new();
+    let (parsed, _, _, _, _, _) = parser.parse_metrics(&text, "node-1:9090", &regex());
+    assert_eq!(parsed.len(), 1);
+    assert!(
+        parsed[0].gsp_firmware_version.is_none(),
+        "GSP version containing control characters must be rejected, got {:?}",
+        parsed[0].gsp_firmware_version
+    );
+}
+
+#[test]
+fn parser_accepts_normal_gsp_version_string() {
+    // Confirm a clean version string passes through the control-char guard.
+    let text = concat!(
+        "all_smi_gpu_utilization{gpu=\"NVIDIA A100\", instance=\"node-1\", \
+         uuid=\"GPU-OK\", index=\"0\"} 10\n",
+        "all_smi_gpu_gsp_firmware_version_info{gpu=\"NVIDIA A100\", instance=\"node-1\", \
+         uuid=\"GPU-OK\", index=\"0\", version=\"550.54.15\"} 1\n",
+    );
+    let parser = MetricsParser::new();
+    let (parsed, _, _, _, _, _) = parser.parse_metrics(text, "node-1:9090", &regex());
+    assert_eq!(parsed.len(), 1);
+    assert_eq!(
+        parsed[0].gsp_firmware_version.as_deref(),
+        Some("550.54.15"),
+        "clean GSP version string must be accepted"
+    );
+}

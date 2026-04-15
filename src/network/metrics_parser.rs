@@ -362,9 +362,17 @@ impl MetricsParser {
             "gpu_gsp_firmware_version_info" => {
                 // The numeric value is always 1 (info-style metric). The
                 // payload is the `version` label.
+                // Reject control characters (including ANSI escape sequences
+                // like ESC[2J) to prevent TUI escape injection when the
+                // version string is rendered in the hardware row. A remote
+                // Prometheus endpoint could embed `\x1b[...` sequences that
+                // would be executed by terminal emulators on display.
                 if let Some(version) = labels.get("version") {
                     let trimmed = version.trim();
-                    if !trimmed.is_empty() && trimmed.len() <= MAX_GSP_VERSION_LEN {
+                    if !trimmed.is_empty()
+                        && trimmed.len() <= MAX_GSP_VERSION_LEN
+                        && trimmed.chars().all(|c| !c.is_control())
+                    {
                         gpu_info.gsp_firmware_version = Some(trimmed.to_string());
                     }
                 }
