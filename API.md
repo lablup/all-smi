@@ -119,6 +119,34 @@ count by (lib_name, lib_version) (all_smi_gpu_info) > 1
 | `all_smi_gpu_power_limit_current_watts` | Current power limit                      | watts | `gpu_index`, `gpu_name` |
 | `all_smi_gpu_power_limit_max_watts`     | Maximum power limit                      | watts | `gpu_index`, `gpu_name` |
 
+### NVIDIA vGPU Metrics
+
+NVIDIA vGPU metrics are emitted only on hosts with vGPU SR-IOV enabled. Non-vGPU hosts produce no output for these metric families.
+
+#### Host-Level vGPU Metrics
+
+| Metric                         | Description                                               | Unit  | Labels                                                                  |
+|--------------------------------|-----------------------------------------------------------|-------|-------------------------------------------------------------------------|
+| `all_smi_vgpu_host_mode`       | vGPU host mode (0=NonSriov, 1=Sriov, 2=Disabled)         | gauge | `gpu_index`, `gpu_uuid`, `gpu`, `instance`, `host`, `host_mode`        |
+| `all_smi_vgpu_scheduler_state` | vGPU scheduler ARR mode (0=unsupported, 1=off, 2=ARR)    | gauge | `gpu_index`, `gpu_uuid`, `gpu`, `instance`, `host`, `arr_supported`    |
+| `all_smi_vgpu_scheduler_policy`| vGPU scheduler policy id                                 | gauge | `gpu_index`, `gpu_uuid`, `gpu`, `instance`, `host`                     |
+
+#### Per-vGPU Instance Metrics
+
+| Metric                           | Description                                             | Unit    | Labels                                                                                              |
+|----------------------------------|---------------------------------------------------------|---------|-----------------------------------------------------------------------------------------------------|
+| `all_smi_vgpu_utilization`       | Per-vGPU GPU utilization percentage (0-100)             | percent | `gpu_index`, `gpu_uuid`, `gpu`, `instance`, `host`, `vgpu_id`, `vgpu_uuid`, `vgpu_type`, `vgpu_vm_id` |
+| `all_smi_vgpu_memory_utilization`| Per-vGPU memory bandwidth utilization percentage (0-100)| percent | `gpu_index`, `gpu_uuid`, `gpu`, `instance`, `host`, `vgpu_id`, `vgpu_uuid`, `vgpu_type`, `vgpu_vm_id` |
+| `all_smi_vgpu_memory_used_bytes` | Per-vGPU framebuffer memory used                        | bytes   | `gpu_index`, `gpu_uuid`, `gpu`, `instance`, `host`, `vgpu_id`, `vgpu_uuid`, `vgpu_type`, `vgpu_vm_id` |
+| `all_smi_vgpu_memory_total_bytes`| Per-vGPU framebuffer memory budget                      | bytes   | `gpu_index`, `gpu_uuid`, `gpu`, `instance`, `host`, `vgpu_id`, `vgpu_uuid`, `vgpu_type`, `vgpu_vm_id` |
+| `all_smi_vgpu_active`            | Per-vGPU liveness (1=accounting PID active, 0=idle)     | gauge   | `gpu_index`, `gpu_uuid`, `gpu`, `instance`, `host`, `vgpu_id`, `vgpu_uuid`, `vgpu_type`, `vgpu_vm_id` |
+
+**Notes:**
+- `vgpu_utilization` is only emitted when NVML accounting data is available for the vGPU instance.
+- `vgpu_memory_utilization` is only emitted when NVML reports memory bandwidth usage.
+- The `vgpu_vm_id` label carries the owning VM identifier so remote scrapers can reconstruct the same VM column shown in the TUI.
+- To simulate vGPU responses in development/testing without real vGPU hardware, set `ALL_SMI_MOCK_VGPU=1` when running with the `mock` feature.
+
 ### NVIDIA Jetson Specific Metrics
 
 | Metric                    | Description                                 | Unit    | Labels                  |
@@ -505,6 +533,27 @@ sum(all_smi_gpu_power_consumption_watts)
 all_smi_gpu_utilization / all_smi_gpu_power_consumption_watts
 ```
 
+### NVIDIA vGPU Specific
+```promql
+# All vGPU-enabled physical GPUs by SR-IOV host mode
+all_smi_vgpu_host_mode{host_mode="Sriov"}
+
+# vGPU instances with high utilization (> 80%)
+all_smi_vgpu_utilization > 80
+
+# vGPU framebuffer occupancy per instance
+all_smi_vgpu_memory_used_bytes / all_smi_vgpu_memory_total_bytes * 100
+
+# Count active vGPU instances per physical GPU
+count by (gpu_uuid) (all_smi_vgpu_active == 1)
+
+# GPUs using Adaptive Round Robin scheduler
+all_smi_vgpu_scheduler_state == 2
+
+# vGPU memory bandwidth saturation
+all_smi_vgpu_memory_utilization > 90
+```
+
 ### AMD GPU Specific
 ```promql
 # AMD GPUs with high fan speed (potential cooling issues)
@@ -847,3 +896,10 @@ Higher update rates provide more real-time data but increase system load. For pr
     - Individual power component breakdown (CPU, GPU, ANE)
     - Inlet/outlet temperature monitoring (BMC-enabled servers)
     - Fan speed monitoring with per-fan granularity
+12. NVIDIA vGPU metrics include:
+    - Host-level SR-IOV mode and scheduler configuration per physical GPU
+    - Per-vGPU instance utilization, framebuffer memory, and liveness
+    - VM identifier label (`vgpu_vm_id`) for correlating instances with virtual machines
+    - Completely silent on non-vGPU hosts — no empty metric families are emitted
+    - Requires NVIDIA vGPU-capable hardware and the GRID/vGPU driver stack
+    - Set `ALL_SMI_MOCK_VGPU=1` (with `--features mock` build) to simulate vGPU data for development
