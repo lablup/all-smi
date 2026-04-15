@@ -76,6 +76,15 @@ impl NvidiaMockGenerator {
             gpus,
         );
 
+        // Optional MIG metrics — gated by the ALL_SMI_MOCK_MIG env var.
+        // Same default-off contract as vGPU above.
+        crate::mock::templates::mig::maybe_add_mig_template(
+            &mut template,
+            &self.instance_name,
+            &self.gpu_name,
+            gpus,
+        );
+
         template
     }
 
@@ -365,6 +374,10 @@ impl NvidiaMockGenerator {
         // Replace vGPU placeholders when the mock mode is enabled. No-op when
         // the env var is unset.
         response = crate::mock::templates::vgpu::maybe_render_vgpu_response(response, gpus);
+
+        // Replace MIG placeholders when the mock mode is enabled. No-op when
+        // the env var is unset.
+        response = crate::mock::templates::mig::maybe_render_mig_response(response, gpus);
 
         response
     }

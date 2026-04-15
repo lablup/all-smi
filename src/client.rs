@@ -52,7 +52,7 @@
 
 use crate::device::{
     ChassisInfo, ChassisReader, CpuInfo, CpuReader, GpuInfo, GpuReader, MemoryInfo, MemoryReader,
-    ProcessInfo, VgpuHostInfo, create_chassis_reader, get_cpu_readers, get_gpu_readers,
+    MigGpuInfo, ProcessInfo, VgpuHostInfo, create_chassis_reader, get_cpu_readers, get_gpu_readers,
     get_memory_readers,
 };
 use crate::error::Result;
@@ -321,6 +321,38 @@ impl AllSmi {
             all_vgpu.extend(reader.get_vgpu_info());
         }
         all_vgpu
+    }
+
+    /// Get NVIDIA MIG (Multi-Instance GPU) information for every GPU that
+    /// has MIG mode enabled.
+    ///
+    /// Returns an empty vector on consumer cards, pre-Ampere datacenter GPUs
+    /// (which do not support compute MIG), and bare-metal hosts where MIG is
+    /// not configured. Each [`MigGpuInfo`] record carries the parent GPU
+    /// metadata, the live MIG mode flag, and a list of enumerated instances.
+    /// Non-NVIDIA readers return empty via the trait default.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use all_smi::AllSmi;
+    ///
+    /// let smi = AllSmi::new()?;
+    /// for host in smi.get_mig_info() {
+    ///     println!("{}: MIG {}", host.gpu_name, if host.mig_mode { "on" } else { "off" });
+    ///     for inst in &host.instances {
+    ///         println!("  instance {} - {} ({:?}% util)",
+    ///             inst.instance_id, inst.profile_name, inst.utilization_gpu);
+    ///     }
+    /// }
+    /// # Ok::<(), all_smi::Error>(())
+    /// ```
+    pub fn get_mig_info(&self) -> Vec<MigGpuInfo> {
+        let mut all_mig = Vec::new();
+        for reader in &self.gpu_readers {
+            all_mig.extend(reader.get_mig_info());
+        }
+        all_mig
     }
 
     /// Get information about system CPUs.

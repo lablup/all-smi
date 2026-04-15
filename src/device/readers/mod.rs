@@ -30,6 +30,7 @@ pub mod gaudi;
 pub mod google_tpu;
 pub mod nvidia;
 pub mod nvidia_jetson;
+pub mod nvidia_mig;
 pub mod nvidia_vgpu;
 pub mod rebellions;
 #[cfg(target_os = "linux")]

@@ -29,7 +29,7 @@ use crate::app_state::AppState;
 use crate::device::platform_detection::has_tenstorrent;
 use crate::device::{
     ChassisInfo, ChassisReader, CpuInfo, CpuReader, GpuInfo, GpuReader, MemoryInfo, MemoryReader,
-    ProcessInfo, VgpuHostInfo, create_chassis_reader, get_cpu_readers, get_gpu_readers,
+    MigGpuInfo, ProcessInfo, VgpuHostInfo, create_chassis_reader, get_cpu_readers, get_gpu_readers,
     get_memory_readers, get_nvml_status_message,
     platform_detection::has_nvidia,
     process_list::{merge_gpu_processes, update_process_cache},
@@ -252,6 +252,7 @@ impl LocalCollector {
         let gpu_readers_1 = Arc::clone(&self.gpu_readers);
         let gpu_readers_2 = Arc::clone(&self.gpu_readers);
         let gpu_readers_vgpu = Arc::clone(&self.gpu_readers);
+        let gpu_readers_mig = Arc::clone(&self.gpu_readers);
         let cpu_readers = Arc::clone(&self.cpu_readers);
         let memory_readers = Arc::clone(&self.memory_readers);
         let chassis_reader = Arc::clone(&self.chassis_reader);
@@ -266,6 +267,7 @@ impl LocalCollector {
             all_storage_info,
             all_chassis_info,
             all_vgpu_info,
+            all_mig_info,
         ) = {
             let status_tx_gpu = status_tx.clone();
             let status_tx_cpu = status_tx.clone();
@@ -384,6 +386,17 @@ impl LocalCollector {
                         .flat_map(|reader| reader.get_vgpu_info())
                         .collect();
                     info
+                },
+                // MIG info collection (only NVIDIA readers with MIG enabled
+                // GPUs produce data; everyone else returns an empty vector
+                // via the default trait implementation).
+                async move {
+                    let readers = gpu_readers_mig.read().await;
+                    let info: Vec<MigGpuInfo> = readers
+                        .iter()
+                        .flat_map(|reader| reader.get_mig_info())
+                        .collect();
+                    info
                 }
             )
         };
@@ -427,6 +440,7 @@ impl LocalCollector {
             storage_info: all_storage_info,
             chassis_info: all_chassis_info,
             vgpu_info: all_vgpu_info,
+            mig_info: all_mig_info,
             connection_statuses: Vec::new(),
         }
     }
@@ -463,6 +477,12 @@ impl LocalCollector {
         let all_vgpu_info: Vec<VgpuHostInfo> = gpu_readers
             .iter()
             .flat_map(|reader| reader.get_vgpu_info())
+            .collect();
+
+        // MIG info collection — same locality benefits as vGPU above.
+        let all_mig_info: Vec<MigGpuInfo> = gpu_readers
+            .iter()
+            .flat_map(|reader| reader.get_mig_info())
             .collect();
 
         // Determine if we should do a full refresh or selective refresh
@@ -547,6 +567,7 @@ impl LocalCollector {
             storage_info: all_storage_info,
             chassis_info: all_chassis_info,
             vgpu_info: all_vgpu_info,
+            mig_info: all_mig_info,
             connection_statuses: Vec::new(),
         }
     }
@@ -705,6 +726,7 @@ impl DataCollectionStrategy for LocalCollector {
         state.storage_info = data.storage_info;
         state.chassis_info = data.chassis_info;
         state.vgpu_info = data.vgpu_info;
+        state.mig_info = data.mig_info;
 
         // Mark data as changed to trigger UI update
         state.mark_data_changed();

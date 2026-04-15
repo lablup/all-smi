@@ -17,6 +17,7 @@ pub mod cpu;
 pub mod disk;
 pub mod gpu;
 pub mod memory;
+pub mod mig;
 pub mod npu;
 pub mod process;
 pub mod runtime;

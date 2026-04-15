@@ -16,6 +16,6 @@
 pub use crate::ui::chrome::{print_function_keys, print_loading_indicator};
 pub use crate::ui::process_renderer::print_process_info;
 pub use crate::ui::renderers::{
-    print_chassis_info, print_cpu_info, print_gpu_info, print_memory_info, print_storage_info,
-    print_vgpu_section,
+    print_chassis_info, print_cpu_info, print_gpu_info, print_memory_info, print_mig_section,
+    print_storage_info, print_vgpu_section,
 };

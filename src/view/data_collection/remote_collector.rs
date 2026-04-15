@@ -167,7 +167,15 @@ impl DataCollectionStrategy for RemoteCollector {
             return Err(CollectionError::Other("No hosts configured".to_string()));
         }
 
-        let (gpu_info, cpu_info, memory_info, storage_info, vgpu_info, connection_statuses) = self
+        let (
+            gpu_info,
+            cpu_info,
+            memory_info,
+            storage_info,
+            vgpu_info,
+            mig_info,
+            connection_statuses,
+        ) = self
             .network_client
             .fetch_remote_data(&config.hosts, &self.semaphore, &self.regex)
             .await;
@@ -182,6 +190,7 @@ impl DataCollectionStrategy for RemoteCollector {
             storage_info: deduplicated_storage,
             chassis_info: Vec::new(), // TODO: Parse chassis info from remote metrics
             vgpu_info,
+            mig_info,
             connection_statuses,
         })
     }
@@ -207,6 +216,7 @@ impl DataCollectionStrategy for RemoteCollector {
         state.memory_info = data.memory_info;
         state.storage_info = data.storage_info;
         state.vgpu_info = data.vgpu_info;
+        state.mig_info = data.mig_info;
 
         // Update connection status and maintain known hosts
         Self::update_connection_status(&mut state, data.connection_statuses, &config.hosts);

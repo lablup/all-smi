@@ -15,7 +15,7 @@
 /// UI layout calculation utilities
 use crate::app_state::AppState;
 use crate::cli::ViewArgs;
-use crate::device::{GpuInfo, VgpuHostInfo};
+use crate::device::{GpuInfo, MigGpuInfo, VgpuHostInfo};
 use crate::ui::activity_panel;
 use crate::ui::gpu_sparkline_panel;
 use crate::ui::renderers::gpu_renderer::gpu_render_line_count;
@@ -335,11 +335,15 @@ fn visible_gpus_for_tab<'a>(state: &'a AppState) -> Box<dyn Iterator<Item = &'a 
 }
 
 /// Compute the maximum line count any visible GPU would render given the
-/// current `state.gpu_info` and `state.vgpu_info`. Falls back to the
-/// historical 2-line baseline when no GPUs are visible (empty cluster,
-/// loading state) so layout math never returns 0.
+/// current `state.gpu_info`, `state.vgpu_info`, and `state.mig_info`. Falls
+/// back to the historical 2-line baseline when no GPUs are visible (empty
+/// cluster, loading state) so layout math never returns 0.
 pub(crate) fn max_gpu_lines_for_tab(state: &AppState) -> usize {
-    max_gpu_lines_over(visible_gpus_for_tab(state), &state.vgpu_info)
+    max_gpu_lines_over(
+        visible_gpus_for_tab(state),
+        &state.vgpu_info,
+        &state.mig_info,
+    )
 }
 
 /// Pure helper used by [`max_gpu_lines_for_tab`] and the unit tests. Iterates
@@ -348,8 +352,9 @@ pub(crate) fn max_gpu_lines_for_tab(state: &AppState) -> usize {
 pub(crate) fn max_gpu_lines_over<'a>(
     gpus: impl Iterator<Item = &'a GpuInfo>,
     vgpu_info: &[VgpuHostInfo],
+    mig_info: &[MigGpuInfo],
 ) -> usize {
-    gpus.map(|g| gpu_render_line_count(g, vgpu_info))
+    gpus.map(|g| gpu_render_line_count(g, vgpu_info, mig_info))
         .max()
         .unwrap_or(2)
 }
@@ -454,7 +459,7 @@ mod tests {
     fn max_gpu_lines_over_returns_two_for_empty_iterator() {
         // No GPUs visible (e.g. cluster still loading) → fall back to the
         // historical baseline so layout math never returns 0.
-        let lines = max_gpu_lines_over(std::iter::empty(), &[]);
+        let lines = max_gpu_lines_over(std::iter::empty(), &[], &[]);
         assert_eq!(lines, 2);
     }
 
@@ -466,7 +471,7 @@ mod tests {
         let mut nvidia = make_minimal_gpu("h2", "NVIDIA A100");
         nvidia.performance_state = Some(2);
         let gpus = [plain, nvidia];
-        let lines = max_gpu_lines_over(gpus.iter(), &[]);
+        let lines = max_gpu_lines_over(gpus.iter(), &[], &[]);
         assert_eq!(lines, 3);
     }
 

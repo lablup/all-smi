@@ -274,6 +274,7 @@ impl NetworkClient {
         Vec<MemoryInfo>,
         Vec<StorageInfo>,
         Vec<crate::device::VgpuHostInfo>,
+        Vec<crate::device::MigGpuInfo>,
         Vec<ConnectionStatus>,
     ) {
         let mut all_gpu_info = Vec::new();
@@ -281,6 +282,7 @@ impl NetworkClient {
         let mut all_memory_info = Vec::new();
         let mut all_storage_info = Vec::new();
         let mut all_vgpu_info: Vec<crate::device::VgpuHostInfo> = Vec::new();
+        let mut all_mig_info: Vec<crate::device::MigGpuInfo> = Vec::new();
         let mut connection_statuses = Vec::new();
 
         // Parallel data collection with concurrency limiting and retries
@@ -417,8 +419,14 @@ impl NetworkClient {
                                     connection_statuses.push(connection_status);
                                 } else {
                                     let parser = super::metrics_parser::MetricsParser::new();
-                                    let (gpu_info, cpu_info, memory_info, storage_info, vgpu_info) =
-                                        parser.parse_metrics(&text, &host, re);
+                                    let (
+                                        gpu_info,
+                                        cpu_info,
+                                        memory_info,
+                                        storage_info,
+                                        vgpu_info,
+                                        mig_info,
+                                    ) = parser.parse_metrics(&text, &host, re);
 
                                     // Extract the instance name from device info if available
                                     let instance_name = if let Some(first_gpu) = gpu_info.first() {
@@ -436,6 +444,7 @@ impl NetworkClient {
                                     all_memory_info.extend(memory_info);
                                     all_storage_info.extend(storage_info);
                                     all_vgpu_info.extend(vgpu_info);
+                                    all_mig_info.extend(mig_info);
                                 }
                             }
                         }
@@ -475,6 +484,7 @@ impl NetworkClient {
             all_memory_info,
             all_storage_info,
             all_vgpu_info,
+            all_mig_info,
             connection_statuses,
         )
     }

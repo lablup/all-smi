@@ -102,6 +102,14 @@ pub use error::{Error, Result};
 // Internal Modules (also exported for advanced usage and testing)
 // =============================================================================
 
+/// Prometheus metric exporters and HTTP handlers used by `all-smi api` mode.
+///
+/// Exposed for integration tests that need to assert on the exact exporter
+/// output. The HTTP handler side of the module depends on the `cli` feature
+/// because it pulls in [`app_state`], `axum`, and `tower-http`.
+#[cfg(feature = "cli")]
+pub mod api;
+
 /// Device readers and types for GPU, CPU, memory monitoring.
 pub mod device;
 

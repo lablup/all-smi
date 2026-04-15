@@ -21,8 +21,8 @@ use crate::app_state::AppState;
 use super::metrics::{
     MetricExporter, chassis::ChassisMetricExporter, cpu::CpuMetricExporter,
     disk::DiskMetricExporter, gpu::GpuMetricExporter, memory::MemoryMetricExporter,
-    npu::NpuMetricExporter, process::ProcessMetricExporter, runtime::RuntimeMetricExporter,
-    vgpu::VgpuMetricExporter,
+    mig::MigMetricExporter, npu::NpuMetricExporter, process::ProcessMetricExporter,
+    runtime::RuntimeMetricExporter, vgpu::VgpuMetricExporter,
 };
 
 pub type SharedState = Arc<RwLock<AppState>>;
@@ -80,6 +80,13 @@ pub async fn metrics_handler(State(state): State<SharedState>) -> String {
     if !state.vgpu_info.is_empty() {
         let vgpu_exporter = VgpuMetricExporter::new(&state.vgpu_info);
         all_metrics.push_str(&vgpu_exporter.export_metrics());
+    }
+
+    // Export MIG metrics (NVIDIA datacenter GPUs with MIG enabled; silent
+    // no-op on consumer cards, pre-Ampere GPUs, and non-MIG hosts).
+    if !state.mig_info.is_empty() {
+        let mig_exporter = MigMetricExporter::new(&state.mig_info);
+        all_metrics.push_str(&mig_exporter.export_metrics());
     }
 
     all_metrics

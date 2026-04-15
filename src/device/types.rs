@@ -365,6 +365,73 @@ impl VgpuHostInfo {
     }
 }
 
+/// Per-MIG-instance metrics collected from NVML.
+///
+/// A MIG (Multi-Instance GPU) instance is an isolated partition of an NVIDIA
+/// datacenter GPU (A100/A30/H100/H200). Each instance has its own SM slice,
+/// memory carve-out, and L2 cache, exposed through NVML as a child `Device`
+/// handle of the parent physical GPU.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct MigInstanceInfo {
+    /// MIG instance index returned by `mig_device_by_index` enumeration (0-based).
+    pub instance_id: u32,
+    /// GPU instance id (the SM/memory slice id, distinct from `instance_id`),
+    /// as reported by `nvmlDeviceGetGpuInstanceId`. `None` when the driver does
+    /// not expose it (older drivers).
+    pub gpu_instance_id: Option<u32>,
+    /// Compute instance id, as reported by `nvmlDeviceGetComputeInstanceId`.
+    /// `None` when the driver does not expose it.
+    pub compute_instance_id: Option<u32>,
+    /// MIG instance UUID (e.g. `MIG-…`). Empty when the driver does not expose one.
+    pub uuid: String,
+    /// MIG profile/slice name (e.g. `1g.5gb`, `2g.10gb`, `7g.40gb`). Best-effort
+    /// — empty when not derivable from the available NVML data.
+    pub profile_name: String,
+    /// GPU SM utilization percentage over the most recent NVML sample (0-100).
+    /// `None` when NVML reports the metric as unavailable for the instance.
+    pub utilization_gpu: Option<u32>,
+    /// Memory bandwidth utilization percentage (0-100). `None` when unavailable.
+    pub utilization_memory: Option<u32>,
+    /// Framebuffer used (bytes). `0` when NVML cannot report it.
+    pub memory_used_bytes: u64,
+    /// Framebuffer total carve-out for this instance (bytes). `0` when unavailable.
+    pub memory_total_bytes: u64,
+}
+
+/// Per-physical-GPU MIG host record.
+///
+/// Populated only when NVML reports MIG mode enabled for the GPU and at least
+/// one instance enumeration succeeded. On non-MIG GPUs and older architectures
+/// the parent vector stays empty — the feature MUST be a silent no-op.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct MigGpuInfo {
+    /// Host identifier (e.g. `10.82.128.41:9090` or local hostname).
+    pub host_id: String,
+    /// DNS hostname of the host.
+    pub hostname: String,
+    /// Prometheus `instance` label.
+    pub instance: String,
+    /// NVML device index of the parent physical GPU.
+    pub gpu_index: u32,
+    /// UUID of the parent physical GPU.
+    pub gpu_uuid: String,
+    /// Device display name (e.g. `NVIDIA A100-SXM4-80GB`).
+    pub gpu_name: String,
+    /// Whether MIG mode is currently enabled (`true`) or disabled (`false`)
+    /// on the parent GPU.
+    pub mig_mode: bool,
+    /// Live MIG instances enumerated from NVML.
+    pub instances: Vec<MigInstanceInfo>,
+}
+
+impl MigGpuInfo {
+    /// Returns `true` when the parent GPU should surface a MIG section in the
+    /// TUI — either MIG mode is enabled or live instances were enumerated.
+    pub fn is_mig_active(&self) -> bool {
+        self.mig_mode || !self.instances.is_empty()
+    }
+}
+
 /// Fan information for cooling monitoring
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct FanInfo {
