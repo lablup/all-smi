@@ -16,6 +16,7 @@ pub mod chassis;
 pub mod cpu;
 pub mod disk;
 pub mod gpu;
+pub mod hardware;
 pub mod memory;
 pub mod mig;
 pub mod npu;

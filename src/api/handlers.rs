@@ -20,9 +20,9 @@ use crate::app_state::AppState;
 
 use super::metrics::{
     MetricExporter, chassis::ChassisMetricExporter, cpu::CpuMetricExporter,
-    disk::DiskMetricExporter, gpu::GpuMetricExporter, memory::MemoryMetricExporter,
-    mig::MigMetricExporter, npu::NpuMetricExporter, process::ProcessMetricExporter,
-    runtime::RuntimeMetricExporter, vgpu::VgpuMetricExporter,
+    disk::DiskMetricExporter, gpu::GpuMetricExporter, hardware::HardwareMetricExporter,
+    memory::MemoryMetricExporter, mig::MigMetricExporter, npu::NpuMetricExporter,
+    process::ProcessMetricExporter, runtime::RuntimeMetricExporter, vgpu::VgpuMetricExporter,
 };
 
 pub type SharedState = Arc<RwLock<AppState>>;
@@ -87,6 +87,16 @@ pub async fn metrics_handler(State(state): State<SharedState>) -> String {
     if !state.mig_info.is_empty() {
         let mig_exporter = MigMetricExporter::new(&state.mig_info);
         all_metrics.push_str(&mig_exporter.export_metrics());
+    }
+
+    // Export extended hardware details (issue #132): NUMA node id, GSP
+    // firmware mode + version, NvLink remote device types, optional GPM
+    // gauges. The exporter self-filters to NVIDIA GPUs that populated at
+    // least one of the new fields so non-NVIDIA and older-driver paths
+    // stay silent in the `/metrics` output.
+    if !state.gpu_info.is_empty() {
+        let hw_exporter = HardwareMetricExporter::new(&state.gpu_info);
+        all_metrics.push_str(&hw_exporter.export_metrics());
     }
 
     all_metrics
