@@ -290,18 +290,116 @@ impl<'a> GpuMetricExporter<'a> {
                 .metric("all_smi_gpu_power_limit_max_watts", &base_labels, power);
         }
 
-        // Performance state
-        if let Some(pstate) = info.detail.get("performance_state")
-            && let Some(state_str) = pstate.strip_prefix('P')
+        // Performance state — first prefer the structured per-device field
+        // populated by the NVIDIA reader, fall back to the legacy
+        // `detail.performance_state` string so mock servers and older
+        // collectors keep working. When neither is available, emit `-1` so
+        // downstream dashboards can distinguish "unsupported" from P0.
+        if let Some(pstate) = info.performance_state {
+            builder
+                .help(
+                    "all_smi_gpu_performance_state",
+                    "GPU performance state (0=P0 fastest, 15=P15 idlest, -1=not reported)",
+                )
+                .type_("all_smi_gpu_performance_state", "gauge")
+                .metric("all_smi_gpu_performance_state", &base_labels, pstate as f64);
+        } else if let Some(pstate_str) = info.detail.get("performance_state")
+            && let Some(state_str) = pstate_str.strip_prefix('P')
             && let Ok(state_num) = state_str.parse::<f64>()
         {
             builder
                 .help(
                     "all_smi_gpu_performance_state",
-                    "GPU performance state (P0=0, P1=1, ...)",
+                    "GPU performance state (0=P0 fastest, 15=P15 idlest, -1=not reported)",
                 )
                 .type_("all_smi_gpu_performance_state", "gauge")
                 .metric("all_smi_gpu_performance_state", &base_labels, state_num);
+        }
+    }
+
+    /// Export extended NVML temperature thresholds and the P-state gauge.
+    ///
+    /// Emitted only when the GPU populated any of the new fields — so
+    /// Apple Silicon / AMD / Jetson rows produce no output and the metrics
+    /// surface stays unchanged for them.
+    ///
+    /// Each metric carries the standard GPU label set (`gpu`, `instance`,
+    /// `uuid`, `index`) so dashboards can correlate with the existing
+    /// `all_smi_gpu_temperature_celsius` series by the same labels.
+    fn export_thermal_thresholds(&self, builder: &mut MetricBuilder, info: &GpuInfo, index: usize) {
+        let base_labels = [
+            ("gpu", info.name.as_str()),
+            ("instance", info.instance.as_str()),
+            ("uuid", info.uuid.as_str()),
+            ("index", &index.to_string()),
+        ];
+
+        if let Some(slowdown) = info.temperature_threshold_slowdown {
+            builder
+                .help(
+                    "all_smi_gpu_temperature_threshold_slowdown_celsius",
+                    "GPU slowdown temperature threshold in Celsius",
+                )
+                .type_(
+                    "all_smi_gpu_temperature_threshold_slowdown_celsius",
+                    "gauge",
+                )
+                .metric(
+                    "all_smi_gpu_temperature_threshold_slowdown_celsius",
+                    &base_labels,
+                    slowdown,
+                );
+        }
+
+        if let Some(shutdown) = info.temperature_threshold_shutdown {
+            builder
+                .help(
+                    "all_smi_gpu_temperature_threshold_shutdown_celsius",
+                    "GPU shutdown temperature threshold in Celsius",
+                )
+                .type_(
+                    "all_smi_gpu_temperature_threshold_shutdown_celsius",
+                    "gauge",
+                )
+                .metric(
+                    "all_smi_gpu_temperature_threshold_shutdown_celsius",
+                    &base_labels,
+                    shutdown,
+                );
+        }
+
+        if let Some(gpu_max) = info.temperature_threshold_max_operating {
+            builder
+                .help(
+                    "all_smi_gpu_temperature_threshold_max_operating_celsius",
+                    "GPU maximum operating temperature threshold in Celsius",
+                )
+                .type_(
+                    "all_smi_gpu_temperature_threshold_max_operating_celsius",
+                    "gauge",
+                )
+                .metric(
+                    "all_smi_gpu_temperature_threshold_max_operating_celsius",
+                    &base_labels,
+                    gpu_max,
+                );
+        }
+
+        if let Some(acoustic) = info.temperature_threshold_acoustic {
+            builder
+                .help(
+                    "all_smi_gpu_temperature_threshold_acoustic_celsius",
+                    "GPU acoustic (noise) temperature threshold in Celsius",
+                )
+                .type_(
+                    "all_smi_gpu_temperature_threshold_acoustic_celsius",
+                    "gauge",
+                )
+                .metric(
+                    "all_smi_gpu_temperature_threshold_acoustic_celsius",
+                    &base_labels,
+                    acoustic,
+                );
         }
     }
 }
@@ -317,9 +415,141 @@ impl<'a> MetricExporter for GpuMetricExporter<'a> {
                 self.export_apple_silicon_metrics(&mut builder, info, i);
                 self.export_device_info(&mut builder, info, i);
                 self.export_cuda_metrics(&mut builder, info, i);
+                self.export_thermal_thresholds(&mut builder, info, i);
             }
         }
 
         builder.build()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn make_nvidia_gpu() -> GpuInfo {
+        GpuInfo {
+            uuid: "GPU-ABC".to_string(),
+            time: String::new(),
+            name: "NVIDIA A100".to_string(),
+            device_type: "GPU".to_string(),
+            host_id: "node-1".to_string(),
+            hostname: "node-1".to_string(),
+            instance: "node-1".to_string(),
+            utilization: 50.0,
+            ane_utilization: 0.0,
+            dla_utilization: None,
+            tensorcore_utilization: None,
+            temperature: 70,
+            used_memory: 1024,
+            total_memory: 8192,
+            frequency: 1500,
+            power_consumption: 200.0,
+            gpu_core_count: None,
+            temperature_threshold_slowdown: Some(90),
+            temperature_threshold_shutdown: Some(95),
+            temperature_threshold_max_operating: Some(85),
+            temperature_threshold_acoustic: Some(77),
+            performance_state: Some(2),
+            detail: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn exporter_emits_all_new_threshold_metrics() {
+        let gpu = make_nvidia_gpu();
+        let gpus = vec![gpu];
+        let exporter = GpuMetricExporter::new(&gpus);
+        let output = exporter.export_metrics();
+
+        assert!(
+            output.contains("all_smi_gpu_temperature_threshold_slowdown_celsius{"),
+            "slowdown metric missing:\n{output}"
+        );
+        assert!(
+            output.contains("all_smi_gpu_temperature_threshold_shutdown_celsius{"),
+            "shutdown metric missing:\n{output}"
+        );
+        assert!(
+            output.contains("all_smi_gpu_temperature_threshold_max_operating_celsius{"),
+            "max_operating metric missing:\n{output}"
+        );
+        assert!(
+            output.contains("all_smi_gpu_temperature_threshold_acoustic_celsius{"),
+            "acoustic metric missing:\n{output}"
+        );
+    }
+
+    #[test]
+    fn exporter_emits_pstate_from_structured_field() {
+        let gpu = make_nvidia_gpu();
+        let gpus = vec![gpu];
+        let output = GpuMetricExporter::new(&gpus).export_metrics();
+        // Structured field wins over the legacy detail-map path.
+        assert!(
+            output.contains("all_smi_gpu_performance_state{"),
+            "pstate metric missing:\n{output}"
+        );
+        // Make sure the value is the structured `2`, not a truncated value.
+        let pstate_line = output
+            .lines()
+            .find(|l| l.starts_with("all_smi_gpu_performance_state{"))
+            .expect("pstate line");
+        assert!(
+            pstate_line.ends_with(" 2"),
+            "expected P2, got {pstate_line}"
+        );
+    }
+
+    #[test]
+    fn exporter_skips_thresholds_when_none_present() {
+        let mut gpu = make_nvidia_gpu();
+        gpu.temperature_threshold_slowdown = None;
+        gpu.temperature_threshold_shutdown = None;
+        gpu.temperature_threshold_max_operating = None;
+        gpu.temperature_threshold_acoustic = None;
+        gpu.performance_state = None;
+        let gpus = vec![gpu];
+        let output = GpuMetricExporter::new(&gpus).export_metrics();
+        assert!(
+            !output.contains("all_smi_gpu_temperature_threshold_"),
+            "should not emit threshold metrics without data:\n{output}"
+        );
+        assert!(
+            !output.contains("all_smi_gpu_performance_state{"),
+            "should not emit pstate metric without data:\n{output}"
+        );
+    }
+
+    #[test]
+    fn exporter_emits_only_available_thresholds() {
+        // Older drivers: slowdown + shutdown known, others absent.
+        let mut gpu = make_nvidia_gpu();
+        gpu.temperature_threshold_max_operating = None;
+        gpu.temperature_threshold_acoustic = None;
+        let gpus = vec![gpu];
+        let output = GpuMetricExporter::new(&gpus).export_metrics();
+        assert!(output.contains("all_smi_gpu_temperature_threshold_slowdown_celsius"));
+        assert!(output.contains("all_smi_gpu_temperature_threshold_shutdown_celsius"));
+        assert!(!output.contains("all_smi_gpu_temperature_threshold_max_operating_celsius"));
+        assert!(!output.contains("all_smi_gpu_temperature_threshold_acoustic_celsius"));
+    }
+
+    #[test]
+    fn exporter_preserves_standard_gpu_labels_on_new_metrics() {
+        let gpu = make_nvidia_gpu();
+        let gpus = vec![gpu];
+        let output = GpuMetricExporter::new(&gpus).export_metrics();
+        // Sanity-check label set on the new metrics — should match the
+        // legacy `all_smi_gpu_temperature_celsius` labels exactly.
+        let slowdown_line = output
+            .lines()
+            .find(|l| l.starts_with("all_smi_gpu_temperature_threshold_slowdown_celsius{"))
+            .expect("slowdown line");
+        assert!(slowdown_line.contains("gpu=\"NVIDIA A100\""));
+        assert!(slowdown_line.contains("instance=\"node-1\""));
+        assert!(slowdown_line.contains("uuid=\"GPU-ABC\""));
+        assert!(slowdown_line.contains("index=\"0\""));
     }
 }
