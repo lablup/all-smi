@@ -197,7 +197,7 @@ http://gpu-node3:9090
 - **Multi-GPU Support:** Handles multiple GPUs per system with individual monitoring
 - **Interactive Sorting:** Sort GPUs by utilization, memory usage, or default (hostname+index) order
 - **Platform-Specific Features:**
-  - NVIDIA: PCIe info, performance states (P0–P15), thermal thresholds (slowdown/shutdown/max-operating/acoustic), power limits, vGPU SR-IOV monitoring
+  - NVIDIA: PCIe info, performance states (P0–P15), thermal thresholds (slowdown/shutdown/max-operating/acoustic), power limits, vGPU SR-IOV monitoring, MIG (Multi-Instance GPU) monitoring with per-instance utilization and memory metrics
   - AMD: VRAM/GTT memory tracking, fan speed monitoring, GPU process detection with fdinfo
   - NVIDIA Jetson: DLA utilization monitoring
   - Apple Silicon: ANE power monitoring, thermal pressure levels
@@ -330,6 +330,7 @@ http://gpu-node3:9090
   - Platform-specific metric generation (NVIDIA, AMD, Apple Silicon, Jetson, Intel Gaudi, Google TPU, Tenstorrent, Rebellions, Furiosa)
   - Background metric updates with realistic variations
   - Set `ALL_SMI_MOCK_VGPU=1` to simulate NVIDIA vGPU SR-IOV data without real vGPU hardware
+  - Set `ALL_SMI_MOCK_MIG=1` to simulate NVIDIA MIG (Multi-Instance GPU) data without MIG hardware
 - **Performance Optimized:**
   - Template-based response generation
   - Efficient memory management
@@ -368,6 +369,7 @@ curl --unix-socket /tmp/all-smi.sock http://localhost/metrics
 Metrics are available at `http://localhost:9090/metrics` (TCP) or via Unix socket and include comprehensive hardware monitoring for:
 - **GPUs:** Utilization, memory, temperature, power, frequency (NVIDIA, AMD, Apple Silicon, Intel Gaudi, Google TPU, Tenstorrent)
 - **NVIDIA vGPUs:** Per-vGPU utilization, framebuffer memory, scheduler state, and SR-IOV host mode (emitted only on vGPU-enabled hosts)
+- **NVIDIA MIG:** Per-GPU MIG mode status and per-MIG-instance utilization, framebuffer memory used/total (emitted only on MIG-enabled hosts)
 - **CPUs:** Utilization, frequency, temperature, power (with P/E core metrics for Apple Silicon)
 - **Memory:** System and swap memory statistics
 - **Storage:** Disk usage information
@@ -467,6 +469,7 @@ fn main() -> Result<()> {
 | `get_process_info()` | `Vec<ProcessInfo>` | GPU process information |
 | `get_chassis_info()` | `Option<ChassisInfo>` | Node-level power and thermal info |
 | `get_vgpu_info()` | `Vec<VgpuHostInfo>` | NVIDIA vGPU host and per-instance metrics (empty on non-vGPU hosts) |
+| `get_mig_info()` | `Vec<MigGpuInfo>` | NVIDIA MIG per-GPU mode status and per-instance metrics (empty on non-MIG hosts) |
 
 ### Configuration
 
@@ -544,7 +547,7 @@ See the [LICENSE](./LICENSE) file for details.
 ## Changelog
 
 ### Recent Updates
-- **v0.21.0 (upcoming):** Add NVIDIA vGPU SR-IOV monitoring — per-vGPU utilization, framebuffer memory, scheduler state, and host mode exported as Prometheus metrics; TUI renders per-GPU vGPU sub-sections; remote parser reconstructs vGPU view from scraped metrics; mock server can simulate vGPU data via `ALL_SMI_MOCK_VGPU=1`. Add NVIDIA extended thermal monitoring — slowdown, shutdown, max-operating, and acoustic temperature thresholds exported as Prometheus metrics; TUI shows per-GPU thermal row with proximity highlighting (yellow within 5°C of slowdown, red within 2°C of shutdown); P-state (P0–P15) surfaced in TUI and metrics; all fields degrade gracefully to `None` on older drivers or non-NVIDIA hardware
+- **v0.21.0 (upcoming):** Add NVIDIA vGPU SR-IOV monitoring — per-vGPU utilization, framebuffer memory, scheduler state, and host mode exported as Prometheus metrics; TUI renders per-GPU vGPU sub-sections; remote parser reconstructs vGPU view from scraped metrics; mock server can simulate vGPU data via `ALL_SMI_MOCK_VGPU=1`. Add NVIDIA extended thermal monitoring — slowdown, shutdown, max-operating, and acoustic temperature thresholds exported as Prometheus metrics; TUI shows per-GPU thermal row with proximity highlighting (yellow within 5°C of slowdown, red within 2°C of shutdown); P-state (P0–P15) surfaced in TUI and metrics; all fields degrade gracefully to `None` on older drivers or non-NVIDIA hardware. Add NVIDIA MIG (Multi-Instance GPU) monitoring — per-GPU MIG mode status and per-MIG-instance SM utilization, memory bandwidth utilization, and framebuffer used/total bytes exported as Prometheus metrics; TUI renders MIG instances as nested rows under each parent GPU; remote parser reconstructs MIG view from scraped metrics; mock server can simulate MIG data via `ALL_SMI_MOCK_MIG=1`
 - **v0.20.1 (2026/04/10):** Fix local header metric row jitter by using fixed-width formatted fields; auto-promote pre-release to release in CI
 - **v0.20.0 (2026/04/10):** Redesign local-mode TUI with Activity panel featuring braille sparklines, CPU per-core view, host summary bar, and per-node LED grid; add Apple M5 Pro/Max Super core (S-CPU) support
 - **v0.19.0 (2026/04/08):** Fix Apple Silicon SMC float decoding to restore real CPU/GPU die temperatures, cache platform detection to avoid per-frame system_profiler on macOS, and fix TIME+/Command column alignment in process list

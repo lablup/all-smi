@@ -156,6 +156,47 @@ NVIDIA vGPU metrics are emitted only on hosts with vGPU SR-IOV enabled. Non-vGPU
 - The `vgpu_vm_id` label carries the owning VM identifier so remote scrapers can reconstruct the same VM column shown in the TUI.
 - To simulate vGPU responses in development/testing without real vGPU hardware, set `ALL_SMI_MOCK_VGPU=1` when running with the `mock` feature.
 
+### NVIDIA MIG Metrics
+
+NVIDIA MIG (Multi-Instance GPU) metrics are emitted only on hosts where at least one GPU has MIG mode enabled or has active MIG instances. Non-MIG hosts produce no output for these metric families.
+
+#### Per-GPU MIG Mode
+
+| Metric                  | Description                                         | Unit  | Labels                                                          |
+|-------------------------|-----------------------------------------------------|-------|-----------------------------------------------------------------|
+| `all_smi_gpu_mig_mode`  | MIG mode per parent GPU (1=enabled, 0=disabled)     | gauge | `gpu_index`, `gpu_uuid`, `gpu`, `instance`, `host`             |
+
+#### Per-MIG-Instance Metrics
+
+| Metric                                    | Description                                           | Unit    | Labels                                                                                                                    |
+|-------------------------------------------|-------------------------------------------------------|---------|---------------------------------------------------------------------------------------------------------------------------|
+| `all_smi_mig_instance_utilization_gpu`    | Per-MIG-instance GPU SM utilization percentage (0-100)| percent | `gpu_index`, `gpu_uuid`, `gpu`, `instance`, `host`, `mig_instance`, `mig_uuid`, `mig_profile`, `gpu_instance_id`, `compute_instance_id` |
+| `all_smi_mig_instance_utilization_memory` | Per-MIG-instance memory bandwidth utilization (0-100) | percent | `gpu_index`, `gpu_uuid`, `gpu`, `instance`, `host`, `mig_instance`, `mig_uuid`, `mig_profile`, `gpu_instance_id`, `compute_instance_id` |
+| `all_smi_mig_instance_memory_used_bytes`  | Per-MIG-instance framebuffer memory used              | bytes   | `gpu_index`, `gpu_uuid`, `gpu`, `instance`, `host`, `mig_instance`, `mig_uuid`, `mig_profile`, `gpu_instance_id`, `compute_instance_id` |
+| `all_smi_mig_instance_memory_total_bytes` | Per-MIG-instance framebuffer memory total carve-out   | bytes   | `gpu_index`, `gpu_uuid`, `gpu`, `instance`, `host`, `mig_instance`, `mig_uuid`, `mig_profile`, `gpu_instance_id`, `compute_instance_id` |
+
+**Label descriptions for per-instance metrics:**
+
+| Label                | Description                                                                 |
+|----------------------|-----------------------------------------------------------------------------|
+| `gpu_index`          | Physical GPU index on the host                                              |
+| `gpu_uuid`           | UUID of the parent physical GPU                                             |
+| `gpu`                | Name of the parent GPU model                                                |
+| `instance`           | Prometheus instance label (hostname or host:port)                           |
+| `host`               | Hostname of the server                                                      |
+| `mig_instance`       | MIG instance ordinal index within the parent GPU                            |
+| `mig_uuid`           | UUID of the MIG compute instance (assigned by NVML)                         |
+| `mig_profile`        | MIG profile name (e.g. `1g.5gb`, `3g.20gb`, `7g.40gb`)                    |
+| `gpu_instance_id`    | NVML GPU instance ID; empty string when not reported by the driver          |
+| `compute_instance_id`| NVML compute instance ID; empty string when not reported by the driver      |
+
+**Notes:**
+- `all_smi_mig_instance_utilization_gpu` and `all_smi_mig_instance_utilization_memory` are emitted only when NVML reports utilization for that instance; the metric line is absent when the value is unavailable.
+- `gpu_instance_id` and `compute_instance_id` are emitted as empty string labels when NVML cannot report them, preserving round-trip fidelity in the remote parser.
+- MIG instances appear as nested rows under their parent GPU in the TUI, matched by `gpu_uuid` with a hostname+GPU-name fallback.
+- `all_smi_gpu_mig_mode` is emitted for every GPU that supports MIG (enabled or disabled), so consumers can detect mode transitions even when no instances are active.
+- To simulate MIG responses in development/testing without MIG hardware, set `ALL_SMI_MOCK_MIG=1` when running with the `mock` feature.
+
 ### NVIDIA Jetson Specific Metrics
 
 | Metric                    | Description                                 | Unit    | Labels                  |
@@ -578,6 +619,27 @@ all_smi_vgpu_scheduler_state == 2
 all_smi_vgpu_memory_utilization > 90
 ```
 
+### NVIDIA MIG Specific
+```promql
+# GPUs with MIG mode enabled
+all_smi_gpu_mig_mode == 1
+
+# MIG instances with high GPU SM utilization (> 80%)
+all_smi_mig_instance_utilization_gpu > 80
+
+# MIG framebuffer occupancy per instance
+all_smi_mig_instance_memory_used_bytes / all_smi_mig_instance_memory_total_bytes * 100
+
+# Count active MIG instances per parent GPU
+count by (gpu_uuid) (all_smi_mig_instance_memory_total_bytes)
+
+# MIG instances by profile type
+count by (mig_profile) (all_smi_mig_instance_memory_total_bytes)
+
+# Total memory carved out for MIG across the cluster
+sum(all_smi_mig_instance_memory_total_bytes)
+```
+
 ### AMD GPU Specific
 ```promql
 # AMD GPUs with high fan speed (potential cooling issues)
@@ -927,3 +989,10 @@ Higher update rates provide more real-time data but increase system load. For pr
     - Completely silent on non-vGPU hosts — no empty metric families are emitted
     - Requires NVIDIA vGPU-capable hardware and the GRID/vGPU driver stack
     - Set `ALL_SMI_MOCK_VGPU=1` (with `--features mock` build) to simulate vGPU data for development
+13. NVIDIA MIG metrics include:
+    - Per-GPU MIG mode status (`all_smi_gpu_mig_mode`); emitted for every MIG-capable GPU regardless of whether instances are active
+    - Per-instance SM utilization, memory bandwidth utilization, and framebuffer used/total bytes
+    - MIG profile name (`mig_profile`, e.g. `1g.5gb`, `3g.20gb`) and NVML instance IDs for correlating with `nvidia-smi mig`
+    - TUI renders MIG instances as nested rows under each parent GPU, matched by UUID with hostname+GPU-name fallback
+    - Completely silent on non-MIG hosts — no empty metric families are emitted
+    - Set `ALL_SMI_MOCK_MIG=1` (with `--features mock` build) to simulate MIG data for development
