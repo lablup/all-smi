@@ -198,6 +198,76 @@ pub struct ChassisInfo {
     pub time: String, // Timestamp
 }
 
+/// Per-vGPU instance metrics collected from NVML.
+///
+/// A vGPU is a virtualized slice of a physical NVIDIA GPU. Each instance has its
+/// own UUID, framebuffer budget, utilization, and memory statistics.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct VgpuInfo {
+    /// NVML-assigned instance id (opaque u32).
+    pub instance_id: u32,
+    /// vGPU instance UUID (e.g. `GRID-…`).
+    pub uuid: String,
+    /// Owning VM id if reported by NVML (typically a UUID or label). Empty when
+    /// the driver does not expose one (e.g. early-boot or SR-IOV VFs).
+    pub vm_id: String,
+    /// Human-readable vGPU profile name (e.g. `GRID A100-8C`).
+    pub vgpu_type_name: String,
+    /// Framebuffer used (bytes).
+    pub fb_used_bytes: u64,
+    /// Framebuffer total (bytes).
+    pub fb_total_bytes: u64,
+    /// GPU utilization percentage over the instance's lifetime (0-100).
+    /// `None` when NVML reports `NVML_VALUE_NOT_AVAILABLE`.
+    pub gpu_utilization: Option<u32>,
+    /// Memory bandwidth utilization percentage (0-100).
+    pub memory_utilization: Option<u32>,
+    /// Whether at least one accounting PID is currently active on the vGPU.
+    pub is_active: bool,
+}
+
+/// Per-GPU vGPU host metadata and the instances running on that GPU.
+///
+/// Populated only when NVML reports the host GPU as vGPU-capable (i.e.
+/// `vgpu_host_mode()` succeeds). On bare-metal hosts this data is not
+/// collected and the vector is empty.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct VgpuHostInfo {
+    /// Host identifier (e.g. `10.82.128.41:9090` or the local hostname).
+    pub host_id: String,
+    /// DNS hostname of the host.
+    pub hostname: String,
+    /// Prometheus `instance` label.
+    pub instance: String,
+    /// NVML device index of the physical GPU this record refers to.
+    pub gpu_index: u32,
+    /// UUID of the physical GPU.
+    pub gpu_uuid: String,
+    /// Device display name (e.g. `NVIDIA A100-SXM4-80GB`).
+    pub gpu_name: String,
+    /// NVML host vGPU mode. `"Sriov"` or `"NonSriov"` on vGPU-enabled hosts,
+    /// `"Disabled"` when the query is supported but the host is not vGPU.
+    pub host_mode: String,
+    /// Numeric vGPU scheduler policy id from NVML (0 = best-effort, 1 = equal share, etc.).
+    pub scheduler_policy: u32,
+    /// Adaptive Round Robin mode (0 = unsupported, 1 = off, 2 = on).
+    pub scheduler_arr_mode: u32,
+    /// Whether Adaptive Round Robin is reported as supported by the driver.
+    pub is_arr_supported: bool,
+    /// Active vGPU instances running on this GPU.
+    pub vgpus: Vec<VgpuInfo>,
+    /// Free-form diagnostic text surfaced to the UI (e.g. scheduler log line).
+    pub detail: HashMap<String, String>,
+}
+
+impl VgpuHostInfo {
+    /// Returns `true` when the GPU is reporting any vGPU-related data that the
+    /// UI should surface (host mode, scheduler info, or live instances).
+    pub fn is_vgpu_active(&self) -> bool {
+        !self.vgpus.is_empty() || self.host_mode != "Disabled"
+    }
+}
+
 /// Fan information for cooling monitoring
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct FanInfo {

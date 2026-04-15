@@ -60,6 +60,15 @@ impl NvidiaMockGenerator {
         // Chassis metrics (total power)
         crate::mock::templates::common::add_chassis_metrics(&mut template, &self.instance_name);
 
+        // Optional vGPU metrics — gated by the ALL_SMI_MOCK_VGPU env var so
+        // the NVIDIA bare-metal behaviour is unchanged by default.
+        crate::mock::templates::vgpu::maybe_add_vgpu_template(
+            &mut template,
+            &self.instance_name,
+            &self.gpu_name,
+            gpus,
+        );
+
         template
     }
 
@@ -283,6 +292,10 @@ impl NvidiaMockGenerator {
 
         // Replace chassis metrics
         response = crate::mock::templates::common::render_chassis_metrics(response, gpus);
+
+        // Replace vGPU placeholders when the mock mode is enabled. No-op when
+        // the env var is unset.
+        response = crate::mock::templates::vgpu::maybe_render_vgpu_response(response, gpus);
 
         response
     }

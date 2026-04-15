@@ -17,6 +17,7 @@ pub mod cpu_renderer;
 pub mod gpu_renderer;
 pub mod memory_renderer;
 pub mod storage_renderer;
+pub mod vgpu_renderer;
 pub mod widgets;
 
 // Re-export the main rendering functions for backward compatibility
@@ -25,6 +26,7 @@ pub use cpu_renderer::print_cpu_info;
 pub use gpu_renderer::print_gpu_info;
 pub use memory_renderer::print_memory_info;
 pub use storage_renderer::print_storage_info;
+pub use vgpu_renderer::print_vgpu_section;
 
 // Re-export renderer structs if needed in the future
 #[allow(unused_imports)]

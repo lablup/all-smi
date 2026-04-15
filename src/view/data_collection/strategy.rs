@@ -17,7 +17,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use crate::app_state::{AppState, ConnectionStatus};
-use crate::device::{ChassisInfo, CpuInfo, GpuInfo, MemoryInfo, ProcessInfo};
+use crate::device::{ChassisInfo, CpuInfo, GpuInfo, MemoryInfo, ProcessInfo, VgpuHostInfo};
 use crate::storage::info::StorageInfo;
 
 /// Result type for data collection operations
@@ -32,6 +32,8 @@ pub struct CollectionData {
     pub process_info: Vec<ProcessInfo>,
     pub storage_info: Vec<StorageInfo>,
     pub chassis_info: Vec<ChassisInfo>,
+    /// Per-GPU vGPU information. Empty on non-vGPU hosts.
+    pub vgpu_info: Vec<VgpuHostInfo>,
     pub connection_statuses: Vec<ConnectionStatus>,
 }
 
@@ -44,6 +46,7 @@ impl CollectionData {
             process_info: Vec::new(),
             storage_info: Vec::new(),
             chassis_info: Vec::new(),
+            vgpu_info: Vec::new(),
             connection_statuses: Vec::new(),
         }
     }

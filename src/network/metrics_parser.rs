@@ -18,7 +18,9 @@ use crate::parsing::common::sanitize_label_value;
 use chrono::Local;
 use regex::Regex;
 
-use crate::device::{AppleSiliconCpuInfo, CpuInfo, CpuPlatformType, GpuInfo, MemoryInfo};
+use crate::device::{
+    AppleSiliconCpuInfo, CpuInfo, CpuPlatformType, GpuInfo, MemoryInfo, VgpuHostInfo, VgpuInfo,
+};
 use crate::storage::info::StorageInfo;
 
 pub struct MetricsParser;
@@ -28,6 +30,7 @@ impl MetricsParser {
         Self
     }
 
+    #[allow(clippy::type_complexity)]
     pub fn parse_metrics(
         &self,
         text: &str,
@@ -38,6 +41,7 @@ impl MetricsParser {
         Vec<CpuInfo>,
         Vec<MemoryInfo>,
         Vec<StorageInfo>,
+        Vec<VgpuHostInfo>,
     ) {
         // Limit the maximum size of HashMaps to prevent memory exhaustion
         const MAX_DEVICES_PER_TYPE: usize = 256;
@@ -57,6 +61,9 @@ impl MetricsParser {
         let mut cpu_info_map: HashMap<String, CpuInfo> = HashMap::with_capacity(8);
         let mut memory_info_map: HashMap<String, MemoryInfo> = HashMap::with_capacity(8);
         let mut storage_info_map: HashMap<String, StorageInfo> = HashMap::with_capacity(32);
+        // Keyed by (gpu_uuid, vgpu_id) for instance rows, and by (gpu_uuid, "__host__")
+        // for host-scoped metrics.
+        let mut vgpu_state = VgpuParseState::new();
         let mut host_instance_name: Option<String> = None;
 
         for line in text.lines() {
@@ -70,8 +77,11 @@ impl MetricsParser {
                     host_instance_name = Some(instance.clone());
                 }
 
-                // Process different metric types with size limits
-                if metric_name.starts_with("gpu_")
+                // Process different metric types with size limits.
+                // Route vGPU lines first so they aren't swallowed by the gpu_ prefix.
+                if metric_name.starts_with("vgpu_") {
+                    vgpu_state.process(&metric_name, &labels, value, host);
+                } else if metric_name.starts_with("gpu_")
                     || metric_name.starts_with("npu_")
                     || metric_name == "ane_utilization"
                 {
@@ -134,6 +144,7 @@ impl MetricsParser {
             cpu_info_map.into_values().collect(),
             memory_info_map.into_values().collect(),
             storage_info_map.into_values().collect(),
+            vgpu_state.finish(),
         )
     }
 
@@ -151,8 +162,10 @@ impl MetricsParser {
         let mut labels: HashMap<String, String> = HashMap::with_capacity(16);
         let mut label_count = 0;
 
-        // Optimized parsing without intermediate allocations
-        for label in labels_str.split(',') {
+        // Quote-aware splitting: only split on commas that appear outside of
+        // a double-quoted value, so that a VM-owner-controlled label value
+        // containing `",` cannot break out and inject fake labels.
+        for label in split_labels_respecting_quotes(labels_str) {
             if label_count >= MAX_LABELS {
                 break;
             }
@@ -162,9 +175,14 @@ impl MetricsParser {
                 let key = &label[..eq_pos];
                 let value = &label[eq_pos + 1..];
 
-                // Sanitize and validate in one pass
+                // Sanitize the key (trim whitespace + any stray quotes).
                 let key_clean = sanitize_label_value(key);
-                let value_clean = sanitize_label_value(value);
+                // For the value we strip the surrounding quotes ourselves
+                // and un-escape the Prometheus exposition escape sequences
+                // produced by `MetricBuilder::metric`. We never fall back to
+                // the naive sanitizer for quoted values — doing so would
+                // leave `\"` / `\\` / `\n` / `\r` escapes in place.
+                let value_clean = unescape_label_value(value);
 
                 // Check lengths and insert
                 if key_clean.len() <= MAX_LABEL_LENGTH && value_clean.len() <= MAX_LABEL_LENGTH {
@@ -586,6 +604,254 @@ impl Default for MetricsParser {
     }
 }
 
+/// Split a Prometheus label list on top-level commas only — commas inside a
+/// double-quoted value are preserved as literal content. Backslash escapes
+/// inside quoted values are honoured so an author cannot terminate the quote
+/// by writing `\"`.
+///
+/// This is a security-critical counterpart to `MetricBuilder::metric`'s
+/// escaping: if we split naively on `,` a malicious label value like
+/// `vgpu_vm_id="evil\", fake=\"x"` breaks out and injects an attacker-
+/// controlled label, enabling cross-host metric spoofing.
+fn split_labels_respecting_quotes(labels_str: &str) -> Vec<&str> {
+    let bytes = labels_str.as_bytes();
+    let mut out: Vec<&str> = Vec::with_capacity(16);
+    let mut start = 0usize;
+    let mut i = 0usize;
+    let mut in_quotes = false;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if in_quotes {
+            if b == b'\\' && i + 1 < bytes.len() {
+                // Skip the escaped byte so `\"` doesn't terminate the quote.
+                i += 2;
+                continue;
+            }
+            if b == b'"' {
+                in_quotes = false;
+            }
+            i += 1;
+        } else {
+            match b {
+                b'"' => {
+                    in_quotes = true;
+                    i += 1;
+                }
+                b',' => {
+                    out.push(&labels_str[start..i]);
+                    i += 1;
+                    start = i;
+                }
+                _ => {
+                    i += 1;
+                }
+            }
+        }
+    }
+    out.push(&labels_str[start..]);
+    out
+}
+
+/// Strip the surrounding double quotes from a Prometheus label value and
+/// un-escape the escape sequences emitted by `MetricBuilder::metric`
+/// (`\\`, `\"`, `\n`, `\r`). If the value is not quoted, fall back to the
+/// shared sanitizer so callers see consistent trimming behaviour for legacy
+/// unquoted inputs.
+fn unescape_label_value(raw: &str) -> String {
+    let trimmed = raw.trim();
+    let inner = match (trimmed.strip_prefix('"'), trimmed.ends_with('"')) {
+        (Some(s), true) if trimmed.len() >= 2 => &s[..s.len() - 1],
+        _ => return sanitize_label_value(raw),
+    };
+
+    let mut out = String::with_capacity(inner.len());
+    let mut chars = inner.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('\\') => out.push('\\'),
+            Some('"') => out.push('"'),
+            Some('n') => out.push('\n'),
+            Some('r') => out.push('\r'),
+            Some(other) => {
+                // Unknown escape: keep the backslash and the following char
+                // verbatim so we do not silently lose data.
+                out.push('\\');
+                out.push(other);
+            }
+            None => out.push('\\'),
+        }
+    }
+
+    // Run through the shared sanitizer only for the length truncation
+    // behaviour, since `inner` has already had its quotes removed and any
+    // stray leading/trailing whitespace inside the quotes is intentional.
+    const MAX_LABEL_VALUE_LENGTH: usize = 1024;
+    if out.len() > MAX_LABEL_VALUE_LENGTH {
+        let mut end = MAX_LABEL_VALUE_LENGTH;
+        while !out.is_char_boundary(end) {
+            end -= 1;
+        }
+        out.truncate(end);
+    }
+    out
+}
+
+/// Accumulator used while parsing vGPU Prometheus lines.
+///
+/// Per-instance metrics are keyed by `(gpu_uuid, vgpu_id)` so they merge into
+/// a single [`VgpuInfo`] even if emitted across multiple metric families.
+/// Host-scoped metrics (host mode, scheduler) populate the parent
+/// [`VgpuHostInfo`] keyed solely by `gpu_uuid`.
+struct VgpuParseState {
+    /// `gpu_uuid -> VgpuHostInfo` being assembled.
+    hosts: HashMap<String, VgpuHostInfo>,
+    /// `(gpu_uuid, vgpu_id) -> VgpuInfo` instance accumulator.
+    instances: HashMap<(String, u32), VgpuInfo>,
+}
+
+/// Per-scrape cap on distinct physical vGPU-capable GPUs. Matches the
+/// `MAX_DEVICES_PER_TYPE` bound used for every other metric family so a
+/// malicious remote exporter cannot exhaust memory by advertising unbounded
+/// `gpu_uuid` values.
+const MAX_VGPU_HOSTS: usize = 256;
+/// Per-scrape cap on distinct `(gpu_uuid, vgpu_id)` tuples (~16 vGPUs * 256
+/// hosts). New-key insertions past this limit are dropped; updates to
+/// already-tracked instances proceed normally.
+const MAX_VGPU_INSTANCES: usize = 4096;
+
+impl VgpuParseState {
+    fn new() -> Self {
+        Self {
+            hosts: HashMap::new(),
+            instances: HashMap::new(),
+        }
+    }
+
+    fn process(
+        &mut self,
+        metric_name: &str,
+        labels: &HashMap<String, String>,
+        value: f64,
+        host: &str,
+    ) {
+        let gpu_uuid = labels.get("gpu_uuid").cloned().unwrap_or_default();
+        if gpu_uuid.is_empty() {
+            return;
+        }
+
+        // Drop samples for new hosts once the cap is reached. Updates to an
+        // already-tracked host UUID always flow through.
+        if !self.hosts.contains_key(&gpu_uuid) && self.hosts.len() >= MAX_VGPU_HOSTS {
+            return;
+        }
+
+        // Ensure the host row exists before we touch either branch.
+        let host_entry = self.hosts.entry(gpu_uuid.clone()).or_insert_with(|| {
+            let gpu_index = labels
+                .get("gpu_index")
+                .and_then(|s| s.parse::<u32>().ok())
+                .unwrap_or(0);
+            let hostname = labels
+                .get("host")
+                .or_else(|| labels.get("instance"))
+                .cloned()
+                .unwrap_or_else(|| host.to_string());
+            VgpuHostInfo {
+                host_id: host.to_string(),
+                hostname: hostname.clone(),
+                instance: hostname,
+                gpu_index,
+                gpu_uuid: gpu_uuid.clone(),
+                gpu_name: labels.get("gpu").cloned().unwrap_or_default(),
+                host_mode: "Disabled".to_string(),
+                scheduler_policy: 0,
+                scheduler_arr_mode: 0,
+                is_arr_supported: false,
+                vgpus: Vec::new(),
+                detail: HashMap::new(),
+            }
+        });
+
+        match metric_name {
+            "vgpu_host_mode" => {
+                if let Some(mode) = labels.get("host_mode") {
+                    host_entry.host_mode = mode.clone();
+                }
+            }
+            "vgpu_scheduler_state" => {
+                host_entry.scheduler_arr_mode = value as u32;
+                if let Some(flag) = labels.get("arr_supported") {
+                    host_entry.is_arr_supported = flag == "true";
+                }
+            }
+            "vgpu_scheduler_policy" => {
+                host_entry.scheduler_policy = value as u32;
+            }
+            _ => {
+                // Per-instance metric families: require a vgpu_id label.
+                let Some(vgpu_id) = labels.get("vgpu_id").and_then(|s| s.parse::<u32>().ok())
+                else {
+                    return;
+                };
+                let instance_key = (gpu_uuid.clone(), vgpu_id);
+                // Drop new-instance samples once the cap is reached. Updates
+                // to an already-tracked instance always flow through.
+                if !self.instances.contains_key(&instance_key)
+                    && self.instances.len() >= MAX_VGPU_INSTANCES
+                {
+                    return;
+                }
+                let entry = self
+                    .instances
+                    .entry(instance_key)
+                    .or_insert_with(|| VgpuInfo {
+                        instance_id: vgpu_id,
+                        uuid: labels.get("vgpu_uuid").cloned().unwrap_or_default(),
+                        // Keep vm_id round-tripping through the Prometheus
+                        // exporter so remote mode can display the same `vm=`
+                        // column as local mode.
+                        vm_id: labels.get("vgpu_vm_id").cloned().unwrap_or_default(),
+                        vgpu_type_name: labels.get("vgpu_type").cloned().unwrap_or_default(),
+                        fb_used_bytes: 0,
+                        fb_total_bytes: 0,
+                        gpu_utilization: None,
+                        memory_utilization: None,
+                        is_active: false,
+                    });
+
+                match metric_name {
+                    "vgpu_utilization" => entry.gpu_utilization = Some(value as u32),
+                    "vgpu_memory_utilization" => entry.memory_utilization = Some(value as u32),
+                    "vgpu_memory_used_bytes" => entry.fb_used_bytes = value as u64,
+                    "vgpu_memory_total_bytes" => entry.fb_total_bytes = value as u64,
+                    "vgpu_active" => entry.is_active = value > 0.0,
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    fn finish(mut self) -> Vec<VgpuHostInfo> {
+        // Attach instances to their owning host rows.
+        for ((gpu_uuid, _vgpu_id), vgpu) in self.instances {
+            if let Some(host) = self.hosts.get_mut(&gpu_uuid) {
+                host.vgpus.push(vgpu);
+            }
+        }
+        // Deterministic order: instance_id ascending inside each host.
+        for host in self.hosts.values_mut() {
+            host.vgpus.sort_by_key(|v| v.instance_id);
+        }
+        let mut out: Vec<VgpuHostInfo> = self.hosts.into_values().collect();
+        out.sort_by_key(|h| h.gpu_index);
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -634,7 +900,7 @@ all_smi_gpu_power_consumption_watts{gpu="NVIDIA H200 141GB HBM3", instance="node
 all_smi_ane_utilization{gpu="NVIDIA H200 141GB HBM3", instance="node-0058", uuid="GPU-12345", index="0"} 15.2
 "#;
 
-        let (gpu_info, _, _, _) = parser.parse_metrics(test_data, host, &re);
+        let (gpu_info, _, _, _, _) = parser.parse_metrics(test_data, host, &re);
 
         assert_eq!(gpu_info.len(), 1);
         let gpu = &gpu_info[0];
@@ -667,7 +933,7 @@ all_smi_cpu_temperature_celsius{cpu_model="Intel Xeon", instance="node-0058", ho
 all_smi_cpu_power_consumption_watts{cpu_model="Intel Xeon", instance="node-0058", hostname="node-0058", index="0"} 125.5
 "#;
 
-        let (_, cpu_info, _, _) = parser.parse_metrics(test_data, host, &re);
+        let (_, cpu_info, _, _, _) = parser.parse_metrics(test_data, host, &re);
 
         assert_eq!(cpu_info.len(), 1);
         let cpu = &cpu_info[0];
@@ -703,7 +969,7 @@ all_smi_cpu_p_core_utilization{cpu_model="Apple M2 Max", instance="node-0058", h
 all_smi_cpu_e_core_utilization{cpu_model="Apple M2 Max", instance="node-0058", hostname="node-0058", index="0"} 10.8
 "#;
 
-        let (_, cpu_info, _, _) = parser.parse_metrics(test_data, host, &re);
+        let (_, cpu_info, _, _, _) = parser.parse_metrics(test_data, host, &re);
 
         assert_eq!(cpu_info.len(), 1);
         let cpu = &cpu_info[0];
@@ -734,7 +1000,7 @@ all_smi_memory_available_bytes{instance="node-0058", hostname="node-0058", index
 all_smi_memory_utilization{instance="node-0058", hostname="node-0058", index="0"} 50.0
 "#;
 
-        let (_, _, memory_info, _) = parser.parse_metrics(test_data, host, &re);
+        let (_, _, memory_info, _, _) = parser.parse_metrics(test_data, host, &re);
 
         assert_eq!(memory_info.len(), 1);
         let memory = &memory_info[0];
@@ -760,7 +1026,7 @@ all_smi_disk_total_bytes{instance="node-0058", mount_point="/home", index="1"} 1
 all_smi_disk_available_bytes{instance="node-0058", mount_point="/home", index="1"} 549755813888
 "#;
 
-        let (_, _, _, storage_info) = parser.parse_metrics(test_data, host, &re);
+        let (_, _, _, storage_info, _) = parser.parse_metrics(test_data, host, &re);
 
         assert_eq!(storage_info.len(), 2);
 
@@ -795,7 +1061,7 @@ all_smi_memory_total_bytes{instance="node-0001", hostname="node-0001", index="0"
 all_smi_disk_total_bytes{instance="node-0001", mount_point="/", index="0"} 2199023255552
 "#;
 
-        let (gpu_info, cpu_info, memory_info, storage_info) =
+        let (gpu_info, cpu_info, memory_info, storage_info, _) =
             parser.parse_metrics(test_data, host, &re);
 
         assert_eq!(gpu_info.len(), 1);
@@ -832,7 +1098,7 @@ all_smi_gpu_utilization{malformed labels} invalid_value
 all_smi_unknown_metric{instance="test"} 42.0
 "#;
 
-        let (gpu_info, cpu_info, memory_info, storage_info) =
+        let (gpu_info, cpu_info, memory_info, storage_info, _) =
             parser.parse_metrics(test_data, host, &re);
 
         assert!(gpu_info.is_empty());
@@ -847,7 +1113,8 @@ all_smi_unknown_metric{instance="test"} 42.0
         let re = create_test_regex();
         let host = "127.0.0.1:10058";
 
-        let (gpu_info, cpu_info, memory_info, storage_info) = parser.parse_metrics("", host, &re);
+        let (gpu_info, cpu_info, memory_info, storage_info, _) =
+            parser.parse_metrics("", host, &re);
 
         assert!(gpu_info.is_empty());
         assert!(cpu_info.is_empty());
@@ -866,7 +1133,7 @@ all_smi_gpu_utilization{gpu="Tesla V100", instance="production-node-42", uuid="G
 all_smi_cpu_utilization{cpu_model="Intel Xeon", instance="production-node-42", hostname="node-0058", index="0"} 55.0
 "#;
 
-        let (gpu_info, cpu_info, _, _) = parser.parse_metrics(test_data, host, &re);
+        let (gpu_info, cpu_info, _, _, _) = parser.parse_metrics(test_data, host, &re);
 
         assert_eq!(gpu_info[0].host_id, host);
         assert_eq!(gpu_info[0].hostname, "production-node-42");
@@ -897,7 +1164,7 @@ all_smi_cpu_utilization{cpu_model="Intel Xeon", instance="production-node-42", h
                 r#"all_smi_cpu_utilization{{cpu_model="{cpu_model}", instance="test", hostname="test", index="0"}} 50.0"#
             );
 
-            let (_, cpu_info, _, _) = parser.parse_metrics(&test_data, host, &re);
+            let (_, cpu_info, _, _, _) = parser.parse_metrics(&test_data, host, &re);
             assert_eq!(cpu_info.len(), 1);
 
             match (&cpu_info[0].platform_type, &expected_type) {
@@ -932,7 +1199,7 @@ all_smi_gpu_utilization{instance="node-0058", index="0"} 25.5
 all_smi_disk_total_bytes{instance="node-0058", index="0"} 1000000000
 "#;
 
-        let (gpu_info, _, _, storage_info) = parser.parse_metrics(test_data, host, &re);
+        let (gpu_info, _, _, storage_info, _) = parser.parse_metrics(test_data, host, &re);
 
         assert!(gpu_info.is_empty());
         assert!(storage_info.is_empty());
@@ -955,7 +1222,7 @@ all_smi_cpu_p_core_utilization{cpu_model="Apple M5 Max", instance="m5-node", hos
 all_smi_cpu_e_core_utilization{cpu_model="Apple M5 Max", instance="m5-node", hostname="m5-node", index="0"} 0.0
 "#;
 
-        let (_, cpu_info, _, _) = parser.parse_metrics(test_data, host, &re);
+        let (_, cpu_info, _, _, _) = parser.parse_metrics(test_data, host, &re);
 
         assert_eq!(cpu_info.len(), 1);
         let cpu = &cpu_info[0];
@@ -990,7 +1257,7 @@ all_smi_cpu_core_utilization{cpu_model="Apple M5 Pro", instance="m5pro-node", ho
 all_smi_cpu_core_utilization{cpu_model="Apple M5 Pro", instance="m5pro-node", hostname="m5pro-node", core_id="3", core_type="P", index="0"} 25.0
 "#;
 
-        let (_, cpu_info, _, _) = parser.parse_metrics(test_data, host, &re);
+        let (_, cpu_info, _, _, _) = parser.parse_metrics(test_data, host, &re);
 
         assert_eq!(cpu_info.len(), 1);
         let cpu = &cpu_info[0];
@@ -1032,7 +1299,7 @@ all_smi_cpu_p_core_utilization{cpu_model="Apple M2 Max", instance="m2-node", hos
 all_smi_cpu_e_core_utilization{cpu_model="Apple M2 Max", instance="m2-node", hostname="m2-node", index="0"} 5.0
 "#;
 
-        let (_, cpu_info, _, _) = parser.parse_metrics(test_data, host, &re);
+        let (_, cpu_info, _, _, _) = parser.parse_metrics(test_data, host, &re);
 
         assert_eq!(cpu_info.len(), 1);
         let cpu = &cpu_info[0];
@@ -1043,5 +1310,151 @@ all_smi_cpu_e_core_utilization{cpu_model="Apple M2 Max", instance="m2-node", hos
         assert_eq!(apple_info.s_core_utilization, 0.0);
         assert_eq!(apple_info.p_core_count, 8);
         assert_eq!(apple_info.e_core_count, 4);
+    }
+
+    #[test]
+    fn test_parse_vgpu_metrics_populates_host_and_instances() {
+        let parser = create_test_parser();
+        let re = create_test_regex();
+        let host = "127.0.0.1:10100";
+
+        let text = r#"
+all_smi_vgpu_host_mode{gpu_index="0", gpu_uuid="GPU-A", gpu="NVIDIA A100", instance="node1", host="node1", host_mode="Sriov"} 1
+all_smi_vgpu_scheduler_state{gpu_index="0", gpu_uuid="GPU-A", gpu="NVIDIA A100", instance="node1", host="node1", arr_supported="true"} 2
+all_smi_vgpu_scheduler_policy{gpu_index="0", gpu_uuid="GPU-A", gpu="NVIDIA A100", instance="node1", host="node1"} 1
+all_smi_vgpu_utilization{gpu_index="0", gpu_uuid="GPU-A", gpu="NVIDIA A100", instance="node1", host="node1", vgpu_id="0", vgpu_uuid="GRID-1", vgpu_type="GRID A100-8C"} 55
+all_smi_vgpu_memory_used_bytes{gpu_index="0", gpu_uuid="GPU-A", gpu="NVIDIA A100", instance="node1", host="node1", vgpu_id="0", vgpu_uuid="GRID-1", vgpu_type="GRID A100-8C"} 8589934592
+all_smi_vgpu_memory_total_bytes{gpu_index="0", gpu_uuid="GPU-A", gpu="NVIDIA A100", instance="node1", host="node1", vgpu_id="0", vgpu_uuid="GRID-1", vgpu_type="GRID A100-8C"} 17179869184
+all_smi_vgpu_memory_utilization{gpu_index="0", gpu_uuid="GPU-A", gpu="NVIDIA A100", instance="node1", host="node1", vgpu_id="0", vgpu_uuid="GRID-1", vgpu_type="GRID A100-8C"} 30
+all_smi_vgpu_active{gpu_index="0", gpu_uuid="GPU-A", gpu="NVIDIA A100", instance="node1", host="node1", vgpu_id="0", vgpu_uuid="GRID-1", vgpu_type="GRID A100-8C"} 1
+all_smi_vgpu_utilization{gpu_index="0", gpu_uuid="GPU-A", gpu="NVIDIA A100", instance="node1", host="node1", vgpu_id="1", vgpu_uuid="GRID-2", vgpu_type="GRID A100-4C"} 10
+"#;
+
+        let (_gpu, _cpu, _mem, _storage, vgpu) = parser.parse_metrics(text, host, &re);
+
+        assert_eq!(vgpu.len(), 1, "expected one host record");
+        let host0 = &vgpu[0];
+        assert_eq!(host0.host_mode, "Sriov");
+        assert_eq!(host0.scheduler_policy, 1);
+        assert_eq!(host0.scheduler_arr_mode, 2);
+        assert!(host0.is_arr_supported);
+        assert_eq!(host0.gpu_uuid, "GPU-A");
+        assert_eq!(host0.gpu_name, "NVIDIA A100");
+        assert_eq!(host0.vgpus.len(), 2);
+        assert_eq!(host0.vgpus[0].instance_id, 0);
+        assert_eq!(host0.vgpus[0].gpu_utilization, Some(55));
+        assert_eq!(host0.vgpus[0].memory_utilization, Some(30));
+        assert_eq!(host0.vgpus[0].fb_used_bytes, 8_589_934_592);
+        assert_eq!(host0.vgpus[0].fb_total_bytes, 17_179_869_184);
+        assert!(host0.vgpus[0].is_active);
+        assert_eq!(host0.vgpus[1].instance_id, 1);
+        assert_eq!(host0.vgpus[1].gpu_utilization, Some(10));
+    }
+
+    #[test]
+    fn test_parse_vgpu_metrics_skips_rows_without_gpu_uuid() {
+        let parser = create_test_parser();
+        let re = create_test_regex();
+        let host = "127.0.0.1:10101";
+        let text = r#"
+all_smi_vgpu_utilization{instance="node1", vgpu_id="0"} 55
+"#;
+        let (_, _, _, _, vgpu) = parser.parse_metrics(text, host, &re);
+        assert!(vgpu.is_empty());
+    }
+
+    #[test]
+    fn test_parse_non_vgpu_host_produces_no_vgpu_rows() {
+        let parser = create_test_parser();
+        let re = create_test_regex();
+        let host = "127.0.0.1:10102";
+
+        let text = r#"
+all_smi_gpu_utilization{gpu="NVIDIA A100", instance="node1", uuid="GPU-X", index="0"} 50
+all_smi_cpu_utilization{cpu_model="AMD", instance="node1", hostname="node1", index="0"} 20
+"#;
+        let (gpu, _cpu, _mem, _store, vgpu) = parser.parse_metrics(text, host, &re);
+        assert_eq!(gpu.len(), 1);
+        assert!(
+            vgpu.is_empty(),
+            "No vGPU rows must be emitted for a bare-metal host"
+        );
+    }
+
+    #[test]
+    fn vgpu_parser_caps_host_count() {
+        let parser = create_test_parser();
+        let re = create_test_regex();
+        let host = "127.0.0.1:10103";
+
+        // Feed 2 * MAX_VGPU_HOSTS unique host UUIDs. Only the first
+        // MAX_VGPU_HOSTS may survive; the rest must be dropped silently.
+        let mut text = String::new();
+        for i in 0..(2 * MAX_VGPU_HOSTS) {
+            text.push_str(&format!(
+                r#"all_smi_vgpu_host_mode{{gpu_index="0", gpu_uuid="GPU-{i}", gpu="NVIDIA A100", instance="node1", host="node1", host_mode="Sriov"}} 1
+"#
+            ));
+        }
+        let (_gpu, _cpu, _mem, _storage, vgpu) = parser.parse_metrics(&text, host, &re);
+        assert_eq!(vgpu.len(), MAX_VGPU_HOSTS, "host count must not exceed cap");
+    }
+
+    #[test]
+    fn vgpu_parser_caps_instance_count() {
+        let parser = create_test_parser();
+        let re = create_test_regex();
+        let host = "127.0.0.1:10104";
+
+        // Generate a single host with 2 * MAX_VGPU_INSTANCES unique vGPU ids.
+        // Each is emitted via a vgpu_utilization line — we pick a scrape-style
+        // metric so the new-instance branch is the one being gated. After
+        // parsing, at most MAX_VGPU_INSTANCES instances may appear.
+        let mut text = String::new();
+        // Establish the host first so the host row exists.
+        text.push_str(
+            r#"all_smi_vgpu_host_mode{gpu_index="0", gpu_uuid="GPU-A", gpu="NVIDIA A100", instance="node1", host="node1", host_mode="Sriov"} 1
+"#,
+        );
+        for i in 0..(2 * MAX_VGPU_INSTANCES) {
+            text.push_str(&format!(
+                r#"all_smi_vgpu_utilization{{gpu_index="0", gpu_uuid="GPU-A", gpu="NVIDIA A100", instance="node1", host="node1", vgpu_id="{i}", vgpu_uuid="GRID-{i}", vgpu_type="GRID A100-8C"}} 1
+"#
+            ));
+        }
+        let (_gpu, _cpu, _mem, _storage, vgpu) = parser.parse_metrics(&text, host, &re);
+        assert_eq!(vgpu.len(), 1, "single host must still exist");
+        assert_eq!(
+            vgpu[0].vgpus.len(),
+            MAX_VGPU_INSTANCES,
+            "instance count must not exceed cap"
+        );
+    }
+
+    #[test]
+    fn parse_labels_is_quote_aware_against_comma_injection() {
+        let parser = create_test_parser();
+        // A malicious VM-controlled value embeds `",` and `\"` so a naive
+        // splitter would turn one label into three. The quote-aware
+        // implementation must see exactly three labels.
+        let labels_str = r#"gpu_uuid="a",vgpu_vm_id="pwned\", fake=\"evil",vgpu_id="0""#;
+        let labels = parser.parse_labels(labels_str);
+        assert_eq!(labels.len(), 3, "got labels: {labels:?}");
+        assert_eq!(labels.get("gpu_uuid").unwrap(), "a");
+        assert_eq!(labels.get("vgpu_id").unwrap(), "0");
+        // vm_id must contain the attacker's payload verbatim, but never be
+        // interpreted as additional labels.
+        assert_eq!(labels.get("vgpu_vm_id").unwrap(), r#"pwned", fake="evil"#);
+        assert!(!labels.contains_key("fake"), "no injected label allowed");
+    }
+
+    #[test]
+    fn parse_labels_unescapes_newline_and_carriage_return() {
+        let parser = create_test_parser();
+        // Prometheus escape sequences must be reversed on ingest so the
+        // parser sees the same bytes the exporter originally held.
+        let labels_str = r#"key="line1\nline2\rend""#;
+        let labels = parser.parse_labels(labels_str);
+        assert_eq!(labels.get("key").unwrap(), "line1\nline2\rend");
     }
 }

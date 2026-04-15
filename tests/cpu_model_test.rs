@@ -19,7 +19,7 @@ all_smi_cpu_core_count{cpu_model="", instance="node-0001", index="0"} 128
 all_smi_cpu_frequency_mhz{instance="node-0001"} 2450
 "#;
 
-    let (_, cpu_info, _, _) = parser.parse_metrics(test_data, host, &re);
+    let (_, cpu_info, _, _, _) = parser.parse_metrics(test_data, host, &re);
 
     assert_eq!(cpu_info.len(), 1);
     let cpu = &cpu_info[0];

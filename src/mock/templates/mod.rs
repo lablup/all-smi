@@ -24,5 +24,6 @@ pub mod jetson;
 pub mod nvidia;
 pub mod rebellions;
 pub mod tenstorrent;
+pub mod vgpu;
 
 // Re-export commonly used items

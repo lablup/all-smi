@@ -22,6 +22,7 @@ use super::metrics::{
     MetricExporter, chassis::ChassisMetricExporter, cpu::CpuMetricExporter,
     disk::DiskMetricExporter, gpu::GpuMetricExporter, memory::MemoryMetricExporter,
     npu::NpuMetricExporter, process::ProcessMetricExporter, runtime::RuntimeMetricExporter,
+    vgpu::VgpuMetricExporter,
 };
 
 pub type SharedState = Arc<RwLock<AppState>>;
@@ -73,6 +74,12 @@ pub async fn metrics_handler(State(state): State<SharedState>) -> String {
     if !state.chassis_info.is_empty() {
         let chassis_exporter = ChassisMetricExporter::new(&state.chassis_info);
         all_metrics.push_str(&chassis_exporter.export_metrics());
+    }
+
+    // Export vGPU metrics (NVIDIA vGPU hosts only; silent no-op otherwise)
+    if !state.vgpu_info.is_empty() {
+        let vgpu_exporter = VgpuMetricExporter::new(&state.vgpu_info);
+        all_metrics.push_str(&vgpu_exporter.export_metrics());
     }
 
     all_metrics

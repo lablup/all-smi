@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::device::{ChassisInfo, CpuInfo, GpuInfo, MemoryInfo, ProcessInfo};
+use crate::device::{ChassisInfo, CpuInfo, GpuInfo, MemoryInfo, ProcessInfo, VgpuHostInfo};
 use std::collections::HashSet;
 
 pub trait GpuReader: Send + Sync {
@@ -31,6 +31,16 @@ pub trait GpuReader: Send + Sync {
             .collect();
         let gpu_only = processes.into_iter().filter(|p| p.uses_gpu).collect();
         (gpu_only, pids)
+    }
+
+    /// Collect per-GPU vGPU host and instance information.
+    ///
+    /// Returns an empty vector on non-vGPU hardware or when the reader does
+    /// not support vGPU at all (the default). Implementations that do support
+    /// vGPU MUST ensure that a missing-host case returns an empty vector
+    /// rather than panicking or producing synthetic rows.
+    fn get_vgpu_info(&self) -> Vec<VgpuHostInfo> {
+        Vec::new()
     }
 }
 

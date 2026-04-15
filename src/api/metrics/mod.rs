@@ -20,6 +20,7 @@ pub mod memory;
 pub mod npu;
 pub mod process;
 pub mod runtime;
+pub mod vgpu;
 
 /// Trait for exporting metrics in Prometheus format
 pub trait MetricExporter {
@@ -78,11 +79,15 @@ impl MetricBuilder {
                     self.metrics.push_str(", ");
                 }
                 // Escape per Prometheus exposition format spec:
-                // backslash, double-quote, and newline must be escaped
+                // backslash, double-quote, and newline must be escaped.
+                // We also escape carriage returns so lines produced on
+                // Windows-origin inputs cannot break the `\n`-delimited
+                // exposition format downstream.
                 let escaped_value = value
                     .replace('\\', "\\\\")
                     .replace('"', "\\\"")
-                    .replace('\n', "\\n");
+                    .replace('\n', "\\n")
+                    .replace('\r', "\\r");
                 self.metrics.push_str(&format!("{key}=\"{escaped_value}\""));
             }
             self.metrics.push('}');
@@ -132,6 +137,14 @@ mod tests {
         builder.metric("test_metric", &[("value", "line1\nline2")], "1");
         let output = builder.build();
         assert!(output.contains(r#"value="line1\nline2""#));
+    }
+
+    #[test]
+    fn test_metric_builder_label_escaping_carriage_return() {
+        let mut builder = MetricBuilder::new();
+        builder.metric("test_metric", &[("value", "line1\rline2")], "1");
+        let output = builder.build();
+        assert!(output.contains(r#"value="line1\rline2""#));
     }
 
     #[test]

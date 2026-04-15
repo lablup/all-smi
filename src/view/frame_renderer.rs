@@ -39,6 +39,7 @@ use crate::ui::local_header::draw_local_header_bar;
 use crate::ui::renderer::{
     print_chassis_info, print_cpu_info, print_function_keys, print_gpu_info,
     print_loading_indicator, print_memory_info, print_process_info, print_storage_info,
+    print_vgpu_section,
 };
 use crate::ui::tabs::draw_tabs;
 use crate::ui::text::print_colored_text;
@@ -284,6 +285,13 @@ impl FrameRenderer {
                 hostname_scroll_offset,
                 !view_state.is_local_mode,
             );
+
+            // If this GPU is vGPU-enabled, render the nested section directly
+            // beneath the GPU row. Matching is by UUID (authoritative) with a
+            // hostname+gpu-name fallback for remote-mode data without UUID.
+            if let Some(vgpu_host) = find_matching_vgpu_host(&snapshot.vgpu_info, gpu_info) {
+                print_vgpu_section(buffer, vgpu_host, cols as usize);
+            }
         }
     }
 
@@ -665,6 +673,27 @@ impl FrameRenderer {
         }
         0
     }
+}
+
+/// Locate the [`crate::device::VgpuHostInfo`] record matching a given GPU row.
+///
+/// Matching precedence:
+/// 1. Exact `gpu_uuid` match (authoritative).
+/// 2. Fallback: same `hostname` + matching `gpu_name` — used when UUID
+///    propagation is missing (e.g. remote mode with incomplete metrics).
+///
+/// Returns `None` when no match is found, which keeps the vGPU section from
+/// appearing under unrelated GPU rows.
+fn find_matching_vgpu_host<'a>(
+    vgpu_info: &'a [crate::device::VgpuHostInfo],
+    gpu: &crate::device::GpuInfo,
+) -> Option<&'a crate::device::VgpuHostInfo> {
+    if let Some(host) = vgpu_info.iter().find(|v| v.gpu_uuid == gpu.uuid) {
+        return Some(host);
+    }
+    vgpu_info
+        .iter()
+        .find(|v| v.hostname == gpu.hostname && v.gpu_name == gpu.name)
 }
 
 #[cfg(test)]
