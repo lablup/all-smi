@@ -252,12 +252,16 @@ pub fn collect_nvlink_remote_devices(
         let link_wrapper = device.link_wrapper_for(link);
         match link_wrapper.is_active() {
             Ok(true) => {}
-            // Any error here (`NotSupported`, `InvalidArg`) means the link
-            // does not exist; stop probing early to avoid 18 failing calls
-            // on a GPU with zero NvLinks. Observed behaviour: NVML returns
-            // `InvalidArg` for indices past the physical link count.
             Ok(false) => continue,
-            Err(_) => break,
+            // `InvalidArg` means the index is past the physical link count —
+            // stop probing early because higher indices will also fail.
+            // `NotSupported` means this GPU has no NvLink hardware at all —
+            // stop immediately.
+            // Any other error (transient: `Unknown`, `GpuLost`) skips this
+            // link but continues probing higher indices so that a transient
+            // failure on link N does not silently hide links N+1..MAX.
+            Err(NvmlError::InvalidArg | NvmlError::NotSupported) => break,
+            Err(_transient) => continue,
         }
         let remote_type = match nvlink_remote_device_type_ffi(nvml, device, link) {
             Some(t) => t,
