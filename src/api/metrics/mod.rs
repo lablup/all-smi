@@ -20,6 +20,7 @@ pub mod memory;
 pub mod npu;
 pub mod process;
 pub mod runtime;
+pub mod vgpu;
 
 /// Trait for exporting metrics in Prometheus format
 pub trait MetricExporter {

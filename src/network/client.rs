@@ -262,6 +262,7 @@ impl NetworkClient {
         }
     }
 
+    #[allow(clippy::type_complexity)]
     pub async fn fetch_remote_data(
         &self,
         hosts: &[String],
@@ -272,12 +273,14 @@ impl NetworkClient {
         Vec<CpuInfo>,
         Vec<MemoryInfo>,
         Vec<StorageInfo>,
+        Vec<crate::device::VgpuHostInfo>,
         Vec<ConnectionStatus>,
     ) {
         let mut all_gpu_info = Vec::new();
         let mut all_cpu_info = Vec::new();
         let mut all_memory_info = Vec::new();
         let mut all_storage_info = Vec::new();
+        let mut all_vgpu_info: Vec<crate::device::VgpuHostInfo> = Vec::new();
         let mut connection_statuses = Vec::new();
 
         // Parallel data collection with concurrency limiting and retries
@@ -414,7 +417,7 @@ impl NetworkClient {
                                     connection_statuses.push(connection_status);
                                 } else {
                                     let parser = super::metrics_parser::MetricsParser::new();
-                                    let (gpu_info, cpu_info, memory_info, storage_info) =
+                                    let (gpu_info, cpu_info, memory_info, storage_info, vgpu_info) =
                                         parser.parse_metrics(&text, &host, re);
 
                                     // Extract the instance name from device info if available
@@ -432,6 +435,7 @@ impl NetworkClient {
                                     all_cpu_info.extend(cpu_info);
                                     all_memory_info.extend(memory_info);
                                     all_storage_info.extend(storage_info);
+                                    all_vgpu_info.extend(vgpu_info);
                                 }
                             }
                         }
@@ -470,6 +474,7 @@ impl NetworkClient {
             all_cpu_info,
             all_memory_info,
             all_storage_info,
+            all_vgpu_info,
             connection_statuses,
         )
     }
