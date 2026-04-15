@@ -15,20 +15,26 @@
 //! NVIDIA MIG (Multi-Instance GPU) information collection.
 //!
 //! This module queries NVML's MIG APIs and returns one [`MigGpuInfo`] row per
-//! physical GPU that has MIG mode enabled. On consumer cards, older datacenter
-//! GPUs (pre-Ampere), and machines without MIG configured the reader returns
-//! an empty vector — the feature MUST be a silent no-op there.
+//! physical GPU that answers the MIG mode query — regardless of whether MIG
+//! mode is currently on. On consumer cards, older datacenter GPUs
+//! (pre-Ampere), and machines without MIG support the reader returns an empty
+//! vector — the feature MUST be a silent no-op there.
 //!
 //! # Error handling contract
 //!
 //! * Any NVML error (`NotSupported`, `FunctionNotFound`, `Uninitialized`, …)
 //!   for a given call is swallowed and treated as "feature unavailable".
-//! * A physical GPU is included in the output only when `mig_mode()` reports
-//!   the MIG-enabled state. The pending mode is intentionally ignored: we
-//!   monitor what is live now, not what would happen after a reboot.
-//! * Per-instance enumeration uses `mig_device_count()` (the maximum slot
-//!   count) and skips slots that return `NotSupported` / `InvalidArg`, which
-//!   is how NVML reports "this slot is not currently provisioned".
+//! * A physical GPU is included in the output whenever `mig_mode()` returns
+//!   a value — enabled or disabled. Surfacing disabled rows lets downstream
+//!   consumers observe the current MIG state (and its runtime transitions)
+//!   via `all_smi_gpu_mig_mode = 0`. The pending mode is intentionally
+//!   ignored: we monitor what is live now, not what would happen after a
+//!   reboot.
+//! * Per-instance enumeration is skipped entirely when MIG mode is disabled
+//!   (there are no instances to read). For enabled GPUs it uses
+//!   `mig_device_count()` (the maximum slot count) and skips slots that
+//!   return `NotSupported` / `InvalidArg`, which is how NVML reports "this
+//!   slot is not currently provisioned".
 //! * Per-instance metric reads are independently best-effort — a single
 //!   failed `utilization_rates` call does not drop the whole instance row.
 
@@ -55,8 +61,13 @@ const MIG_NAME_BUFFER: usize = 64;
 ///
 /// Returns an empty vector when:
 /// * NVML reports zero devices.
-/// * No device responds successfully to `mig_mode()`.
-/// * No device has MIG mode currently enabled.
+/// * No device responds successfully to `mig_mode()` (i.e. no MIG-capable
+///   GPU is present — consumer cards / pre-Ampere datacenter GPUs).
+///
+/// A row is emitted for every MIG-capable GPU, with `mig_mode` reflecting
+/// the current live state and `instances` empty whenever MIG mode is
+/// disabled. This lets consumers observe disabled GPUs in dashboards and
+/// catch runtime MIG toggles via `all_smi_gpu_mig_mode = 0`.
 pub fn collect_mig_info(nvml: &Nvml) -> Vec<MigGpuInfo> {
     let mut out = Vec::new();
 
@@ -74,23 +85,25 @@ pub fn collect_mig_info(nvml: &Nvml) -> Vec<MigGpuInfo> {
         };
 
         // Probe MIG mode. `NotSupported` is the expected response on consumer
-        // cards and pre-Ampere datacenter GPUs — we silently skip them.
+        // cards and pre-Ampere datacenter GPUs — silently skip those, they
+        // have no MIG story at all to report.
         let mode = match device.mig_mode() {
             Ok(m) => m,
             Err(_) => continue,
         };
         let mig_enabled = mode.current == 1;
 
-        // Only surface a record when MIG mode is actually live. Pending mode
-        // is informational and would require a reboot to take effect.
-        if !mig_enabled {
-            continue;
-        }
-
         let gpu_uuid = device.uuid().unwrap_or_else(|_| format!("GPU-{index}"));
         let gpu_name = device.name().unwrap_or_else(|_| "Unknown GPU".to_string());
 
-        let instances = enumerate_mig_instances(nvml, &device);
+        // Disabled MIG mode => no instances to enumerate. Keep the host row
+        // around so the exporter still emits `all_smi_gpu_mig_mode = 0` for
+        // it and downstream consumers can track runtime toggles.
+        let instances = if mig_enabled {
+            enumerate_mig_instances(nvml, &device)
+        } else {
+            Vec::new()
+        };
 
         out.push(MigGpuInfo {
             host_id: hostname.clone(),
@@ -99,7 +112,7 @@ pub fn collect_mig_info(nvml: &Nvml) -> Vec<MigGpuInfo> {
             gpu_index: index,
             gpu_uuid,
             gpu_name,
-            mig_mode: true,
+            mig_mode: mig_enabled,
             instances,
         });
     }

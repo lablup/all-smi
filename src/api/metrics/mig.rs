@@ -317,6 +317,37 @@ mod tests {
     }
 
     #[test]
+    fn mig_mode_emits_zero_when_disabled_and_no_instances() {
+        // Regression for the "disabled MIG is invisible" bug: a GPU row that
+        // supports MIG but has it turned off and therefore no instances must
+        // still produce an `all_smi_gpu_mig_mode{...} 0` line so consumers
+        // can observe the state transition.
+        let mut host = sample_host();
+        host.mig_mode = false;
+        host.instances.clear();
+        let hosts = vec![host];
+        let exporter = MigMetricExporter::new(&hosts);
+        let out = exporter.export_metrics();
+
+        let mode_line = out
+            .lines()
+            .find(|l| l.starts_with("all_smi_gpu_mig_mode{"))
+            .expect("mode line present even without instances");
+        assert!(mode_line.ends_with(" 0"), "got line: {mode_line}");
+
+        // With no instances, no per-instance metric data lines may leak.
+        for family in [
+            "all_smi_mig_instance_utilization_gpu{",
+            "all_smi_mig_instance_utilization_memory{",
+            "all_smi_mig_instance_memory_used_bytes{",
+            "all_smi_mig_instance_memory_total_bytes{",
+        ] {
+            let count = out.lines().filter(|l| l.starts_with(family)).count();
+            assert_eq!(count, 0, "unexpected data line for `{family}` in:\n{out}");
+        }
+    }
+
+    #[test]
     fn mig_mode_code_is_stable() {
         assert_eq!(MigMetricExporter::mig_mode_code(false), 0);
         assert_eq!(MigMetricExporter::mig_mode_code(true), 1);

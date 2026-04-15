@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::parsing::common::sanitize_label_value;
 use chrono::Local;
@@ -923,6 +923,12 @@ struct MigParseState {
     hosts: HashMap<String, MigGpuInfo>,
     /// `(gpu_uuid, mig_instance) -> MigInstanceInfo` accumulator.
     instances: HashMap<(String, u32), MigInstanceInfo>,
+    /// UUIDs that received an explicit `gpu_mig_mode` line during this scrape.
+    /// Used by `finish` to retain disabled-MIG rows (mode=0, zero instances)
+    /// that were deliberately emitted by the remote exporter, while still
+    /// dropping spurious hosts whose `gpu_uuid` appeared only in some other
+    /// (non-MIG) family's labels by accident.
+    hosts_with_mode: HashSet<String>,
 }
 
 /// Per-scrape cap on distinct MIG-capable GPUs. Matches the existing
@@ -944,6 +950,7 @@ impl MigParseState {
         Self {
             hosts: HashMap::new(),
             instances: HashMap::new(),
+            hosts_with_mode: HashSet::new(),
         }
     }
 
@@ -994,6 +1001,12 @@ impl MigParseState {
                 // value defensively as "enabled" rather than panicking on a
                 // weird remote payload.
                 host_entry.mig_mode = value > 0.0;
+                // Remember that this host was explicitly observed via the
+                // MIG-mode metric so `finish` retains it even with mode=0
+                // and zero instances. Without this, disabled GPUs would be
+                // silently dropped and the metric would be unobservable on
+                // the consumer side.
+                self.hosts_with_mode.insert(gpu_uuid.clone());
             }
             _ => {
                 // Per-instance metric families: require a `mig_instance` label
@@ -1066,11 +1079,15 @@ impl MigParseState {
         for host in self.hosts.values_mut() {
             host.instances.sort_by_key(|i| i.instance_id);
         }
-        // Drop hosts that ended up with neither MIG mode nor any instance —
-        // an exporter is free to omit `gpu_mig_mode` if MIG is disabled, so
-        // we should not surface a bogus row from labels that only mentioned
-        // a `gpu_uuid` in passing.
-        self.hosts.retain(|_, h| h.is_mig_active());
+        // Retain a host when it either:
+        //   * received an explicit `gpu_mig_mode` line (enabled or disabled),
+        //     so disabled parent GPUs remain observable to consumers, or
+        //   * has at least one MIG instance attached.
+        // Hosts whose `gpu_uuid` appeared only incidentally on non-MIG
+        // metrics still drop out here.
+        let hosts_with_mode = &self.hosts_with_mode;
+        self.hosts
+            .retain(|uuid, h| hosts_with_mode.contains(uuid) || !h.instances.is_empty());
         let mut out: Vec<MigGpuInfo> = self.hosts.into_values().collect();
         out.sort_by_key(|h| h.gpu_index);
         out
@@ -1835,9 +1852,10 @@ all_smi_cpu_utilization{cpu_model="AMD", instance="node1", hostname="node1", ind
 
     #[test]
     fn mig_parser_records_disabled_mode_when_only_mode_metric_present() {
-        // A parent GPU with MIG mode disabled and no instances should still
-        // surface one row with `mig_mode=false`. Useful for dashboards that
-        // want to track the rollout of MIG enablement across a cluster.
+        // A parent GPU with MIG mode disabled and no instances must still
+        // surface one row with `mig_mode=false`. Dashboards rely on this to
+        // track runtime MIG toggles and cluster-wide MIG enablement rollout;
+        // silently dropping disabled rows would make the metric unobservable.
         let parser = create_test_parser();
         let re = create_test_regex();
         let host = "127.0.0.1:10203";
@@ -1846,12 +1864,14 @@ all_smi_cpu_utilization{cpu_model="AMD", instance="node1", hostname="node1", ind
 all_smi_gpu_mig_mode{gpu_index="0", gpu_uuid="GPU-X", gpu="NVIDIA A100", instance="node1", host="node1"} 0
 "#;
         let (_, _, _, _, _, mig) = parser.parse_metrics(text, host, &re);
-        // is_mig_active() == false when mig_mode is false and no instances:
-        // MigParseState::finish drops the row.
-        assert!(
-            mig.is_empty(),
-            "Disabled MIG mode with no instances must be silent"
+        assert_eq!(
+            mig.len(),
+            1,
+            "Disabled-MIG row must be retained so consumers can see mode=0"
         );
+        assert!(!mig[0].mig_mode);
+        assert_eq!(mig[0].gpu_uuid, "GPU-X");
+        assert!(mig[0].instances.is_empty());
     }
 
     #[test]

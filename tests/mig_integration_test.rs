@@ -120,6 +120,46 @@ fn mig_metrics_parser_roundtrip_preserves_all_fields() {
 }
 
 #[test]
+fn mig_disabled_parent_roundtrips_as_visible_row_with_mode_zero() {
+    // End-to-end: a MIG-capable GPU with MIG mode currently disabled (the
+    // typical "hardware supports it but operators haven't turned it on" state)
+    // must survive the full exporter -> parser round trip. Previously the
+    // reader skipped disabled GPUs entirely, so `all_smi_gpu_mig_mode = 0`
+    // was never observed in production and the parser silently dropped any
+    // row that managed to reach it.
+    use all_smi::network::metrics_parser::MetricsParser;
+
+    let disabled_host = MigGpuInfo {
+        host_id: "node-42".to_string(),
+        hostname: "node-42".to_string(),
+        instance: "node-42".to_string(),
+        gpu_index: 0,
+        gpu_uuid: "GPU-OFF".to_string(),
+        gpu_name: "NVIDIA A100".to_string(),
+        mig_mode: false,
+        instances: Vec::new(),
+    };
+    let hosts = vec![disabled_host];
+    let text = MigMetricExporter::new(&hosts).export_metrics();
+
+    // Exporter side: the mode-0 line must be present.
+    let mode_line = text
+        .lines()
+        .find(|l| l.starts_with("all_smi_gpu_mig_mode{"))
+        .expect("exporter must emit gpu_mig_mode for disabled parent");
+    assert!(mode_line.ends_with(" 0"), "got line: {mode_line}");
+
+    // Parser side: the disabled row must survive the retain filter.
+    let parser = MetricsParser::new();
+    let (_gpu, _cpu, _mem, _store, _vgpu, parsed) =
+        parser.parse_metrics(&text, "127.0.0.1:9090", &regex());
+    assert_eq!(parsed.len(), 1, "disabled MIG row must be retained");
+    assert_eq!(parsed[0].gpu_uuid, "GPU-OFF");
+    assert!(!parsed[0].mig_mode);
+    assert!(parsed[0].instances.is_empty());
+}
+
+#[test]
 fn mig_parser_is_empty_on_bare_metal_metrics() {
     use all_smi::network::metrics_parser::MetricsParser;
 
