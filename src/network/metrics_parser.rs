@@ -1762,4 +1762,186 @@ all_smi_cpu_utilization{cpu_model="AMD", instance="node1", hostname="node1", ind
         let labels = parser.parse_labels(labels_str);
         assert_eq!(labels.get("key").unwrap(), "line1\nline2\rend");
     }
+
+    #[test]
+    fn test_parse_mig_metrics_populates_host_and_instances() {
+        let parser = create_test_parser();
+        let re = create_test_regex();
+        let host = "127.0.0.1:10200";
+
+        let text = r#"
+all_smi_gpu_mig_mode{gpu_index="0", gpu_uuid="GPU-M", gpu="NVIDIA A100", instance="node1", host="node1"} 1
+all_smi_mig_instance_utilization_gpu{gpu_index="0", gpu_uuid="GPU-M", gpu="NVIDIA A100", instance="node1", host="node1", mig_instance="0", mig_uuid="MIG-1", mig_profile="1g.5gb", gpu_instance_id="7", compute_instance_id="0"} 55
+all_smi_mig_instance_utilization_memory{gpu_index="0", gpu_uuid="GPU-M", gpu="NVIDIA A100", instance="node1", host="node1", mig_instance="0", mig_uuid="MIG-1", mig_profile="1g.5gb", gpu_instance_id="7", compute_instance_id="0"} 30
+all_smi_mig_instance_memory_used_bytes{gpu_index="0", gpu_uuid="GPU-M", gpu="NVIDIA A100", instance="node1", host="node1", mig_instance="0", mig_uuid="MIG-1", mig_profile="1g.5gb", gpu_instance_id="7", compute_instance_id="0"} 1073741824
+all_smi_mig_instance_memory_total_bytes{gpu_index="0", gpu_uuid="GPU-M", gpu="NVIDIA A100", instance="node1", host="node1", mig_instance="0", mig_uuid="MIG-1", mig_profile="1g.5gb", gpu_instance_id="7", compute_instance_id="0"} 5368709120
+all_smi_mig_instance_utilization_gpu{gpu_index="0", gpu_uuid="GPU-M", gpu="NVIDIA A100", instance="node1", host="node1", mig_instance="1", mig_uuid="MIG-2", mig_profile="2g.10gb", gpu_instance_id="2", compute_instance_id="0"} 10
+"#;
+
+        let (_gpu, _cpu, _mem, _storage, _vgpu, mig) = parser.parse_metrics(text, host, &re);
+
+        assert_eq!(mig.len(), 1, "expected one MIG host record");
+        let host0 = &mig[0];
+        assert!(host0.mig_mode);
+        assert_eq!(host0.gpu_uuid, "GPU-M");
+        assert_eq!(host0.gpu_name, "NVIDIA A100");
+        assert_eq!(host0.gpu_index, 0);
+        assert_eq!(host0.instances.len(), 2);
+
+        let inst0 = &host0.instances[0];
+        assert_eq!(inst0.instance_id, 0);
+        assert_eq!(inst0.uuid, "MIG-1");
+        assert_eq!(inst0.profile_name, "1g.5gb");
+        assert_eq!(inst0.gpu_instance_id, Some(7));
+        assert_eq!(inst0.compute_instance_id, Some(0));
+        assert_eq!(inst0.utilization_gpu, Some(55));
+        assert_eq!(inst0.utilization_memory, Some(30));
+        assert_eq!(inst0.memory_used_bytes, 1_073_741_824);
+        assert_eq!(inst0.memory_total_bytes, 5_368_709_120);
+
+        let inst1 = &host0.instances[1];
+        assert_eq!(inst1.instance_id, 1);
+        assert_eq!(inst1.utilization_gpu, Some(10));
+    }
+
+    #[test]
+    fn test_parse_mig_metrics_skips_rows_without_gpu_uuid() {
+        let parser = create_test_parser();
+        let re = create_test_regex();
+        let host = "127.0.0.1:10201";
+        let text = r#"
+all_smi_mig_instance_utilization_gpu{instance="node1", mig_instance="0"} 55
+"#;
+        let (_, _, _, _, _, mig) = parser.parse_metrics(text, host, &re);
+        assert!(mig.is_empty());
+    }
+
+    #[test]
+    fn test_parse_non_mig_host_produces_no_mig_rows() {
+        let parser = create_test_parser();
+        let re = create_test_regex();
+        let host = "127.0.0.1:10202";
+
+        let text = r#"
+all_smi_gpu_utilization{gpu="NVIDIA A100", instance="node1", uuid="GPU-X", index="0"} 50
+all_smi_cpu_utilization{cpu_model="AMD", instance="node1", hostname="node1", index="0"} 20
+"#;
+        let (gpu, _cpu, _mem, _store, _vgpu, mig) = parser.parse_metrics(text, host, &re);
+        assert_eq!(gpu.len(), 1);
+        assert!(
+            mig.is_empty(),
+            "No MIG rows must be emitted for a bare-metal host"
+        );
+    }
+
+    #[test]
+    fn mig_parser_records_disabled_mode_when_only_mode_metric_present() {
+        // A parent GPU with MIG mode disabled and no instances should still
+        // surface one row with `mig_mode=false`. Useful for dashboards that
+        // want to track the rollout of MIG enablement across a cluster.
+        let parser = create_test_parser();
+        let re = create_test_regex();
+        let host = "127.0.0.1:10203";
+
+        let text = r#"
+all_smi_gpu_mig_mode{gpu_index="0", gpu_uuid="GPU-X", gpu="NVIDIA A100", instance="node1", host="node1"} 0
+"#;
+        let (_, _, _, _, _, mig) = parser.parse_metrics(text, host, &re);
+        // is_mig_active() == false when mig_mode is false and no instances:
+        // MigParseState::finish drops the row.
+        assert!(
+            mig.is_empty(),
+            "Disabled MIG mode with no instances must be silent"
+        );
+    }
+
+    #[test]
+    fn mig_parser_caps_host_count() {
+        let parser = create_test_parser();
+        let re = create_test_regex();
+        let host = "127.0.0.1:10204";
+
+        // Feed 2 * MAX_MIG_GPUS unique host UUIDs. Only the first
+        // MAX_MIG_GPUS may survive; the rest must be dropped silently.
+        let mut text = String::new();
+        for i in 0..(2 * MAX_MIG_GPUS) {
+            text.push_str(&format!(
+                r#"all_smi_gpu_mig_mode{{gpu_index="0", gpu_uuid="GPU-{i}", gpu="NVIDIA A100", instance="node1", host="node1"}} 1
+"#
+            ));
+        }
+        let (_, _, _, _, _, mig) = parser.parse_metrics(&text, host, &re);
+        assert_eq!(mig.len(), MAX_MIG_GPUS, "host count must not exceed cap");
+    }
+
+    #[test]
+    fn mig_parser_caps_instance_count() {
+        let parser = create_test_parser();
+        let re = create_test_regex();
+        let host = "127.0.0.1:10205";
+
+        // Single host with 2 * MAX_MIG_INSTANCES unique mig_instance ids.
+        // Indices beyond MAX_MIG_INSTANCE_INDEX (64) are also dropped by the
+        // per-index defensive cap, so this test exercises both layers.
+        let mut text = String::new();
+        text.push_str(
+            r#"all_smi_gpu_mig_mode{gpu_index="0", gpu_uuid="GPU-A", gpu="NVIDIA A100", instance="node1", host="node1"} 1
+"#,
+        );
+        for i in 0..(2 * MAX_MIG_INSTANCES) {
+            text.push_str(&format!(
+                r#"all_smi_mig_instance_utilization_gpu{{gpu_index="0", gpu_uuid="GPU-A", gpu="NVIDIA A100", instance="node1", host="node1", mig_instance="{i}", mig_uuid="MIG-{i}", mig_profile="1g.5gb"}} 1
+"#
+            ));
+        }
+        let (_, _, _, _, _, mig) = parser.parse_metrics(&text, host, &re);
+        assert_eq!(mig.len(), 1, "single host must still exist");
+        // Per-index cap kicks in first (only IDs 0..=64 survive), so the
+        // visible instance count is bounded by MAX_MIG_INSTANCE_INDEX + 1.
+        assert!(
+            mig[0].instances.len() <= (MAX_MIG_INSTANCE_INDEX as usize) + 1,
+            "per-index cap must clamp instance count, got {}",
+            mig[0].instances.len()
+        );
+    }
+
+    #[test]
+    fn mig_parser_drops_rows_with_oversized_instance_index() {
+        let parser = create_test_parser();
+        let re = create_test_regex();
+        let host = "127.0.0.1:10206";
+
+        // mig_instance="9999" exceeds the defensive cap (64) — must be
+        // dropped silently. The parent host record only surfaces because of
+        // the gpu_mig_mode line.
+        let text = r#"
+all_smi_gpu_mig_mode{gpu_index="0", gpu_uuid="GPU-A", gpu="NVIDIA A100", instance="node1", host="node1"} 1
+all_smi_mig_instance_utilization_gpu{gpu_index="0", gpu_uuid="GPU-A", gpu="NVIDIA A100", instance="node1", host="node1", mig_instance="9999", mig_uuid="MIG-X", mig_profile="1g.5gb"} 50
+"#;
+        let (_, _, _, _, _, mig) = parser.parse_metrics(text, host, &re);
+        assert_eq!(mig.len(), 1, "host record present");
+        assert!(
+            mig[0].instances.is_empty(),
+            "oversized mig_instance must be rejected"
+        );
+    }
+
+    #[test]
+    fn mig_parser_handles_missing_optional_ids() {
+        // Older drivers may not emit gpu_instance_id / compute_instance_id.
+        // Empty values must round-trip as None rather than panic.
+        let parser = create_test_parser();
+        let re = create_test_regex();
+        let host = "127.0.0.1:10207";
+
+        let text = r#"
+all_smi_gpu_mig_mode{gpu_index="0", gpu_uuid="GPU-A", gpu="NVIDIA A100", instance="node1", host="node1"} 1
+all_smi_mig_instance_utilization_gpu{gpu_index="0", gpu_uuid="GPU-A", gpu="NVIDIA A100", instance="node1", host="node1", mig_instance="0", mig_uuid="MIG-X", mig_profile="1g.5gb", gpu_instance_id="", compute_instance_id=""} 25
+"#;
+        let (_, _, _, _, _, mig) = parser.parse_metrics(text, host, &re);
+        assert_eq!(mig.len(), 1);
+        assert_eq!(mig[0].instances.len(), 1);
+        assert!(mig[0].instances[0].gpu_instance_id.is_none());
+        assert!(mig[0].instances[0].compute_instance_id.is_none());
+    }
 }
