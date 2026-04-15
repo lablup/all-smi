@@ -45,8 +45,15 @@ impl NvidiaMockGenerator {
         // Basic GPU metrics
         self.add_gpu_metrics(&mut template, gpus);
 
-        // NVIDIA-specific: P-state metrics
+        // NVIDIA-specific: P-state metrics (legacy `all_smi_gpu_pstate` name
+        // kept for backwards compatibility with older scrapers; the new
+        // canonical name is emitted by `add_thermal_threshold_metrics`).
         self.add_pstate_metrics(&mut template, gpus);
+
+        // NVIDIA-specific: Temperature thresholds + canonical P-state metric
+        // (issue #130). Emitted with synthetic but realistic numbers so local
+        // dev and `cargo test --features mock` see the feature populated.
+        self.add_thermal_threshold_metrics(&mut template, gpus);
 
         // NVIDIA-specific: Process metrics
         self.add_process_metrics(&mut template, gpus);
@@ -70,6 +77,68 @@ impl NvidiaMockGenerator {
         );
 
         template
+    }
+
+    /// Synthesize the new NVML extended-temperature / P-state metrics in the
+    /// mock output. Values are fixed-synthetic, not randomized, because
+    /// thresholds never change on real hardware.
+    fn add_thermal_threshold_metrics(&self, template: &mut String, gpus: &[GpuMetrics]) {
+        // Constants chosen to match typical H100 / A100 datacenter values.
+        const SLOWDOWN: u32 = 90;
+        const SHUTDOWN: u32 = 95;
+        const MAX_OPERATING: u32 = 87;
+        const ACOUSTIC: u32 = 77;
+
+        for (metric_name, help_text, value) in [
+            (
+                "all_smi_gpu_temperature_threshold_slowdown_celsius",
+                "GPU slowdown temperature threshold in Celsius",
+                SLOWDOWN,
+            ),
+            (
+                "all_smi_gpu_temperature_threshold_shutdown_celsius",
+                "GPU shutdown temperature threshold in Celsius",
+                SHUTDOWN,
+            ),
+            (
+                "all_smi_gpu_temperature_threshold_max_operating_celsius",
+                "GPU maximum operating temperature threshold in Celsius",
+                MAX_OPERATING,
+            ),
+            (
+                "all_smi_gpu_temperature_threshold_acoustic_celsius",
+                "GPU acoustic (noise) temperature threshold in Celsius",
+                ACOUSTIC,
+            ),
+        ] {
+            template.push_str(&format!("# HELP {metric_name} {help_text}\n"));
+            template.push_str(&format!("# TYPE {metric_name} gauge\n"));
+            for (i, gpu) in gpus.iter().enumerate() {
+                let labels = format!(
+                    "gpu=\"{}\", instance=\"{}\", uuid=\"{}\", index=\"{i}\"",
+                    self.gpu_name, self.instance_name, gpu.uuid
+                );
+                template.push_str(&format!("{metric_name}{{{labels}}} {value}\n"));
+            }
+        }
+
+        // Canonical P-state metric (issue #130). Reuses the same
+        // placeholder substitution as the legacy pstate metric so
+        // `render_nvidia_response` only needs one replace pass.
+        template.push_str(
+            "# HELP all_smi_gpu_performance_state GPU performance state \
+             (0=P0 fastest, 15=P15 idlest, -1=not reported)\n",
+        );
+        template.push_str("# TYPE all_smi_gpu_performance_state gauge\n");
+        for (i, gpu) in gpus.iter().enumerate() {
+            let labels = format!(
+                "gpu=\"{}\", instance=\"{}\", uuid=\"{}\", index=\"{i}\"",
+                self.gpu_name, self.instance_name, gpu.uuid
+            );
+            template.push_str(&format!(
+                "all_smi_gpu_performance_state{{{labels}}} {{{{PSTATE_{i}}}}}\n"
+            ));
+        }
     }
 
     fn add_gpu_metrics(&self, template: &mut String, gpus: &[GpuMetrics]) {
@@ -436,5 +505,103 @@ impl MockGenerator for NvidiaMockGenerator {
 
     fn platform(&self) -> MockPlatform {
         MockPlatform::Nvidia
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_gpu_metrics() -> Vec<GpuMetrics> {
+        vec![GpuMetrics {
+            uuid: "GPU-0".to_string(),
+            utilization: 50.0,
+            memory_used_bytes: 1024,
+            memory_total_bytes: 8192,
+            temperature_celsius: 65,
+            power_consumption_watts: 200.0,
+            frequency_mhz: 1500,
+            ane_utilization_watts: 0.0,
+            thermal_pressure_level: None,
+        }]
+    }
+
+    fn make_cpu_metrics() -> CpuMetrics {
+        CpuMetrics {
+            model: "Intel Xeon".to_string(),
+            utilization: 10.0,
+            socket_count: 1,
+            core_count: 8,
+            thread_count: 16,
+            frequency_mhz: 2400,
+            temperature_celsius: Some(50),
+            power_consumption_watts: Some(100.0),
+            socket_utilizations: vec![10.0],
+            p_core_count: None,
+            e_core_count: None,
+            gpu_core_count: None,
+            p_core_utilization: None,
+            e_core_utilization: None,
+            p_cluster_frequency_mhz: None,
+            e_cluster_frequency_mhz: None,
+            per_core_utilization: vec![],
+        }
+    }
+
+    fn make_memory_metrics() -> MemoryMetrics {
+        MemoryMetrics {
+            total_bytes: 1024,
+            used_bytes: 512,
+            available_bytes: 512,
+            free_bytes: 512,
+            cached_bytes: 0,
+            buffers_bytes: 0,
+            swap_total_bytes: 0,
+            swap_used_bytes: 0,
+            swap_free_bytes: 0,
+            utilization: 50.0,
+        }
+    }
+
+    #[test]
+    fn mock_template_includes_threshold_metrics() {
+        let gen_ = NvidiaMockGenerator::new(None, "mock-node".to_string());
+        let gpus = make_gpu_metrics();
+        let tpl = gen_.build_nvidia_template(&gpus, &make_cpu_metrics(), &make_memory_metrics());
+
+        assert!(
+            tpl.contains("all_smi_gpu_temperature_threshold_slowdown_celsius"),
+            "mock template missing slowdown metric:\n{tpl}"
+        );
+        assert!(
+            tpl.contains("all_smi_gpu_temperature_threshold_shutdown_celsius"),
+            "mock template missing shutdown metric:\n{tpl}"
+        );
+        assert!(
+            tpl.contains("all_smi_gpu_temperature_threshold_max_operating_celsius"),
+            "mock template missing max_operating metric:\n{tpl}"
+        );
+        assert!(
+            tpl.contains("all_smi_gpu_temperature_threshold_acoustic_celsius"),
+            "mock template missing acoustic metric:\n{tpl}"
+        );
+        assert!(
+            tpl.contains("all_smi_gpu_performance_state{"),
+            "mock template missing canonical pstate metric:\n{tpl}"
+        );
+    }
+
+    #[test]
+    fn mock_render_resolves_pstate_placeholders() {
+        let gen_ = NvidiaMockGenerator::new(None, "mock-node".to_string());
+        let gpus = make_gpu_metrics();
+        let tpl = gen_.build_nvidia_template(&gpus, &make_cpu_metrics(), &make_memory_metrics());
+        let rendered =
+            gen_.render_nvidia_response(&tpl, &gpus, &make_cpu_metrics(), &make_memory_metrics());
+        // After rendering, no `{{PSTATE_...}}` placeholders should remain.
+        assert!(
+            !rendered.contains("{{PSTATE_"),
+            "unresolved PSTATE placeholder in rendered output"
+        );
     }
 }
