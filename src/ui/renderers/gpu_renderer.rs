@@ -445,19 +445,28 @@ fn render_thermal_pstate_row<W: Write>(stdout: &mut W, info: &GpuInfo) {
         ThermalProximity::Normal => None,
     };
 
+    // Track whether any field has already been written so that only the
+    // second and subsequent fields get a leading separator space. Without
+    // this, a partial report (e.g. only P-State populated) would begin the
+    // row with two spaces — one from the indent above, one from the field
+    // itself — corrupting alignment.
+    let mut emitted_any = false;
+
     // Slowdown threshold — colour it yellow when the current temperature is
     // bumping up against it, red when shutdown is imminent. When no warning
     // is active, render neutrally.
     if let Some(slowdown) = info.temperature_threshold_slowdown {
+        emitted_any = true;
         print_colored_text(stdout, "Slowdown:", Color::DarkYellow, None, None);
         let color = warn_color.unwrap_or(Color::White);
         print_colored_text(stdout, &format!("{slowdown}°C"), color, None, None);
     }
 
     if let Some(shutdown) = info.temperature_threshold_shutdown {
-        if info.temperature_threshold_slowdown.is_some() {
+        if emitted_any {
             print_colored_text(stdout, " ", Color::White, None, None);
         }
+        emitted_any = true;
         print_colored_text(stdout, "Shutdown:", Color::DarkRed, None, None);
         let color = match proximity {
             ThermalProximity::Shutdown => Color::Red,
@@ -467,17 +476,28 @@ fn render_thermal_pstate_row<W: Write>(stdout: &mut W, info: &GpuInfo) {
     }
 
     if let Some(gpu_max) = info.temperature_threshold_max_operating {
-        print_colored_text(stdout, " MaxOp:", Color::DarkGreen, None, None);
+        if emitted_any {
+            print_colored_text(stdout, " ", Color::White, None, None);
+        }
+        emitted_any = true;
+        print_colored_text(stdout, "MaxOp:", Color::DarkGreen, None, None);
         print_colored_text(stdout, &format!("{gpu_max}°C"), Color::White, None, None);
     }
 
     if let Some(acoustic) = info.temperature_threshold_acoustic {
-        print_colored_text(stdout, " Acoustic:", Color::DarkCyan, None, None);
+        if emitted_any {
+            print_colored_text(stdout, " ", Color::White, None, None);
+        }
+        emitted_any = true;
+        print_colored_text(stdout, "Acoustic:", Color::DarkCyan, None, None);
         print_colored_text(stdout, &format!("{acoustic}°C"), Color::White, None, None);
     }
 
     if let Some(pstate) = info.performance_state {
-        print_colored_text(stdout, " P-State:", Color::DarkBlue, None, None);
+        if emitted_any {
+            print_colored_text(stdout, " ", Color::White, None, None);
+        }
+        print_colored_text(stdout, "P-State:", Color::DarkBlue, None, None);
         // Highlight P0 (maximum performance) green and P15 (idle) dim; mid
         // states render neutrally. Helps spot a throttled GPU at a glance.
         let color = match pstate {
@@ -693,6 +713,52 @@ mod tests {
         assert!(
             !rendered.contains("Slowdown:"),
             "should not render Slowdown without data: {rendered}"
+        );
+    }
+
+    #[test]
+    fn render_pstate_only_has_no_double_leading_space() {
+        // When only performance_state is populated the row must not start
+        // with two consecutive spaces. The indent ("     ") is always
+        // emitted, but no extra separator space should precede the first
+        // field on the row.
+        let mut gpu = make_gpu(50);
+        gpu.temperature_threshold_slowdown = None;
+        gpu.temperature_threshold_shutdown = None;
+        gpu.temperature_threshold_max_operating = None;
+        gpu.temperature_threshold_acoustic = None;
+        gpu.performance_state = Some(3);
+        let mut buf: Vec<u8> = Vec::new();
+        render_thermal_pstate_row(&mut buf, &gpu);
+        // Strip ANSI escape sequences to get the plain text.
+        let raw = String::from_utf8(buf).expect("valid utf-8");
+        // Remove all ESC [...m sequences.
+        let plain: String = {
+            let mut out = String::new();
+            let mut chars = raw.chars().peekable();
+            while let Some(c) = chars.next() {
+                if c == '\x1b' {
+                    // consume up to and including the final 'm'
+                    for ch in chars.by_ref() {
+                        if ch == 'm' {
+                            break;
+                        }
+                    }
+                } else {
+                    out.push(c);
+                }
+            }
+            out
+        };
+        // The row must contain "P-State:" and "P3".
+        assert!(plain.contains("P-State:"), "missing P-State: in {plain:?}");
+        assert!(plain.contains("P3"), "missing P3 in {plain:?}");
+        // After the fixed 5-char indent the next printable character must
+        // not be another space — that would indicate a double leading space.
+        let after_indent = plain.trim_start_matches(' ');
+        assert!(
+            !after_indent.starts_with(' '),
+            "double leading space detected in {plain:?}"
         );
     }
 
