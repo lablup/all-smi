@@ -15,8 +15,10 @@
 /// UI layout calculation utilities
 use crate::app_state::AppState;
 use crate::cli::ViewArgs;
+use crate::device::{GpuInfo, VgpuHostInfo};
 use crate::ui::activity_panel;
 use crate::ui::gpu_sparkline_panel;
+use crate::ui::renderers::gpu_renderer::gpu_render_line_count;
 
 pub struct LayoutCalculator;
 
@@ -124,7 +126,15 @@ impl LayoutCalculator {
                 / 2
         };
 
-        let lines_per_gpu = 2; // Each GPU takes 2 lines
+        // Each GPU may render 2, 3, or more lines depending on whether it
+        // populates the optional thermal/P-state row (NVML 0.12+ data) and
+        // whether a vGPU section nests beneath it. Use the maximum line
+        // count over the GPUs visible in the current tab so PgUp/PgDn
+        // never overshoots the rendered area. A pessimistic max means
+        // mixed pages may under-fill by one row, which is acceptable —
+        // overshooting would clip the gauges off-screen and corrupt the
+        // scroll math.
+        let lines_per_gpu = max_gpu_lines_for_tab(state).max(2);
         let max_gpu_items = gpu_display_rows / lines_per_gpu;
 
         GpuDisplayParams {
@@ -186,6 +196,12 @@ impl LayoutCalculator {
         }
 
         widths
+    }
+
+    /// Public entry point used by `view::event_handler` so PgUp / PgDn page
+    /// sizes stay consistent with the rendered layout.
+    pub fn max_gpu_lines_for_tab(state: &AppState) -> usize {
+        max_gpu_lines_for_tab(state)
     }
 
     fn calculate_storage_items_count(state: &AppState, args: &ViewArgs) -> usize {
@@ -302,6 +318,42 @@ impl StandardColumns {
     }
 }
 
+/// Filter `gpu_info` to the subset visible under the current tab. "All"
+/// returns every GPU; a host tab returns only GPUs whose `host_id`
+/// matches the tab name.
+fn visible_gpus_for_tab<'a>(state: &'a AppState) -> Box<dyn Iterator<Item = &'a GpuInfo> + 'a> {
+    if let Some(tab_name) = state.tabs.get(state.current_tab) {
+        if tab_name == "All" {
+            Box::new(state.gpu_info.iter())
+        } else {
+            let owned = tab_name.clone();
+            Box::new(state.gpu_info.iter().filter(move |g| g.host_id == owned))
+        }
+    } else {
+        Box::new(state.gpu_info.iter())
+    }
+}
+
+/// Compute the maximum line count any visible GPU would render given the
+/// current `state.gpu_info` and `state.vgpu_info`. Falls back to the
+/// historical 2-line baseline when no GPUs are visible (empty cluster,
+/// loading state) so layout math never returns 0.
+pub(crate) fn max_gpu_lines_for_tab(state: &AppState) -> usize {
+    max_gpu_lines_over(visible_gpus_for_tab(state), &state.vgpu_info)
+}
+
+/// Pure helper used by [`max_gpu_lines_for_tab`] and the unit tests. Iterates
+/// any GPU iterator and returns the largest [`gpu_render_line_count`] value,
+/// or 2 for an empty iterator.
+pub(crate) fn max_gpu_lines_over<'a>(
+    gpus: impl Iterator<Item = &'a GpuInfo>,
+    vgpu_info: &[VgpuHostInfo],
+) -> usize {
+    gpus.map(|g| gpu_render_line_count(g, vgpu_info))
+        .max()
+        .unwrap_or(2)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -366,5 +418,90 @@ mod tests {
             remote_lines_no_history < remote_lines_with_history,
             "remote mode with history ({remote_lines_with_history}) should use more header lines than without ({remote_lines_no_history})"
         );
+    }
+
+    // --- per-GPU line-count math ---
+
+    fn make_minimal_gpu(host_id: &str, name: &str) -> GpuInfo {
+        GpuInfo {
+            uuid: format!("{host_id}/{name}"),
+            time: String::new(),
+            name: name.to_string(),
+            device_type: "GPU".to_string(),
+            host_id: host_id.to_string(),
+            hostname: host_id.to_string(),
+            instance: host_id.to_string(),
+            utilization: 0.0,
+            ane_utilization: 0.0,
+            dla_utilization: None,
+            tensorcore_utilization: None,
+            temperature: 50,
+            used_memory: 0,
+            total_memory: 0,
+            frequency: 0,
+            power_consumption: 0.0,
+            gpu_core_count: None,
+            temperature_threshold_slowdown: None,
+            temperature_threshold_shutdown: None,
+            temperature_threshold_max_operating: None,
+            temperature_threshold_acoustic: None,
+            performance_state: None,
+            detail: std::collections::HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn max_gpu_lines_over_returns_two_for_empty_iterator() {
+        // No GPUs visible (e.g. cluster still loading) → fall back to the
+        // historical baseline so layout math never returns 0.
+        let lines = max_gpu_lines_over(std::iter::empty(), &[]);
+        assert_eq!(lines, 2);
+    }
+
+    #[test]
+    fn max_gpu_lines_over_picks_largest_visible_gpu() {
+        // A 2-line GPU and a 3-line NVIDIA GPU: the layout must size for
+        // the 3-line worst case to avoid clipping the gauges.
+        let plain = make_minimal_gpu("h1", "Apple M2 Pro");
+        let mut nvidia = make_minimal_gpu("h2", "NVIDIA A100");
+        nvidia.performance_state = Some(2);
+        let gpus = [plain, nvidia];
+        let lines = max_gpu_lines_over(gpus.iter(), &[]);
+        assert_eq!(lines, 3);
+    }
+
+    #[test]
+    fn max_gpu_lines_for_tab_filters_by_host_id_in_per_host_tab() {
+        use crate::app_state::AppState;
+        // Tab "h2" is selected; only h2's GPU contributes to the max,
+        // even though h1 has a vGPU section that would otherwise inflate
+        // the count.
+        let plain_h2 = make_minimal_gpu("h2", "Apple M2 Pro");
+        let mut nvidia_h1 = make_minimal_gpu("h1", "NVIDIA A100");
+        nvidia_h1.performance_state = Some(0);
+        let state = AppState {
+            tabs: vec!["All".into(), "h2".into()],
+            current_tab: 1,
+            gpu_info: vec![plain_h2, nvidia_h1],
+            ..AppState::default()
+        };
+        let lines = LayoutCalculator::max_gpu_lines_for_tab(&state);
+        assert_eq!(lines, 2, "h1's NVIDIA row must not affect h2's tab");
+    }
+
+    #[test]
+    fn max_gpu_lines_for_tab_uses_all_gpus_under_all_tab() {
+        use crate::app_state::AppState;
+        let plain_h2 = make_minimal_gpu("h2", "Apple M2 Pro");
+        let mut nvidia_h1 = make_minimal_gpu("h1", "NVIDIA A100");
+        nvidia_h1.performance_state = Some(0);
+        let state = AppState {
+            tabs: vec!["All".into(), "h2".into()],
+            current_tab: 0,
+            gpu_info: vec![plain_h2, nvidia_h1],
+            ..AppState::default()
+        };
+        let lines = LayoutCalculator::max_gpu_lines_for_tab(&state);
+        assert_eq!(lines, 3, "All tab must surface the worst-case GPU height");
     }
 }
