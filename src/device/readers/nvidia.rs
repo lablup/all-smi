@@ -17,6 +17,9 @@ use crate::device::common::constants::BYTES_PER_MB;
 use crate::device::common::{execute_command_default, parse_csv_line};
 use crate::device::process_list::{get_all_processes, merge_gpu_processes};
 use crate::device::readers::common_cache::{DetailBuilder, DeviceStaticInfo, MAX_DEVICES};
+use crate::device::readers::nvidia_hardware::{
+    HardwareDetailCache, collect_gpm_metrics, collect_nvlink_remote_devices,
+};
 use crate::device::readers::nvidia_mig::collect_mig_info;
 use crate::device::readers::nvidia_vgpu::collect_vgpu_info;
 use crate::device::types::{GpuInfo, MigGpuInfo, ProcessInfo, VgpuHostInfo};
@@ -71,6 +74,11 @@ pub struct NvidiaGpuReader {
     /// Cached temperature thresholds per device index. Populated lazily on
     /// the first successful read and reused for the lifetime of the process.
     thermal_thresholds: Mutex<HashMap<u32, ThermalThresholds>>,
+    /// Cached static hardware details per device index (NUMA node, GSP
+    /// firmware mode, GSP firmware version). Populated lazily on the first
+    /// call that observes any supported value, following the same "don't
+    /// cache an all-empty snapshot" policy as [`Self::thermal_thresholds`].
+    hardware_details: HardwareDetailCache,
 }
 
 /// Map the NVML [`PerformanceState`] enum to the integer used by the
@@ -114,6 +122,7 @@ impl NvidiaGpuReader {
             device_static_info: OnceLock::new(),
             nvml: Mutex::new(Nvml::init().ok()),
             thermal_thresholds: Mutex::new(HashMap::new()),
+            hardware_details: HardwareDetailCache::new(),
         }
     }
 
@@ -290,6 +299,19 @@ impl NvidiaGpuReader {
                         .ok()
                         .and_then(performance_state_to_u32);
 
+                    // Static hardware details: NUMA node id + GSP firmware
+                    // (mode + version). All three are cached per device
+                    // since they never change at runtime.
+                    let hw = self.hardware_details.get_or_fetch(&device, i);
+                    // Active NvLinks are queried every poll — link state
+                    // can change at runtime if a cable is disconnected.
+                    let nvlink_remote_devices = collect_nvlink_remote_devices(nvml, &device);
+                    // GPM metrics are opt-in (Hopper+). `collect_gpm_metrics`
+                    // returns `None` everywhere else and a populated-but-empty
+                    // snapshot on supported hardware (full two-sample
+                    // implementation deferred to a follow-up).
+                    let gpm_metrics = collect_gpm_metrics(&device);
+
                     let info = GpuInfo {
                         uuid: device.uuid().unwrap_or_else(|_| format!("GPU-{i}")),
                         time: Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
@@ -328,6 +350,11 @@ impl NvidiaGpuReader {
                         temperature_threshold_max_operating: thresholds.max_operating,
                         temperature_threshold_acoustic: thresholds.acoustic,
                         performance_state,
+                        numa_node_id: hw.numa_node_id,
+                        gsp_firmware_mode: hw.gsp_firmware_mode,
+                        gsp_firmware_version: hw.gsp_firmware_version,
+                        nvlink_remote_devices,
+                        gpm_metrics,
                         detail,
                     };
                     gpu_info.push(info);
@@ -800,6 +827,15 @@ fn get_gpu_info_nvidia_smi() -> Vec<GpuInfo> {
                     temperature_threshold_max_operating: None,
                     temperature_threshold_acoustic: None,
                     performance_state: None,
+                    // Hardware details (issue #132) are only available via
+                    // NVML — the CSV fallback cannot surface them. Leave
+                    // them at the "unavailable" defaults so downstream
+                    // consumers render them as missing rather than zero.
+                    numa_node_id: None,
+                    gsp_firmware_mode: None,
+                    gsp_firmware_version: None,
+                    nvlink_remote_devices: Vec::new(),
+                    gpm_metrics: None,
                     detail,
                 })
             } else {
