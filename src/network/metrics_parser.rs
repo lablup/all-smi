@@ -298,13 +298,11 @@ impl MetricsParser {
                 gpu_info.temperature_threshold_acoustic = saturating_u32(value);
             }
             "gpu_performance_state" => {
-                // The exporter omits this metric when the device did not
-                // report a P-state (Prometheus convention for "no data"),
-                // so an absent line round-trips to `None` naturally. Guard
-                // against legacy scrapers that may have emitted negative
-                // sentinel values by treating any negative value as
-                // "unavailable" too.
-                if value >= 0.0 {
+                // NVML defines exactly P0–P15 (0..=15). Accept only values
+                // in that range so a malicious or buggy upstream cannot emit
+                // an out-of-range value (e.g. 9999) that the TUI would
+                // render as "P9999" and corrupt the secondary row layout.
+                if (0.0..=15.0).contains(&value) {
                     gpu_info.performance_state = saturating_u32(value);
                 }
             }
@@ -1013,6 +1011,30 @@ all_smi_gpu_temperature_celsius{gpu="NVIDIA A100", instance="node-1", uuid="GPU-
         assert!(gpu.temperature_threshold_slowdown.is_none());
         assert!(gpu.temperature_threshold_shutdown.is_none());
         assert!(gpu.performance_state.is_none());
+    }
+
+    #[test]
+    fn parser_rejects_out_of_range_pstate() {
+        // NVML defines P0–P15 only. Values outside [0, 15] from a
+        // malicious or buggy upstream must be silently dropped so the TUI
+        // never renders "P9999" or similar.
+        let parser = create_test_parser();
+        let re = create_test_regex();
+        let host = "127.0.0.1:10058";
+
+        for bad_value in [16.0_f64, 100.0, 9999.0, -1.0] {
+            let test_data = format!(
+                "all_smi_gpu_utilization{{gpu=\"GPU\", instance=\"n\", uuid=\"GPU-BAD\", index=\"0\"}} 0\n\
+                 all_smi_gpu_performance_state{{gpu=\"GPU\", instance=\"n\", uuid=\"GPU-BAD\", index=\"0\"}} {bad_value}\n"
+            );
+            let (gpu_info, _, _, _, _) = parser.parse_metrics(&test_data, host, &re);
+            assert_eq!(gpu_info.len(), 1);
+            assert!(
+                gpu_info[0].performance_state.is_none(),
+                "expected None for out-of-range pstate {bad_value}, got {:?}",
+                gpu_info[0].performance_state
+            );
+        }
     }
 
     #[test]
