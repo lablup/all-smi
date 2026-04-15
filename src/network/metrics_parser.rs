@@ -231,6 +231,15 @@ impl MetricsParser {
                 frequency: 0,
                 power_consumption: 0.0,
                 gpu_core_count: None,
+                // Populated by the new threshold / pstate metric handlers
+                // below when the scraped exposition contains them. Remote
+                // all-smi nodes exporting older builds will leave these None,
+                // matching the local graceful-degradation contract.
+                temperature_threshold_slowdown: None,
+                temperature_threshold_shutdown: None,
+                temperature_threshold_max_operating: None,
+                temperature_threshold_acoustic: None,
+                performance_state: None,
                 detail,
             }
         });
@@ -272,6 +281,28 @@ impl MetricsParser {
                         "pci_device"
                     ]
                 );
+            }
+            // Thermal thresholds and P-state. Any round-number reading < 0 is
+            // rejected via saturating_cast; the exporter only emits positive
+            // u32 values, but we defend against malformed upstreams.
+            "gpu_temperature_threshold_slowdown_celsius" => {
+                gpu_info.temperature_threshold_slowdown = saturating_u32(value);
+            }
+            "gpu_temperature_threshold_shutdown_celsius" => {
+                gpu_info.temperature_threshold_shutdown = saturating_u32(value);
+            }
+            "gpu_temperature_threshold_max_operating_celsius" => {
+                gpu_info.temperature_threshold_max_operating = saturating_u32(value);
+            }
+            "gpu_temperature_threshold_acoustic_celsius" => {
+                gpu_info.temperature_threshold_acoustic = saturating_u32(value);
+            }
+            "gpu_performance_state" => {
+                // Exporter emits -1 when the device did not report a P-state.
+                // Preserve that absence on round-trip.
+                if value >= 0.0 {
+                    gpu_info.performance_state = saturating_u32(value);
+                }
             }
             "npu_firmware_info" => {
                 // Handle NPU-specific firmware info metric
@@ -613,6 +644,23 @@ impl Default for MetricsParser {
 /// escaping: if we split naively on `,` a malicious label value like
 /// `vgpu_vm_id="evil\", fake=\"x"` breaks out and injects an attacker-
 /// controlled label, enabling cross-host metric spoofing.
+/// Saturating cast of a Prometheus `f64` value to `Option<u32>` for the
+/// thermal-threshold / P-state fields.
+///
+/// * Negative values yield `None` (the exporter emits `-1` for "not
+///   reported", and non-reading clients should not pretend otherwise).
+/// * Values above `u32::MAX` saturate to `u32::MAX`.
+/// * `NaN` yields `None`.
+fn saturating_u32(value: f64) -> Option<u32> {
+    if value.is_nan() || value < 0.0 {
+        return None;
+    }
+    if value >= u32::MAX as f64 {
+        return Some(u32::MAX);
+    }
+    Some(value as u32)
+}
+
 fn split_labels_respecting_quotes(labels_str: &str) -> Vec<&str> {
     let bytes = labels_str.as_bytes();
     let mut out: Vec<&str> = Vec::with_capacity(16);
@@ -915,6 +963,61 @@ all_smi_ane_utilization{gpu="NVIDIA H200 141GB HBM3", instance="node-0058", uuid
         assert_eq!(gpu.temperature, 65);
         assert_eq!(gpu.power_consumption, 400.5);
         assert_eq!(gpu.ane_utilization, 15.2);
+    }
+
+    #[test]
+    fn test_parse_gpu_thermal_thresholds_and_pstate() {
+        let parser = create_test_parser();
+        let re = create_test_regex();
+        let host = "127.0.0.1:10058";
+
+        let test_data = r#"
+all_smi_gpu_utilization{gpu="NVIDIA A100", instance="node-1", uuid="GPU-T", index="0"} 30
+all_smi_gpu_temperature_celsius{gpu="NVIDIA A100", instance="node-1", uuid="GPU-T", index="0"} 65
+all_smi_gpu_temperature_threshold_slowdown_celsius{gpu="NVIDIA A100", instance="node-1", uuid="GPU-T", index="0"} 90
+all_smi_gpu_temperature_threshold_shutdown_celsius{gpu="NVIDIA A100", instance="node-1", uuid="GPU-T", index="0"} 95
+all_smi_gpu_temperature_threshold_max_operating_celsius{gpu="NVIDIA A100", instance="node-1", uuid="GPU-T", index="0"} 85
+all_smi_gpu_temperature_threshold_acoustic_celsius{gpu="NVIDIA A100", instance="node-1", uuid="GPU-T", index="0"} 77
+all_smi_gpu_performance_state{gpu="NVIDIA A100", instance="node-1", uuid="GPU-T", index="0"} 2
+"#;
+
+        let (gpu_info, _, _, _, _) = parser.parse_metrics(test_data, host, &re);
+        assert_eq!(gpu_info.len(), 1);
+        let gpu = &gpu_info[0];
+        assert_eq!(gpu.temperature_threshold_slowdown, Some(90));
+        assert_eq!(gpu.temperature_threshold_shutdown, Some(95));
+        assert_eq!(gpu.temperature_threshold_max_operating, Some(85));
+        assert_eq!(gpu.temperature_threshold_acoustic, Some(77));
+        assert_eq!(gpu.performance_state, Some(2));
+    }
+
+    #[test]
+    fn test_parse_gpu_round_trip_preserves_absence() {
+        // Round-trip: a scrape from an older all-smi node without the new
+        // metrics must leave the new fields as `None`, not defaults.
+        let parser = create_test_parser();
+        let re = create_test_regex();
+        let host = "127.0.0.1:10058";
+
+        let test_data = r#"
+all_smi_gpu_utilization{gpu="NVIDIA A100", instance="node-1", uuid="GPU-A", index="0"} 40
+all_smi_gpu_temperature_celsius{gpu="NVIDIA A100", instance="node-1", uuid="GPU-A", index="0"} 60
+"#;
+        let (gpu_info, _, _, _, _) = parser.parse_metrics(test_data, host, &re);
+        assert_eq!(gpu_info.len(), 1);
+        let gpu = &gpu_info[0];
+        assert!(gpu.temperature_threshold_slowdown.is_none());
+        assert!(gpu.temperature_threshold_shutdown.is_none());
+        assert!(gpu.performance_state.is_none());
+    }
+
+    #[test]
+    fn test_saturating_u32_helper() {
+        assert_eq!(saturating_u32(-1.0), None);
+        assert_eq!(saturating_u32(f64::NAN), None);
+        assert_eq!(saturating_u32(0.0), Some(0));
+        assert_eq!(saturating_u32(93.0), Some(93));
+        assert_eq!(saturating_u32(1e12), Some(u32::MAX));
     }
 
     #[test]
