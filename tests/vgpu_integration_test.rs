@@ -87,8 +87,9 @@ fn vgpu_metrics_parser_roundtrip_preserves_all_fields() {
     use all_smi::network::metrics_parser::MetricsParser;
 
     let parser = MetricsParser::new();
-    let (_gpu, _cpu, _mem, _store, parsed, _mig) =
+    let result =
         parser.parse_metrics(&exported_metrics_text(), "127.0.0.1:9090", &regex());
+    let parsed = &result.vgpu_info;
 
     assert_eq!(parsed.len(), 1, "expected one host record");
     let got = &parsed[0];
@@ -125,7 +126,9 @@ fn vgpu_parser_is_empty_on_bare_metal_metrics() {
         "all_smi_cpu_utilization{cpu_model=\"AMD\", instance=\"x\", hostname=\"x\", index=\"0\"} 20\n",
     );
 
-    let (gpu, _cpu, _mem, _storage, parsed, _mig) = parser.parse_metrics(non_vgpu, "x", &regex());
+    let result = parser.parse_metrics(non_vgpu, "x", &regex());
+    let gpu = &result.gpu_info;
+    let parsed = &result.vgpu_info;
     assert_eq!(gpu.len(), 1, "sanity: GPU row still parsed");
     assert!(
         parsed.is_empty(),

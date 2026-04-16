@@ -24,6 +24,19 @@ use crate::device::{
 };
 use crate::storage::info::StorageInfo;
 
+/// Structured return type for [`MetricsParser::parse_metrics`], replacing the
+/// previous 6-tuple. Each field holds the parsed device records for a single
+/// metric family.
+#[derive(Debug, Default)]
+pub struct ParsedMetrics {
+    pub gpu_info: Vec<GpuInfo>,
+    pub cpu_info: Vec<CpuInfo>,
+    pub memory_info: Vec<MemoryInfo>,
+    pub storage_info: Vec<StorageInfo>,
+    pub vgpu_info: Vec<VgpuHostInfo>,
+    pub mig_info: Vec<MigGpuInfo>,
+}
+
 pub struct MetricsParser;
 
 impl MetricsParser {
@@ -31,20 +44,12 @@ impl MetricsParser {
         Self
     }
 
-    #[allow(clippy::type_complexity)]
     pub fn parse_metrics(
         &self,
         text: &str,
         host: &str,
         re: &Regex,
-    ) -> (
-        Vec<GpuInfo>,
-        Vec<CpuInfo>,
-        Vec<MemoryInfo>,
-        Vec<StorageInfo>,
-        Vec<VgpuHostInfo>,
-        Vec<MigGpuInfo>,
-    ) {
+    ) -> ParsedMetrics {
         // Limit the maximum size of HashMaps to prevent memory exhaustion
         const MAX_DEVICES_PER_TYPE: usize = 256;
         const MAX_TEXT_SIZE: usize = 10_485_760; // 10MB max input
@@ -152,14 +157,14 @@ impl MetricsParser {
             );
         }
 
-        (
-            gpu_info_map.into_values().collect(),
-            cpu_info_map.into_values().collect(),
-            memory_info_map.into_values().collect(),
-            storage_info_map.into_values().collect(),
-            vgpu_state.finish(),
-            mig_state.finish(),
-        )
+        ParsedMetrics {
+            gpu_info: gpu_info_map.into_values().collect(),
+            cpu_info: cpu_info_map.into_values().collect(),
+            memory_info: memory_info_map.into_values().collect(),
+            storage_info: storage_info_map.into_values().collect(),
+            vgpu_info: vgpu_state.finish(),
+            mig_info: mig_state.finish(),
+        }
     }
 
     fn parse_labels(&self, labels_str: &str) -> HashMap<String, String> {
@@ -1320,10 +1325,10 @@ all_smi_gpu_power_consumption_watts{gpu="NVIDIA H200 141GB HBM3", instance="node
 all_smi_ane_utilization{gpu="NVIDIA H200 141GB HBM3", instance="node-0058", uuid="GPU-12345", index="0"} 15.2
 "#;
 
-        let (gpu_info, _, _, _, _, _) = parser.parse_metrics(test_data, host, &re);
+        let parsed = parser.parse_metrics(test_data, host, &re);
 
-        assert_eq!(gpu_info.len(), 1);
-        let gpu = &gpu_info[0];
+        assert_eq!(parsed.gpu_info.len(), 1);
+        let gpu = &parsed.gpu_info[0];
         assert_eq!(gpu.uuid, "GPU-12345");
         assert_eq!(gpu.name, "NVIDIA H200 141GB HBM3");
         assert_eq!(gpu.host_id, host);
@@ -1353,9 +1358,9 @@ all_smi_gpu_temperature_threshold_acoustic_celsius{gpu="NVIDIA A100", instance="
 all_smi_gpu_performance_state{gpu="NVIDIA A100", instance="node-1", uuid="GPU-T", index="0"} 2
 "#;
 
-        let (gpu_info, _, _, _, _, _) = parser.parse_metrics(test_data, host, &re);
-        assert_eq!(gpu_info.len(), 1);
-        let gpu = &gpu_info[0];
+        let parsed = parser.parse_metrics(test_data, host, &re);
+        assert_eq!(parsed.gpu_info.len(), 1);
+        let gpu = &parsed.gpu_info[0];
         assert_eq!(gpu.temperature_threshold_slowdown, Some(90));
         assert_eq!(gpu.temperature_threshold_shutdown, Some(95));
         assert_eq!(gpu.temperature_threshold_max_operating, Some(85));
@@ -1375,9 +1380,9 @@ all_smi_gpu_performance_state{gpu="NVIDIA A100", instance="node-1", uuid="GPU-T"
 all_smi_gpu_utilization{gpu="NVIDIA A100", instance="node-1", uuid="GPU-A", index="0"} 40
 all_smi_gpu_temperature_celsius{gpu="NVIDIA A100", instance="node-1", uuid="GPU-A", index="0"} 60
 "#;
-        let (gpu_info, _, _, _, _, _) = parser.parse_metrics(test_data, host, &re);
-        assert_eq!(gpu_info.len(), 1);
-        let gpu = &gpu_info[0];
+        let parsed = parser.parse_metrics(test_data, host, &re);
+        assert_eq!(parsed.gpu_info.len(), 1);
+        let gpu = &parsed.gpu_info[0];
         assert!(gpu.temperature_threshold_slowdown.is_none());
         assert!(gpu.temperature_threshold_shutdown.is_none());
         assert!(gpu.performance_state.is_none());
@@ -1397,12 +1402,12 @@ all_smi_gpu_temperature_celsius{gpu="NVIDIA A100", instance="node-1", uuid="GPU-
                 "all_smi_gpu_utilization{{gpu=\"GPU\", instance=\"n\", uuid=\"GPU-BAD\", index=\"0\"}} 0\n\
                  all_smi_gpu_performance_state{{gpu=\"GPU\", instance=\"n\", uuid=\"GPU-BAD\", index=\"0\"}} {bad_value}\n"
             );
-            let (gpu_info, _, _, _, _, _) = parser.parse_metrics(&test_data, host, &re);
-            assert_eq!(gpu_info.len(), 1);
+            let parsed = parser.parse_metrics(&test_data, host, &re);
+            assert_eq!(parsed.gpu_info.len(), 1);
             assert!(
-                gpu_info[0].performance_state.is_none(),
+                parsed.gpu_info[0].performance_state.is_none(),
                 "expected None for out-of-range pstate {bad_value}, got {:?}",
-                gpu_info[0].performance_state
+                parsed.gpu_info[0].performance_state
             );
         }
     }
@@ -1432,10 +1437,10 @@ all_smi_cpu_temperature_celsius{cpu_model="Intel Xeon", instance="node-0058", ho
 all_smi_cpu_power_consumption_watts{cpu_model="Intel Xeon", instance="node-0058", hostname="node-0058", index="0"} 125.5
 "#;
 
-        let (_, cpu_info, _, _, _, _) = parser.parse_metrics(test_data, host, &re);
+        let parsed = parser.parse_metrics(test_data, host, &re);
 
-        assert_eq!(cpu_info.len(), 1);
-        let cpu = &cpu_info[0];
+        assert_eq!(parsed.cpu_info.len(), 1);
+        let cpu = &parsed.cpu_info[0];
         assert_eq!(cpu.host_id, host);
         assert_eq!(cpu.hostname, "node-0058");
         assert_eq!(cpu.instance, "node-0058");
@@ -1468,10 +1473,10 @@ all_smi_cpu_p_core_utilization{cpu_model="Apple M2 Max", instance="node-0058", h
 all_smi_cpu_e_core_utilization{cpu_model="Apple M2 Max", instance="node-0058", hostname="node-0058", index="0"} 10.8
 "#;
 
-        let (_, cpu_info, _, _, _, _) = parser.parse_metrics(test_data, host, &re);
+        let parsed = parser.parse_metrics(test_data, host, &re);
 
-        assert_eq!(cpu_info.len(), 1);
-        let cpu = &cpu_info[0];
+        assert_eq!(parsed.cpu_info.len(), 1);
+        let cpu = &parsed.cpu_info[0];
         assert_eq!(cpu.cpu_model, "Apple M2 Max");
         assert_eq!(cpu.utilization, 30.5);
         assert!(matches!(
@@ -1499,10 +1504,10 @@ all_smi_memory_available_bytes{instance="node-0058", hostname="node-0058", index
 all_smi_memory_utilization{instance="node-0058", hostname="node-0058", index="0"} 50.0
 "#;
 
-        let (_, _, memory_info, _, _, _) = parser.parse_metrics(test_data, host, &re);
+        let parsed = parser.parse_metrics(test_data, host, &re);
 
-        assert_eq!(memory_info.len(), 1);
-        let memory = &memory_info[0];
+        assert_eq!(parsed.memory_info.len(), 1);
+        let memory = &parsed.memory_info[0];
         assert_eq!(memory.host_id, host);
         assert_eq!(memory.hostname, "node-0058");
         assert_eq!(memory.instance, "node-0058");
@@ -1525,18 +1530,18 @@ all_smi_disk_total_bytes{instance="node-0058", mount_point="/home", index="1"} 1
 all_smi_disk_available_bytes{instance="node-0058", mount_point="/home", index="1"} 549755813888
 "#;
 
-        let (_, _, _, storage_info, _, _) = parser.parse_metrics(test_data, host, &re);
+        let parsed = parser.parse_metrics(test_data, host, &re);
 
-        assert_eq!(storage_info.len(), 2);
+        assert_eq!(parsed.storage_info.len(), 2);
 
-        let root_storage = storage_info.iter().find(|s| s.mount_point == "/").unwrap();
+        let root_storage = parsed.storage_info.iter().find(|s| s.mount_point == "/").unwrap();
         assert_eq!(root_storage.host_id, host);
         assert_eq!(root_storage.hostname, "node-0058");
         assert_eq!(root_storage.total_bytes, 4398046511104);
         assert_eq!(root_storage.available_bytes, 891915494941);
         assert_eq!(root_storage.index, 0);
 
-        let home_storage = storage_info
+        let home_storage = parsed.storage_info
             .iter()
             .find(|s| s.mount_point == "/home")
             .unwrap();
@@ -1560,29 +1565,28 @@ all_smi_memory_total_bytes{instance="node-0001", hostname="node-0001", index="0"
 all_smi_disk_total_bytes{instance="node-0001", mount_point="/", index="0"} 2199023255552
 "#;
 
-        let (gpu_info, cpu_info, memory_info, storage_info, _, _) =
-            parser.parse_metrics(test_data, host, &re);
+        let parsed = parser.parse_metrics(test_data, host, &re);
 
-        assert_eq!(gpu_info.len(), 1);
-        assert_eq!(cpu_info.len(), 1);
-        assert_eq!(memory_info.len(), 1);
-        assert_eq!(storage_info.len(), 1);
+        assert_eq!(parsed.gpu_info.len(), 1);
+        assert_eq!(parsed.cpu_info.len(), 1);
+        assert_eq!(parsed.memory_info.len(), 1);
+        assert_eq!(parsed.storage_info.len(), 1);
 
-        assert_eq!(gpu_info[0].name, "NVIDIA RTX 4090");
-        assert_eq!(gpu_info[0].utilization, 75.0);
-        assert_eq!(gpu_info[0].host_id, host);
-        assert_eq!(gpu_info[0].hostname, "node-0001");
-        assert_eq!(gpu_info[0].instance, "node-0001");
+        assert_eq!(parsed.gpu_info[0].name, "NVIDIA RTX 4090");
+        assert_eq!(parsed.gpu_info[0].utilization, 75.0);
+        assert_eq!(parsed.gpu_info[0].host_id, host);
+        assert_eq!(parsed.gpu_info[0].hostname, "node-0001");
+        assert_eq!(parsed.gpu_info[0].instance, "node-0001");
 
-        assert_eq!(cpu_info[0].cpu_model, "AMD Ryzen");
-        assert_eq!(cpu_info[0].utilization, 60.0);
+        assert_eq!(parsed.cpu_info[0].cpu_model, "AMD Ryzen");
+        assert_eq!(parsed.cpu_info[0].utilization, 60.0);
         assert!(matches!(
-            cpu_info[0].platform_type,
+            parsed.cpu_info[0].platform_type,
             crate::device::CpuPlatformType::Amd
         ));
 
-        assert_eq!(memory_info[0].total_bytes, 68719476736);
-        assert_eq!(storage_info[0].total_bytes, 2199023255552);
+        assert_eq!(parsed.memory_info[0].total_bytes, 68719476736);
+        assert_eq!(parsed.storage_info[0].total_bytes, 2199023255552);
     }
 
     #[test]
@@ -1597,13 +1601,12 @@ all_smi_gpu_utilization{malformed labels} invalid_value
 all_smi_unknown_metric{instance="test"} 42.0
 "#;
 
-        let (gpu_info, cpu_info, memory_info, storage_info, _, _) =
-            parser.parse_metrics(test_data, host, &re);
+        let parsed = parser.parse_metrics(test_data, host, &re);
 
-        assert!(gpu_info.is_empty());
-        assert!(cpu_info.is_empty());
-        assert!(memory_info.is_empty());
-        assert!(storage_info.is_empty());
+        assert!(parsed.gpu_info.is_empty());
+        assert!(parsed.cpu_info.is_empty());
+        assert!(parsed.memory_info.is_empty());
+        assert!(parsed.storage_info.is_empty());
     }
 
     #[test]
@@ -1612,13 +1615,12 @@ all_smi_unknown_metric{instance="test"} 42.0
         let re = create_test_regex();
         let host = "127.0.0.1:10058";
 
-        let (gpu_info, cpu_info, memory_info, storage_info, _, _) =
-            parser.parse_metrics("", host, &re);
+        let parsed = parser.parse_metrics("", host, &re);
 
-        assert!(gpu_info.is_empty());
-        assert!(cpu_info.is_empty());
-        assert!(memory_info.is_empty());
-        assert!(storage_info.is_empty());
+        assert!(parsed.gpu_info.is_empty());
+        assert!(parsed.cpu_info.is_empty());
+        assert!(parsed.memory_info.is_empty());
+        assert!(parsed.storage_info.is_empty());
     }
 
     #[test]
@@ -1632,14 +1634,14 @@ all_smi_gpu_utilization{gpu="Tesla V100", instance="production-node-42", uuid="G
 all_smi_cpu_utilization{cpu_model="Intel Xeon", instance="production-node-42", hostname="node-0058", index="0"} 55.0
 "#;
 
-        let (gpu_info, cpu_info, _, _, _, _) = parser.parse_metrics(test_data, host, &re);
+        let parsed = parser.parse_metrics(test_data, host, &re);
 
-        assert_eq!(gpu_info[0].host_id, host);
-        assert_eq!(gpu_info[0].hostname, "production-node-42");
-        assert_eq!(gpu_info[0].instance, "production-node-42");
-        assert_eq!(cpu_info[0].host_id, host);
-        assert_eq!(cpu_info[0].hostname, "production-node-42");
-        assert_eq!(cpu_info[0].instance, "production-node-42");
+        assert_eq!(parsed.gpu_info[0].host_id, host);
+        assert_eq!(parsed.gpu_info[0].hostname, "production-node-42");
+        assert_eq!(parsed.gpu_info[0].instance, "production-node-42");
+        assert_eq!(parsed.cpu_info[0].host_id, host);
+        assert_eq!(parsed.cpu_info[0].hostname, "production-node-42");
+        assert_eq!(parsed.cpu_info[0].instance, "production-node-42");
     }
 
     #[test]
@@ -1663,10 +1665,10 @@ all_smi_cpu_utilization{cpu_model="Intel Xeon", instance="production-node-42", h
                 r#"all_smi_cpu_utilization{{cpu_model="{cpu_model}", instance="test", hostname="test", index="0"}} 50.0"#
             );
 
-            let (_, cpu_info, _, _, _, _) = parser.parse_metrics(&test_data, host, &re);
-            assert_eq!(cpu_info.len(), 1);
+            let parsed = parser.parse_metrics(&test_data, host, &re);
+            assert_eq!(parsed.cpu_info.len(), 1);
 
-            match (&cpu_info[0].platform_type, &expected_type) {
+            match (&parsed.cpu_info[0].platform_type, &expected_type) {
                 (
                     crate::device::CpuPlatformType::AppleSilicon,
                     crate::device::CpuPlatformType::AppleSilicon,
@@ -1681,7 +1683,7 @@ all_smi_cpu_utilization{cpu_model="Intel Xeon", instance="production-node-42", h
                 }
                 _ => panic!(
                     "Platform type mismatch for {cpu_model}: expected {expected_type:?}, got {:?}",
-                    cpu_info[0].platform_type
+                    parsed.cpu_info[0].platform_type
                 ),
             }
         }
@@ -1698,10 +1700,10 @@ all_smi_gpu_utilization{instance="node-0058", index="0"} 25.5
 all_smi_disk_total_bytes{instance="node-0058", index="0"} 1000000000
 "#;
 
-        let (gpu_info, _, _, storage_info, _, _) = parser.parse_metrics(test_data, host, &re);
+        let parsed = parser.parse_metrics(test_data, host, &re);
 
-        assert!(gpu_info.is_empty());
-        assert!(storage_info.is_empty());
+        assert!(parsed.gpu_info.is_empty());
+        assert!(parsed.storage_info.is_empty());
     }
 
     #[test]
@@ -1721,10 +1723,10 @@ all_smi_cpu_p_core_utilization{cpu_model="Apple M5 Max", instance="m5-node", hos
 all_smi_cpu_e_core_utilization{cpu_model="Apple M5 Max", instance="m5-node", hostname="m5-node", index="0"} 0.0
 "#;
 
-        let (_, cpu_info, _, _, _, _) = parser.parse_metrics(test_data, host, &re);
+        let parsed = parser.parse_metrics(test_data, host, &re);
 
-        assert_eq!(cpu_info.len(), 1);
-        let cpu = &cpu_info[0];
+        assert_eq!(parsed.cpu_info.len(), 1);
+        let cpu = &parsed.cpu_info[0];
         assert_eq!(cpu.cpu_model, "Apple M5 Max");
         assert_eq!(cpu.utilization, 42.0);
         assert!(matches!(
@@ -1756,10 +1758,10 @@ all_smi_cpu_core_utilization{cpu_model="Apple M5 Pro", instance="m5pro-node", ho
 all_smi_cpu_core_utilization{cpu_model="Apple M5 Pro", instance="m5pro-node", hostname="m5pro-node", core_id="3", core_type="P", index="0"} 25.0
 "#;
 
-        let (_, cpu_info, _, _, _, _) = parser.parse_metrics(test_data, host, &re);
+        let parsed = parser.parse_metrics(test_data, host, &re);
 
-        assert_eq!(cpu_info.len(), 1);
-        let cpu = &cpu_info[0];
+        assert_eq!(parsed.cpu_info.len(), 1);
+        let cpu = &parsed.cpu_info[0];
         assert_eq!(cpu.per_core_utilization.len(), 4);
 
         let core0 = &cpu.per_core_utilization[0];
@@ -1798,10 +1800,10 @@ all_smi_cpu_p_core_utilization{cpu_model="Apple M2 Max", instance="m2-node", hos
 all_smi_cpu_e_core_utilization{cpu_model="Apple M2 Max", instance="m2-node", hostname="m2-node", index="0"} 5.0
 "#;
 
-        let (_, cpu_info, _, _, _, _) = parser.parse_metrics(test_data, host, &re);
+        let parsed = parser.parse_metrics(test_data, host, &re);
 
-        assert_eq!(cpu_info.len(), 1);
-        let cpu = &cpu_info[0];
+        assert_eq!(parsed.cpu_info.len(), 1);
+        let cpu = &parsed.cpu_info[0];
         let apple_info = cpu.apple_silicon_info.as_ref().unwrap();
 
         // s_core_count defaults to 0 when not present in metrics
@@ -1829,10 +1831,10 @@ all_smi_vgpu_active{gpu_index="0", gpu_uuid="GPU-A", gpu="NVIDIA A100", instance
 all_smi_vgpu_utilization{gpu_index="0", gpu_uuid="GPU-A", gpu="NVIDIA A100", instance="node1", host="node1", vgpu_id="1", vgpu_uuid="GRID-2", vgpu_type="GRID A100-4C"} 10
 "#;
 
-        let (_gpu, _cpu, _mem, _storage, vgpu, _) = parser.parse_metrics(text, host, &re);
+        let parsed = parser.parse_metrics(text, host, &re);
 
-        assert_eq!(vgpu.len(), 1, "expected one host record");
-        let host0 = &vgpu[0];
+        assert_eq!(parsed.vgpu_info.len(), 1, "expected one host record");
+        let host0 = &parsed.vgpu_info[0];
         assert_eq!(host0.host_mode, "Sriov");
         assert_eq!(host0.scheduler_policy, 1);
         assert_eq!(host0.scheduler_arr_mode, 2);
@@ -1858,8 +1860,8 @@ all_smi_vgpu_utilization{gpu_index="0", gpu_uuid="GPU-A", gpu="NVIDIA A100", ins
         let text = r#"
 all_smi_vgpu_utilization{instance="node1", vgpu_id="0"} 55
 "#;
-        let (_, _, _, _, vgpu, _) = parser.parse_metrics(text, host, &re);
-        assert!(vgpu.is_empty());
+        let parsed = parser.parse_metrics(text, host, &re);
+        assert!(parsed.vgpu_info.is_empty());
     }
 
     #[test]
@@ -1872,10 +1874,10 @@ all_smi_vgpu_utilization{instance="node1", vgpu_id="0"} 55
 all_smi_gpu_utilization{gpu="NVIDIA A100", instance="node1", uuid="GPU-X", index="0"} 50
 all_smi_cpu_utilization{cpu_model="AMD", instance="node1", hostname="node1", index="0"} 20
 "#;
-        let (gpu, _cpu, _mem, _store, vgpu, _) = parser.parse_metrics(text, host, &re);
-        assert_eq!(gpu.len(), 1);
+        let parsed = parser.parse_metrics(text, host, &re);
+        assert_eq!(parsed.gpu_info.len(), 1);
         assert!(
-            vgpu.is_empty(),
+            parsed.vgpu_info.is_empty(),
             "No vGPU rows must be emitted for a bare-metal host"
         );
     }
@@ -1895,8 +1897,8 @@ all_smi_cpu_utilization{cpu_model="AMD", instance="node1", hostname="node1", ind
 "#
             ));
         }
-        let (_gpu, _cpu, _mem, _storage, vgpu, _) = parser.parse_metrics(&text, host, &re);
-        assert_eq!(vgpu.len(), MAX_VGPU_HOSTS, "host count must not exceed cap");
+        let parsed = parser.parse_metrics(&text, host, &re);
+        assert_eq!(parsed.vgpu_info.len(), MAX_VGPU_HOSTS, "host count must not exceed cap");
     }
 
     #[test]
@@ -1921,10 +1923,10 @@ all_smi_cpu_utilization{cpu_model="AMD", instance="node1", hostname="node1", ind
 "#
             ));
         }
-        let (_gpu, _cpu, _mem, _storage, vgpu, _) = parser.parse_metrics(&text, host, &re);
-        assert_eq!(vgpu.len(), 1, "single host must still exist");
+        let parsed = parser.parse_metrics(&text, host, &re);
+        assert_eq!(parsed.vgpu_info.len(), 1, "single host must still exist");
         assert_eq!(
-            vgpu[0].vgpus.len(),
+            parsed.vgpu_info[0].vgpus.len(),
             MAX_VGPU_INSTANCES,
             "instance count must not exceed cap"
         );
@@ -1972,10 +1974,10 @@ all_smi_mig_instance_memory_total_bytes{gpu_index="0", gpu_uuid="GPU-M", gpu="NV
 all_smi_mig_instance_utilization_gpu{gpu_index="0", gpu_uuid="GPU-M", gpu="NVIDIA A100", instance="node1", host="node1", mig_instance="1", mig_uuid="MIG-2", mig_profile="2g.10gb", gpu_instance_id="2", compute_instance_id="0"} 10
 "#;
 
-        let (_gpu, _cpu, _mem, _storage, _vgpu, mig) = parser.parse_metrics(text, host, &re);
+        let parsed = parser.parse_metrics(text, host, &re);
 
-        assert_eq!(mig.len(), 1, "expected one MIG host record");
-        let host0 = &mig[0];
+        assert_eq!(parsed.mig_info.len(), 1, "expected one MIG host record");
+        let host0 = &parsed.mig_info[0];
         assert!(host0.mig_mode);
         assert_eq!(host0.gpu_uuid, "GPU-M");
         assert_eq!(host0.gpu_name, "NVIDIA A100");
@@ -2006,8 +2008,8 @@ all_smi_mig_instance_utilization_gpu{gpu_index="0", gpu_uuid="GPU-M", gpu="NVIDI
         let text = r#"
 all_smi_mig_instance_utilization_gpu{instance="node1", mig_instance="0"} 55
 "#;
-        let (_, _, _, _, _, mig) = parser.parse_metrics(text, host, &re);
-        assert!(mig.is_empty());
+        let parsed = parser.parse_metrics(text, host, &re);
+        assert!(parsed.mig_info.is_empty());
     }
 
     #[test]
@@ -2020,10 +2022,10 @@ all_smi_mig_instance_utilization_gpu{instance="node1", mig_instance="0"} 55
 all_smi_gpu_utilization{gpu="NVIDIA A100", instance="node1", uuid="GPU-X", index="0"} 50
 all_smi_cpu_utilization{cpu_model="AMD", instance="node1", hostname="node1", index="0"} 20
 "#;
-        let (gpu, _cpu, _mem, _store, _vgpu, mig) = parser.parse_metrics(text, host, &re);
-        assert_eq!(gpu.len(), 1);
+        let parsed = parser.parse_metrics(text, host, &re);
+        assert_eq!(parsed.gpu_info.len(), 1);
         assert!(
-            mig.is_empty(),
+            parsed.mig_info.is_empty(),
             "No MIG rows must be emitted for a bare-metal host"
         );
     }
@@ -2041,15 +2043,15 @@ all_smi_cpu_utilization{cpu_model="AMD", instance="node1", hostname="node1", ind
         let text = r#"
 all_smi_gpu_mig_mode{gpu_index="0", gpu_uuid="GPU-X", gpu="NVIDIA A100", instance="node1", host="node1"} 0
 "#;
-        let (_, _, _, _, _, mig) = parser.parse_metrics(text, host, &re);
+        let parsed = parser.parse_metrics(text, host, &re);
         assert_eq!(
-            mig.len(),
+            parsed.mig_info.len(),
             1,
             "Disabled-MIG row must be retained so consumers can see mode=0"
         );
         assert!(!mig[0].mig_mode);
-        assert_eq!(mig[0].gpu_uuid, "GPU-X");
-        assert!(mig[0].instances.is_empty());
+        assert_eq!(parsed.mig_info[0].gpu_uuid, "GPU-X");
+        assert!(parsed.mig_info[0].instances.is_empty());
     }
 
     #[test]
@@ -2067,8 +2069,8 @@ all_smi_gpu_mig_mode{gpu_index="0", gpu_uuid="GPU-X", gpu="NVIDIA A100", instanc
 "#
             ));
         }
-        let (_, _, _, _, _, mig) = parser.parse_metrics(&text, host, &re);
-        assert_eq!(mig.len(), MAX_MIG_GPUS, "host count must not exceed cap");
+        let parsed = parser.parse_metrics(&text, host, &re);
+        assert_eq!(parsed.mig_info.len(), MAX_MIG_GPUS, "host count must not exceed cap");
     }
 
     #[test]
@@ -2091,14 +2093,14 @@ all_smi_gpu_mig_mode{gpu_index="0", gpu_uuid="GPU-X", gpu="NVIDIA A100", instanc
 "#
             ));
         }
-        let (_, _, _, _, _, mig) = parser.parse_metrics(&text, host, &re);
-        assert_eq!(mig.len(), 1, "single host must still exist");
+        let parsed = parser.parse_metrics(&text, host, &re);
+        assert_eq!(parsed.mig_info.len(), 1, "single host must still exist");
         // Per-index cap kicks in first (only IDs 0..=64 survive), so the
         // visible instance count is bounded by MAX_MIG_INSTANCE_INDEX + 1.
         assert!(
-            mig[0].instances.len() <= (MAX_MIG_INSTANCE_INDEX as usize) + 1,
+            parsed.mig_info[0].instances.len() <= (MAX_MIG_INSTANCE_INDEX as usize) + 1,
             "per-index cap must clamp instance count, got {}",
-            mig[0].instances.len()
+            parsed.mig_info[0].instances.len()
         );
     }
 
@@ -2115,10 +2117,10 @@ all_smi_gpu_mig_mode{gpu_index="0", gpu_uuid="GPU-X", gpu="NVIDIA A100", instanc
 all_smi_gpu_mig_mode{gpu_index="0", gpu_uuid="GPU-A", gpu="NVIDIA A100", instance="node1", host="node1"} 1
 all_smi_mig_instance_utilization_gpu{gpu_index="0", gpu_uuid="GPU-A", gpu="NVIDIA A100", instance="node1", host="node1", mig_instance="9999", mig_uuid="MIG-X", mig_profile="1g.5gb"} 50
 "#;
-        let (_, _, _, _, _, mig) = parser.parse_metrics(text, host, &re);
-        assert_eq!(mig.len(), 1, "host record present");
+        let parsed = parser.parse_metrics(text, host, &re);
+        assert_eq!(parsed.mig_info.len(), 1, "host record present");
         assert!(
-            mig[0].instances.is_empty(),
+            parsed.mig_info[0].instances.is_empty(),
             "oversized mig_instance must be rejected"
         );
     }
@@ -2135,11 +2137,11 @@ all_smi_mig_instance_utilization_gpu{gpu_index="0", gpu_uuid="GPU-A", gpu="NVIDI
 all_smi_gpu_mig_mode{gpu_index="0", gpu_uuid="GPU-A", gpu="NVIDIA A100", instance="node1", host="node1"} 1
 all_smi_mig_instance_utilization_gpu{gpu_index="0", gpu_uuid="GPU-A", gpu="NVIDIA A100", instance="node1", host="node1", mig_instance="0", mig_uuid="MIG-X", mig_profile="1g.5gb", gpu_instance_id="", compute_instance_id=""} 25
 "#;
-        let (_, _, _, _, _, mig) = parser.parse_metrics(text, host, &re);
-        assert_eq!(mig.len(), 1);
-        assert_eq!(mig[0].instances.len(), 1);
-        assert!(mig[0].instances[0].gpu_instance_id.is_none());
-        assert!(mig[0].instances[0].compute_instance_id.is_none());
+        let parsed = parser.parse_metrics(text, host, &re);
+        assert_eq!(parsed.mig_info.len(), 1);
+        assert_eq!(parsed.mig_info[0].instances.len(), 1);
+        assert!(parsed.mig_info[0].instances[0].gpu_instance_id.is_none());
+        assert!(parsed.mig_info[0].instances[0].compute_instance_id.is_none());
     }
 
     #[test]
@@ -2157,14 +2159,14 @@ all_smi_mig_instance_utilization_gpu{gpu_index="0", gpu_uuid="GPU-A", gpu="NVIDI
         let text = r#"
 all_smi_mig_instance_utilization_gpu{gpu_index="0", gpu_uuid="GPU-G", gpu="NVIDIA A100", instance="node1", host="node1", mig_instance="0", mig_uuid="MIG-G1", mig_profile="1g.5gb", gpu_instance_id="7", compute_instance_id="0"} 42
 "#;
-        let (_, _, _, _, _, mig) = parser.parse_metrics(text, host, &re);
-        assert_eq!(mig.len(), 1, "host must survive via instance presence");
+        let parsed = parser.parse_metrics(text, host, &re);
+        assert_eq!(parsed.mig_info.len(), 1, "host must survive via instance presence");
         assert!(
             mig[0].mig_mode,
             "mig_mode must be inferred as true when instances are present"
         );
-        assert_eq!(mig[0].instances.len(), 1);
-        assert_eq!(mig[0].instances[0].uuid, "MIG-G1");
+        assert_eq!(parsed.mig_info[0].instances.len(), 1);
+        assert_eq!(parsed.mig_info[0].instances[0].uuid, "MIG-G1");
     }
 
     #[test]
@@ -2173,21 +2175,21 @@ all_smi_mig_instance_utilization_gpu{gpu_index="0", gpu_uuid="GPU-G", gpu="NVIDI
         let re = create_test_regex();
         let host = "127.0.0.1:10058";
 
-        // First emit a valid CPU metric so the cpu_info entry exists, then
+        // First emit a valid CPU metric so the parsed.cpu_info entry exists, then
         // inject an out-of-range core_id that must be silently dropped.
         let text = r#"
 all_smi_cpu_utilization{cpu_model="Intel Xeon", instance="node-1", index="0"} 50
 all_smi_cpu_core_utilization{cpu_model="Intel Xeon", instance="node-1", index="0", core_id="2000", core_type="S"} 99
 "#;
-        let (_, cpu_info, _, _, _, _) = parser.parse_metrics(text, host, &re);
-        assert_eq!(cpu_info.len(), 1);
+        let parsed = parser.parse_metrics(text, host, &re);
+        assert_eq!(parsed.cpu_info.len(), 1);
         // The out-of-range core_id=2000 must have been rejected — the
         // per_core_utilization vector must remain empty (or at least not
         // grow to 2001 elements).
         assert!(
-            cpu_info[0].per_core_utilization.is_empty(),
+            parsed.cpu_info[0].per_core_utilization.is_empty(),
             "per_core_utilization must be empty when core_id >= MAX_CPU_CORES, got len={}",
-            cpu_info[0].per_core_utilization.len()
+            parsed.cpu_info[0].per_core_utilization.len()
         );
     }
 }

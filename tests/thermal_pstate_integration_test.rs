@@ -85,7 +85,8 @@ fn partial_exposition() -> String {
 #[test]
 fn thermal_and_pstate_round_trip_preserves_all_fields() {
     let parser = MetricsParser::new();
-    let (parsed, _, _, _, _, _) = parser.parse_metrics(&full_exposition(), "node-7:9090", &regex());
+    let result = parser.parse_metrics(&full_exposition(), "node-7:9090", &regex());
+    let parsed = &result.gpu_info;
 
     assert_eq!(parsed.len(), 1, "expected exactly one GPU record");
     let gpu = &parsed[0];
@@ -103,8 +104,8 @@ fn thermal_and_pstate_round_trip_handles_partial_reports() {
     // Older drivers: only slowdown + shutdown known. The others must stay
     // `None` after parse, not default to 0.
     let parser = MetricsParser::new();
-    let (parsed, _, _, _, _, _) =
-        parser.parse_metrics(&partial_exposition(), "node-7:9090", &regex());
+    let result = parser.parse_metrics(&partial_exposition(), "node-7:9090", &regex());
+    let parsed = &result.gpu_info;
     assert_eq!(parsed.len(), 1);
     let gpu = &parsed[0];
     assert_eq!(gpu.temperature_threshold_slowdown, Some(91));
@@ -126,7 +127,8 @@ fn non_nvidia_path_leaves_fields_none() {
     );
 
     let parser = MetricsParser::new();
-    let (parsed, _, _, _, _, _) = parser.parse_metrics(non_nvidia, "mac-1:9090", &regex());
+    let result = parser.parse_metrics(non_nvidia, "mac-1:9090", &regex());
+    let parsed = &result.gpu_info;
     assert_eq!(parsed.len(), 1);
     let gpu = &parsed[0];
     assert!(gpu.temperature_threshold_slowdown.is_none());
@@ -153,7 +155,8 @@ fn performance_state_omission_means_unavailable() {
         "all_smi_gpu_temperature_celsius{gpu=\"NVIDIA A100\", instance=\"node-7\", \
          uuid=\"GPU-X\", index=\"0\"} 50\n",
     );
-    let (parsed, _, _, _, _, _) = parser.parse_metrics(text, "node-7:9090", &regex());
+    let result = parser.parse_metrics(text, "node-7:9090", &regex());
+    let parsed = &result.gpu_info;
     assert_eq!(parsed.len(), 1);
     assert!(parsed[0].performance_state.is_none());
 }

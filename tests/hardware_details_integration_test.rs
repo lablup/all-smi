@@ -82,8 +82,8 @@ fn full_hardware_exposition() -> String {
 #[test]
 fn hardware_detail_round_trip_preserves_all_fields() {
     let parser = MetricsParser::new();
-    let (parsed, _, _, _, _, _) =
-        parser.parse_metrics(&full_hardware_exposition(), "node-9:9090", &regex());
+    let result = parser.parse_metrics(&full_hardware_exposition(), "node-9:9090", &regex());
+    let parsed = &result.gpu_info;
 
     assert_eq!(parsed.len(), 1, "expected exactly one GPU record");
     let gpu = &parsed[0];
@@ -137,7 +137,8 @@ fn hardware_detail_partial_scrape_preserves_absence() {
          uuid=\"GPU-OLD\", index=\"0\"} 1\n",
     );
     let parser = MetricsParser::new();
-    let (parsed, _, _, _, _, _) = parser.parse_metrics(partial, "node-9:9090", &regex());
+    let result = parser.parse_metrics(partial, "node-9:9090", &regex());
+    let parsed = &result.gpu_info;
     assert_eq!(parsed.len(), 1);
     let gpu = &parsed[0];
     assert_eq!(gpu.numa_node_id, Some(1));
@@ -159,7 +160,8 @@ fn non_nvidia_path_leaves_hardware_fields_unavailable() {
          uuid=\"APPLE-0\", index=\"0\"} 55\n",
     );
     let parser = MetricsParser::new();
-    let (parsed, _, _, _, _, _) = parser.parse_metrics(non_nvidia, "mac-1:9090", &regex());
+    let result = parser.parse_metrics(non_nvidia, "mac-1:9090", &regex());
+    let parsed = &result.gpu_info;
     assert_eq!(parsed.len(), 1);
     let gpu = &parsed[0];
     assert!(gpu.numa_node_id.is_none());
@@ -183,7 +185,8 @@ fn nvlink_unknown_remote_type_is_preserved() {
          uuid=\"GPU-U\", index=\"0\", link_index=\"1\", remote_type=\"ibmnpu\"} 1\n",
     );
     let parser = MetricsParser::new();
-    let (parsed, _, _, _, _, _) = parser.parse_metrics(text, "node-1:9090", &regex());
+    let result = parser.parse_metrics(text, "node-1:9090", &regex());
+    let parsed = &result.gpu_info;
     assert_eq!(parsed.len(), 1);
     let gpu = &parsed[0];
     assert_eq!(gpu.nvlink_remote_devices.len(), 2);
@@ -219,7 +222,8 @@ fn parser_caps_nvlinks_at_max_per_gpu() {
         ));
     }
     let parser = MetricsParser::new();
-    let (parsed, _, _, _, _, _) = parser.parse_metrics(&lines, "node-a:9090", &regex());
+    let result = parser.parse_metrics(&lines, "node-a:9090", &regex());
+    let parsed = &result.gpu_info;
     assert_eq!(parsed.len(), 1);
     assert!(
         parsed[0].nvlink_remote_devices.len() <= 32,
@@ -239,7 +243,8 @@ fn parser_rejects_out_of_range_gsp_firmware_mode() {
          uuid=\"GPU-B\", index=\"0\"} 99\n",
     );
     let parser = MetricsParser::new();
-    let (parsed, _, _, _, _, _) = parser.parse_metrics(text, "node-1:9090", &regex());
+    let result = parser.parse_metrics(text, "node-1:9090", &regex());
+    let parsed = &result.gpu_info;
     assert_eq!(parsed.len(), 1);
     assert!(parsed[0].gsp_firmware_mode.is_none());
 }
@@ -257,7 +262,8 @@ fn parser_rejects_out_of_range_gpm_fractions() {
          uuid=\"GPU-R\", index=\"0\"} 9.9\n",
     );
     let parser = MetricsParser::new();
-    let (parsed, _, _, _, _, _) = parser.parse_metrics(text, "node-1:9090", &regex());
+    let result = parser.parse_metrics(text, "node-1:9090", &regex());
+    let parsed = &result.gpu_info;
     assert_eq!(parsed.len(), 1);
     // Neither GPM field accepted → no `GpmMetrics` allocated.
     assert!(parsed[0].gpm_metrics.is_none());
@@ -275,7 +281,8 @@ fn parser_gpm_accepts_only_the_fields_present() {
          uuid=\"GPU-P\", index=\"0\"} 0.55\n",
     );
     let parser = MetricsParser::new();
-    let (parsed, _, _, _, _, _) = parser.parse_metrics(text, "node-1:9090", &regex());
+    let result = parser.parse_metrics(text, "node-1:9090", &regex());
+    let parsed = &result.gpu_info;
     assert_eq!(parsed.len(), 1);
     let gpm = parsed[0].gpm_metrics.as_ref().expect("GPM populated");
     assert!((gpm.sm_occupancy.unwrap() - 0.55).abs() < 1e-4);
@@ -294,7 +301,8 @@ fn parser_rejects_fractional_gsp_firmware_mode() {
          uuid=\"GPU-FRAC\", index=\"0\"} 1.5\n",
     );
     let parser = MetricsParser::new();
-    let (parsed, _, _, _, _, _) = parser.parse_metrics(text, "node-1:9090", &regex());
+    let result = parser.parse_metrics(text, "node-1:9090", &regex());
+    let parsed = &result.gpu_info;
     assert_eq!(parsed.len(), 1);
     assert!(
         parsed[0].gsp_firmware_mode.is_none(),
@@ -314,7 +322,8 @@ fn parser_rejects_negative_numa_node_id() {
          uuid=\"GPU-NEG\", index=\"0\"} -0.5\n",
     );
     let parser = MetricsParser::new();
-    let (parsed, _, _, _, _, _) = parser.parse_metrics(text, "node-1:9090", &regex());
+    let result = parser.parse_metrics(text, "node-1:9090", &regex());
+    let parsed = &result.gpu_info;
     assert_eq!(parsed.len(), 1);
     assert!(
         parsed[0].numa_node_id.is_none(),
@@ -334,7 +343,8 @@ fn parser_rejects_fractional_numa_node_id() {
          uuid=\"GPU-FRAC2\", index=\"0\"} 1.7\n",
     );
     let parser = MetricsParser::new();
-    let (parsed, _, _, _, _, _) = parser.parse_metrics(text, "node-1:9090", &regex());
+    let result = parser.parse_metrics(text, "node-1:9090", &regex());
+    let parsed = &result.gpu_info;
     assert_eq!(parsed.len(), 1);
     assert!(
         parsed[0].numa_node_id.is_none(),
@@ -359,7 +369,8 @@ fn parser_rejects_gsp_version_with_control_chars() {
          uuid=\"GPU-ESC\", index=\"0\", version=\"\x1b[2J\x1b[H\"} 1\n"
         .to_string();
     let parser = MetricsParser::new();
-    let (parsed, _, _, _, _, _) = parser.parse_metrics(&text, "node-1:9090", &regex());
+    let result = parser.parse_metrics(&text, "node-1:9090", &regex());
+    let parsed = &result.gpu_info;
     assert_eq!(parsed.len(), 1);
     assert!(
         parsed[0].gsp_firmware_version.is_none(),
@@ -378,7 +389,8 @@ fn parser_accepts_normal_gsp_version_string() {
          uuid=\"GPU-OK\", index=\"0\", version=\"550.54.15\"} 1\n",
     );
     let parser = MetricsParser::new();
-    let (parsed, _, _, _, _, _) = parser.parse_metrics(text, "node-1:9090", &regex());
+    let result = parser.parse_metrics(text, "node-1:9090", &regex());
+    let parsed = &result.gpu_info;
     assert_eq!(parsed.len(), 1);
     assert_eq!(
         parsed[0].gsp_firmware_version.as_deref(),
