@@ -15,6 +15,7 @@ The following packages are required and must be available in the Ubuntu reposito
 - `pkg-config` - For finding system libraries
 - `libssl-dev` - OpenSSL development files
 - `protobuf-compiler` - Protocol buffer compiler
+- `libprotobuf-dev` - Well-known protobuf includes such as `timestamp.proto`
 - `cmake` - Build system
 
 ### Rust Version Requirements

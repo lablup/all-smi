@@ -9,6 +9,7 @@ Build-Depends: debhelper-compat (= 13),
                libssl-dev,
                pkg-config,
                protobuf-compiler,
+               libprotobuf-dev,
                cmake,
                libdrm-dev
 Standards-Version: 4.6.2

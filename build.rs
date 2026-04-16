@@ -20,12 +20,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Check if proto file exists before trying to compile
         if std::path::Path::new(proto_file).exists() {
+            let include_paths = ["proto/", "/usr/include"];
             tonic_prost_build::configure()
                 .build_server(false) // We only need the client
                 .protoc_arg("--experimental_allow_proto3_optional")
                 // Suppress clippy warnings on generated protobuf code
                 .type_attribute(".", "#[allow(clippy::enum_variant_names)]")
-                .compile_protos(&[proto_file], &["proto/"])?;
+                .compile_protos(&[proto_file], &include_paths)?;
         }
     }
 

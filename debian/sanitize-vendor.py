@@ -6,7 +6,11 @@ from pathlib import Path
 
 def should_strip(rel_path: str) -> bool:
     path = Path(rel_path)
-    return rel_path.endswith(".orig") or any(part.startswith(".") for part in path.parts)
+    return (
+        rel_path.endswith(".orig")
+        or rel_path.startswith("test-data/")
+        or any(part.startswith(".") for part in path.parts)
+    )
 
 
 def main() -> int:
@@ -22,10 +26,10 @@ def main() -> int:
 
         removed = []
         for rel_path in list(files.keys()):
-            if should_strip(rel_path):
+            target = crate_dir / rel_path
+            if should_strip(rel_path) or not target.exists():
                 removed.append(rel_path)
                 files.pop(rel_path, None)
-                target = crate_dir / rel_path
                 if target.exists():
                     target.unlink()
 

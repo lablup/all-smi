@@ -119,6 +119,7 @@ jobs:
           pkg-config \
           libssl-dev \
           protobuf-compiler \
+          libprotobuf-dev \
           cmake \
           libdrm-dev
 
