@@ -14,7 +14,7 @@
 
 use super::{MetricBuilder, MetricExporter};
 use crate::device::GpuInfo;
-use crate::parsing::common::sanitize_label_name;
+use crate::parsing::common::{sanitize_label_name, sanitize_label_value};
 
 pub struct GpuMetricExporter<'a> {
     pub gpu_info: &'a [GpuInfo],
@@ -187,11 +187,13 @@ impl<'a> GpuMetricExporter<'a> {
             ("type", info.device_type.as_str()),
         ];
 
-        // Convert detail HashMap to label pairs with sanitized names
+        // Convert detail HashMap to label pairs with sanitized names and values.
+        // Values are sanitized to strip control characters and prevent
+        // injection of ANSI escape sequences from NVML.
         let detail_labels: Vec<(String, String)> = info
             .detail
             .iter()
-            .map(|(k, v)| (sanitize_label_name(k), v.clone()))
+            .map(|(k, v)| (sanitize_label_name(k), sanitize_label_value(v)))
             .collect();
 
         builder
