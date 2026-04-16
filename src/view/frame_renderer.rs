@@ -19,6 +19,7 @@
 //! This means the `AppState` mutex is not held during any of this work.
 
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::io::Write;
 
 use chrono::Local;
@@ -258,6 +259,11 @@ impl FrameRenderer {
         let start_gpu_index = snapshot.gpu_scroll_offset;
         let end_gpu_index = (start_gpu_index + max_gpu_items).min(display_indices.len());
 
+        // Build O(1) lookup maps for vGPU and MIG matching, replacing the
+        // previous per-GPU linear scans that were O(G*V) + O(G*M) per frame.
+        let vgpu_lookup = build_vgpu_lookup(&snapshot.vgpu_info);
+        let mig_lookup = build_mig_lookup(&snapshot.mig_info);
+
         for (i, &gpu_idx) in display_indices
             .iter()
             .enumerate()
@@ -287,16 +293,18 @@ impl FrameRenderer {
             );
 
             // If this GPU is vGPU-enabled, render the nested section directly
-            // beneath the GPU row. Matching is by UUID (authoritative) with a
-            // hostname+gpu-name fallback for remote-mode data without UUID.
-            if let Some(vgpu_host) = find_matching_vgpu_host(&snapshot.vgpu_info, gpu_info) {
+            // beneath the GPU row. O(1) UUID lookup with hostname+gpu-name
+            // fallback for remote-mode data without UUID.
+            if let Some(vgpu_host) =
+                lookup_vgpu_host(&vgpu_lookup, &snapshot.vgpu_info, gpu_info)
+            {
                 print_vgpu_section(buffer, vgpu_host, cols as usize);
             }
 
             // If this GPU has MIG mode enabled, render the nested MIG section
             // directly beneath the GPU row using the same UUID-first matching
             // strategy as the vGPU section above.
-            if let Some(mig_host) = find_matching_mig_gpu(&snapshot.mig_info, gpu_info) {
+            if let Some(mig_host) = lookup_mig_gpu(&mig_lookup, &snapshot.mig_info, gpu_info) {
                 print_mig_section(buffer, mig_host, cols as usize);
             }
         }
@@ -684,41 +692,68 @@ impl FrameRenderer {
 
 /// Locate the [`crate::device::VgpuHostInfo`] record matching a given GPU row.
 ///
+/// Build an O(1) lookup map from `gpu_uuid` to index in the vGPU info slice.
+/// Called once per frame to replace per-GPU linear scans.
+fn build_vgpu_lookup<'a>(vgpu_info: &'a [crate::device::VgpuHostInfo]) -> HashMap<&'a str, usize> {
+    let mut map = HashMap::with_capacity(vgpu_info.len());
+    for (i, host) in vgpu_info.iter().enumerate() {
+        map.entry(host.gpu_uuid.as_str()).or_insert(i);
+    }
+    map
+}
+
+/// Build an O(1) lookup map from `gpu_uuid` to index in the MIG info slice.
+/// Called once per frame to replace per-GPU linear scans.
+fn build_mig_lookup<'a>(mig_info: &'a [crate::device::MigGpuInfo]) -> HashMap<&'a str, usize> {
+    let mut map = HashMap::with_capacity(mig_info.len());
+    for (i, host) in mig_info.iter().enumerate() {
+        map.entry(host.gpu_uuid.as_str()).or_insert(i);
+    }
+    map
+}
+
+/// O(1) vGPU host lookup by UUID with hostname+gpu_name fallback.
+///
 /// Matching precedence:
-/// 1. Exact `gpu_uuid` match (authoritative).
+/// 1. Exact `gpu_uuid` match via HashMap (authoritative, O(1)).
 /// 2. Fallback: same `hostname` + matching `gpu_name` — used when UUID
 ///    propagation is missing (e.g. remote mode with incomplete metrics).
+///    This path is a rare linear scan only hit for entries not found by UUID.
 ///
 /// Returns `None` when no match is found, which keeps the vGPU section from
 /// appearing under unrelated GPU rows.
-fn find_matching_vgpu_host<'a>(
+fn lookup_vgpu_host<'a>(
+    lookup: &HashMap<&str, usize>,
     vgpu_info: &'a [crate::device::VgpuHostInfo],
     gpu: &crate::device::GpuInfo,
 ) -> Option<&'a crate::device::VgpuHostInfo> {
-    if let Some(host) = vgpu_info.iter().find(|v| v.gpu_uuid == gpu.uuid) {
-        return Some(host);
+    if let Some(&idx) = lookup.get(gpu.uuid.as_str()) {
+        return Some(&vgpu_info[idx]);
     }
+    // Fallback: hostname + gpu_name linear scan for entries without UUID match.
     vgpu_info
         .iter()
         .find(|v| v.hostname == gpu.hostname && v.gpu_name == gpu.name)
 }
 
-/// Locate the [`crate::device::MigGpuInfo`] record matching a given GPU row.
+/// O(1) MIG GPU lookup by UUID with hostname+gpu_name fallback.
 ///
-/// Same precedence as [`find_matching_vgpu_host`]:
-/// 1. Exact `gpu_uuid` match (authoritative).
+/// Same precedence as [`lookup_vgpu_host`]:
+/// 1. Exact `gpu_uuid` match via HashMap (authoritative, O(1)).
 /// 2. Fallback: same `hostname` + matching `gpu_name` — used when UUID
 ///    propagation is missing (e.g. remote mode with incomplete metrics).
 ///
 /// Returns `None` when no match is found, keeping the MIG section from
 /// appearing under unrelated GPU rows.
-fn find_matching_mig_gpu<'a>(
+fn lookup_mig_gpu<'a>(
+    lookup: &HashMap<&str, usize>,
     mig_info: &'a [crate::device::MigGpuInfo],
     gpu: &crate::device::GpuInfo,
 ) -> Option<&'a crate::device::MigGpuInfo> {
-    if let Some(host) = mig_info.iter().find(|m| m.gpu_uuid == gpu.uuid) {
-        return Some(host);
+    if let Some(&idx) = lookup.get(gpu.uuid.as_str()) {
+        return Some(&mig_info[idx]);
     }
+    // Fallback: hostname + gpu_name linear scan for entries without UUID match.
     mig_info
         .iter()
         .find(|m| m.hostname == gpu.hostname && m.gpu_name == gpu.name)
