@@ -72,6 +72,13 @@ fn exported_metrics_text() -> String {
         "instance=\"node-42\", host=\"node-42\", vgpu_id=\"10\", vgpu_uuid=\"GRID-10\", ",
         "vgpu_type=\"GRID A100-8C\"} 8589934592\n"
     ));
+    out.push_str("# HELP all_smi_vgpu_memory_utilization\n");
+    out.push_str("# TYPE all_smi_vgpu_memory_utilization gauge\n");
+    out.push_str(concat!(
+        "all_smi_vgpu_memory_utilization{gpu_index=\"3\", gpu_uuid=\"GPU-A\", gpu=\"NVIDIA A100\", ",
+        "instance=\"node-42\", host=\"node-42\", vgpu_id=\"10\", vgpu_uuid=\"GRID-10\", ",
+        "vgpu_type=\"GRID A100-8C\"} 45\n"
+    ));
     out.push_str("# HELP all_smi_vgpu_active\n");
     out.push_str("# TYPE all_smi_vgpu_active gauge\n");
     out.push_str(concat!(
@@ -111,6 +118,7 @@ fn vgpu_metrics_parser_roundtrip_preserves_all_fields() {
     // render the same `vm=` column as local mode.
     assert_eq!(inst.vm_id, "vm-node-01");
     assert_eq!(inst.gpu_utilization, Some(64));
+    assert_eq!(inst.memory_utilization, Some(45));
     assert_eq!(inst.fb_used_bytes, 3 * (1 << 30));
     assert_eq!(inst.fb_total_bytes, 8 * (1 << 30));
     assert!(inst.is_active);
