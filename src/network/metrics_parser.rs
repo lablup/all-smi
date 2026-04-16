@@ -906,18 +906,25 @@ fn unescape_label_value(raw: &str) -> String {
         }
     }
 
-    // Run through the shared sanitizer only for the length truncation
-    // behaviour, since `inner` has already had its quotes removed and any
-    // stray leading/trailing whitespace inside the quotes is intentional.
+    // Strip control characters (including ANSI escape sequences) to defend
+    // against TUI escape injection from compromised remote endpoints. This
+    // mirrors the stripping done in `sanitize_label_value` for unquoted
+    // values, ensuring ALL label values are safe regardless of quoting.
+    let out = crate::parsing::common::strip_control_chars(&out);
+
+    // Run through length truncation (the shared sanitizer also does this,
+    // but `inner` has already had its quotes removed and any stray
+    // leading/trailing whitespace inside the quotes is intentional).
     const MAX_LABEL_VALUE_LENGTH: usize = 1024;
     if out.len() > MAX_LABEL_VALUE_LENGTH {
         let mut end = MAX_LABEL_VALUE_LENGTH;
         while !out.is_char_boundary(end) {
             end -= 1;
         }
-        out.truncate(end);
+        out[..end].to_string()
+    } else {
+        out
     }
-    out
 }
 
 /// Accumulator used while parsing vGPU Prometheus lines.
