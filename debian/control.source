@@ -1,15 +1,16 @@
 Source: all-smi
 Section: utils
 Priority: optional
-Maintainer: Jeongkyu Shin <inureyes@gmail.com>
+Maintainer: Jeongkyu Shin <jshin@lablup.com>
 Build-Depends: debhelper-compat (= 13),
-               rust-1.85-all,
+               build-essential,
+               rustc-1.92 | rustc (>= 1.92),
+               cargo-1.92 | cargo (>= 1.92),
                libssl-dev,
                pkg-config,
                protobuf-compiler,
                cmake,
-               libdrm-dev,
-               build-essential
+               libdrm-dev
 Standards-Version: 4.6.2
 Homepage: https://github.com/lablup/all-smi
 Vcs-Browser: https://github.com/lablup/all-smi

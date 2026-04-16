@@ -79,7 +79,7 @@ all-smi (${FULL_VERSION}) ${DISTRO}; urgency=medium
   * ${NAME}
 $(echo "$BODY" | sed 's/^/  /')
 
- -- Jeongkyu Shin <inureyes@gmail.com>  ${FORMATTED_DATE}
+ -- Jeongkyu Shin <jshin@lablup.com>  ${FORMATTED_DATE}
 
 EOF
 done

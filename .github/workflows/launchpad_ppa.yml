@@ -1,13 +1,6 @@
 # .github/workflows/launchpad_ppa.yml
 name: Upload to Launchpad PPA
 
-# ═══════════════════════════════════════════════════════════════
-# Workflow Triggers
-# ═══════════════════════════════════════════════════════════════
-# This workflow runs when:
-# 1. Manually triggered via workflow_dispatch
-# 2. Called from another workflow
-# ───────────────────────────────────────────────────────────────
 on:
   workflow_dispatch:
     inputs:
@@ -15,44 +8,38 @@ on:
         description: 'Release tag to upload to PPA (e.g. v0.5.0). Empty = latest release'
         required: false
       distributions:
-        description: 'Target distributions (comma-separated: jammy,noble)'
+        description: 'Target distributions (comma-separated: jammy,noble,resolute)'
         required: false
-        default: 'jammy,noble'
+        default: 'jammy,noble,resolute'
 
-# Required permissions
 permissions:
   contents: read
 
 jobs:
-  # ═══════════════════════════════════════════════════════════════
-  # Job: Upload to Launchpad PPA
-  # ═══════════════════════════════════════════════════════════════
-  # Creates source packages and uploads them to Ubuntu PPA
-  # ───────────────────────────────────────────────────────────────
   upload-ppa:
     name: Upload to PPA (${{ matrix.distro }})
     runs-on: ubuntu-latest
-    
-    # Access secrets from "packaging" environment
     environment: packaging
-    
     strategy:
       fail-fast: false
       matrix:
-        distro: [jammy, noble]
-    
-    steps:
-    # ───────────────────────────────────────────────────────────────
-    # Step 1: Checkout source code
-    # ───────────────────────────────────────────────────────────────
-    - name: Checkout code
-      uses: actions/checkout@v6
-      with:
-        fetch-depth: 0  # Full history for changelog generation
+        include:
+          - distro: jammy
+            vendor_rust: "1.92.0"
+            toolchain_source: "Requires backend-ai PPA dependency on ~lablup/+archive/ubuntu/rustc-release"
+          - distro: noble
+            vendor_rust: "1.92.0"
+            toolchain_source: "Requires backend-ai PPA dependency on ~lablup/+archive/ubuntu/rustc-release"
+          - distro: resolute
+            vendor_rust: "1.92.0"
+            toolchain_source: "Uses the official Ubuntu 26.04 archive Rust 1.92+ toolchain"
 
-    # ───────────────────────────────────────────────────────────────
-    # Step 2: Check if distribution is requested
-    # ───────────────────────────────────────────────────────────────
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
     - name: Check distribution
       id: check_distro
       run: |
@@ -64,9 +51,6 @@ jobs:
           echo "Skipping ${{ matrix.distro }} - not in requested distributions"
         fi
 
-    # ───────────────────────────────────────────────────────────────
-    # Step 3: Determine release tag
-    # ───────────────────────────────────────────────────────────────
     - name: Get release tag
       if: steps.check_distro.outputs.should_run == 'true'
       id: get_tag
@@ -74,23 +58,43 @@ jobs:
         if [ -n "${{ github.event.inputs.release_tag }}" ]; then
           echo "tag=${{ github.event.inputs.release_tag }}" >> "$GITHUB_OUTPUT"
         else
-          # Get the latest release tag
           TAG=$(gh release list --limit 1 --json tagName -q '.[0].tagName')
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
         fi
       env:
         GH_TOKEN: ${{ github.token }}
 
-    # ───────────────────────────────────────────────────────────────
-    # Step 4: Update changelog with auto-increment
-    # ───────────────────────────────────────────────────────────────
+    - name: Preserve current packaging overlay
+      if: steps.check_distro.outputs.should_run == 'true'
+      run: |
+        rm -rf /tmp/all-smi-packaging
+        mkdir -p /tmp/all-smi-packaging
+        cp -a debian /tmp/all-smi-packaging/debian
+
+    - name: Check out release tag
+      if: steps.check_distro.outputs.should_run == 'true'
+      uses: actions/checkout@v4
+      with:
+        ref: ${{ steps.get_tag.outputs.tag }}
+        fetch-depth: 0
+
+    - name: Restore current packaging overlay
+      if: steps.check_distro.outputs.should_run == 'true'
+      run: |
+        rm -rf debian
+        cp -a /tmp/all-smi-packaging/debian debian
+
+    - name: Describe Rust toolchain source
+      if: steps.check_distro.outputs.should_run == 'true'
+      run: |
+        echo "Target distro: ${{ matrix.distro }}"
+        echo "Vendoring toolchain: Rust ${{ matrix.vendor_rust }}"
+        echo "Launchpad build toolchain: ${{ matrix.toolchain_source }}"
+
     - name: Update debian/changelog from release
       if: steps.check_distro.outputs.should_run == 'true'
       run: |
-        # Install curl for the version check script
-        sudo apt-get update && sudo apt-get install -y curl
-        
-        # Update changelog with auto-increment flag
+        sudo apt-get update && sudo apt-get install -y curl jq
         bash ./debian/update-changelog.sh \
           -d ${{ matrix.distro }} \
           -p lablup/backend-ai \
@@ -99,37 +103,6 @@ jobs:
       env:
         GH_TOKEN: ${{ github.token }}
 
-    # ───────────────────────────────────────────────────────────────
-    # Step 5: Install Rust toolchain
-    # ───────────────────────────────────────────────────────────────
-    - name: Install Rust toolchain
-      if: steps.check_distro.outputs.should_run == 'true'
-      uses: dtolnay/rust-toolchain@stable
-
-    # ───────────────────────────────────────────────────────────────
-    # Step 6: Vendor Rust dependencies
-    # ───────────────────────────────────────────────────────────────
-    - name: Vendor Rust dependencies
-      if: steps.check_distro.outputs.should_run == 'true'
-      run: |
-        # Vendor all dependencies for offline Launchpad build
-        cargo vendor debian/vendor
-
-        # Create .cargo/config.toml to use vendored sources
-        mkdir -p .cargo
-        cat > .cargo/config.toml << 'EOF'
-        [source.crates-io]
-        replace-with = "vendored-sources"
-
-        [source.vendored-sources]
-        directory = "debian/vendor"
-        EOF
-
-        echo "Vendored dependencies created ($(du -sh debian/vendor | cut -f1))"
-
-    # ───────────────────────────────────────────────────────────────
-    # Step 7: Install build dependencies
-    # ───────────────────────────────────────────────────────────────
     - name: Install build dependencies
       if: steps.check_distro.outputs.should_run == 'true'
       run: |
@@ -149,131 +122,127 @@ jobs:
           cmake \
           libdrm-dev
 
-    # ───────────────────────────────────────────────────────────────────
-    # Step 8: Prepare package version
-    # ───────────────────────────────────────────────────────────────
+    - name: Install Rust ${{ matrix.vendor_rust }} for vendoring
+      if: steps.check_distro.outputs.should_run == 'true'
+      uses: dtolnay/rust-toolchain@master
+      with:
+        toolchain: ${{ matrix.vendor_rust }}
+
+    - name: Validate lockfile with Rust ${{ matrix.vendor_rust }}
+      if: steps.check_distro.outputs.should_run == 'true'
+      run: |
+        cargo --version
+        rustc --version
+        cargo metadata --format-version 1 --locked --no-deps > /dev/null
+        awk '/^version = /{print; found=1} END{ if(!found) exit 1 }' Cargo.lock
+
+    - name: Vendor Rust dependencies for offline Launchpad build
+      if: steps.check_distro.outputs.should_run == 'true'
+      run: |
+        rm -rf vendor .cargo
+        mkdir -p .cargo
+        cargo vendor --locked vendor > .cargo/config.toml
+        python3 debian/sanitize-vendor.py
+        python3 - <<'PY'
+        import json
+        from pathlib import Path, PurePosixPath
+
+        offenders = []
+        for checksum_file in Path("vendor").rglob(".cargo-checksum.json"):
+            data = json.loads(checksum_file.read_text())
+            for rel_path in data.get("files", {}):
+                if rel_path.endswith(".orig") or any(
+                    part.startswith(".") for part in PurePosixPath(rel_path).parts
+                ):
+                    offenders.append(f"{checksum_file}: {rel_path}")
+
+        if offenders:
+            raise SystemExit(
+                "vendor checksum still references hidden/orig files:\n"
+                + "\n".join(offenders[:50])
+            )
+        PY
+        grep -q 'replace-with = "vendored-sources"' .cargo/config.toml
+        grep -q '\[source.vendored-sources\]' .cargo/config.toml
+        grep -q '^directory = "vendor"$' .cargo/config.toml
+        test -d vendor
+        ! find vendor -name '*.orig' -print | grep -q .
+
     - name: Prepare package version
       if: steps.check_distro.outputs.should_run == 'true'
       run: |
-        # Get version from release tag (remove 'v' prefix)
         VERSION="${{ steps.get_tag.outputs.tag }}"
         VERSION="${VERSION#v}"
         echo "PACKAGE_VERSION=${VERSION}" >> "$GITHUB_ENV"
-        
-        # Get the actual version from changelog (with auto-increment)
         CHANGELOG_VERSION=$(head -n 1 debian/changelog | awk '{print $2}' | tr -d '()')
         echo "FULL_PACKAGE_VERSION=${CHANGELOG_VERSION}" >> "$GITHUB_ENV"
         echo "Package version: ${CHANGELOG_VERSION}"
-        
-        # Verify changelog contains the base version
         head -n 1 debian/changelog | grep -q "${VERSION}-" || {
           echo "Error: Changelog doesn't contain expected version ${VERSION}"
           exit 1
         }
 
-    # ───────────────────────────────────────────────────────────────
-    # Step 9: Import GPG signing key
-    # ───────────────────────────────────────────────────────────────
     - name: Import GPG key
       if: steps.check_distro.outputs.should_run == 'true'
       run: |
-        # Import the GPG key
         echo "${{ secrets.GPG_PRIVATE_KEY }}" | gpg --batch --import
-        
-        # List the imported key to verify
         gpg --list-secret-keys --keyid-format LONG
-        
-        # Get the full fingerprint for the key
         FINGERPRINT=$(gpg --list-secret-keys --with-colons | grep '^fpr:' | head -1 | cut -d: -f10)
-        echo "Key fingerprint: $FINGERPRINT"
         echo "GPG_FINGERPRINT=$FINGERPRINT" >> "$GITHUB_ENV"
-        
-        # Trust the key using the full fingerprint
         echo "${FINGERPRINT}:6:" | gpg --import-ownertrust
 
-    # ───────────────────────────────────────────────────────────────
-    # Step 10: Configure GPG for non-interactive signing
-    # ───────────────────────────────────────────────────────────────
     - name: Configure GPG
       if: steps.check_distro.outputs.should_run == 'true'
       run: |
         export GNUPGHOME=/home/runner/.gnupg
         mkdir -p $GNUPGHOME
         chmod 700 $GNUPGHOME
-        
-        # Configure gpg-agent for batch mode
         cat > $GNUPGHOME/gpg-agent.conf << 'EOF'
         allow-loopback-pinentry
         default-cache-ttl 300
         max-cache-ttl 3600
         EOF
-        
-        # Configure gpg for batch mode
         cat > $GNUPGHOME/gpg.conf << 'EOF'
         use-agent
         pinentry-mode loopback
         batch
         no-tty
         EOF
-        
-        # Set up passphrase for signing
         if [ -n "${{ secrets.GPG_PASSPHRASE }}" ]; then
           echo "${{ secrets.GPG_PASSPHRASE }}" > $GNUPGHOME/passphrase
           chmod 600 $GNUPGHOME/passphrase
         fi
-        
-        # Restart gpg-agent with new config
         gpgconf --kill gpg-agent || true
 
-    # ───────────────────────────────────────────────────────────────
-    # Step 11: Build source package
-    # ───────────────────────────────────────────────────────────────
     - name: Build source package
       if: steps.check_distro.outputs.should_run == 'true'
       run: |
-        # Clean any build artifacts
         rm -f all-smi
         rm -rf target/
-        
-        # Ensure Architecture field is 'any' for source package
+        test -d vendor
+        test -f .cargo/config.toml
         sed -i 's/Architecture: .*/Architecture: any/' debian/control
-        
-        # Ensure debian/rules has proper permissions
         chmod +x debian/rules
-        
-        # Configure environment for signing
         export GNUPGHOME=/home/runner/.gnupg
-        
-        # Build and sign source package in one step
+
         if [ -n "${{ secrets.GPG_PASSPHRASE }}" ]; then
           echo "Building and signing source package with passphrase..."
-          # Create a script to handle GPG signing with passphrase
           cat > /tmp/gpg-sign.sh << 'EOSCRIPT'
         #!/bin/bash
         echo "$GPG_PASSPHRASE" | gpg --batch --yes --passphrase-fd 0 --pinentry-mode loopback "$@"
         EOSCRIPT
           chmod +x /tmp/gpg-sign.sh
-          
-          # Export passphrase for the script
           export GPG_PASSPHRASE="${{ secrets.GPG_PASSPHRASE }}"
-          
-          # Build with custom gpg command
-          dpkg-buildpackage -S -sa -k"$GPG_FINGERPRINT" -d \
-            --sign-command="/tmp/gpg-sign.sh"
+          dpkg-buildpackage -S -sa -k"$GPG_FINGERPRINT" -d --sign-command="/tmp/gpg-sign.sh"
         else
           echo "Building and signing source package without passphrase..."
           dpkg-buildpackage -S -sa -k"$GPG_FINGERPRINT" -d
         fi
-        
         echo "Source package built and signed successfully"
 
-    # ───────────────────────────────────────────────────────────────
-    # Step 12: Upload to PPA
-    # ───────────────────────────────────────────────────────────────
     - name: Upload to Ubuntu PPA
       if: steps.check_distro.outputs.should_run == 'true'
       run: |
-        # Configure dput for PPA upload
         cat > ~/.dput.cf << 'EOF'
         [backend-ai-ppa]
         fqdn = ppa.launchpad.net
@@ -282,19 +251,13 @@ jobs:
         login = anonymous
         allow_unsigned_uploads = 0
         EOF
-        
-        # Verify the .changes file exists
         CHANGES_FILE=$(ls ../*_source.changes 2>/dev/null | head -1)
         if [ -z "$CHANGES_FILE" ]; then
           echo "Error: No source .changes file found"
           exit 1
         fi
-        
         echo "Uploading $CHANGES_FILE to PPA lablup/backend-ai"
-        
-        # Upload source package to PPA
         dput backend-ai-ppa "$CHANGES_FILE"
-        
         echo "✅ Successfully uploaded to PPA"
         echo "📦 Version: $FULL_PACKAGE_VERSION"
         echo "📦 Package will be available at: https://launchpad.net/~lablup/+archive/ubuntu/backend-ai"

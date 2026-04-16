@@ -10,36 +10,34 @@ Launchpad build environments do NOT have internet access. This means:
 
 ### Build Dependencies
 The following packages are required and must be available in the Ubuntu repository:
-- `rustc (>= 1.75)` - Rust compiler (requires 1.75 or newer)
-- `cargo (>= 0.75)` - Rust package manager
+- `rustc-1.92 | rustc (>= 1.92)` - Rust compiler for the current dependency set
+- `cargo-1.92 | cargo (>= 1.92)` - Cargo for the current lockfile/dependency set
 - `pkg-config` - For finding system libraries
 - `libssl-dev` - OpenSSL development files
 - `protobuf-compiler` - Protocol buffer compiler
 - `cmake` - Build system
 
 ### Rust Version Requirements
-This project requires Rust 1.75 or newer. This means:
-- Ubuntu 22.04 (Jammy): May need a newer Rust version from backports
-- Ubuntu 24.04 (Noble): Should have 1.75+
-- Ubuntu 26.04 (Resolute): Should have 1.75+
-
-If building for older Ubuntu versions, you may need to:
-1. Use a PPA that provides newer Rust versions
-2. Limit support to distributions with Rust 1.75+
+This project currently requires Rust 1.92 or newer. This means:
+- Ubuntu 22.04 (Jammy): needs the `~lablup/+archive/ubuntu/rustc-release` dependency PPA
+- Ubuntu 24.04 (Noble): needs the `~lablup/+archive/ubuntu/rustc-release` dependency PPA
+- Ubuntu 26.04 (Resolute): uses the official Ubuntu archive Rust toolchain
 
 ### Build Process
-1. The debian/rules file uses system-provided rustc and cargo
-2. A temporary HOME directory is created for cargo's cache
-3. The project is built with `cargo build --release --locked`
-4. The binary is installed to /usr/bin/all-smi
+1. The GitHub Actions workflow vendors dependencies into `vendor/`
+2. `debian/sanitize-vendor.py` removes hidden/orig checksum entries that break Launchpad source tarballs
+3. The debian/rules file uses system-provided `rustc-1.92` / `cargo-1.92` when present
+4. The project is built with `cargo build --release --frozen`
+5. The binary is installed to `/usr/bin/all-smi`
 
 ### Troubleshooting Build Failures
 If the build fails on Launchpad:
 1. Check the build log for the exact error
 2. Common issues:
    - Missing build dependencies: Add them to debian/control
-   - Rust version incompatibility: Ensure Rust 1.75+ is available
+   - Rust version incompatibility: Ensure Rust 1.92+ is available
    - Network access attempts: Remove any code that downloads dependencies
+   - Vendored checksum mismatch: Re-run the vendor sanitization step
    - Permission issues: Ensure proper file permissions in debian/rules
    - Cargo registry access: The build will fail if it tries to download crates
 

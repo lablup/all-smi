@@ -1,7 +1,7 @@
 Source: all-smi
 Section: utils
 Priority: optional
-Maintainer: Jeongkyu Shin <inureyes@gmail.com>
+Maintainer: Jeongkyu Shin <jshin@lablup.com>
 Build-Depends: debhelper-compat (= 13), build-essential
 Standards-Version: 4.6.2
 Homepage: https://github.com/lablup/all-smi

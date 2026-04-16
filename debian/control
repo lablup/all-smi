@@ -1,10 +1,11 @@
 Source: all-smi
 Section: utils
 Priority: optional
-Maintainer: Jeongkyu Shin <inureyes@gmail.com>
+Maintainer: Jeongkyu Shin <jshin@lablup.com>
 Build-Depends: debhelper-compat (= 13),
                build-essential,
-               rust-1.85-all,
+               rustc-1.92 | rustc (>= 1.92),
+               cargo-1.92 | cargo (>= 1.92),
                pkg-config,
                libssl-dev,
                protobuf-compiler,

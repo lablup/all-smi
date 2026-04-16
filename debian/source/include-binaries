@@ -1,2 +1,2 @@
-debian/vendor
+vendor
 .cargo/config.toml

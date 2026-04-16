@@ -1,41 +1,31 @@
 #!/bin/bash
 set -euo pipefail
 
-# This script prepares the source package for Launchpad PPA upload
-# It switches from binary-based packaging to source-based packaging
+# This script prepares the source package for Launchpad PPA upload.
+# It vendors Rust dependencies so Launchpad can build offline.
 
 echo "Preparing source package for Launchpad..."
 
-# Check if we're in the right directory
 if [ ! -f "Cargo.toml" ]; then
     echo "Error: Must be run from the project root directory"
     exit 1
 fi
 
-# Backup original files
-cp debian/control debian/control.binary
-cp debian/rules debian/rules.binary
-
-# Use source-based packaging files
+# Ensure source-package rules are active
 cp debian/control.source debian/control
 cp debian/rules.source debian/rules
-
-# Make rules executable
 chmod +x debian/rules
 
-# Vendor Rust dependencies for offline build
 echo "Vendoring Rust dependencies..."
-cargo vendor debian/vendor
-
-# Create cargo config to use vendored dependencies
+rm -rf vendor .cargo
 mkdir -p .cargo
-cat > .cargo/config.toml << 'EOF'
-[source.crates-io]
-replace-with = "vendored-sources"
+cargo vendor --locked vendor > .cargo/config.toml
+python3 debian/sanitize-vendor.py
 
-[source.vendored-sources]
-directory = "debian/vendor"
-EOF
+if ! grep -q '^directory = "vendor"$' .cargo/config.toml; then
+    echo "Error: cargo vendor did not generate the expected source replacement config"
+    exit 1
+fi
 
 echo "Source package preparation complete!"
 echo "The package will now build from source on Launchpad"

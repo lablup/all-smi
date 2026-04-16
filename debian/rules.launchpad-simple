@@ -3,38 +3,36 @@
 # Enable all hardening options
 export DEB_BUILD_MAINT_OPTIONS = hardening=+all
 
-# Ensure we have HOME set for cargo
-export HOME = /tmp/build-home
+# Keep cargo state inside the build tree.
+export HOME = $(CURDIR)/debian/home
 export CARGO_HOME = $(HOME)/.cargo
-export PATH := $(CARGO_HOME)/bin:$(PATH)
+export CARGO_TARGET_DIR = $(CURDIR)/target
+export CARGO_NET_OFFLINE = true
+
+RUSTC := $(shell if command -v rustc-1.92 >/dev/null 2>&1; then printf '%s' rustc-1.92; else printf '%s' rustc; fi)
+CARGO := $(shell if command -v cargo-1.92 >/dev/null 2>&1; then printf '%s' cargo-1.92; else printf '%s' cargo; fi)
 
 %:
 	dh $@
 
 override_dh_auto_configure:
-	# Create temporary home directory
-	mkdir -p $(HOME)
-	# Install Rust toolchain
-	curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
-	# Verify installation
-	$(CARGO_HOME)/bin/rustc --version
-	$(CARGO_HOME)/bin/cargo --version
+	mkdir -p $(CARGO_HOME)
+	test -d vendor
+	test -f .cargo/config.toml
+	$(RUSTC) --version
+	$(CARGO) --version
 
 override_dh_auto_build:
-	# Build the project
-	$(CARGO_HOME)/bin/cargo build --release --locked
+	$(CARGO) build --release --frozen
 
 override_dh_auto_install:
-	# Install the compiled binary
 	install -D -m 0755 target/release/all-smi debian/all-smi/usr/bin/all-smi
 
 override_dh_auto_test:
-	# Skip tests to save build time on Launchpad
 	@echo "Skipping tests for PPA build"
 
 override_dh_auto_clean:
-	rm -rf target/ $(HOME)
-	dh_auto_clean
+	rm -rf $(CARGO_TARGET_DIR) $(HOME)
 
 override_dh_builddeb:
 	dh_builddeb --destdir=../
