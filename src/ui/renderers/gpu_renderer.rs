@@ -65,6 +65,7 @@ impl GpuRenderer {
 /// Used by the layout calculator and the PgUp/PgDn handlers to size the
 /// scrollable GPU area correctly when optional rows are present, since they
 /// can grow rows from 2 to 4 lines apiece.
+#[cfg(test)]
 pub fn gpu_render_line_count(
     gpu: &GpuInfo,
     vgpu_info: &[VgpuHostInfo],
