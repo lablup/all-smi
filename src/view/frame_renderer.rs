@@ -692,7 +692,7 @@ impl FrameRenderer {
 ///
 /// Build an O(1) lookup map from `gpu_uuid` to index in the vGPU info slice.
 /// Called once per frame to replace per-GPU linear scans.
-fn build_vgpu_lookup<'a>(vgpu_info: &'a [crate::device::VgpuHostInfo]) -> HashMap<&'a str, usize> {
+fn build_vgpu_lookup(vgpu_info: &[crate::device::VgpuHostInfo]) -> HashMap<&str, usize> {
     let mut map = HashMap::with_capacity(vgpu_info.len());
     for (i, host) in vgpu_info.iter().enumerate() {
         map.entry(host.gpu_uuid.as_str()).or_insert(i);
@@ -702,7 +702,7 @@ fn build_vgpu_lookup<'a>(vgpu_info: &'a [crate::device::VgpuHostInfo]) -> HashMa
 
 /// Build an O(1) lookup map from `gpu_uuid` to index in the MIG info slice.
 /// Called once per frame to replace per-GPU linear scans.
-fn build_mig_lookup<'a>(mig_info: &'a [crate::device::MigGpuInfo]) -> HashMap<&'a str, usize> {
+fn build_mig_lookup(mig_info: &[crate::device::MigGpuInfo]) -> HashMap<&str, usize> {
     let mut map = HashMap::with_capacity(mig_info.len());
     for (i, host) in mig_info.iter().enumerate() {
         map.entry(host.gpu_uuid.as_str()).or_insert(i);

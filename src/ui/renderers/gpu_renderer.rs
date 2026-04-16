@@ -145,7 +145,7 @@ pub fn gpu_render_line_count_with_lookup(
 
 /// Build a `gpu_uuid -> index` lookup map for vGPU host info. O(V) build
 /// time, O(1) per-GPU lookup.
-pub fn build_vgpu_uuid_lookup<'a>(vgpu_info: &'a [VgpuHostInfo]) -> HashMap<&'a str, usize> {
+pub fn build_vgpu_uuid_lookup(vgpu_info: &[VgpuHostInfo]) -> HashMap<&str, usize> {
     let mut map = HashMap::with_capacity(vgpu_info.len());
     for (i, host) in vgpu_info.iter().enumerate() {
         map.entry(host.gpu_uuid.as_str()).or_insert(i);
@@ -155,7 +155,7 @@ pub fn build_vgpu_uuid_lookup<'a>(vgpu_info: &'a [VgpuHostInfo]) -> HashMap<&'a 
 
 /// Build a `gpu_uuid -> index` lookup map for MIG GPU info. O(M) build
 /// time, O(1) per-GPU lookup.
-pub fn build_mig_uuid_lookup<'a>(mig_info: &'a [MigGpuInfo]) -> HashMap<&'a str, usize> {
+pub fn build_mig_uuid_lookup(mig_info: &[MigGpuInfo]) -> HashMap<&str, usize> {
     let mut map = HashMap::with_capacity(mig_info.len());
     for (i, host) in mig_info.iter().enumerate() {
         map.entry(host.gpu_uuid.as_str()).or_insert(i);
