@@ -573,6 +573,12 @@ impl MetricsParser {
                     (labels.get("core_id"), labels.get("core_type"))
                     && let Ok(core_id) = core_id_str.parse::<u32>()
                 {
+                    // Reject out-of-range core_ids to prevent OOM from a
+                    // malicious upstream sending e.g. core_id="4294967295".
+                    if core_id as usize >= MAX_CPU_CORES {
+                        return;
+                    }
+
                     let core_type = match core_type_str.as_str() {
                         "S" => crate::device::CoreType::Super,
                         "P" => crate::device::CoreType::Performance,
@@ -798,6 +804,11 @@ fn saturating_i32(value: f64) -> Option<i32> {
     }
     Some(value as i32)
 }
+
+/// Maximum CPU core_id accepted from a remote scrape. No real system
+/// exposes more than a few hundred cores; 1024 provides generous headroom
+/// while preventing OOM from a malicious upstream sending core_id=4294967295.
+const MAX_CPU_CORES: usize = 1024;
 
 /// Maximum NvLinks per GPU accepted from a remote scrape. Current NVIDIA
 /// hardware caps at 18 physical links; 32 leaves headroom for future
@@ -2147,5 +2158,29 @@ all_smi_mig_instance_utilization_gpu{gpu_index="0", gpu_uuid="GPU-G", gpu="NVIDI
         );
         assert_eq!(mig[0].instances.len(), 1);
         assert_eq!(mig[0].instances[0].uuid, "MIG-G1");
+    }
+
+    #[test]
+    fn parser_rejects_out_of_range_cpu_core_id() {
+        let parser = create_test_parser();
+        let re = create_test_regex();
+        let host = "127.0.0.1:10058";
+
+        // First emit a valid CPU metric so the cpu_info entry exists, then
+        // inject an out-of-range core_id that must be silently dropped.
+        let text = r#"
+all_smi_cpu_utilization{cpu_model="Intel Xeon", instance="node-1", index="0"} 50
+all_smi_cpu_core_utilization{cpu_model="Intel Xeon", instance="node-1", index="0", core_id="2000", core_type="S"} 99
+"#;
+        let (_, cpu_info, _, _, _, _) = parser.parse_metrics(text, host, &re);
+        assert_eq!(cpu_info.len(), 1);
+        // The out-of-range core_id=2000 must have been rejected — the
+        // per_core_utilization vector must remain empty (or at least not
+        // grow to 2001 elements).
+        assert!(
+            cpu_info[0].per_core_utilization.is_empty(),
+            "per_core_utilization must be empty when core_id >= MAX_CPU_CORES, got len={}",
+            cpu_info[0].per_core_utilization.len()
+        );
     }
 }
