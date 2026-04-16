@@ -19,8 +19,7 @@ use crate::device::{GpuInfo, MigGpuInfo, VgpuHostInfo};
 use crate::ui::activity_panel;
 use crate::ui::gpu_sparkline_panel;
 use crate::ui::renderers::gpu_renderer::{
-    build_mig_uuid_lookup, build_vgpu_uuid_lookup, gpu_render_line_count,
-    gpu_render_line_count_with_lookup,
+    build_mig_uuid_lookup, build_vgpu_uuid_lookup, gpu_render_line_count_with_lookup,
 };
 
 pub struct LayoutCalculator;

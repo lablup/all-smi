@@ -26,11 +26,12 @@ impl<'a> GpuMetricExporter<'a> {
     }
 
     fn export_basic_metrics(&self, builder: &mut MetricBuilder, info: &GpuInfo, index: usize) {
+        let index_str = index.to_string();
         let base_labels = [
             ("gpu", info.name.as_str()),
             ("instance", info.instance.as_str()),
-            ("uuid", info.uuid.as_str()),
-            ("index", &index.to_string()),
+            ("gpu_uuid", info.uuid.as_str()),
+            ("gpu_index", index_str.as_str()),
         ];
 
         // GPU utilization
@@ -122,11 +123,12 @@ impl<'a> GpuMetricExporter<'a> {
             return;
         }
 
+        let index_str = index.to_string();
         let base_labels = [
             ("gpu", info.name.as_str()),
             ("instance", info.instance.as_str()),
-            ("uuid", info.uuid.as_str()),
-            ("index", &index.to_string()),
+            ("gpu_uuid", info.uuid.as_str()),
+            ("gpu_index", index_str.as_str()),
         ];
 
         // ANE power in watts
@@ -144,8 +146,8 @@ impl<'a> GpuMetricExporter<'a> {
             let thermal_labels = [
                 ("gpu", info.name.as_str()),
                 ("instance", info.instance.as_str()),
-                ("uuid", info.uuid.as_str()),
-                ("index", &index.to_string()),
+                ("gpu_uuid", info.uuid.as_str()),
+                ("gpu_index", index_str.as_str()),
                 ("level", thermal_level.as_str()),
             ];
             builder
@@ -180,8 +182,8 @@ impl<'a> GpuMetricExporter<'a> {
         let labels = [
             ("gpu", info.name.as_str()),
             ("instance", info.instance.as_str()),
-            ("uuid", info.uuid.as_str()),
-            ("index", index_str.as_str()),
+            ("gpu_uuid", info.uuid.as_str()),
+            ("gpu_index", index_str.as_str()),
             ("type", info.device_type.as_str()),
         ];
 
@@ -214,11 +216,12 @@ impl<'a> GpuMetricExporter<'a> {
     }
 
     fn export_cuda_metrics(&self, builder: &mut MetricBuilder, info: &GpuInfo, index: usize) {
+        let index_str = index.to_string();
         let base_labels = [
             ("gpu", info.name.as_str()),
             ("instance", info.instance.as_str()),
-            ("uuid", info.uuid.as_str()),
-            ("index", &index.to_string()),
+            ("gpu_uuid", info.uuid.as_str()),
+            ("gpu_index", index_str.as_str()),
         ];
 
         // PCIe metrics
@@ -329,11 +332,12 @@ impl<'a> GpuMetricExporter<'a> {
     /// `uuid`, `index`) so dashboards can correlate with the existing
     /// `all_smi_gpu_temperature_celsius` series by the same labels.
     fn export_thermal_thresholds(&self, builder: &mut MetricBuilder, info: &GpuInfo, index: usize) {
+        let index_str = index.to_string();
         let base_labels = [
             ("gpu", info.name.as_str()),
             ("instance", info.instance.as_str()),
-            ("uuid", info.uuid.as_str()),
-            ("index", &index.to_string()),
+            ("gpu_uuid", info.uuid.as_str()),
+            ("gpu_index", index_str.as_str()),
         ];
 
         if let Some(slowdown) = info.temperature_threshold_slowdown {
@@ -556,7 +560,7 @@ mod tests {
             .expect("slowdown line");
         assert!(slowdown_line.contains("gpu=\"NVIDIA A100\""));
         assert!(slowdown_line.contains("instance=\"node-1\""));
-        assert!(slowdown_line.contains("uuid=\"GPU-ABC\""));
-        assert!(slowdown_line.contains("index=\"0\""));
+        assert!(slowdown_line.contains("gpu_uuid=\"GPU-ABC\""));
+        assert!(slowdown_line.contains("gpu_index=\"0\""));
     }
 }

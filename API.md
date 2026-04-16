@@ -111,17 +111,17 @@ count by (lib_name, lib_version) (all_smi_gpu_info) > 1
 
 | Metric                                                    | Description                                                        | Unit    | Labels                               |
 |-----------------------------------------------------------|--------------------------------------------------------------------|---------|--------------------------------------|
-| `all_smi_gpu_pcie_gen_current`                            | Current PCIe generation                                            | -       | `gpu`, `instance`, `uuid`, `index`   |
-| `all_smi_gpu_pcie_width_current`                          | Current PCIe link width                                            | -       | `gpu`, `instance`, `uuid`, `index`   |
-| `all_smi_gpu_performance_state`                           | GPU performance state (P0=0 … P15=15; omitted when not reported)  | -       | `gpu`, `instance`, `uuid`, `index`   |
-| `all_smi_gpu_temperature_threshold_slowdown_celsius`      | Slowdown temperature threshold                                     | celsius | `gpu`, `instance`, `uuid`, `index`   |
-| `all_smi_gpu_temperature_threshold_shutdown_celsius`      | Shutdown temperature threshold                                     | celsius | `gpu`, `instance`, `uuid`, `index`   |
-| `all_smi_gpu_temperature_threshold_max_operating_celsius` | Maximum operating temperature threshold                            | celsius | `gpu`, `instance`, `uuid`, `index`   |
-| `all_smi_gpu_temperature_threshold_acoustic_celsius`      | Acoustic (fan-noise) temperature threshold                         | celsius | `gpu`, `instance`, `uuid`, `index`   |
-| `all_smi_gpu_clock_graphics_max_mhz`                      | Maximum graphics clock                                             | MHz     | `gpu`, `instance`, `uuid`, `index`   |
-| `all_smi_gpu_clock_memory_max_mhz`                        | Maximum memory clock                                               | MHz     | `gpu`, `instance`, `uuid`, `index`   |
-| `all_smi_gpu_power_limit_current_watts`                   | Current power limit                                                | watts   | `gpu`, `instance`, `uuid`, `index`   |
-| `all_smi_gpu_power_limit_max_watts`                       | Maximum power limit                                                | watts   | `gpu`, `instance`, `uuid`, `index`   |
+| `all_smi_gpu_pcie_gen_current`                            | Current PCIe generation                                            | -       | `gpu`, `instance`, `gpu_uuid`, `gpu_index`   |
+| `all_smi_gpu_pcie_width_current`                          | Current PCIe link width                                            | -       | `gpu`, `instance`, `gpu_uuid`, `gpu_index`   |
+| `all_smi_gpu_performance_state`                           | GPU performance state (P0=0 … P15=15; omitted when not reported)  | -       | `gpu`, `instance`, `gpu_uuid`, `gpu_index`   |
+| `all_smi_gpu_temperature_threshold_slowdown_celsius`      | Slowdown temperature threshold                                     | celsius | `gpu`, `instance`, `gpu_uuid`, `gpu_index`   |
+| `all_smi_gpu_temperature_threshold_shutdown_celsius`      | Shutdown temperature threshold                                     | celsius | `gpu`, `instance`, `gpu_uuid`, `gpu_index`   |
+| `all_smi_gpu_temperature_threshold_max_operating_celsius` | Maximum operating temperature threshold                            | celsius | `gpu`, `instance`, `gpu_uuid`, `gpu_index`   |
+| `all_smi_gpu_temperature_threshold_acoustic_celsius`      | Acoustic (fan-noise) temperature threshold                         | celsius | `gpu`, `instance`, `gpu_uuid`, `gpu_index`   |
+| `all_smi_gpu_clock_graphics_max_mhz`                      | Maximum graphics clock                                             | MHz     | `gpu`, `instance`, `gpu_uuid`, `gpu_index`   |
+| `all_smi_gpu_clock_memory_max_mhz`                        | Maximum memory clock                                               | MHz     | `gpu`, `instance`, `gpu_uuid`, `gpu_index`   |
+| `all_smi_gpu_power_limit_current_watts`                   | Current power limit                                                | watts   | `gpu`, `instance`, `gpu_uuid`, `gpu_index`   |
+| `all_smi_gpu_power_limit_max_watts`                       | Maximum power limit                                                | watts   | `gpu`, `instance`, `gpu_uuid`, `gpu_index`   |
 
 **Notes:**
 - Threshold metrics (`temperature_threshold_*`) and `performance_state` are NVIDIA-only. Each metric is emitted only when the driver exposes the value; hosts where the driver does not report a given threshold simply omit that metric line.
@@ -130,16 +130,16 @@ count by (lib_name, lib_version) (all_smi_gpu_info) > 1
 
 ### NVIDIA Hardware Details Metrics
 
-Extended NVIDIA hardware detail metrics (NUMA topology, GSP firmware, NvLink topology, and GPU Performance Monitoring). All metrics in this group share the same four-label base set as other NVIDIA-specific metrics (`gpu`, `instance`, `uuid`, `index`) and are omitted entirely for non-NVIDIA devices, on older drivers that do not expose the underlying NVML APIs, or when the field value is unavailable.
+Extended NVIDIA hardware detail metrics (NUMA topology, GSP firmware, NvLink topology, and GPU Performance Monitoring). All metrics in this group share the same four-label base set as other NVIDIA-specific metrics (`gpu`, `instance`, `gpu_uuid`, `gpu_index`) and are omitted entirely for non-NVIDIA devices, on older drivers that do not expose the underlying NVML APIs, or when the field value is unavailable.
 
 | Metric                                    | Description                                                                                                      | Unit  | Labels                                                               |
 |-------------------------------------------|------------------------------------------------------------------------------------------------------------------|-------|----------------------------------------------------------------------|
-| `all_smi_gpu_numa_node_id`                | NUMA node the GPU is attached to; omitted when the host has no NUMA topology or the driver does not report one   | gauge | `gpu`, `instance`, `uuid`, `index`                                   |
-| `all_smi_gpu_gsp_firmware_mode`           | GSP firmware mode: `0`=disabled, `1`=enabled, `2`=default; omitted on pre-R525 drivers or non-datacenter SKUs  | gauge | `gpu`, `instance`, `uuid`, `index`                                   |
-| `all_smi_gpu_gsp_firmware_version_info`   | Info-style metric (value always 1) carrying the GSP firmware version string in a `version` label                | gauge | `gpu`, `instance`, `uuid`, `index`, `version`                        |
-| `all_smi_nvlink_remote_device_type`       | Info-style metric (value always 1) per active NvLink; classification in `remote_type` label                     | gauge | `gpu`, `instance`, `uuid`, `index`, `link_index`, `remote_type`      |
-| `all_smi_gpu_sm_occupancy`                | GPM-reported SM occupancy fraction (0.0–1.0); omitted on pre-Hopper GPUs or when GPM has not yet sampled        | gauge | `gpu`, `instance`, `uuid`, `index`                                   |
-| `all_smi_gpu_memory_bandwidth_utilization`| GPM-reported DRAM bandwidth utilization fraction (0.0–1.0); omitted when GPM is unsupported or unsampled        | gauge | `gpu`, `instance`, `uuid`, `index`                                   |
+| `all_smi_gpu_numa_node_id`                | NUMA node the GPU is attached to; omitted when the host has no NUMA topology or the driver does not report one   | gauge | `gpu`, `instance`, `gpu_uuid`, `gpu_index`                                   |
+| `all_smi_gpu_gsp_firmware_mode`           | GSP firmware mode: `0`=disabled, `1`=enabled, `2`=default; omitted on pre-R525 drivers or non-datacenter SKUs  | gauge | `gpu`, `instance`, `gpu_uuid`, `gpu_index`                                   |
+| `all_smi_gpu_gsp_firmware_version_info`   | Info-style metric (value always 1) carrying the GSP firmware version string in a `version` label                | gauge | `gpu`, `instance`, `gpu_uuid`, `gpu_index`, `version`                        |
+| `all_smi_nvlink_remote_device_type`       | Info-style metric (value always 1) per active NvLink; classification in `remote_type` label                     | gauge | `gpu`, `instance`, `gpu_uuid`, `gpu_index`, `link_index`, `remote_type`      |
+| `all_smi_gpu_sm_occupancy`                | GPM-reported SM occupancy fraction (0.0–1.0); omitted on pre-Hopper GPUs or when GPM has not yet sampled        | gauge | `gpu`, `instance`, `gpu_uuid`, `gpu_index`                                   |
+| `all_smi_gpu_memory_bandwidth_utilization`| GPM-reported DRAM bandwidth utilization fraction (0.0–1.0); omitted when GPM is unsupported or unsampled        | gauge | `gpu`, `instance`, `gpu_uuid`, `gpu_index`                                   |
 
 **Label values for `all_smi_nvlink_remote_device_type`:**
 

@@ -79,8 +79,8 @@ impl<'a> HardwareMetricExporter<'a> {
         [
             ("gpu", row.gpu.name.as_str()),
             ("instance", row.gpu.instance.as_str()),
-            ("uuid", row.gpu.uuid.as_str()),
-            ("index", row.index_str.as_str()),
+            ("gpu_uuid", row.gpu.uuid.as_str()),
+            ("gpu_index", row.index_str.as_str()),
         ]
     }
 

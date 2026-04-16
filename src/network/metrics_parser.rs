@@ -222,8 +222,18 @@ impl MetricsParser {
         host: &str,
     ) {
         let gpu_name = crate::get_label_or_default!(labels, "gpu");
-        let gpu_uuid = crate::get_label_or_default!(labels, "uuid");
-        let gpu_index = crate::get_label_or_default!(labels, "index");
+        // Accept both new (`gpu_uuid`) and legacy (`uuid`) label names for
+        // backward compatibility with remote nodes running older versions.
+        let gpu_uuid = labels
+            .get("gpu_uuid")
+            .or_else(|| labels.get("uuid"))
+            .cloned()
+            .unwrap_or_default();
+        let gpu_index = labels
+            .get("gpu_index")
+            .or_else(|| labels.get("index"))
+            .cloned()
+            .unwrap_or_default();
 
         if gpu_name.is_empty() || gpu_uuid.is_empty() {
             return;
@@ -1950,13 +1960,14 @@ all_smi_cpu_utilization{cpu_model="AMD", instance="node1", hostname="node1", ind
     }
 
     #[test]
-    fn parse_labels_unescapes_newline_and_carriage_return() {
+    fn parse_labels_unescapes_newline_and_carriage_return_then_strips() {
         let parser = create_test_parser();
-        // Prometheus escape sequences must be reversed on ingest so the
-        // parser sees the same bytes the exporter originally held.
+        // Prometheus escape sequences are first reversed, then control
+        // characters (including the resulting \n and \r) are stripped to
+        // defend against TUI escape injection.
         let labels_str = r#"key="line1\nline2\rend""#;
         let labels = parser.parse_labels(labels_str);
-        assert_eq!(labels.get("key").unwrap(), "line1\nline2\rend");
+        assert_eq!(labels.get("key").unwrap(), "line1line2end");
     }
 
     #[test]
@@ -2049,7 +2060,7 @@ all_smi_gpu_mig_mode{gpu_index="0", gpu_uuid="GPU-X", gpu="NVIDIA A100", instanc
             1,
             "Disabled-MIG row must be retained so consumers can see mode=0"
         );
-        assert!(!mig[0].mig_mode);
+        assert!(!parsed.mig_info[0].mig_mode);
         assert_eq!(parsed.mig_info[0].gpu_uuid, "GPU-X");
         assert!(parsed.mig_info[0].instances.is_empty());
     }
@@ -2162,7 +2173,7 @@ all_smi_mig_instance_utilization_gpu{gpu_index="0", gpu_uuid="GPU-G", gpu="NVIDI
         let parsed = parser.parse_metrics(text, host, &re);
         assert_eq!(parsed.mig_info.len(), 1, "host must survive via instance presence");
         assert!(
-            mig[0].mig_mode,
+            parsed.mig_info[0].mig_mode,
             "mig_mode must be inferred as true when instances are present"
         );
         assert_eq!(parsed.mig_info[0].instances.len(), 1);
