@@ -25,13 +25,13 @@ impl<'a> GpuMetricExporter<'a> {
         Self { gpu_info }
     }
 
-    fn export_basic_metrics(&self, builder: &mut MetricBuilder, info: &GpuInfo, index: usize) {
-        let index_str = index.to_string();
+    fn export_basic_metrics(&self, builder: &mut MetricBuilder, row: &GpuRow<'a>) {
+        let info = row.gpu;
         let base_labels = [
             ("gpu", info.name.as_str()),
             ("instance", info.instance.as_str()),
             ("gpu_uuid", info.uuid.as_str()),
-            ("gpu_index", index_str.as_str()),
+            ("gpu_index", row.index_str.as_str()),
         ];
 
         // GPU utilization
@@ -113,22 +113,17 @@ impl<'a> GpuMetricExporter<'a> {
         }
     }
 
-    fn export_apple_silicon_metrics(
-        &self,
-        builder: &mut MetricBuilder,
-        info: &GpuInfo,
-        index: usize,
-    ) {
+    fn export_apple_silicon_metrics(&self, builder: &mut MetricBuilder, row: &GpuRow<'a>) {
+        let info = row.gpu;
         if !info.name.contains("Apple") && !info.name.contains("Metal") {
             return;
         }
 
-        let index_str = index.to_string();
         let base_labels = [
             ("gpu", info.name.as_str()),
             ("instance", info.instance.as_str()),
             ("gpu_uuid", info.uuid.as_str()),
-            ("gpu_index", index_str.as_str()),
+            ("gpu_index", row.index_str.as_str()),
         ];
 
         // ANE power in watts
@@ -147,7 +142,7 @@ impl<'a> GpuMetricExporter<'a> {
                 ("gpu", info.name.as_str()),
                 ("instance", info.instance.as_str()),
                 ("gpu_uuid", info.uuid.as_str()),
-                ("gpu_index", index_str.as_str()),
+                ("gpu_index", row.index_str.as_str()),
                 ("level", thermal_level.as_str()),
             ];
             builder
@@ -175,15 +170,15 @@ impl<'a> GpuMetricExporter<'a> {
         }
     }
 
-    fn export_device_info(&self, builder: &mut MetricBuilder, info: &GpuInfo, index: usize) {
-        let index_str = index.to_string();
+    fn export_device_info(&self, builder: &mut MetricBuilder, row: &GpuRow<'a>) {
+        let info = row.gpu;
 
         // Build label string with all detail fields
         let labels = [
             ("gpu", info.name.as_str()),
             ("instance", info.instance.as_str()),
             ("gpu_uuid", info.uuid.as_str()),
-            ("gpu_index", index_str.as_str()),
+            ("gpu_index", row.index_str.as_str()),
             ("type", info.device_type.as_str()),
         ];
 
@@ -217,13 +212,13 @@ impl<'a> GpuMetricExporter<'a> {
         builder.metric("all_smi_gpu_info", &all_labels, 1);
     }
 
-    fn export_cuda_metrics(&self, builder: &mut MetricBuilder, info: &GpuInfo, index: usize) {
-        let index_str = index.to_string();
+    fn export_cuda_metrics(&self, builder: &mut MetricBuilder, row: &GpuRow<'a>) {
+        let info = row.gpu;
         let base_labels = [
             ("gpu", info.name.as_str()),
             ("instance", info.instance.as_str()),
             ("gpu_uuid", info.uuid.as_str()),
-            ("gpu_index", index_str.as_str()),
+            ("gpu_index", row.index_str.as_str()),
         ];
 
         // PCIe metrics
@@ -333,13 +328,13 @@ impl<'a> GpuMetricExporter<'a> {
     /// Each metric carries the standard GPU label set (`gpu`, `instance`,
     /// `uuid`, `index`) so dashboards can correlate with the existing
     /// `all_smi_gpu_temperature_celsius` series by the same labels.
-    fn export_thermal_thresholds(&self, builder: &mut MetricBuilder, info: &GpuInfo, index: usize) {
-        let index_str = index.to_string();
+    fn export_thermal_thresholds(&self, builder: &mut MetricBuilder, row: &GpuRow<'a>) {
+        let info = row.gpu;
         let base_labels = [
             ("gpu", info.name.as_str()),
             ("instance", info.instance.as_str()),
             ("gpu_uuid", info.uuid.as_str()),
-            ("gpu_index", index_str.as_str()),
+            ("gpu_index", row.index_str.as_str()),
         ];
 
         if let Some(slowdown) = info.temperature_threshold_slowdown {
@@ -410,21 +405,46 @@ impl<'a> GpuMetricExporter<'a> {
                 );
         }
     }
+
+    /// Pre-compute the stringified `gpu_index` label for each eligible GPU.
+    /// Allocates once per scrape regardless of how many metric families are
+    /// later emitted, reducing per-family string allocations from 5*N to N.
+    fn collect_rows(&self) -> Vec<GpuRow<'a>> {
+        self.gpu_info
+            .iter()
+            .enumerate()
+            .filter(|(_, info)| {
+                info.device_type == "GPU"
+                    || info.device_type == "NPU"
+                    || info.device_type == "TPU"
+            })
+            .map(|(idx, gpu)| GpuRow {
+                gpu,
+                index_str: idx.to_string(),
+            })
+            .collect()
+    }
+}
+
+/// Borrowed view of a single GPU row with its stringified index cached.
+/// Exists purely to amortise the `.to_string()` on the index label across
+/// the five export methods.
+struct GpuRow<'a> {
+    gpu: &'a GpuInfo,
+    index_str: String,
 }
 
 impl<'a> MetricExporter for GpuMetricExporter<'a> {
     fn export_metrics(&self) -> String {
+        let rows = self.collect_rows();
         let mut builder = MetricBuilder::new();
 
-        for (i, info) in self.gpu_info.iter().enumerate() {
-            // Export metrics for GPU, NPU, and TPU devices
-            if info.device_type == "GPU" || info.device_type == "NPU" || info.device_type == "TPU" {
-                self.export_basic_metrics(&mut builder, info, i);
-                self.export_apple_silicon_metrics(&mut builder, info, i);
-                self.export_device_info(&mut builder, info, i);
-                self.export_cuda_metrics(&mut builder, info, i);
-                self.export_thermal_thresholds(&mut builder, info, i);
-            }
+        for row in &rows {
+            self.export_basic_metrics(&mut builder, row);
+            self.export_apple_silicon_metrics(&mut builder, row);
+            self.export_device_info(&mut builder, row);
+            self.export_cuda_metrics(&mut builder, row);
+            self.export_thermal_thresholds(&mut builder, row);
         }
 
         builder.build()
