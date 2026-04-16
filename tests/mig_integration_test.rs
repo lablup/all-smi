@@ -92,8 +92,8 @@ fn mig_metrics_parser_roundtrip_preserves_all_fields() {
     use all_smi::network::metrics_parser::MetricsParser;
 
     let parser = MetricsParser::new();
-    let (_gpu, _cpu, _mem, _store, _vgpu, parsed) =
-        parser.parse_metrics(&exported_metrics_text(), "127.0.0.1:9090", &regex());
+    let result = parser.parse_metrics(&exported_metrics_text(), "127.0.0.1:9090", &regex());
+    let parsed = &result.mig_info;
 
     assert_eq!(parsed.len(), 1, "expected one host record");
     let got = &parsed[0];
@@ -151,8 +151,8 @@ fn mig_disabled_parent_roundtrips_as_visible_row_with_mode_zero() {
 
     // Parser side: the disabled row must survive the retain filter.
     let parser = MetricsParser::new();
-    let (_gpu, _cpu, _mem, _store, _vgpu, parsed) =
-        parser.parse_metrics(&text, "127.0.0.1:9090", &regex());
+    let result = parser.parse_metrics(&text, "127.0.0.1:9090", &regex());
+    let parsed = &result.mig_info;
     assert_eq!(parsed.len(), 1, "disabled MIG row must be retained");
     assert_eq!(parsed[0].gpu_uuid, "GPU-OFF");
     assert!(!parsed[0].mig_mode);
@@ -169,7 +169,9 @@ fn mig_parser_is_empty_on_bare_metal_metrics() {
         "all_smi_cpu_utilization{cpu_model=\"AMD\", instance=\"x\", hostname=\"x\", index=\"0\"} 20\n",
     );
 
-    let (gpu, _cpu, _mem, _storage, _vgpu, parsed) = parser.parse_metrics(non_mig, "x", &regex());
+    let result = parser.parse_metrics(non_mig, "x", &regex());
+    let gpu = &result.gpu_info;
+    let parsed = &result.mig_info;
     assert_eq!(gpu.len(), 1, "sanity: GPU row still parsed");
     assert!(
         parsed.is_empty(),
@@ -198,8 +200,8 @@ fn mig_parser_attaches_multiple_instances_to_same_host() {
     }
 
     let parser = MetricsParser::new();
-    let (_gpu, _cpu, _mem, _store, _vgpu, parsed) =
-        parser.parse_metrics(&text, "node-9:9090", &regex());
+    let result = parser.parse_metrics(&text, "node-9:9090", &regex());
+    let parsed = &result.mig_info;
     assert_eq!(parsed.len(), 1);
     assert_eq!(parsed[0].instances.len(), 7);
     // Sorted by instance_id ascending — first must be id 0, last id 6.

@@ -34,8 +34,8 @@
 //! * `all_smi_gpu_memory_bandwidth_utilization` (gauge, 0-1): fractional
 //!   DRAM bandwidth utilization from the GPM API. Absent when unsupported.
 //!
-//! All metrics carry the standard GPU label set (`gpu`, `instance`, `uuid`,
-//! `index`), matching the core `all_smi_gpu_temperature_celsius` series so
+//! All metrics carry the standard GPU label set (`gpu`, `instance`, `gpu_uuid`,
+//! `gpu_index`), matching the core `all_smi_gpu_temperature_celsius` series so
 //! dashboards can correlate by label.
 //!
 //! The exporter emits nothing when no GPUs populated any of the new fields
@@ -79,8 +79,8 @@ impl<'a> HardwareMetricExporter<'a> {
         [
             ("gpu", row.gpu.name.as_str()),
             ("instance", row.gpu.instance.as_str()),
-            ("uuid", row.gpu.uuid.as_str()),
-            ("index", row.index_str.as_str()),
+            ("gpu_uuid", row.gpu.uuid.as_str()),
+            ("gpu_index", row.index_str.as_str()),
         ]
     }
 
@@ -452,8 +452,8 @@ mod tests {
         let expected_fragments = [
             r#"gpu="NVIDIA A100""#,
             r#"instance="node-1""#,
-            r#"uuid="GPU-ABC""#,
-            r#"index="0""#,
+            r#"gpu_uuid="GPU-ABC""#,
+            r#"gpu_index="0""#,
         ];
         for line in out
             .lines()

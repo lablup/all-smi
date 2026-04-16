@@ -85,11 +85,17 @@ impl MetricBuilder {
                 // We also escape carriage returns so lines produced on
                 // Windows-origin inputs cannot break the `\n`-delimited
                 // exposition format downstream.
-                let escaped_value = value
+                // Finally, strip any remaining control characters to
+                // defend against local NVML returning unexpected strings
+                // that could inject ANSI escape sequences.
+                let escaped_value: String = value
                     .replace('\\', "\\\\")
                     .replace('"', "\\\"")
                     .replace('\n', "\\n")
-                    .replace('\r', "\\r");
+                    .replace('\r', "\\r")
+                    .chars()
+                    .filter(|c| !c.is_control())
+                    .collect();
                 self.metrics.push_str(&format!("{key}=\"{escaped_value}\""));
             }
             self.metrics.push('}');
@@ -147,6 +153,17 @@ mod tests {
         builder.metric("test_metric", &[("value", "line1\rline2")], "1");
         let output = builder.build();
         assert!(output.contains(r#"value="line1\rline2""#));
+    }
+
+    #[test]
+    fn test_metric_builder_label_strips_control_characters() {
+        let mut builder = MetricBuilder::new();
+        builder.metric("test_metric", &[("gpu", "NVIDIA\x1b[2JEvil")], "1");
+        let output = builder.build();
+        // The ESC control character is stripped; only the printable part of
+        // the escape sequence remains.
+        assert!(!output.contains('\x1b'), "control char leaked: {output}");
+        assert!(output.contains("NVIDIA[2JEvil"));
     }
 
     #[test]

@@ -73,7 +73,7 @@ impl TenstorrentMockGenerator {
 
         for (i, gpu) in gpus.iter().enumerate() {
             let labels = format!(
-                "gpu=\"{}\", instance=\"{}\", uuid=\"{}\", index=\"{i}\"",
+                "gpu=\"{}\", instance=\"{}\", gpu_uuid=\"{}\", gpu_index=\"{i}\"",
                 self.gpu_name, self.instance_name, gpu.uuid
             );
             template.push_str(&format!(
@@ -100,7 +100,7 @@ impl TenstorrentMockGenerator {
 
             for (i, gpu) in gpus.iter().enumerate() {
                 let labels = format!(
-                    "gpu=\"{}\", instance=\"{}\", uuid=\"{}\", index=\"{i}\"",
+                    "gpu=\"{}\", instance=\"{}\", gpu_uuid=\"{}\", gpu_index=\"{i}\"",
                     self.gpu_name, self.instance_name, gpu.uuid
                 );
                 let placeholder = format!("{{{{{}_TEMP_{i}}}}}", sensor_name.to_uppercase());
@@ -127,7 +127,7 @@ impl TenstorrentMockGenerator {
 
             for (i, gpu) in gpus.iter().enumerate() {
                 let labels = format!(
-                    "gpu=\"{}\", instance=\"{}\", uuid=\"{}\", index=\"{i}\"",
+                    "gpu=\"{}\", instance=\"{}\", gpu_uuid=\"{}\", gpu_index=\"{i}\"",
                     self.gpu_name, self.instance_name, gpu.uuid
                 );
                 let placeholder = format!("{{{{{}_{i}}}}}", clock_name.to_uppercase());
@@ -145,7 +145,7 @@ impl TenstorrentMockGenerator {
 
         for (i, gpu) in gpus.iter().enumerate() {
             let labels = format!(
-                "gpu=\"{}\", instance=\"{}\", uuid=\"{}\", index=\"{i}\"",
+                "gpu=\"{}\", instance=\"{}\", gpu_uuid=\"{}\", gpu_index=\"{i}\"",
                 self.gpu_name, self.instance_name, gpu.uuid
             );
             template.push_str(&format!(
@@ -159,7 +159,7 @@ impl TenstorrentMockGenerator {
 
         for (i, gpu) in gpus.iter().enumerate() {
             let labels = format!(
-                "gpu=\"{}\", instance=\"{}\", uuid=\"{}\", index=\"{i}\"",
+                "gpu=\"{}\", instance=\"{}\", gpu_uuid=\"{}\", gpu_index=\"{i}\"",
                 self.gpu_name, self.instance_name, gpu.uuid
             );
             template.push_str(&format!(

@@ -18,7 +18,9 @@ use crate::cli::ViewArgs;
 use crate::device::{GpuInfo, MigGpuInfo, VgpuHostInfo};
 use crate::ui::activity_panel;
 use crate::ui::gpu_sparkline_panel;
-use crate::ui::renderers::gpu_renderer::gpu_render_line_count;
+use crate::ui::renderers::gpu_renderer::{
+    build_mig_uuid_lookup, build_vgpu_uuid_lookup, gpu_render_line_count_with_lookup,
+};
 
 pub struct LayoutCalculator;
 
@@ -349,14 +351,22 @@ pub(crate) fn max_gpu_lines_for_tab(state: &AppState) -> usize {
 /// Pure helper used by [`max_gpu_lines_for_tab`] and the unit tests. Iterates
 /// any GPU iterator and returns the largest [`gpu_render_line_count`] value,
 /// or 2 for an empty iterator.
+///
+/// Builds UUID lookup maps once and uses
+/// [`gpu_render_line_count_with_lookup`] so the total cost is O(G + V + M)
+/// instead of the previous O(G * (V + M)) per frame.
 pub(crate) fn max_gpu_lines_over<'a>(
     gpus: impl Iterator<Item = &'a GpuInfo>,
     vgpu_info: &[VgpuHostInfo],
     mig_info: &[MigGpuInfo],
 ) -> usize {
-    gpus.map(|g| gpu_render_line_count(g, vgpu_info, mig_info))
-        .max()
-        .unwrap_or(2)
+    let vgpu_lookup = build_vgpu_uuid_lookup(vgpu_info);
+    let mig_lookup = build_mig_uuid_lookup(mig_info);
+    gpus.map(|g| {
+        gpu_render_line_count_with_lookup(g, vgpu_info, mig_info, &vgpu_lookup, &mig_lookup)
+    })
+    .max()
+    .unwrap_or(2)
 }
 
 #[cfg(test)]

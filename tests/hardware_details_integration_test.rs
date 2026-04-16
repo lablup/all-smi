@@ -38,43 +38,43 @@ fn full_hardware_exposition() -> String {
     //   * GPM: SM occupancy 0.67, memory bandwidth util 0.42
     concat!(
         "all_smi_gpu_utilization{gpu=\"NVIDIA A100\", instance=\"node-9\", \
-         uuid=\"GPU-HW\", index=\"0\"} 30.0\n",
+         gpu_uuid=\"GPU-HW\", gpu_index=\"0\"} 30.0\n",
         "all_smi_gpu_temperature_celsius{gpu=\"NVIDIA A100\", instance=\"node-9\", \
-         uuid=\"GPU-HW\", index=\"0\"} 55\n",
+         gpu_uuid=\"GPU-HW\", gpu_index=\"0\"} 55\n",
         "# HELP all_smi_gpu_numa_node_id NUMA node the GPU is attached to\n",
         "# TYPE all_smi_gpu_numa_node_id gauge\n",
         "all_smi_gpu_numa_node_id{gpu=\"NVIDIA A100\", instance=\"node-9\", \
-         uuid=\"GPU-HW\", index=\"0\"} 0\n",
+         gpu_uuid=\"GPU-HW\", gpu_index=\"0\"} 0\n",
         "# HELP all_smi_gpu_gsp_firmware_mode GSP firmware mode\n",
         "# TYPE all_smi_gpu_gsp_firmware_mode gauge\n",
         "all_smi_gpu_gsp_firmware_mode{gpu=\"NVIDIA A100\", instance=\"node-9\", \
-         uuid=\"GPU-HW\", index=\"0\"} 1\n",
+         gpu_uuid=\"GPU-HW\", gpu_index=\"0\"} 1\n",
         "# HELP all_smi_gpu_gsp_firmware_version_info GSP firmware version\n",
         "# TYPE all_smi_gpu_gsp_firmware_version_info gauge\n",
         "all_smi_gpu_gsp_firmware_version_info{gpu=\"NVIDIA A100\", instance=\"node-9\", \
-         uuid=\"GPU-HW\", index=\"0\", version=\"550.54.15\"} 1\n",
+         gpu_uuid=\"GPU-HW\", gpu_index=\"0\", version=\"550.54.15\"} 1\n",
         "# HELP all_smi_nvlink_remote_device_type NvLink remote endpoint classification\n",
         "# TYPE all_smi_nvlink_remote_device_type gauge\n",
         "all_smi_nvlink_remote_device_type{gpu=\"NVIDIA A100\", instance=\"node-9\", \
-         uuid=\"GPU-HW\", index=\"0\", link_index=\"0\", remote_type=\"gpu\"} 1\n",
+         gpu_uuid=\"GPU-HW\", gpu_index=\"0\", link_index=\"0\", remote_type=\"gpu\"} 1\n",
         "all_smi_nvlink_remote_device_type{gpu=\"NVIDIA A100\", instance=\"node-9\", \
-         uuid=\"GPU-HW\", index=\"0\", link_index=\"1\", remote_type=\"gpu\"} 1\n",
+         gpu_uuid=\"GPU-HW\", gpu_index=\"0\", link_index=\"1\", remote_type=\"gpu\"} 1\n",
         "all_smi_nvlink_remote_device_type{gpu=\"NVIDIA A100\", instance=\"node-9\", \
-         uuid=\"GPU-HW\", index=\"0\", link_index=\"2\", remote_type=\"gpu\"} 1\n",
+         gpu_uuid=\"GPU-HW\", gpu_index=\"0\", link_index=\"2\", remote_type=\"gpu\"} 1\n",
         "all_smi_nvlink_remote_device_type{gpu=\"NVIDIA A100\", instance=\"node-9\", \
-         uuid=\"GPU-HW\", index=\"0\", link_index=\"3\", remote_type=\"gpu\"} 1\n",
+         gpu_uuid=\"GPU-HW\", gpu_index=\"0\", link_index=\"3\", remote_type=\"gpu\"} 1\n",
         "all_smi_nvlink_remote_device_type{gpu=\"NVIDIA A100\", instance=\"node-9\", \
-         uuid=\"GPU-HW\", index=\"0\", link_index=\"4\", remote_type=\"gpu\"} 1\n",
+         gpu_uuid=\"GPU-HW\", gpu_index=\"0\", link_index=\"4\", remote_type=\"gpu\"} 1\n",
         "all_smi_nvlink_remote_device_type{gpu=\"NVIDIA A100\", instance=\"node-9\", \
-         uuid=\"GPU-HW\", index=\"0\", link_index=\"5\", remote_type=\"switch\"} 1\n",
+         gpu_uuid=\"GPU-HW\", gpu_index=\"0\", link_index=\"5\", remote_type=\"switch\"} 1\n",
         "# HELP all_smi_gpu_sm_occupancy GPM SM occupancy\n",
         "# TYPE all_smi_gpu_sm_occupancy gauge\n",
         "all_smi_gpu_sm_occupancy{gpu=\"NVIDIA A100\", instance=\"node-9\", \
-         uuid=\"GPU-HW\", index=\"0\"} 0.67\n",
+         gpu_uuid=\"GPU-HW\", gpu_index=\"0\"} 0.67\n",
         "# HELP all_smi_gpu_memory_bandwidth_utilization GPM memory bandwidth util\n",
         "# TYPE all_smi_gpu_memory_bandwidth_utilization gauge\n",
         "all_smi_gpu_memory_bandwidth_utilization{gpu=\"NVIDIA A100\", instance=\"node-9\", \
-         uuid=\"GPU-HW\", index=\"0\"} 0.42\n",
+         gpu_uuid=\"GPU-HW\", gpu_index=\"0\"} 0.42\n",
     )
     .to_string()
 }
@@ -82,8 +82,8 @@ fn full_hardware_exposition() -> String {
 #[test]
 fn hardware_detail_round_trip_preserves_all_fields() {
     let parser = MetricsParser::new();
-    let (parsed, _, _, _, _, _) =
-        parser.parse_metrics(&full_hardware_exposition(), "node-9:9090", &regex());
+    let result = parser.parse_metrics(&full_hardware_exposition(), "node-9:9090", &regex());
+    let parsed = &result.gpu_info;
 
     assert_eq!(parsed.len(), 1, "expected exactly one GPU record");
     let gpu = &parsed[0];
@@ -137,7 +137,8 @@ fn hardware_detail_partial_scrape_preserves_absence() {
          uuid=\"GPU-OLD\", index=\"0\"} 1\n",
     );
     let parser = MetricsParser::new();
-    let (parsed, _, _, _, _, _) = parser.parse_metrics(partial, "node-9:9090", &regex());
+    let result = parser.parse_metrics(partial, "node-9:9090", &regex());
+    let parsed = &result.gpu_info;
     assert_eq!(parsed.len(), 1);
     let gpu = &parsed[0];
     assert_eq!(gpu.numa_node_id, Some(1));
@@ -154,12 +155,13 @@ fn non_nvidia_path_leaves_hardware_fields_unavailable() {
     // "unavailable" defaults so the TUI renders nothing.
     let non_nvidia = concat!(
         "all_smi_gpu_utilization{gpu=\"Apple M2 Pro\", instance=\"mac-1\", \
-         uuid=\"APPLE-0\", index=\"0\"} 20\n",
+         gpu_uuid=\"APPLE-0\", gpu_index=\"0\"} 20\n",
         "all_smi_gpu_temperature_celsius{gpu=\"Apple M2 Pro\", instance=\"mac-1\", \
-         uuid=\"APPLE-0\", index=\"0\"} 55\n",
+         gpu_uuid=\"APPLE-0\", gpu_index=\"0\"} 55\n",
     );
     let parser = MetricsParser::new();
-    let (parsed, _, _, _, _, _) = parser.parse_metrics(non_nvidia, "mac-1:9090", &regex());
+    let result = parser.parse_metrics(non_nvidia, "mac-1:9090", &regex());
+    let parsed = &result.gpu_info;
     assert_eq!(parsed.len(), 1);
     let gpu = &parsed[0];
     assert!(gpu.numa_node_id.is_none());
@@ -183,7 +185,8 @@ fn nvlink_unknown_remote_type_is_preserved() {
          uuid=\"GPU-U\", index=\"0\", link_index=\"1\", remote_type=\"ibmnpu\"} 1\n",
     );
     let parser = MetricsParser::new();
-    let (parsed, _, _, _, _, _) = parser.parse_metrics(text, "node-1:9090", &regex());
+    let result = parser.parse_metrics(text, "node-1:9090", &regex());
+    let parsed = &result.gpu_info;
     assert_eq!(parsed.len(), 1);
     let gpu = &parsed[0];
     assert_eq!(gpu.nvlink_remote_devices.len(), 2);
@@ -219,7 +222,8 @@ fn parser_caps_nvlinks_at_max_per_gpu() {
         ));
     }
     let parser = MetricsParser::new();
-    let (parsed, _, _, _, _, _) = parser.parse_metrics(&lines, "node-a:9090", &regex());
+    let result = parser.parse_metrics(&lines, "node-a:9090", &regex());
+    let parsed = &result.gpu_info;
     assert_eq!(parsed.len(), 1);
     assert!(
         parsed[0].nvlink_remote_devices.len() <= 32,
@@ -239,7 +243,8 @@ fn parser_rejects_out_of_range_gsp_firmware_mode() {
          uuid=\"GPU-B\", index=\"0\"} 99\n",
     );
     let parser = MetricsParser::new();
-    let (parsed, _, _, _, _, _) = parser.parse_metrics(text, "node-1:9090", &regex());
+    let result = parser.parse_metrics(text, "node-1:9090", &regex());
+    let parsed = &result.gpu_info;
     assert_eq!(parsed.len(), 1);
     assert!(parsed[0].gsp_firmware_mode.is_none());
 }
@@ -257,7 +262,8 @@ fn parser_rejects_out_of_range_gpm_fractions() {
          uuid=\"GPU-R\", index=\"0\"} 9.9\n",
     );
     let parser = MetricsParser::new();
-    let (parsed, _, _, _, _, _) = parser.parse_metrics(text, "node-1:9090", &regex());
+    let result = parser.parse_metrics(text, "node-1:9090", &regex());
+    let parsed = &result.gpu_info;
     assert_eq!(parsed.len(), 1);
     // Neither GPM field accepted → no `GpmMetrics` allocated.
     assert!(parsed[0].gpm_metrics.is_none());
@@ -275,7 +281,8 @@ fn parser_gpm_accepts_only_the_fields_present() {
          uuid=\"GPU-P\", index=\"0\"} 0.55\n",
     );
     let parser = MetricsParser::new();
-    let (parsed, _, _, _, _, _) = parser.parse_metrics(text, "node-1:9090", &regex());
+    let result = parser.parse_metrics(text, "node-1:9090", &regex());
+    let parsed = &result.gpu_info;
     assert_eq!(parsed.len(), 1);
     let gpm = parsed[0].gpm_metrics.as_ref().expect("GPM populated");
     assert!((gpm.sm_occupancy.unwrap() - 0.55).abs() < 1e-4);
@@ -294,7 +301,8 @@ fn parser_rejects_fractional_gsp_firmware_mode() {
          uuid=\"GPU-FRAC\", index=\"0\"} 1.5\n",
     );
     let parser = MetricsParser::new();
-    let (parsed, _, _, _, _, _) = parser.parse_metrics(text, "node-1:9090", &regex());
+    let result = parser.parse_metrics(text, "node-1:9090", &regex());
+    let parsed = &result.gpu_info;
     assert_eq!(parsed.len(), 1);
     assert!(
         parsed[0].gsp_firmware_mode.is_none(),
@@ -314,7 +322,8 @@ fn parser_rejects_negative_numa_node_id() {
          uuid=\"GPU-NEG\", index=\"0\"} -0.5\n",
     );
     let parser = MetricsParser::new();
-    let (parsed, _, _, _, _, _) = parser.parse_metrics(text, "node-1:9090", &regex());
+    let result = parser.parse_metrics(text, "node-1:9090", &regex());
+    let parsed = &result.gpu_info;
     assert_eq!(parsed.len(), 1);
     assert!(
         parsed[0].numa_node_id.is_none(),
@@ -334,7 +343,8 @@ fn parser_rejects_fractional_numa_node_id() {
          uuid=\"GPU-FRAC2\", index=\"0\"} 1.7\n",
     );
     let parser = MetricsParser::new();
-    let (parsed, _, _, _, _, _) = parser.parse_metrics(text, "node-1:9090", &regex());
+    let result = parser.parse_metrics(text, "node-1:9090", &regex());
+    let parsed = &result.gpu_info;
     assert_eq!(parsed.len(), 1);
     assert!(
         parsed[0].numa_node_id.is_none(),
@@ -344,27 +354,26 @@ fn parser_rejects_fractional_numa_node_id() {
 }
 
 #[test]
-fn parser_rejects_gsp_version_with_control_chars() {
+fn parser_strips_control_chars_from_gsp_version() {
     // A malicious remote could emit a version string containing ANSI escape
-    // sequences (e.g. ESC[2J ESC[H to clear the terminal). The parser must
-    // reject such strings so the TUI never executes injected escape codes
-    // when rendering the hardware row.
-    //
-    // The metric format uses Prometheus label syntax, so the `version` label
-    // value is a quoted string inside `{...}`. We include a literal ESC
-    // character (U+001B) inside the label to simulate the injection.
+    // sequences (e.g. ESC[2J ESC[H to clear the terminal). The parser strips
+    // control characters at the label parsing layer, so the ESC bytes are
+    // removed before the version string reaches the gsp_firmware handler.
+    // The remaining printable characters ([2J[H) are harmless.
     let text = "all_smi_gpu_utilization{gpu=\"NVIDIA A100\", instance=\"node-1\", \
-         uuid=\"GPU-ESC\", index=\"0\"} 10\n\
+         gpu_uuid=\"GPU-ESC\", gpu_index=\"0\"} 10\n\
          all_smi_gpu_gsp_firmware_version_info{gpu=\"NVIDIA A100\", instance=\"node-1\", \
-         uuid=\"GPU-ESC\", index=\"0\", version=\"\x1b[2J\x1b[H\"} 1\n"
+         gpu_uuid=\"GPU-ESC\", gpu_index=\"0\", version=\"\x1b[2J\x1b[H\"} 1\n"
         .to_string();
     let parser = MetricsParser::new();
-    let (parsed, _, _, _, _, _) = parser.parse_metrics(&text, "node-1:9090", &regex());
+    let result = parser.parse_metrics(&text, "node-1:9090", &regex());
+    let parsed = &result.gpu_info;
     assert_eq!(parsed.len(), 1);
-    assert!(
-        parsed[0].gsp_firmware_version.is_none(),
-        "GSP version containing control characters must be rejected, got {:?}",
-        parsed[0].gsp_firmware_version
+    // ESC bytes are stripped; only harmless printable chars remain.
+    assert_eq!(
+        parsed[0].gsp_firmware_version.as_deref(),
+        Some("[2J[H"),
+        "ESC should be stripped, leaving only printable chars"
     );
 }
 
@@ -378,7 +387,8 @@ fn parser_accepts_normal_gsp_version_string() {
          uuid=\"GPU-OK\", index=\"0\", version=\"550.54.15\"} 1\n",
     );
     let parser = MetricsParser::new();
-    let (parsed, _, _, _, _, _) = parser.parse_metrics(text, "node-1:9090", &regex());
+    let result = parser.parse_metrics(text, "node-1:9090", &regex());
+    let parsed = &result.gpu_info;
     assert_eq!(parsed.len(), 1);
     assert_eq!(
         parsed[0].gsp_firmware_version.as_deref(),

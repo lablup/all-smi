@@ -33,36 +33,36 @@ fn full_exposition() -> String {
         "# HELP all_smi_gpu_utilization GPU utilization percentage\n",
         "# TYPE all_smi_gpu_utilization gauge\n",
         "all_smi_gpu_utilization{gpu=\"NVIDIA A100\", instance=\"node-7\", \
-         uuid=\"GPU-RT\", index=\"0\"} 42.0\n",
+         gpu_uuid=\"GPU-RT\", gpu_index=\"0\"} 42.0\n",
         "# HELP all_smi_gpu_temperature_celsius GPU temperature in celsius\n",
         "# TYPE all_smi_gpu_temperature_celsius gauge\n",
         "all_smi_gpu_temperature_celsius{gpu=\"NVIDIA A100\", instance=\"node-7\", \
-         uuid=\"GPU-RT\", index=\"0\"} 72\n",
+         gpu_uuid=\"GPU-RT\", gpu_index=\"0\"} 72\n",
         "# HELP all_smi_gpu_temperature_threshold_slowdown_celsius \
          GPU slowdown temperature threshold in Celsius\n",
         "# TYPE all_smi_gpu_temperature_threshold_slowdown_celsius gauge\n",
         "all_smi_gpu_temperature_threshold_slowdown_celsius{gpu=\"NVIDIA A100\", \
-         instance=\"node-7\", uuid=\"GPU-RT\", index=\"0\"} 90\n",
+         instance=\"node-7\", gpu_uuid=\"GPU-RT\", gpu_index=\"0\"} 90\n",
         "# HELP all_smi_gpu_temperature_threshold_shutdown_celsius \
          GPU shutdown temperature threshold in Celsius\n",
         "# TYPE all_smi_gpu_temperature_threshold_shutdown_celsius gauge\n",
         "all_smi_gpu_temperature_threshold_shutdown_celsius{gpu=\"NVIDIA A100\", \
-         instance=\"node-7\", uuid=\"GPU-RT\", index=\"0\"} 95\n",
+         instance=\"node-7\", gpu_uuid=\"GPU-RT\", gpu_index=\"0\"} 95\n",
         "# HELP all_smi_gpu_temperature_threshold_max_operating_celsius \
          GPU maximum operating temperature threshold in Celsius\n",
         "# TYPE all_smi_gpu_temperature_threshold_max_operating_celsius gauge\n",
         "all_smi_gpu_temperature_threshold_max_operating_celsius{gpu=\"NVIDIA A100\", \
-         instance=\"node-7\", uuid=\"GPU-RT\", index=\"0\"} 85\n",
+         instance=\"node-7\", gpu_uuid=\"GPU-RT\", gpu_index=\"0\"} 85\n",
         "# HELP all_smi_gpu_temperature_threshold_acoustic_celsius \
          GPU acoustic (noise) temperature threshold in Celsius\n",
         "# TYPE all_smi_gpu_temperature_threshold_acoustic_celsius gauge\n",
         "all_smi_gpu_temperature_threshold_acoustic_celsius{gpu=\"NVIDIA A100\", \
-         instance=\"node-7\", uuid=\"GPU-RT\", index=\"0\"} 77\n",
+         instance=\"node-7\", gpu_uuid=\"GPU-RT\", gpu_index=\"0\"} 77\n",
         "# HELP all_smi_gpu_performance_state \
          GPU performance state (0=P0 fastest, 15=P15 idlest; metric is omitted when the device does not report a P-state)\n",
         "# TYPE all_smi_gpu_performance_state gauge\n",
         "all_smi_gpu_performance_state{gpu=\"NVIDIA A100\", instance=\"node-7\", \
-         uuid=\"GPU-RT\", index=\"0\"} 4\n",
+         gpu_uuid=\"GPU-RT\", gpu_index=\"0\"} 4\n",
     )
     .to_string()
 }
@@ -71,13 +71,13 @@ fn partial_exposition() -> String {
     // Older driver: slowdown + shutdown known, the others absent.
     concat!(
         "all_smi_gpu_utilization{gpu=\"NVIDIA A100\", instance=\"node-7\", \
-         uuid=\"GPU-RT\", index=\"0\"} 10.0\n",
+         gpu_uuid=\"GPU-RT\", gpu_index=\"0\"} 10.0\n",
         "all_smi_gpu_temperature_celsius{gpu=\"NVIDIA A100\", instance=\"node-7\", \
-         uuid=\"GPU-RT\", index=\"0\"} 60\n",
+         gpu_uuid=\"GPU-RT\", gpu_index=\"0\"} 60\n",
         "all_smi_gpu_temperature_threshold_slowdown_celsius{gpu=\"NVIDIA A100\", \
-         instance=\"node-7\", uuid=\"GPU-RT\", index=\"0\"} 91\n",
+         instance=\"node-7\", gpu_uuid=\"GPU-RT\", gpu_index=\"0\"} 91\n",
         "all_smi_gpu_temperature_threshold_shutdown_celsius{gpu=\"NVIDIA A100\", \
-         instance=\"node-7\", uuid=\"GPU-RT\", index=\"0\"} 96\n",
+         instance=\"node-7\", gpu_uuid=\"GPU-RT\", gpu_index=\"0\"} 96\n",
     )
     .to_string()
 }
@@ -85,7 +85,8 @@ fn partial_exposition() -> String {
 #[test]
 fn thermal_and_pstate_round_trip_preserves_all_fields() {
     let parser = MetricsParser::new();
-    let (parsed, _, _, _, _, _) = parser.parse_metrics(&full_exposition(), "node-7:9090", &regex());
+    let result = parser.parse_metrics(&full_exposition(), "node-7:9090", &regex());
+    let parsed = &result.gpu_info;
 
     assert_eq!(parsed.len(), 1, "expected exactly one GPU record");
     let gpu = &parsed[0];
@@ -103,8 +104,8 @@ fn thermal_and_pstate_round_trip_handles_partial_reports() {
     // Older drivers: only slowdown + shutdown known. The others must stay
     // `None` after parse, not default to 0.
     let parser = MetricsParser::new();
-    let (parsed, _, _, _, _, _) =
-        parser.parse_metrics(&partial_exposition(), "node-7:9090", &regex());
+    let result = parser.parse_metrics(&partial_exposition(), "node-7:9090", &regex());
+    let parsed = &result.gpu_info;
     assert_eq!(parsed.len(), 1);
     let gpu = &parsed[0];
     assert_eq!(gpu.temperature_threshold_slowdown, Some(91));
@@ -120,13 +121,14 @@ fn non_nvidia_path_leaves_fields_none() {
     // `None` — i.e. the feature is a complete no-op on non-NVIDIA sources.
     let non_nvidia = concat!(
         "all_smi_gpu_utilization{gpu=\"Apple M2 Pro\", instance=\"mac-1\", \
-         uuid=\"APPLE-0\", index=\"0\"} 20\n",
+         gpu_uuid=\"APPLE-0\", gpu_index=\"0\"} 20\n",
         "all_smi_gpu_temperature_celsius{gpu=\"Apple M2 Pro\", instance=\"mac-1\", \
-         uuid=\"APPLE-0\", index=\"0\"} 55\n",
+         gpu_uuid=\"APPLE-0\", gpu_index=\"0\"} 55\n",
     );
 
     let parser = MetricsParser::new();
-    let (parsed, _, _, _, _, _) = parser.parse_metrics(non_nvidia, "mac-1:9090", &regex());
+    let result = parser.parse_metrics(non_nvidia, "mac-1:9090", &regex());
+    let parsed = &result.gpu_info;
     assert_eq!(parsed.len(), 1);
     let gpu = &parsed[0];
     assert!(gpu.temperature_threshold_slowdown.is_none());
@@ -149,11 +151,12 @@ fn performance_state_omission_means_unavailable() {
     let parser = MetricsParser::new();
     let text = concat!(
         "all_smi_gpu_utilization{gpu=\"NVIDIA A100\", instance=\"node-7\", \
-         uuid=\"GPU-X\", index=\"0\"} 10\n",
+         gpu_uuid=\"GPU-X\", gpu_index=\"0\"} 10\n",
         "all_smi_gpu_temperature_celsius{gpu=\"NVIDIA A100\", instance=\"node-7\", \
-         uuid=\"GPU-X\", index=\"0\"} 50\n",
+         gpu_uuid=\"GPU-X\", gpu_index=\"0\"} 50\n",
     );
-    let (parsed, _, _, _, _, _) = parser.parse_metrics(text, "node-7:9090", &regex());
+    let result = parser.parse_metrics(text, "node-7:9090", &regex());
+    let parsed = &result.gpu_info;
     assert_eq!(parsed.len(), 1);
     assert!(parsed[0].performance_state.is_none());
 }

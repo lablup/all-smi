@@ -419,32 +419,25 @@ impl NetworkClient {
                                     connection_statuses.push(connection_status);
                                 } else {
                                     let parser = super::metrics_parser::MetricsParser::new();
-                                    let (
-                                        gpu_info,
-                                        cpu_info,
-                                        memory_info,
-                                        storage_info,
-                                        vgpu_info,
-                                        mig_info,
-                                    ) = parser.parse_metrics(&text, &host, re);
+                                    let parsed = parser.parse_metrics(&text, &host, re);
 
                                     // Extract the instance name from device info if available
-                                    let instance_name = if let Some(first_gpu) = gpu_info.first() {
+                                    let instance_name = if let Some(first_gpu) = parsed.gpu_info.first() {
                                         Some(first_gpu.instance.clone())
-                                    } else if let Some(first_cpu) = cpu_info.first() {
+                                    } else if let Some(first_cpu) = parsed.cpu_info.first() {
                                         Some(first_cpu.instance.clone())
-                                    } else { memory_info.first().map(|first_memory| first_memory.instance.clone()) };
+                                    } else { parsed.memory_info.first().map(|first_memory| first_memory.instance.clone()) };
 
                                     // Store the instance name as actual_hostname for display purposes
                                     connection_status.actual_hostname = instance_name;
                                     connection_statuses.push(connection_status);
 
-                                    all_gpu_info.extend(gpu_info);
-                                    all_cpu_info.extend(cpu_info);
-                                    all_memory_info.extend(memory_info);
-                                    all_storage_info.extend(storage_info);
-                                    all_vgpu_info.extend(vgpu_info);
-                                    all_mig_info.extend(mig_info);
+                                    all_gpu_info.extend(parsed.gpu_info);
+                                    all_cpu_info.extend(parsed.cpu_info);
+                                    all_memory_info.extend(parsed.memory_info);
+                                    all_storage_info.extend(parsed.storage_info);
+                                    all_vgpu_info.extend(parsed.vgpu_info);
+                                    all_mig_info.extend(parsed.mig_info);
                                 }
                             }
                         }

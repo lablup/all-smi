@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::io::Write;
 
 use crossterm::{queue, style::Color, style::Print};
@@ -64,10 +65,28 @@ impl GpuRenderer {
 /// Used by the layout calculator and the PgUp/PgDn handlers to size the
 /// scrollable GPU area correctly when optional rows are present, since they
 /// can grow rows from 2 to 4 lines apiece.
+#[cfg(test)]
 pub fn gpu_render_line_count(
     gpu: &GpuInfo,
     vgpu_info: &[VgpuHostInfo],
     mig_info: &[MigGpuInfo],
+) -> usize {
+    // Build single-use lookup maps. When called from `max_gpu_lines_over`
+    // for many GPUs, prefer `gpu_render_line_count_with_lookup` instead.
+    let vgpu_lookup = build_vgpu_uuid_lookup(vgpu_info);
+    let mig_lookup = build_mig_uuid_lookup(mig_info);
+    gpu_render_line_count_with_lookup(gpu, vgpu_info, mig_info, &vgpu_lookup, &mig_lookup)
+}
+
+/// Same as [`gpu_render_line_count`] but accepts pre-built UUID lookup maps
+/// so that callers iterating over many GPUs (e.g. `max_gpu_lines_over`) pay
+/// O(V+M) map construction once rather than O(G*(V+M)) linear scans per GPU.
+pub fn gpu_render_line_count_with_lookup(
+    gpu: &GpuInfo,
+    vgpu_info: &[VgpuHostInfo],
+    mig_info: &[MigGpuInfo],
+    vgpu_lookup: &HashMap<&str, usize>,
+    mig_lookup: &HashMap<&str, usize>,
 ) -> usize {
     // Base: info line + gauges line.
     let mut lines: usize = 2;
@@ -90,12 +109,11 @@ pub fn gpu_render_line_count(
         lines += 1;
     }
 
-    // Optional vGPU section: header + one row per instance. The matching
-    // logic must stay in lockstep with `find_matching_vgpu_host` in
-    // `view::frame_renderer`.
-    let matched = vgpu_info
-        .iter()
-        .find(|v| v.gpu_uuid == gpu.uuid)
+    // Optional vGPU section: header + one row per instance. O(1) UUID
+    // lookup with hostname+gpu_name fallback for remote-mode data.
+    let matched = vgpu_lookup
+        .get(gpu.uuid.as_str())
+        .map(|&idx| &vgpu_info[idx])
         .or_else(|| {
             vgpu_info
                 .iter()
@@ -107,12 +125,11 @@ pub fn gpu_render_line_count(
         lines += 1 + host.vgpus.len();
     }
 
-    // Optional MIG section: header + one row per instance. The matching
-    // logic must stay in lockstep with `find_matching_mig_gpu` in
-    // `view::frame_renderer`.
-    let mig_matched = mig_info
-        .iter()
-        .find(|m| m.gpu_uuid == gpu.uuid)
+    // Optional MIG section: header + one row per instance. O(1) UUID
+    // lookup with hostname+gpu_name fallback for remote-mode data.
+    let mig_matched = mig_lookup
+        .get(gpu.uuid.as_str())
+        .map(|&idx| &mig_info[idx])
         .or_else(|| {
             mig_info
                 .iter()
@@ -125,6 +142,26 @@ pub fn gpu_render_line_count(
     }
 
     lines
+}
+
+/// Build a `gpu_uuid -> index` lookup map for vGPU host info. O(V) build
+/// time, O(1) per-GPU lookup.
+pub fn build_vgpu_uuid_lookup(vgpu_info: &[VgpuHostInfo]) -> HashMap<&str, usize> {
+    let mut map = HashMap::with_capacity(vgpu_info.len());
+    for (i, host) in vgpu_info.iter().enumerate() {
+        map.entry(host.gpu_uuid.as_str()).or_insert(i);
+    }
+    map
+}
+
+/// Build a `gpu_uuid -> index` lookup map for MIG GPU info. O(M) build
+/// time, O(1) per-GPU lookup.
+pub fn build_mig_uuid_lookup(mig_info: &[MigGpuInfo]) -> HashMap<&str, usize> {
+    let mut map = HashMap::with_capacity(mig_info.len());
+    for (i, host) in mig_info.iter().enumerate() {
+        map.entry(host.gpu_uuid.as_str()).or_insert(i);
+    }
+    map
 }
 
 /// Helper function to format hostname with scrolling.

@@ -48,25 +48,38 @@ pub fn to_bytes(value: f64, unit: &str) -> Option<u64> {
     }
 }
 
-/// Sanitize a quoted label/value by trimming whitespace and removing surrounding double quotes.
+/// Strip control characters (including ANSI escape sequences like `\x1b[2J`)
+/// from a string. Prevents TUI escape injection when label values from remote
+/// metrics are rendered in terminal output.
+pub fn strip_control_chars(s: &str) -> String {
+    s.chars().filter(|c| !c.is_control()).collect()
+}
+
+/// Sanitize a quoted label/value by trimming whitespace, removing surrounding
+/// double quotes, and stripping control characters to defend against ANSI
+/// escape injection from compromised remote endpoints.
 pub fn sanitize_label_value(s: &str) -> String {
     const MAX_LABEL_VALUE_LENGTH: usize = 1024;
 
     let trimmed = s.trim();
     let cleaned = trimmed.trim_matches('"');
 
+    // Strip control characters before length check so we don't count
+    // characters that will be removed anyway.
+    let stripped = strip_control_chars(cleaned);
+
     // Truncate excessively long values to prevent memory exhaustion.
     // Walk back to a char boundary so UTF-8 input whose byte
     // `[MAX_LABEL_VALUE_LENGTH]` lands in the middle of a multi-byte codepoint
     // does not panic via the slice operation.
-    if cleaned.len() > MAX_LABEL_VALUE_LENGTH {
+    if stripped.len() > MAX_LABEL_VALUE_LENGTH {
         let mut end = MAX_LABEL_VALUE_LENGTH;
-        while !cleaned.is_char_boundary(end) {
+        while !stripped.is_char_boundary(end) {
             end -= 1;
         }
-        cleaned[..end].to_string()
+        stripped[..end].to_string()
     } else {
-        cleaned.to_string()
+        stripped
     }
 }
 
@@ -110,6 +123,26 @@ mod tests {
     fn test_sanitize_label_value() {
         assert_eq!(sanitize_label_value(r#" "hello" "#), "hello".to_string());
         assert_eq!(sanitize_label_value("world"), "world".to_string());
+    }
+
+    #[test]
+    fn test_strip_control_chars() {
+        assert_eq!(strip_control_chars("hello"), "hello");
+        assert_eq!(strip_control_chars(""), "");
+        // ESC (\x1b) is a control char; `[`, `2`, `J` are printable.
+        assert_eq!(strip_control_chars("\x1b[2J"), "[2J");
+        assert_eq!(strip_control_chars("abc\x1b[2Jdef"), "abc[2Jdef");
+        assert_eq!(strip_control_chars("\x00\x07\x0b"), "");
+        // Newlines and carriage returns are control chars too.
+        assert_eq!(strip_control_chars("a\nb\rc"), "abc");
+    }
+
+    #[test]
+    fn test_sanitize_label_value_strips_ansi_escape() {
+        // The ESC byte (\x1b) is removed; the remaining `[2J` is printable.
+        assert_eq!(sanitize_label_value("\x1b[2Jmalicious"), "[2Jmalicious");
+        // Control chars within a quoted value are also stripped.
+        assert_eq!(sanitize_label_value("\"\x1b[2JEvil GPU\""), "[2JEvil GPU");
     }
 
     #[test]

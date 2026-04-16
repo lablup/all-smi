@@ -73,7 +73,7 @@ impl AppleSiliconMockGenerator {
 
         for (i, gpu) in gpus.iter().enumerate() {
             let labels = format!(
-                "gpu=\"{}\", instance=\"{}\", uuid=\"{}\", index=\"{i}\", \
+                "gpu=\"{}\", instance=\"{}\", gpu_uuid=\"{}\", gpu_index=\"{i}\", \
                  lib_name=\"Metal\", lib_version=\"3\"",
                 self.gpu_name, self.instance_name, gpu.uuid
             );
@@ -106,7 +106,7 @@ impl AppleSiliconMockGenerator {
 
             for (i, gpu) in gpus.iter().enumerate() {
                 let labels = format!(
-                    "gpu=\"{}\", instance=\"{}\", uuid=\"{}\", index=\"{i}\"",
+                    "gpu=\"{}\", instance=\"{}\", gpu_uuid=\"{}\", gpu_index=\"{i}\"",
                     self.gpu_name, self.instance_name, gpu.uuid
                 );
 
@@ -132,7 +132,7 @@ impl AppleSiliconMockGenerator {
 
         for (i, gpu) in gpus.iter().enumerate() {
             let labels = format!(
-                "gpu=\"{}\", instance=\"{}\", uuid=\"{}\", index=\"{i}\"",
+                "gpu=\"{}\", instance=\"{}\", gpu_uuid=\"{}\", gpu_index=\"{i}\"",
                 self.gpu_name, self.instance_name, gpu.uuid
             );
             template.push_str(&format!(
@@ -146,7 +146,7 @@ impl AppleSiliconMockGenerator {
 
         for (i, gpu) in gpus.iter().enumerate() {
             let labels = format!(
-                "gpu=\"{}\", instance=\"{}\", uuid=\"{}\", index=\"{i}\"",
+                "gpu=\"{}\", instance=\"{}\", gpu_uuid=\"{}\", gpu_index=\"{i}\"",
                 self.gpu_name, self.instance_name, gpu.uuid
             );
             template.push_str(&format!(
@@ -160,7 +160,7 @@ impl AppleSiliconMockGenerator {
 
         for (i, gpu) in gpus.iter().enumerate() {
             let labels = format!(
-                "gpu=\"{}\", instance=\"{}\", uuid=\"{}\", index=\"{i}\"",
+                "gpu=\"{}\", instance=\"{}\", gpu_uuid=\"{}\", gpu_index=\"{i}\"",
                 self.gpu_name, self.instance_name, gpu.uuid
             );
             template.push_str(&format!(
@@ -176,7 +176,7 @@ impl AppleSiliconMockGenerator {
 
         for (i, gpu) in gpus.iter().enumerate() {
             let labels = format!(
-                "gpu=\"{}\", instance=\"{}\", uuid=\"{}\", index=\"{i}\", level=\"{{{{THERMAL_LEVEL_{i}}}}}\"",
+                "gpu=\"{}\", instance=\"{}\", gpu_uuid=\"{}\", gpu_index=\"{i}\", level=\"{{{{THERMAL_LEVEL_{i}}}}}\"",
                 self.gpu_name, self.instance_name, gpu.uuid
             );
             template.push_str(&format!(

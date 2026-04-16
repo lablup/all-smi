@@ -23,7 +23,7 @@
 //! * `all_smi_vgpu_scheduler_state` (gauge): scheduler ARR mode (0=unsup,1=off,2=ARR).
 //! * `all_smi_vgpu_scheduler_policy` (gauge): scheduler policy id.
 //! * `all_smi_vgpu_host_mode` (gauge): 0=NonSriov, 1=Sriov, 2=Disabled.
-//! * `all_smi_vgpu_host_info` (gauge): label-only info row per host GPU.
+//! * `all_smi_vgpu_host_mode` (gauge): label-only info row per host GPU.
 //!
 //! All metrics carry the labels `gpu_index`, `gpu_uuid`, `instance`, and for
 //! per-instance metrics also `vgpu_id`, `vgpu_uuid`, and `vgpu_type`.

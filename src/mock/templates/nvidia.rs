@@ -130,7 +130,7 @@ impl NvidiaMockGenerator {
             template.push_str(&format!("# TYPE {metric_name} gauge\n"));
             for (i, gpu) in gpus.iter().enumerate() {
                 let labels = format!(
-                    "gpu=\"{}\", instance=\"{}\", uuid=\"{}\", index=\"{i}\"",
+                    "gpu=\"{}\", instance=\"{}\", gpu_uuid=\"{}\", gpu_index=\"{i}\"",
                     self.gpu_name, self.instance_name, gpu.uuid
                 );
                 template.push_str(&format!("{metric_name}{{{labels}}} {value}\n"));
@@ -147,7 +147,7 @@ impl NvidiaMockGenerator {
         template.push_str("# TYPE all_smi_gpu_performance_state gauge\n");
         for (i, gpu) in gpus.iter().enumerate() {
             let labels = format!(
-                "gpu=\"{}\", instance=\"{}\", uuid=\"{}\", index=\"{i}\"",
+                "gpu=\"{}\", instance=\"{}\", gpu_uuid=\"{}\", gpu_index=\"{i}\"",
                 self.gpu_name, self.instance_name, gpu.uuid
             );
             template.push_str(&format!(
@@ -182,7 +182,7 @@ impl NvidiaMockGenerator {
         for (i, gpu) in gpus.iter().enumerate() {
             let numa = (i as u32) % 2;
             let labels = format!(
-                "gpu=\"{}\", instance=\"{}\", uuid=\"{}\", index=\"{i}\"",
+                "gpu=\"{}\", instance=\"{}\", gpu_uuid=\"{}\", gpu_index=\"{i}\"",
                 self.gpu_name, self.instance_name, gpu.uuid
             );
             template.push_str(&format!("all_smi_gpu_numa_node_id{{{labels}}} {numa}\n"));
@@ -196,7 +196,7 @@ impl NvidiaMockGenerator {
         template.push_str("# TYPE all_smi_gpu_gsp_firmware_mode gauge\n");
         for (i, gpu) in gpus.iter().enumerate() {
             let labels = format!(
-                "gpu=\"{}\", instance=\"{}\", uuid=\"{}\", index=\"{i}\"",
+                "gpu=\"{}\", instance=\"{}\", gpu_uuid=\"{}\", gpu_index=\"{i}\"",
                 self.gpu_name, self.instance_name, gpu.uuid
             );
             template.push_str(&format!(
@@ -212,7 +212,7 @@ impl NvidiaMockGenerator {
         template.push_str("# TYPE all_smi_gpu_gsp_firmware_version_info gauge\n");
         for (i, gpu) in gpus.iter().enumerate() {
             let labels = format!(
-                "gpu=\"{}\", instance=\"{}\", uuid=\"{}\", index=\"{i}\", version=\"{GSP_VERSION}\"",
+                "gpu=\"{}\", instance=\"{}\", gpu_uuid=\"{}\", gpu_index=\"{i}\", version=\"{GSP_VERSION}\"",
                 self.gpu_name, self.instance_name, gpu.uuid
             );
             template.push_str(&format!(
@@ -236,7 +236,7 @@ impl NvidiaMockGenerator {
                     "gpu"
                 };
                 let labels = format!(
-                    "gpu=\"{}\", instance=\"{}\", uuid=\"{}\", index=\"{i}\", link_index=\"{link}\", remote_type=\"{remote_type}\"",
+                    "gpu=\"{}\", instance=\"{}\", gpu_uuid=\"{}\", gpu_index=\"{i}\", link_index=\"{link}\", remote_type=\"{remote_type}\"",
                     self.gpu_name, self.instance_name, gpu.uuid
                 );
                 template.push_str(&format!(
@@ -254,7 +254,7 @@ impl NvidiaMockGenerator {
         template.push_str("# TYPE all_smi_gpu_sm_occupancy gauge\n");
         for (i, gpu) in gpus.iter().enumerate() {
             let labels = format!(
-                "gpu=\"{}\", instance=\"{}\", uuid=\"{}\", index=\"{i}\"",
+                "gpu=\"{}\", instance=\"{}\", gpu_uuid=\"{}\", gpu_index=\"{i}\"",
                 self.gpu_name, self.instance_name, gpu.uuid
             );
             template.push_str(&format!(
@@ -269,7 +269,7 @@ impl NvidiaMockGenerator {
         template.push_str("# TYPE all_smi_gpu_memory_bandwidth_utilization gauge\n");
         for (i, gpu) in gpus.iter().enumerate() {
             let labels = format!(
-                "gpu=\"{}\", instance=\"{}\", uuid=\"{}\", index=\"{i}\"",
+                "gpu=\"{}\", instance=\"{}\", gpu_uuid=\"{}\", gpu_index=\"{i}\"",
                 self.gpu_name, self.instance_name, gpu.uuid
             );
             template.push_str(&format!(
@@ -303,7 +303,7 @@ impl NvidiaMockGenerator {
 
             for (i, gpu) in gpus.iter().enumerate() {
                 let labels = format!(
-                    "gpu=\"{}\", instance=\"{}\", uuid=\"{}\", index=\"{i}\"",
+                    "gpu=\"{}\", instance=\"{}\", gpu_uuid=\"{}\", gpu_index=\"{i}\"",
                     self.gpu_name, self.instance_name, gpu.uuid
                 );
 
@@ -333,7 +333,7 @@ impl NvidiaMockGenerator {
 
         for (i, gpu) in gpus.iter().enumerate() {
             let labels = format!(
-                "gpu=\"{}\", instance=\"{}\", uuid=\"{}\", index=\"{i}\", \
+                "gpu=\"{}\", instance=\"{}\", gpu_uuid=\"{}\", gpu_index=\"{i}\", \
                  driver_version=\"{DEFAULT_NVIDIA_DRIVER_VERSION}\", cuda_version=\"{DEFAULT_CUDA_VERSION}\", \
                  lib_name=\"CUDA\", lib_version=\"{DEFAULT_CUDA_VERSION}\"",
                 self.gpu_name, self.instance_name, gpu.uuid
@@ -348,7 +348,7 @@ impl NvidiaMockGenerator {
 
         for (i, gpu) in gpus.iter().enumerate() {
             let labels = format!(
-                "gpu=\"{}\", instance=\"{}\", uuid=\"{}\", index=\"{i}\"",
+                "gpu=\"{}\", instance=\"{}\", gpu_uuid=\"{}\", gpu_index=\"{i}\"",
                 self.gpu_name, self.instance_name, gpu.uuid
             );
             template.push_str(&format!(
@@ -364,7 +364,7 @@ impl NvidiaMockGenerator {
 
         for (i, gpu) in gpus.iter().enumerate() {
             let labels = format!(
-                "gpu=\"{}\", instance=\"{}\", uuid=\"{}\", index=\"{i}\"",
+                "gpu=\"{}\", instance=\"{}\", gpu_uuid=\"{}\", gpu_index=\"{i}\"",
                 self.gpu_name, self.instance_name, gpu.uuid
             );
             template.push_str(&format!(

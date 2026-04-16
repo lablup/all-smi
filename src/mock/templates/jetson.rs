@@ -64,7 +64,7 @@ impl JetsonMockGenerator {
 
         for (i, gpu) in gpus.iter().enumerate() {
             let labels = format!(
-                "gpu=\"{}\", instance=\"{}\", uuid=\"{}\", index=\"{i}\", \
+                "gpu=\"{}\", instance=\"{}\", gpu_uuid=\"{}\", gpu_index=\"{i}\", \
                  cuda_version=\"{DEFAULT_CUDA_VERSION}\", \
                  lib_name=\"CUDA\", lib_version=\"{DEFAULT_CUDA_VERSION}\"",
                 self.gpu_name, self.instance_name, gpu.uuid
@@ -122,7 +122,7 @@ impl JetsonMockGenerator {
             for dla_idx in 0..2 {
                 // Jetson has 2 DLA cores
                 let labels = format!(
-                    "gpu=\"{}\", instance=\"{}\", uuid=\"{}\", index=\"{i}\", dla=\"{dla_idx}\"",
+                    "gpu=\"{}\", instance=\"{}\", gpu_uuid=\"{}\", gpu_index=\"{i}\", dla=\"{dla_idx}\"",
                     self.gpu_name, self.instance_name, gpu.uuid
                 );
                 template.push_str(&format!(
@@ -138,7 +138,7 @@ impl JetsonMockGenerator {
         for (i, gpu) in gpus.iter().enumerate() {
             for dla_idx in 0..2 {
                 let labels = format!(
-                    "gpu=\"{}\", instance=\"{}\", uuid=\"{}\", index=\"{i}\", dla=\"{dla_idx}\"",
+                    "gpu=\"{}\", instance=\"{}\", gpu_uuid=\"{}\", gpu_index=\"{i}\", dla=\"{dla_idx}\"",
                     self.gpu_name, self.instance_name, gpu.uuid
                 );
                 template.push_str(&format!(

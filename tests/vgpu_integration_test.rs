@@ -72,6 +72,13 @@ fn exported_metrics_text() -> String {
         "instance=\"node-42\", host=\"node-42\", vgpu_id=\"10\", vgpu_uuid=\"GRID-10\", ",
         "vgpu_type=\"GRID A100-8C\"} 8589934592\n"
     ));
+    out.push_str("# HELP all_smi_vgpu_memory_utilization\n");
+    out.push_str("# TYPE all_smi_vgpu_memory_utilization gauge\n");
+    out.push_str(concat!(
+        "all_smi_vgpu_memory_utilization{gpu_index=\"3\", gpu_uuid=\"GPU-A\", gpu=\"NVIDIA A100\", ",
+        "instance=\"node-42\", host=\"node-42\", vgpu_id=\"10\", vgpu_uuid=\"GRID-10\", ",
+        "vgpu_type=\"GRID A100-8C\"} 45\n"
+    ));
     out.push_str("# HELP all_smi_vgpu_active\n");
     out.push_str("# TYPE all_smi_vgpu_active gauge\n");
     out.push_str(concat!(
@@ -87,8 +94,8 @@ fn vgpu_metrics_parser_roundtrip_preserves_all_fields() {
     use all_smi::network::metrics_parser::MetricsParser;
 
     let parser = MetricsParser::new();
-    let (_gpu, _cpu, _mem, _store, parsed, _mig) =
-        parser.parse_metrics(&exported_metrics_text(), "127.0.0.1:9090", &regex());
+    let result = parser.parse_metrics(&exported_metrics_text(), "127.0.0.1:9090", &regex());
+    let parsed = &result.vgpu_info;
 
     assert_eq!(parsed.len(), 1, "expected one host record");
     let got = &parsed[0];
@@ -110,6 +117,7 @@ fn vgpu_metrics_parser_roundtrip_preserves_all_fields() {
     // render the same `vm=` column as local mode.
     assert_eq!(inst.vm_id, "vm-node-01");
     assert_eq!(inst.gpu_utilization, Some(64));
+    assert_eq!(inst.memory_utilization, Some(45));
     assert_eq!(inst.fb_used_bytes, 3 * (1 << 30));
     assert_eq!(inst.fb_total_bytes, 8 * (1 << 30));
     assert!(inst.is_active);
@@ -125,7 +133,9 @@ fn vgpu_parser_is_empty_on_bare_metal_metrics() {
         "all_smi_cpu_utilization{cpu_model=\"AMD\", instance=\"x\", hostname=\"x\", index=\"0\"} 20\n",
     );
 
-    let (gpu, _cpu, _mem, _storage, parsed, _mig) = parser.parse_metrics(non_vgpu, "x", &regex());
+    let result = parser.parse_metrics(non_vgpu, "x", &regex());
+    let gpu = &result.gpu_info;
+    let parsed = &result.vgpu_info;
     assert_eq!(gpu.len(), 1, "sanity: GPU row still parsed");
     assert!(
         parsed.is_empty(),
