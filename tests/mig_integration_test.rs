@@ -92,8 +92,7 @@ fn mig_metrics_parser_roundtrip_preserves_all_fields() {
     use all_smi::network::metrics_parser::MetricsParser;
 
     let parser = MetricsParser::new();
-    let result =
-        parser.parse_metrics(&exported_metrics_text(), "127.0.0.1:9090", &regex());
+    let result = parser.parse_metrics(&exported_metrics_text(), "127.0.0.1:9090", &regex());
     let parsed = &result.mig_info;
 
     assert_eq!(parsed.len(), 1, "expected one host record");
@@ -152,8 +151,7 @@ fn mig_disabled_parent_roundtrips_as_visible_row_with_mode_zero() {
 
     // Parser side: the disabled row must survive the retain filter.
     let parser = MetricsParser::new();
-    let result =
-        parser.parse_metrics(&text, "127.0.0.1:9090", &regex());
+    let result = parser.parse_metrics(&text, "127.0.0.1:9090", &regex());
     let parsed = &result.mig_info;
     assert_eq!(parsed.len(), 1, "disabled MIG row must be retained");
     assert_eq!(parsed[0].gpu_uuid, "GPU-OFF");
@@ -202,8 +200,7 @@ fn mig_parser_attaches_multiple_instances_to_same_host() {
     }
 
     let parser = MetricsParser::new();
-    let result =
-        parser.parse_metrics(&text, "node-9:9090", &regex());
+    let result = parser.parse_metrics(&text, "node-9:9090", &regex());
     let parsed = &result.mig_info;
     assert_eq!(parsed.len(), 1);
     assert_eq!(parsed[0].instances.len(), 7);

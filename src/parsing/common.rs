@@ -129,20 +129,20 @@ mod tests {
     fn test_strip_control_chars() {
         assert_eq!(strip_control_chars("hello"), "hello");
         assert_eq!(strip_control_chars(""), "");
-        assert_eq!(strip_control_chars("\x1b[2J"), "");
+        // ESC (\x1b) is a control char; `[`, `2`, `J` are printable.
+        assert_eq!(strip_control_chars("\x1b[2J"), "[2J");
         assert_eq!(strip_control_chars("abc\x1b[2Jdef"), "abc[2Jdef");
         assert_eq!(strip_control_chars("\x00\x07\x0b"), "");
+        // Newlines and carriage returns are control chars too.
+        assert_eq!(strip_control_chars("a\nb\rc"), "abc");
     }
 
     #[test]
     fn test_sanitize_label_value_strips_ansi_escape() {
-        // A clear-screen ANSI escape sequence must be stripped entirely.
+        // The ESC byte (\x1b) is removed; the remaining `[2J` is printable.
         assert_eq!(sanitize_label_value("\x1b[2Jmalicious"), "[2Jmalicious");
         // Control chars within a quoted value are also stripped.
-        assert_eq!(
-            sanitize_label_value("\"\x1b[2JEvil GPU\""),
-            "[2JEvil GPU"
-        );
+        assert_eq!(sanitize_label_value("\"\x1b[2JEvil GPU\""), "[2JEvil GPU");
     }
 
     #[test]

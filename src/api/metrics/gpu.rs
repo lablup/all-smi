@@ -414,9 +414,7 @@ impl<'a> GpuMetricExporter<'a> {
             .iter()
             .enumerate()
             .filter(|(_, info)| {
-                info.device_type == "GPU"
-                    || info.device_type == "NPU"
-                    || info.device_type == "TPU"
+                info.device_type == "GPU" || info.device_type == "NPU" || info.device_type == "TPU"
             })
             .map(|(idx, gpu)| GpuRow {
                 gpu,

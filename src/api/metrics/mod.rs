@@ -162,10 +162,7 @@ mod tests {
         let output = builder.build();
         // The ESC control character is stripped; only the printable part of
         // the escape sequence remains.
-        assert!(
-            !output.contains('\x1b'),
-            "control char leaked: {output}"
-        );
+        assert!(!output.contains('\x1b'), "control char leaked: {output}");
         assert!(output.contains("NVIDIA[2JEvil"));
     }
 

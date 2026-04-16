@@ -295,9 +295,7 @@ impl FrameRenderer {
             // If this GPU is vGPU-enabled, render the nested section directly
             // beneath the GPU row. O(1) UUID lookup with hostname+gpu-name
             // fallback for remote-mode data without UUID.
-            if let Some(vgpu_host) =
-                lookup_vgpu_host(&vgpu_lookup, &snapshot.vgpu_info, gpu_info)
-            {
+            if let Some(vgpu_host) = lookup_vgpu_host(&vgpu_lookup, &snapshot.vgpu_info, gpu_info) {
                 print_vgpu_section(buffer, vgpu_host, cols as usize);
             }
 

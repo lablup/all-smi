@@ -44,12 +44,7 @@ impl MetricsParser {
         Self
     }
 
-    pub fn parse_metrics(
-        &self,
-        text: &str,
-        host: &str,
-        re: &Regex,
-    ) -> ParsedMetrics {
+    pub fn parse_metrics(&self, text: &str, host: &str, re: &Regex) -> ParsedMetrics {
         // Limit the maximum size of HashMaps to prevent memory exhaustion
         const MAX_DEVICES_PER_TYPE: usize = 256;
         const MAX_TEXT_SIZE: usize = 10_485_760; // 10MB max input
@@ -1544,14 +1539,19 @@ all_smi_disk_available_bytes{instance="node-0058", mount_point="/home", index="1
 
         assert_eq!(parsed.storage_info.len(), 2);
 
-        let root_storage = parsed.storage_info.iter().find(|s| s.mount_point == "/").unwrap();
+        let root_storage = parsed
+            .storage_info
+            .iter()
+            .find(|s| s.mount_point == "/")
+            .unwrap();
         assert_eq!(root_storage.host_id, host);
         assert_eq!(root_storage.hostname, "node-0058");
         assert_eq!(root_storage.total_bytes, 4398046511104);
         assert_eq!(root_storage.available_bytes, 891915494941);
         assert_eq!(root_storage.index, 0);
 
-        let home_storage = parsed.storage_info
+        let home_storage = parsed
+            .storage_info
             .iter()
             .find(|s| s.mount_point == "/home")
             .unwrap();
@@ -1908,7 +1908,11 @@ all_smi_cpu_utilization{cpu_model="AMD", instance="node1", hostname="node1", ind
             ));
         }
         let parsed = parser.parse_metrics(&text, host, &re);
-        assert_eq!(parsed.vgpu_info.len(), MAX_VGPU_HOSTS, "host count must not exceed cap");
+        assert_eq!(
+            parsed.vgpu_info.len(),
+            MAX_VGPU_HOSTS,
+            "host count must not exceed cap"
+        );
     }
 
     #[test]
@@ -2081,7 +2085,11 @@ all_smi_gpu_mig_mode{gpu_index="0", gpu_uuid="GPU-X", gpu="NVIDIA A100", instanc
             ));
         }
         let parsed = parser.parse_metrics(&text, host, &re);
-        assert_eq!(parsed.mig_info.len(), MAX_MIG_GPUS, "host count must not exceed cap");
+        assert_eq!(
+            parsed.mig_info.len(),
+            MAX_MIG_GPUS,
+            "host count must not exceed cap"
+        );
     }
 
     #[test]
@@ -2152,7 +2160,11 @@ all_smi_mig_instance_utilization_gpu{gpu_index="0", gpu_uuid="GPU-A", gpu="NVIDI
         assert_eq!(parsed.mig_info.len(), 1);
         assert_eq!(parsed.mig_info[0].instances.len(), 1);
         assert!(parsed.mig_info[0].instances[0].gpu_instance_id.is_none());
-        assert!(parsed.mig_info[0].instances[0].compute_instance_id.is_none());
+        assert!(
+            parsed.mig_info[0].instances[0]
+                .compute_instance_id
+                .is_none()
+        );
     }
 
     #[test]
@@ -2171,7 +2183,11 @@ all_smi_mig_instance_utilization_gpu{gpu_index="0", gpu_uuid="GPU-A", gpu="NVIDI
 all_smi_mig_instance_utilization_gpu{gpu_index="0", gpu_uuid="GPU-G", gpu="NVIDIA A100", instance="node1", host="node1", mig_instance="0", mig_uuid="MIG-G1", mig_profile="1g.5gb", gpu_instance_id="7", compute_instance_id="0"} 42
 "#;
         let parsed = parser.parse_metrics(text, host, &re);
-        assert_eq!(parsed.mig_info.len(), 1, "host must survive via instance presence");
+        assert_eq!(
+            parsed.mig_info.len(),
+            1,
+            "host must survive via instance presence"
+        );
         assert!(
             parsed.mig_info[0].mig_mode,
             "mig_mode must be inferred as true when instances are present"

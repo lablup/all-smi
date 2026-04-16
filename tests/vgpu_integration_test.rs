@@ -94,8 +94,7 @@ fn vgpu_metrics_parser_roundtrip_preserves_all_fields() {
     use all_smi::network::metrics_parser::MetricsParser;
 
     let parser = MetricsParser::new();
-    let result =
-        parser.parse_metrics(&exported_metrics_text(), "127.0.0.1:9090", &regex());
+    let result = parser.parse_metrics(&exported_metrics_text(), "127.0.0.1:9090", &regex());
     let parsed = &result.vgpu_info;
 
     assert_eq!(parsed.len(), 1, "expected one host record");
