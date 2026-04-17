@@ -14,6 +14,22 @@
 
 //! Shared rendering utilities used across multiple renderer modules.
 
+/// Indentation applied to per-instance rows nested under a GPU line (vGPU
+/// instances, MIG instances, and the thermal/P-state / hardware-details
+/// secondary rows in the GPU renderer).
+///
+/// Six spaces were chosen because two of the three affected renderers
+/// (vGPU and MIG) already used that width, and it provides a visually
+/// clear nesting depth beneath the parent GPU row.
+pub(crate) const SUB_ITEM_INDENT: &str = "      ";
+
+/// Indentation applied to section-header lines (e.g. "vGPU host:" and
+/// "MIG host:") that introduce a nested block beneath a parent GPU row.
+///
+/// Two spaces keep the header tight to the left edge while still
+/// signalling that it belongs to the GPU row above it.
+pub(crate) const SECTION_HEADER_INDENT: &str = "  ";
+
 /// Truncate a display string on char boundaries to the given max char count.
 /// Appends a single ellipsis character (`…`, U+2026) when truncation occurred.
 ///

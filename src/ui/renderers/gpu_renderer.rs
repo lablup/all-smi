@@ -21,6 +21,7 @@ use crate::device::GpuInfo;
 use crate::device::MigGpuInfo;
 use crate::device::VgpuHostInfo;
 use crate::device::types::{NvLinkRemoteType, ThermalProximity, ThermalProximityConfig};
+use crate::ui::renderers::utils::SUB_ITEM_INDENT;
 use crate::ui::text::print_colored_text;
 use crate::ui::widgets::draw_bar;
 
@@ -514,8 +515,8 @@ fn render_thermal_pstate_row<W: Write>(stdout: &mut W, info: &GpuInfo) {
         return;
     }
 
-    // 5-char indent aligns with the gauge row below.
-    print_colored_text(stdout, "     ", Color::White, None, None);
+    // Indent aligns with the gauge row below.
+    print_colored_text(stdout, SUB_ITEM_INDENT, Color::White, None, None);
 
     let proximity = info.thermal_proximity(ThermalProximityConfig::default());
     let warn_color = match proximity {
@@ -629,8 +630,8 @@ fn render_hardware_details_row<W: Write>(stdout: &mut W, info: &GpuInfo) {
         return;
     }
 
-    // 5-char indent aligns with the other secondary rows.
-    print_colored_text(stdout, "     ", Color::White, None, None);
+    // Indent aligns with the other secondary rows.
+    print_colored_text(stdout, SUB_ITEM_INDENT, Color::White, None, None);
     print_colored_text(stdout, "HW", Color::DarkMagenta, None, None);
 
     if let Some(numa) = info.numa_node_id {
@@ -941,9 +942,9 @@ mod tests {
     #[test]
     fn render_pstate_only_has_no_double_leading_space() {
         // When only performance_state is populated the row must not start
-        // with two consecutive spaces. The indent ("     ") is always
-        // emitted, but no extra separator space should precede the first
-        // field on the row.
+        // with two consecutive spaces. SUB_ITEM_INDENT is always emitted,
+        // but no extra separator space should precede the first field on
+        // the row.
         let mut gpu = make_gpu(50);
         gpu.temperature_threshold_slowdown = None;
         gpu.temperature_threshold_shutdown = None;
