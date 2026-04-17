@@ -331,7 +331,7 @@ http://gpu-node3:9090
   - Background metric updates with realistic variations
   - Set `ALL_SMI_MOCK_VGPU=1` to simulate NVIDIA vGPU SR-IOV data without real vGPU hardware
   - Set `ALL_SMI_MOCK_MIG=1` to simulate NVIDIA MIG (Multi-Instance GPU) data without MIG hardware
-  - NVIDIA hardware details (NUMA, GSP firmware, NvLink) are always included in mock responses
+  - Set `ALL_SMI_MOCK_HARDWARE_DETAILS=1` to include extended NVIDIA hardware detail metrics (NUMA node ID, GSP firmware mode/version, NvLink remote endpoint types, GPM SM occupancy/memory bandwidth utilization, thermal thresholds, P-state); omitted by default to simulate older drivers that do not expose these APIs
 - **Performance Optimized:**
   - Template-based response generation
   - Efficient memory management
