@@ -18,6 +18,7 @@ pub mod gpu_renderer;
 pub mod memory_renderer;
 pub mod mig_renderer;
 pub mod storage_renderer;
+pub(crate) mod utils;
 pub mod vgpu_renderer;
 pub mod widgets;
 

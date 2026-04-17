@@ -23,6 +23,7 @@ use std::io::Write;
 use crossterm::{queue, style::Color, style::Print};
 
 use crate::device::VgpuHostInfo;
+use crate::ui::renderers::utils::truncate_str;
 use crate::ui::text::print_colored_text;
 
 /// Render a compact vGPU sub-section beneath a physical GPU row.
@@ -141,17 +142,6 @@ fn arr_label(arr_mode: u32) -> &'static str {
         2 => "on",
         _ => "?",
     }
-}
-
-/// Truncate a display string on char boundaries to the given max char count.
-/// Appends an ellipsis when truncation actually occurred.
-fn truncate_str(s: &str, max_chars: usize) -> String {
-    if s.chars().count() <= max_chars {
-        return s.to_string();
-    }
-    let mut out: String = s.chars().take(max_chars.saturating_sub(1)).collect();
-    out.push('…');
-    out
 }
 
 #[cfg(test)]
@@ -273,18 +263,5 @@ mod tests {
         assert_eq!(arr_label(1), "off");
         assert_eq!(arr_label(2), "on");
         assert_eq!(arr_label(99), "?");
-    }
-
-    #[test]
-    fn truncate_str_preserves_short_strings() {
-        assert_eq!(truncate_str("abc", 10), "abc");
-        assert_eq!(truncate_str("abcdefghij", 10), "abcdefghij");
-    }
-
-    #[test]
-    fn truncate_str_trims_and_appends_ellipsis() {
-        let out = truncate_str("abcdefghij", 5);
-        assert_eq!(out.chars().count(), 5);
-        assert!(out.ends_with('…'));
     }
 }
