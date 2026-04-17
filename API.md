@@ -153,6 +153,7 @@ Extended NVIDIA hardware detail metrics (NUMA topology, GSP firmware, NvLink top
 - `all_smi_gpu_gsp_firmware_version_info`: the `version` label carries a string such as `"550.54.15"`. Because the version is static for the lifetime of the driver, it is cached after the first successful NVML call.
 - `all_smi_nvlink_remote_device_type`: one metric row is emitted per active NvLink. A GPU with no active links produces no rows for this metric family.
 - `all_smi_gpu_sm_occupancy` and `all_smi_gpu_memory_bandwidth_utilization`: GPM requires a two-sample handshake before values are available. Until the handshake completes the exporter holds `None` for both fields and emits nothing, preventing spurious zero readings. These metrics are currently plumbing only — values are populated on Hopper and later hardware when the GPM handshake succeeds.
+- To simulate the full set of extended hardware detail metrics (including the thermal thresholds and `performance_state` listed in the NVIDIA GPU Specific Metrics table above) in development/testing without a modern NVIDIA driver, set `ALL_SMI_MOCK_HARDWARE_DETAILS=1` when running with the `mock` feature. When unset, the mock omits these families to simulate an older driver that does not expose the underlying NVML APIs.
 
 ### NVIDIA vGPU Metrics
 
@@ -1022,3 +1023,8 @@ Higher update rates provide more real-time data but increase system load. For pr
     - TUI renders MIG instances as nested rows under each parent GPU, matched by UUID with hostname+GPU-name fallback
     - Completely silent on non-MIG hosts — no empty metric families are emitted
     - Set `ALL_SMI_MOCK_MIG=1` (with `--features mock` build) to simulate MIG data for development
+14. NVIDIA extended hardware detail metrics include:
+    - NUMA topology (`all_smi_gpu_numa_node_id`), GSP firmware mode/version, NvLink remote endpoint classification, and GPM SM occupancy / memory bandwidth utilization
+    - Thermal thresholds (`all_smi_gpu_temperature_threshold_{slowdown,shutdown,max_operating,acoustic}_celsius`) and the canonical `all_smi_gpu_performance_state` gauge
+    - Emitted only when the driver exposes the underlying NVML APIs; older drivers silently omit these metrics
+    - Set `ALL_SMI_MOCK_HARDWARE_DETAILS=1` (with `--features mock` build) to have the mock emit the full extended hardware-detail set; when unset, the mock simulates an older driver

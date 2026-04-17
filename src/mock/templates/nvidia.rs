@@ -734,36 +734,88 @@ mod tests {
         }
     }
 
-    // Helper: set HARDWARE_DETAILS_ENV_VAR for the duration of a closure, then
-    // restore the prior value. Uses unsafe env mutation the same way the vGPU
-    // and MIG test helpers do.
-    fn with_hardware_details_enabled<F: FnOnce()>(f: F) {
-        let prior = std::env::var(HARDWARE_DETAILS_ENV_VAR).ok();
-        // SAFETY: this helper is called from single-threaded test functions
-        // that do not spawn additional threads. Env mutation is restored before
-        // returning, matching the pattern used by is_vgpu_enabled_reflects_env_var
-        // and is_mig_enabled_reflects_env_var in the sibling mock modules.
-        unsafe {
-            std::env::set_var(HARDWARE_DETAILS_ENV_VAR, "1");
+    // Process-global mutex that serialises every test in this module which
+    // reads or writes `HARDWARE_DETAILS_ENV_VAR`. `cargo test` runs tests in
+    // parallel threads inside a single process, and `std::env::set_var` /
+    // `remove_var` mutate shared process state — without this mutex, sibling
+    // tests race each other and observe arbitrary intermediate values. Unlike
+    // the sibling vgpu/mig modules (which have only a single env-mutating test
+    // each), this module has many, so a serialisation primitive is required.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// RAII guard that acquires the module-wide env lock, snapshots the prior
+    /// `HARDWARE_DETAILS_ENV_VAR` value, and restores it on drop. The lock is
+    /// held for the entire lifetime of the guard so other env-mutating tests
+    /// cannot run concurrently. Poisoned locks are recovered from so a
+    /// previously panicking test does not block subsequent tests.
+    ///
+    /// Restoration on `Drop` is what gives the helper panic safety: if the
+    /// test body panics partway through, unwinding still runs `Drop` and the
+    /// env var is returned to its prior state before other tests run.
+    struct EnvVarGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        prior: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        /// Acquire the lock and snapshot the current env value. Does not
+        /// mutate the env; call `set` / `remove` on the returned guard to
+        /// change it.
+        fn new() -> Self {
+            let lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+            let prior = std::env::var(HARDWARE_DETAILS_ENV_VAR).ok();
+            Self { _lock: lock, prior }
         }
-        f();
-        unsafe {
-            match prior {
-                Some(v) => std::env::set_var(HARDWARE_DETAILS_ENV_VAR, v),
-                None => std::env::remove_var(HARDWARE_DETAILS_ENV_VAR),
+
+        fn set(&self, value: &str) {
+            // SAFETY: `_lock` serialises all env mutations in this module,
+            // so no other thread in the test binary mutates or reads
+            // HARDWARE_DETAILS_ENV_VAR while this guard is live.
+            unsafe {
+                std::env::set_var(HARDWARE_DETAILS_ENV_VAR, value);
             }
         }
+
+        fn remove(&self) {
+            // SAFETY: see `set`.
+            unsafe {
+                std::env::remove_var(HARDWARE_DETAILS_ENV_VAR);
+            }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            // SAFETY: `_lock` is still held for the duration of this method.
+            unsafe {
+                match &self.prior {
+                    Some(v) => std::env::set_var(HARDWARE_DETAILS_ENV_VAR, v),
+                    None => std::env::remove_var(HARDWARE_DETAILS_ENV_VAR),
+                }
+            }
+        }
+    }
+
+    // Helper: enable HARDWARE_DETAILS_ENV_VAR for the duration of a closure.
+    // The returned guard restores the prior value on drop, including when the
+    // closure panics, and holds the module-wide env lock so sibling tests
+    // cannot concurrently mutate or read the same variable.
+    fn with_hardware_details_enabled<F: FnOnce()>(f: F) {
+        let guard = EnvVarGuard::new();
+        guard.set("1");
+        f();
+        // `guard` dropped here restores the prior value under the lock.
     }
 
     // --- default (env var unset) behaviour ---
 
     #[test]
     fn mock_template_omits_hardware_details_by_default() {
-        // Ensure the env var is absent for this test.
-        let prior = std::env::var(HARDWARE_DETAILS_ENV_VAR).ok();
-        unsafe {
-            std::env::remove_var(HARDWARE_DETAILS_ENV_VAR);
-        }
+        // `EnvVarGuard` holds the module-wide env lock and restores the prior
+        // value on drop (including on panic), so sibling tests cannot set the
+        // env var while this test is asserting its default-off behaviour.
+        let guard = EnvVarGuard::new();
+        guard.remove();
 
         let gen_ = NvidiaMockGenerator::new(None, "mock-node".to_string());
         let gpus = make_gpu_metrics();
@@ -795,45 +847,27 @@ mod tests {
             tpl.contains("all_smi_gpu_utilization{"),
             "basic GPU metric absent"
         );
-
-        // Restore prior state.
-        unsafe {
-            match prior {
-                Some(v) => std::env::set_var(HARDWARE_DETAILS_ENV_VAR, v),
-                None => std::env::remove_var(HARDWARE_DETAILS_ENV_VAR),
-            }
-        }
+        // `guard` drops here and restores the prior env value under the lock.
     }
 
     // --- is_hardware_details_enabled reflects env var ---
 
     #[test]
     fn is_hardware_details_enabled_reflects_env_var() {
-        let prior = std::env::var(HARDWARE_DETAILS_ENV_VAR).ok();
-        // SAFETY: See with_hardware_details_enabled docstring.
-        unsafe {
-            std::env::remove_var(HARDWARE_DETAILS_ENV_VAR);
-        }
+        // EnvVarGuard serialises with sibling env-mutating tests and restores
+        // the prior value on drop (including on panic).
+        let guard = EnvVarGuard::new();
+        guard.remove();
         assert!(!is_hardware_details_enabled());
 
-        unsafe {
-            std::env::set_var(HARDWARE_DETAILS_ENV_VAR, "1");
-        }
+        guard.set("1");
         assert!(is_hardware_details_enabled());
 
         // Empty value treated as disabled.
-        unsafe {
-            std::env::set_var(HARDWARE_DETAILS_ENV_VAR, "");
-        }
+        guard.set("");
         assert!(!is_hardware_details_enabled());
 
-        // Restore prior state.
-        unsafe {
-            match prior {
-                Some(v) => std::env::set_var(HARDWARE_DETAILS_ENV_VAR, v),
-                None => std::env::remove_var(HARDWARE_DETAILS_ENV_VAR),
-            }
-        }
+        // `guard` drops here and restores the prior env value under the lock.
     }
 
     // --- extended-detail tests (require env var set) ---
