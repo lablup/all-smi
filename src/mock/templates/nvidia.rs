@@ -19,6 +19,28 @@ use all_smi::traits::mock_generator::{
     MockConfig, MockData, MockGenerator, MockPlatform, MockResult,
 };
 
+/// Environment variable that gates hardware-detail metric emission in NVIDIA
+/// mock responses.
+///
+/// When set to any non-empty value the mock will emit:
+/// * NUMA node id
+/// * GSP firmware mode and version
+/// * NvLink remote endpoint classification per active link
+/// * GPM SM occupancy and memory bandwidth utilization (Hopper+)
+/// * Thermal thresholds (slowdown, shutdown, max-operating, acoustic)
+/// * Canonical P-state gauge (`all_smi_gpu_performance_state`)
+///
+/// When unset (the default) only basic GPU metrics are emitted, simulating an
+/// older driver or a node where NVML does not expose these extended APIs.
+pub const HARDWARE_DETAILS_ENV_VAR: &str = "ALL_SMI_MOCK_HARDWARE_DETAILS";
+
+/// `true` when the hardware-detail mock mode is enabled via env var.
+pub fn is_hardware_details_enabled() -> bool {
+    std::env::var(HARDWARE_DETAILS_ENV_VAR)
+        .map(|v| !v.is_empty())
+        .unwrap_or(false)
+}
+
 /// NVIDIA GPU mock generator
 pub struct NvidiaMockGenerator {
     gpu_name: String,
@@ -45,21 +67,29 @@ impl NvidiaMockGenerator {
         // Basic GPU metrics
         self.add_gpu_metrics(&mut template, gpus);
 
-        // NVIDIA-specific: P-state metrics (legacy `all_smi_gpu_pstate` name
-        // kept for backwards compatibility with older scrapers; the new
-        // canonical name is emitted by `add_thermal_threshold_metrics`).
-        self.add_pstate_metrics(&mut template, gpus);
+        // NVIDIA-specific extended hardware detail metrics — gated by
+        // ALL_SMI_MOCK_HARDWARE_DETAILS so the default bare-metal mock
+        // simulates a minimal/older driver that does not expose these APIs.
+        //
+        // Gated together under one flag because they all originate from the
+        // same family of extended NVML calls (thermal thresholds, P-state,
+        // NUMA, GSP, NvLink, GPM) and a consumer either has access to all of
+        // them or none. Splitting into per-feature flags would add complexity
+        // without a clear use case.
+        if is_hardware_details_enabled() {
+            // Legacy `all_smi_gpu_pstate` gauge — kept for backwards
+            // compatibility with scrapers predating issue #130.
+            self.add_pstate_metrics(&mut template, gpus);
 
-        // NVIDIA-specific: Temperature thresholds + canonical P-state metric
-        // (issue #130). Emitted with synthetic but realistic numbers so local
-        // dev and `cargo test --features mock` see the feature populated.
-        self.add_thermal_threshold_metrics(&mut template, gpus);
+            // Temperature thresholds + canonical P-state metric (issue #130).
+            // Fixed synthetic values that match typical H100/A100 limits.
+            self.add_thermal_threshold_metrics(&mut template, gpus);
 
-        // NVIDIA-specific: Hardware details (issue #132). NUMA node id,
-        // GSP firmware mode + version, NvLink topology, plus GPM gauges.
-        // Synthetic but representative so the TUI, exporter, and remote
-        // parser round-trip paths all see the feature populated.
-        self.add_hardware_detail_metrics(&mut template, gpus);
+            // NUMA node id, GSP firmware mode + version, NvLink topology,
+            // GPM gauges (issue #132). Representative synthetic values so the
+            // TUI, exporter, and remote-parser round-trip paths all compile.
+            self.add_hardware_detail_metrics(&mut template, gpus);
+        }
 
         // NVIDIA-specific: Process metrics
         self.add_process_metrics(&mut template, gpus);
@@ -704,46 +734,160 @@ mod tests {
         }
     }
 
+    // Helper: set HARDWARE_DETAILS_ENV_VAR for the duration of a closure, then
+    // restore the prior value. Uses unsafe env mutation the same way the vGPU
+    // and MIG test helpers do.
+    fn with_hardware_details_enabled<F: FnOnce()>(f: F) {
+        let prior = std::env::var(HARDWARE_DETAILS_ENV_VAR).ok();
+        // SAFETY: this helper is called from single-threaded test functions
+        // that do not spawn additional threads. Env mutation is restored before
+        // returning, matching the pattern used by is_vgpu_enabled_reflects_env_var
+        // and is_mig_enabled_reflects_env_var in the sibling mock modules.
+        unsafe {
+            std::env::set_var(HARDWARE_DETAILS_ENV_VAR, "1");
+        }
+        f();
+        unsafe {
+            match prior {
+                Some(v) => std::env::set_var(HARDWARE_DETAILS_ENV_VAR, v),
+                None => std::env::remove_var(HARDWARE_DETAILS_ENV_VAR),
+            }
+        }
+    }
+
+    // --- default (env var unset) behaviour ---
+
     #[test]
-    fn mock_template_includes_threshold_metrics() {
+    fn mock_template_omits_hardware_details_by_default() {
+        // Ensure the env var is absent for this test.
+        let prior = std::env::var(HARDWARE_DETAILS_ENV_VAR).ok();
+        unsafe {
+            std::env::remove_var(HARDWARE_DETAILS_ENV_VAR);
+        }
+
         let gen_ = NvidiaMockGenerator::new(None, "mock-node".to_string());
         let gpus = make_gpu_metrics();
         let tpl = gen_.build_nvidia_template(&gpus, &make_cpu_metrics(), &make_memory_metrics());
 
+        // All extended-detail metrics must be absent in the minimal output.
+        for metric in &[
+            "all_smi_gpu_temperature_threshold_slowdown_celsius",
+            "all_smi_gpu_temperature_threshold_shutdown_celsius",
+            "all_smi_gpu_temperature_threshold_max_operating_celsius",
+            "all_smi_gpu_temperature_threshold_acoustic_celsius",
+            "all_smi_gpu_performance_state{",
+            "all_smi_gpu_pstate{",
+            "all_smi_gpu_numa_node_id{",
+            "all_smi_gpu_gsp_firmware_mode{",
+            "all_smi_gpu_gsp_firmware_version_info{",
+            "all_smi_nvlink_remote_device_type{",
+            "all_smi_gpu_sm_occupancy{",
+            "all_smi_gpu_memory_bandwidth_utilization{",
+        ] {
+            assert!(
+                !tpl.contains(metric),
+                "metric {metric:?} should be absent when ALL_SMI_MOCK_HARDWARE_DETAILS is unset, but was found in:\n{tpl}"
+            );
+        }
+
+        // Basic metrics must still be present.
         assert!(
-            tpl.contains("all_smi_gpu_temperature_threshold_slowdown_celsius"),
-            "mock template missing slowdown metric:\n{tpl}"
+            tpl.contains("all_smi_gpu_utilization{"),
+            "basic GPU metric absent"
         );
-        assert!(
-            tpl.contains("all_smi_gpu_temperature_threshold_shutdown_celsius"),
-            "mock template missing shutdown metric:\n{tpl}"
-        );
-        assert!(
-            tpl.contains("all_smi_gpu_temperature_threshold_max_operating_celsius"),
-            "mock template missing max_operating metric:\n{tpl}"
-        );
-        assert!(
-            tpl.contains("all_smi_gpu_temperature_threshold_acoustic_celsius"),
-            "mock template missing acoustic metric:\n{tpl}"
-        );
-        assert!(
-            tpl.contains("all_smi_gpu_performance_state{"),
-            "mock template missing canonical pstate metric:\n{tpl}"
-        );
+
+        // Restore prior state.
+        unsafe {
+            match prior {
+                Some(v) => std::env::set_var(HARDWARE_DETAILS_ENV_VAR, v),
+                None => std::env::remove_var(HARDWARE_DETAILS_ENV_VAR),
+            }
+        }
+    }
+
+    // --- is_hardware_details_enabled reflects env var ---
+
+    #[test]
+    fn is_hardware_details_enabled_reflects_env_var() {
+        let prior = std::env::var(HARDWARE_DETAILS_ENV_VAR).ok();
+        // SAFETY: See with_hardware_details_enabled docstring.
+        unsafe {
+            std::env::remove_var(HARDWARE_DETAILS_ENV_VAR);
+        }
+        assert!(!is_hardware_details_enabled());
+
+        unsafe {
+            std::env::set_var(HARDWARE_DETAILS_ENV_VAR, "1");
+        }
+        assert!(is_hardware_details_enabled());
+
+        // Empty value treated as disabled.
+        unsafe {
+            std::env::set_var(HARDWARE_DETAILS_ENV_VAR, "");
+        }
+        assert!(!is_hardware_details_enabled());
+
+        // Restore prior state.
+        unsafe {
+            match prior {
+                Some(v) => std::env::set_var(HARDWARE_DETAILS_ENV_VAR, v),
+                None => std::env::remove_var(HARDWARE_DETAILS_ENV_VAR),
+            }
+        }
+    }
+
+    // --- extended-detail tests (require env var set) ---
+
+    #[test]
+    fn mock_template_includes_threshold_metrics() {
+        with_hardware_details_enabled(|| {
+            let gen_ = NvidiaMockGenerator::new(None, "mock-node".to_string());
+            let gpus = make_gpu_metrics();
+            let tpl =
+                gen_.build_nvidia_template(&gpus, &make_cpu_metrics(), &make_memory_metrics());
+
+            assert!(
+                tpl.contains("all_smi_gpu_temperature_threshold_slowdown_celsius"),
+                "mock template missing slowdown metric:\n{tpl}"
+            );
+            assert!(
+                tpl.contains("all_smi_gpu_temperature_threshold_shutdown_celsius"),
+                "mock template missing shutdown metric:\n{tpl}"
+            );
+            assert!(
+                tpl.contains("all_smi_gpu_temperature_threshold_max_operating_celsius"),
+                "mock template missing max_operating metric:\n{tpl}"
+            );
+            assert!(
+                tpl.contains("all_smi_gpu_temperature_threshold_acoustic_celsius"),
+                "mock template missing acoustic metric:\n{tpl}"
+            );
+            assert!(
+                tpl.contains("all_smi_gpu_performance_state{"),
+                "mock template missing canonical pstate metric:\n{tpl}"
+            );
+        });
     }
 
     #[test]
     fn mock_render_resolves_pstate_placeholders() {
-        let gen_ = NvidiaMockGenerator::new(None, "mock-node".to_string());
-        let gpus = make_gpu_metrics();
-        let tpl = gen_.build_nvidia_template(&gpus, &make_cpu_metrics(), &make_memory_metrics());
-        let rendered =
-            gen_.render_nvidia_response(&tpl, &gpus, &make_cpu_metrics(), &make_memory_metrics());
-        // After rendering, no `{{PSTATE_...}}` placeholders should remain.
-        assert!(
-            !rendered.contains("{{PSTATE_"),
-            "unresolved PSTATE placeholder in rendered output"
-        );
+        with_hardware_details_enabled(|| {
+            let gen_ = NvidiaMockGenerator::new(None, "mock-node".to_string());
+            let gpus = make_gpu_metrics();
+            let tpl =
+                gen_.build_nvidia_template(&gpus, &make_cpu_metrics(), &make_memory_metrics());
+            let rendered = gen_.render_nvidia_response(
+                &tpl,
+                &gpus,
+                &make_cpu_metrics(),
+                &make_memory_metrics(),
+            );
+            // After rendering, no `{{PSTATE_...}}` placeholders should remain.
+            assert!(
+                !rendered.contains("{{PSTATE_"),
+                "unresolved PSTATE placeholder in rendered output"
+            );
+        });
     }
 
     // --- hardware-detail mock template tests (issue #132) ---
@@ -766,115 +910,130 @@ mod tests {
 
     #[test]
     fn mock_template_includes_all_hardware_detail_metrics() {
-        let gen_ = NvidiaMockGenerator::new(None, "mock-node".to_string());
-        let gpus = make_gpu_metrics();
-        let tpl = gen_.build_nvidia_template(&gpus, &make_cpu_metrics(), &make_memory_metrics());
+        with_hardware_details_enabled(|| {
+            let gen_ = NvidiaMockGenerator::new(None, "mock-node".to_string());
+            let gpus = make_gpu_metrics();
+            let tpl =
+                gen_.build_nvidia_template(&gpus, &make_cpu_metrics(), &make_memory_metrics());
 
-        assert!(
-            tpl.contains("all_smi_gpu_numa_node_id{"),
-            "mock template missing NUMA metric:\n{tpl}"
-        );
-        assert!(
-            tpl.contains("all_smi_gpu_gsp_firmware_mode{"),
-            "mock template missing GSP firmware mode metric:\n{tpl}"
-        );
-        assert!(
-            tpl.contains("all_smi_gpu_gsp_firmware_version_info{"),
-            "mock template missing GSP firmware version info metric:\n{tpl}"
-        );
-        assert!(
-            tpl.contains("all_smi_nvlink_remote_device_type{"),
-            "mock template missing NvLink metric:\n{tpl}"
-        );
-        assert!(
-            tpl.contains("all_smi_gpu_sm_occupancy{"),
-            "mock template missing SM occupancy metric:\n{tpl}"
-        );
-        assert!(
-            tpl.contains("all_smi_gpu_memory_bandwidth_utilization{"),
-            "mock template missing memory bandwidth utilization metric:\n{tpl}"
-        );
+            assert!(
+                tpl.contains("all_smi_gpu_numa_node_id{"),
+                "mock template missing NUMA metric:\n{tpl}"
+            );
+            assert!(
+                tpl.contains("all_smi_gpu_gsp_firmware_mode{"),
+                "mock template missing GSP firmware mode metric:\n{tpl}"
+            );
+            assert!(
+                tpl.contains("all_smi_gpu_gsp_firmware_version_info{"),
+                "mock template missing GSP firmware version info metric:\n{tpl}"
+            );
+            assert!(
+                tpl.contains("all_smi_nvlink_remote_device_type{"),
+                "mock template missing NvLink metric:\n{tpl}"
+            );
+            assert!(
+                tpl.contains("all_smi_gpu_sm_occupancy{"),
+                "mock template missing SM occupancy metric:\n{tpl}"
+            );
+            assert!(
+                tpl.contains("all_smi_gpu_memory_bandwidth_utilization{"),
+                "mock template missing memory bandwidth utilization metric:\n{tpl}"
+            );
+        });
     }
 
     #[test]
     fn mock_template_emits_six_nvlinks_per_gpu() {
-        let gen_ = NvidiaMockGenerator::new(None, "mock-node".to_string());
-        let gpus = make_multi_gpu_metrics(2);
-        let tpl = gen_.build_nvidia_template(&gpus, &make_cpu_metrics(), &make_memory_metrics());
-        let nvlink_lines: Vec<_> = tpl
-            .lines()
-            .filter(|l| l.starts_with("all_smi_nvlink_remote_device_type{"))
-            .collect();
-        // 2 GPUs * 6 links = 12 lines.
-        assert_eq!(
-            nvlink_lines.len(),
-            12,
-            "expected 12 NvLink rows (2 GPUs x 6 links):\n{}",
-            nvlink_lines.join("\n")
-        );
-        // 5 gpu + 1 switch per GPU = 10 gpu + 2 switch total.
-        let gpu_remote_count = nvlink_lines
-            .iter()
-            .filter(|l| l.contains(r#"remote_type="gpu""#))
-            .count();
-        let switch_remote_count = nvlink_lines
-            .iter()
-            .filter(|l| l.contains(r#"remote_type="switch""#))
-            .count();
-        assert_eq!(gpu_remote_count, 10);
-        assert_eq!(switch_remote_count, 2);
+        with_hardware_details_enabled(|| {
+            let gen_ = NvidiaMockGenerator::new(None, "mock-node".to_string());
+            let gpus = make_multi_gpu_metrics(2);
+            let tpl =
+                gen_.build_nvidia_template(&gpus, &make_cpu_metrics(), &make_memory_metrics());
+            let nvlink_lines: Vec<_> = tpl
+                .lines()
+                .filter(|l| l.starts_with("all_smi_nvlink_remote_device_type{"))
+                .collect();
+            // 2 GPUs * 6 links = 12 lines.
+            assert_eq!(
+                nvlink_lines.len(),
+                12,
+                "expected 12 NvLink rows (2 GPUs x 6 links):\n{}",
+                nvlink_lines.join("\n")
+            );
+            // 5 gpu + 1 switch per GPU = 10 gpu + 2 switch total.
+            let gpu_remote_count = nvlink_lines
+                .iter()
+                .filter(|l| l.contains(r#"remote_type="gpu""#))
+                .count();
+            let switch_remote_count = nvlink_lines
+                .iter()
+                .filter(|l| l.contains(r#"remote_type="switch""#))
+                .count();
+            assert_eq!(gpu_remote_count, 10);
+            assert_eq!(switch_remote_count, 2);
+        });
     }
 
     #[test]
     fn mock_template_numa_alternates_between_zero_and_one() {
-        let gen_ = NvidiaMockGenerator::new(None, "mock-node".to_string());
-        let gpus = make_multi_gpu_metrics(4);
-        let tpl = gen_.build_nvidia_template(&gpus, &make_cpu_metrics(), &make_memory_metrics());
-        // Extract just the NUMA metric lines.
-        let numa_lines: Vec<_> = tpl
-            .lines()
-            .filter(|l| l.starts_with("all_smi_gpu_numa_node_id{"))
-            .collect();
-        assert_eq!(numa_lines.len(), 4);
-        // GPU 0 → 0, GPU 1 → 1, GPU 2 → 0, GPU 3 → 1.
-        for (i, line) in numa_lines.iter().enumerate() {
-            let expected = (i as u32) % 2;
-            assert!(
-                line.ends_with(&format!(" {expected}")),
-                "GPU {i} NUMA line expected to end with ' {expected}', got: {line}"
-            );
-        }
+        with_hardware_details_enabled(|| {
+            let gen_ = NvidiaMockGenerator::new(None, "mock-node".to_string());
+            let gpus = make_multi_gpu_metrics(4);
+            let tpl =
+                gen_.build_nvidia_template(&gpus, &make_cpu_metrics(), &make_memory_metrics());
+            // Extract just the NUMA metric lines.
+            let numa_lines: Vec<_> = tpl
+                .lines()
+                .filter(|l| l.starts_with("all_smi_gpu_numa_node_id{"))
+                .collect();
+            assert_eq!(numa_lines.len(), 4);
+            // GPU 0 → 0, GPU 1 → 1, GPU 2 → 0, GPU 3 → 1.
+            for (i, line) in numa_lines.iter().enumerate() {
+                let expected = (i as u32) % 2;
+                assert!(
+                    line.ends_with(&format!(" {expected}")),
+                    "GPU {i} NUMA line expected to end with ' {expected}', got: {line}"
+                );
+            }
+        });
     }
 
     #[test]
     fn mock_template_emits_gsp_firmware_version_label() {
-        let gen_ = NvidiaMockGenerator::new(None, "mock-node".to_string());
-        let gpus = make_gpu_metrics();
-        let tpl = gen_.build_nvidia_template(&gpus, &make_cpu_metrics(), &make_memory_metrics());
-        assert!(
-            tpl.contains(r#"version="550.54.15""#),
-            "mock template missing GSP firmware version label:\n{tpl}"
-        );
+        with_hardware_details_enabled(|| {
+            let gen_ = NvidiaMockGenerator::new(None, "mock-node".to_string());
+            let gpus = make_gpu_metrics();
+            let tpl =
+                gen_.build_nvidia_template(&gpus, &make_cpu_metrics(), &make_memory_metrics());
+            assert!(
+                tpl.contains(r#"version="550.54.15""#),
+                "mock template missing GSP firmware version label:\n{tpl}"
+            );
+        });
     }
 
     #[test]
     fn mock_template_gpm_values_are_in_0_to_1_range() {
-        let gen_ = NvidiaMockGenerator::new(None, "mock-node".to_string());
-        let gpus = make_gpu_metrics();
-        let tpl = gen_.build_nvidia_template(&gpus, &make_cpu_metrics(), &make_memory_metrics());
-        // Parse the SM occupancy line and sanity-check the value band.
-        let sm_line = tpl
-            .lines()
-            .find(|l| l.starts_with("all_smi_gpu_sm_occupancy{"))
-            .expect("SM occupancy line");
-        let value: f32 = sm_line
-            .rsplit(' ')
-            .next()
-            .and_then(|s| s.parse().ok())
-            .expect("SM occupancy value");
-        assert!(
-            (0.0..=1.0).contains(&value),
-            "SM occupancy out of range: {value}"
-        );
+        with_hardware_details_enabled(|| {
+            let gen_ = NvidiaMockGenerator::new(None, "mock-node".to_string());
+            let gpus = make_gpu_metrics();
+            let tpl =
+                gen_.build_nvidia_template(&gpus, &make_cpu_metrics(), &make_memory_metrics());
+            // Parse the SM occupancy line and sanity-check the value band.
+            let sm_line = tpl
+                .lines()
+                .find(|l| l.starts_with("all_smi_gpu_sm_occupancy{"))
+                .expect("SM occupancy line");
+            let value: f32 = sm_line
+                .rsplit(' ')
+                .next()
+                .and_then(|s| s.parse().ok())
+                .expect("SM occupancy value");
+            assert!(
+                (0.0..=1.0).contains(&value),
+                "SM occupancy out of range: {value}"
+            );
+        });
     }
 }
