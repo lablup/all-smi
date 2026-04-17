@@ -86,8 +86,12 @@ impl MetricsParser {
                 // Route vGPU and MIG lines first so they aren't swallowed by
                 // the broader `gpu_` prefix below. `nvlink_*` metrics from
                 // issue #132 are also hardware-detail lines that must join
-                // the per-GPU accumulator — they carry the same `uuid`
-                // label set as the rest of the GPU rows.
+                // the per-GPU accumulator — they carry the same GPU base
+                // label set as the rest of the GPU rows. NPU families share
+                // the same accumulator but may identify themselves with
+                // either the GPU (`gpu_uuid`/`gpu_index`) or NPU
+                // (`npu_uuid`/`npu_index`) label aliases; see
+                // `process_gpu_metrics` for the fallback chain.
                 if metric_name.starts_with("vgpu_") {
                     vgpu_state.process(&metric_name, &labels, value, host);
                 } else if metric_name == "gpu_mig_mode" || metric_name.starts_with("mig_instance_")
@@ -216,16 +220,29 @@ impl MetricsParser {
         value: f64,
         host: &str,
     ) {
-        let gpu_name = crate::get_label_or_default!(labels, "gpu");
-        // Accept both new (`gpu_uuid`) and legacy (`uuid`) label names for
-        // backward compatibility with remote nodes running older versions.
+        // NPU lines carry the same accumulator as GPU lines (both funnel into
+        // `gpu_info_map`), so a row may label its device name as either `gpu`
+        // or `npu` depending on the vendor exporter. Prefer `gpu` when both
+        // are present.
+        let gpu_name = labels
+            .get("gpu")
+            .or_else(|| labels.get("npu"))
+            .cloned()
+            .unwrap_or_default();
+        // Accept GPU (`gpu_uuid`/`uuid`) and NPU (`npu_uuid`) label names for
+        // backward compatibility. The legacy `uuid`/`index` labels were used
+        // by pre-v0.21.0 exporters for both GPUs and NPUs; the new explicit
+        // `gpu_*`/`npu_*` labels were introduced in v0.21.0 to disambiguate
+        // the base label set across device families.
         let gpu_uuid = labels
             .get("gpu_uuid")
+            .or_else(|| labels.get("npu_uuid"))
             .or_else(|| labels.get("uuid"))
             .cloned()
             .unwrap_or_default();
         let gpu_index = labels
             .get("gpu_index")
+            .or_else(|| labels.get("npu_index"))
             .or_else(|| labels.get("index"))
             .cloned()
             .unwrap_or_default();
@@ -1424,6 +1441,56 @@ all_smi_gpu_temperature_celsius{gpu="NVIDIA A100", instance="node-1", uuid="GPU-
         assert_eq!(saturating_u32(0.0), Some(0));
         assert_eq!(saturating_u32(93.0), Some(93));
         assert_eq!(saturating_u32(1e12), Some(u32::MAX));
+    }
+
+    #[test]
+    fn parser_accepts_npu_labels_for_uuid_and_index() {
+        // Issue #177: NPU vendor exporters now emit `npu_uuid` / `npu_index`
+        // alongside `gpu_uuid` / `gpu_index` and the legacy `uuid` / `index`.
+        // The parser must reconstruct the same device regardless of which
+        // label alias a remote node uses.
+        let parser = create_test_parser();
+        let re = create_test_regex();
+        let host = "127.0.0.1:10058";
+
+        let test_data = "\
+all_smi_gpu_utilization{gpu=\"Tenstorrent Wormhole n150s\", instance=\"node-7\", npu_uuid=\"NPU-A\", npu_index=\"0\"} 33.3\n\
+all_smi_gpu_temperature_celsius{gpu=\"Tenstorrent Wormhole n150s\", instance=\"node-7\", npu_uuid=\"NPU-A\", npu_index=\"0\"} 52\n\
+all_smi_npu_firmware_info{npu=\"Tenstorrent Wormhole n150s\", instance=\"node-7\", npu_uuid=\"NPU-A\", npu_index=\"0\", firmware=\"1.2.3\"} 1\n";
+
+        let parsed = parser.parse_metrics(test_data, host, &re);
+        assert_eq!(parsed.gpu_info.len(), 1);
+        let npu = &parsed.gpu_info[0];
+        assert_eq!(npu.uuid, "NPU-A");
+        assert!((npu.utilization - 33.3).abs() < 0.1);
+        assert_eq!(npu.temperature, 52);
+        assert_eq!(npu.detail.get("index").map(String::as_str), Some("0"));
+        assert_eq!(
+            npu.detail.get("firmware").map(String::as_str),
+            Some("1.2.3")
+        );
+    }
+
+    #[test]
+    fn parser_prefers_gpu_uuid_when_both_gpu_and_npu_labels_present() {
+        // A hybrid exposition that carries both sets of aliases must not
+        // produce a duplicate row — the parser should pick the first
+        // present candidate deterministically (gpu_uuid wins over
+        // npu_uuid; gpu_index wins over npu_index).
+        let parser = create_test_parser();
+        let re = create_test_regex();
+        let host = "127.0.0.1:10058";
+
+        let test_data = "\
+all_smi_gpu_utilization{gpu=\"Dual Labels\", instance=\"node-7\", gpu_uuid=\"GPU-Q\", gpu_index=\"2\", npu_uuid=\"NPU-Q\", npu_index=\"9\"} 12.0\n";
+
+        let parsed = parser.parse_metrics(test_data, host, &re);
+        assert_eq!(parsed.gpu_info.len(), 1);
+        assert_eq!(parsed.gpu_info[0].uuid, "GPU-Q");
+        assert_eq!(
+            parsed.gpu_info[0].detail.get("index").map(String::as_str),
+            Some("2")
+        );
     }
 
     #[test]

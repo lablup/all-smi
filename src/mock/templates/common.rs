@@ -48,7 +48,7 @@ pub fn add_basic_gpu_metrics(
 
         for (i, gpu) in gpus.iter().enumerate() {
             let labels = format!(
-                "gpu=\"{gpu_name}\", instance=\"{instance_name}\", uuid=\"{}\", index=\"{i}\"",
+                "gpu=\"{gpu_name}\", instance=\"{instance_name}\", gpu_uuid=\"{}\", gpu_index=\"{i}\"",
                 gpu.uuid
             );
 

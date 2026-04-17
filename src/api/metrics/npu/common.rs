@@ -136,8 +136,8 @@ impl CommonNpuExporter {
             let status_labels = [
                 ("npu", info.name.as_str()),
                 ("instance", info.instance.as_str()),
-                ("uuid", info.uuid.as_str()),
-                ("index", &index.to_string()),
+                ("npu_uuid", info.uuid.as_str()),
+                ("npu_index", &index.to_string()),
                 ("status", status.as_str()),
             ];
             builder
@@ -183,8 +183,8 @@ impl CommonNpuMetrics for CommonNpuExporter {
             let fw_labels = [
                 ("npu", safe_name.as_str()),
                 ("instance", safe_instance.as_str()),
-                ("uuid", safe_uuid.as_str()),
-                ("index", index_str),
+                ("npu_uuid", safe_uuid.as_str()),
+                ("npu_index", index_str),
                 ("firmware", safe_firmware.as_str()),
             ];
             builder
@@ -199,8 +199,8 @@ impl CommonNpuMetrics for CommonNpuExporter {
         let device_labels = [
             ("npu", info.name.as_str()),
             ("instance", info.instance.as_str()),
-            ("uuid", info.uuid.as_str()),
-            ("index", &index.to_string()),
+            ("npu_uuid", info.uuid.as_str()),
+            ("npu_index", &index.to_string()),
             ("device_type", info.device_type.as_str()),
         ];
 
@@ -224,8 +224,8 @@ impl CommonNpuMetrics for CommonNpuExporter {
         let base_labels = [
             ("npu", info.name.as_str()),
             ("instance", info.instance.as_str()),
-            ("uuid", info.uuid.as_str()),
-            ("index", &index.to_string()),
+            ("npu_uuid", info.uuid.as_str()),
+            ("npu_index", &index.to_string()),
         ];
 
         // Generic temperature metric if available
@@ -246,8 +246,8 @@ impl CommonNpuMetrics for CommonNpuExporter {
         let base_labels = [
             ("npu", info.name.as_str()),
             ("instance", info.instance.as_str()),
-            ("uuid", info.uuid.as_str()),
-            ("index", &index.to_string()),
+            ("npu_uuid", info.uuid.as_str()),
+            ("npu_index", &index.to_string()),
         ];
 
         // Generic power metric if available

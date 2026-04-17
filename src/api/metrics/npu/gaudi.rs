@@ -36,8 +36,8 @@ impl GaudiExporter {
         let device_labels = [
             ("npu", info.name.as_str()),
             ("instance", info.instance.as_str()),
-            ("uuid", info.uuid.as_str()),
-            ("index", &index_str),
+            ("npu_uuid", info.uuid.as_str()),
+            ("npu_index", &index_str),
         ];
 
         builder
@@ -53,8 +53,8 @@ impl GaudiExporter {
             let internal_labels = [
                 ("npu", info.name.as_str()),
                 ("instance", info.instance.as_str()),
-                ("uuid", info.uuid.as_str()),
-                ("index", &index_str),
+                ("npu_uuid", info.uuid.as_str()),
+                ("npu_index", &index_str),
                 ("internal_name", internal_name.as_str()),
             ];
             builder
@@ -75,8 +75,8 @@ impl GaudiExporter {
             let driver_labels = [
                 ("npu", info.name.as_str()),
                 ("instance", info.instance.as_str()),
-                ("uuid", info.uuid.as_str()),
-                ("index", &index_str),
+                ("npu_uuid", info.uuid.as_str()),
+                ("npu_index", &index_str),
                 ("version", driver_version.as_str()),
             ];
             builder
@@ -94,8 +94,8 @@ impl GaudiExporter {
         let base_labels = [
             ("npu", info.name.as_str()),
             ("instance", info.instance.as_str()),
-            ("uuid", info.uuid.as_str()),
-            ("index", &index_str),
+            ("npu_uuid", info.uuid.as_str()),
+            ("npu_index", &index_str),
         ];
 
         // AIP (AI Processor) utilization - this is the main utilization metric for Gaudi
@@ -117,8 +117,8 @@ impl GaudiExporter {
         let base_labels = [
             ("npu", info.name.as_str()),
             ("instance", info.instance.as_str()),
-            ("uuid", info.uuid.as_str()),
-            ("index", &index_str),
+            ("npu_uuid", info.uuid.as_str()),
+            ("npu_index", &index_str),
         ];
 
         // Memory used in bytes
@@ -171,8 +171,8 @@ impl GaudiExporter {
         let base_labels = [
             ("npu", info.name.as_str()),
             ("instance", info.instance.as_str()),
-            ("uuid", info.uuid.as_str()),
-            ("index", &index_str),
+            ("npu_uuid", info.uuid.as_str()),
+            ("npu_index", &index_str),
         ];
 
         // Current power draw
@@ -230,8 +230,8 @@ impl GaudiExporter {
         let base_labels = [
             ("npu", info.name.as_str()),
             ("instance", info.instance.as_str()),
-            ("uuid", info.uuid.as_str()),
-            ("index", &index_str),
+            ("npu_uuid", info.uuid.as_str()),
+            ("npu_index", &index_str),
         ];
 
         // AIP temperature

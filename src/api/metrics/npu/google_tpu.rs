@@ -57,8 +57,8 @@ impl NpuExporter for GoogleTpuExporter {
         let base_labels = [
             ("npu", info.name.as_str()),
             ("instance", info.instance.as_str()),
-            ("uuid", info.uuid.as_str()),
-            ("index", index_str.as_str()),
+            ("npu_uuid", info.uuid.as_str()),
+            ("npu_index", index_str.as_str()),
         ];
 
         // TPU Utilization (duty cycle or tensorcore utilization)
@@ -122,8 +122,8 @@ impl NpuExporter for GoogleTpuExporter {
             let labels = [
                 ("npu", info.name.as_str()),
                 ("instance", info.instance.as_str()),
-                ("uuid", info.uuid.as_str()),
-                ("index", index_str.as_str()),
+                ("npu_uuid", info.uuid.as_str()),
+                ("npu_index", index_str.as_str()),
                 ("version", chip_version.as_str()),
             ];
             builder
@@ -139,8 +139,8 @@ impl NpuExporter for GoogleTpuExporter {
             let labels = [
                 ("npu", info.name.as_str()),
                 ("instance", info.instance.as_str()),
-                ("uuid", info.uuid.as_str()),
-                ("index", index_str.as_str()),
+                ("npu_uuid", info.uuid.as_str()),
+                ("npu_index", index_str.as_str()),
                 ("type", accel_type.as_str()),
             ];
             builder
@@ -179,8 +179,8 @@ impl NpuExporter for GoogleTpuExporter {
             let labels = [
                 ("npu", info.name.as_str()),
                 ("instance", info.instance.as_str()),
-                ("uuid", info.uuid.as_str()),
-                ("index", index_str.as_str()),
+                ("npu_uuid", info.uuid.as_str()),
+                ("npu_index", index_str.as_str()),
                 ("type", mem_type.as_str()),
             ];
             builder
@@ -197,8 +197,8 @@ impl NpuExporter for GoogleTpuExporter {
             let labels = [
                 ("npu", info.name.as_str()),
                 ("instance", info.instance.as_str()),
-                ("uuid", info.uuid.as_str()),
-                ("index", index_str.as_str()),
+                ("npu_uuid", info.uuid.as_str()),
+                ("npu_index", index_str.as_str()),
                 ("version", lib_ver.as_str()),
             ];
             builder

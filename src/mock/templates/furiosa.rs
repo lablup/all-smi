@@ -82,7 +82,10 @@ impl FuriosaMockGenerator {
             template.push_str(&format!("# TYPE {metric_name} gauge\n"));
 
             for (i, gpu) in gpus.iter().enumerate() {
-                // Furiosa uses "npu{i}" instead of instance name
+                // Furiosa uses "npu{i}" instead of instance name. These are
+                // the shared `all_smi_gpu_*` exposition metrics, so they keep
+                // the GPU-family base label set (`gpu`, `gpu_uuid`, `gpu_index`)
+                // to match the real exporter in `src/api/metrics/gpu.rs`.
                 let labels = format!(
                     "gpu=\"{}\", instance=\"npu{i}\", gpu_uuid=\"{}\", gpu_index=\"{i}\"",
                     self.gpu_name, gpu.uuid
@@ -104,7 +107,9 @@ impl FuriosaMockGenerator {
     }
 
     fn add_ane_metrics(&self, template: &mut String, gpus: &[GpuMetrics]) {
-        // ANE metrics (Furiosa always returns 0)
+        // ANE metrics (Furiosa always returns 0). `all_smi_ane_*` is emitted
+        // by the shared GPU exporter in `src/api/metrics/gpu.rs`, so the
+        // mocks also keep the GPU-family base label set.
         template.push_str("# HELP all_smi_ane_utilization ANE utilization in mW\n");
         template.push_str("# TYPE all_smi_ane_utilization gauge\n");
 
@@ -139,7 +144,7 @@ impl FuriosaMockGenerator {
 
         for (i, gpu) in gpus.iter().enumerate() {
             let labels = format!(
-                "gpu=\"{}\", instance=\"npu{i}\", gpu_uuid=\"{}\", gpu_index=\"{i}\"",
+                "npu=\"{}\", instance=\"npu{i}\", npu_uuid=\"{}\", npu_index=\"{i}\"",
                 self.gpu_name, gpu.uuid
             );
             template.push_str(&format!(
@@ -155,7 +160,7 @@ impl FuriosaMockGenerator {
 
         for (i, gpu) in gpus.iter().enumerate() {
             let labels = format!(
-                "gpu=\"{}\", instance=\"npu{i}\", gpu_uuid=\"{}\", gpu_index=\"{i}\"",
+                "npu=\"{}\", instance=\"npu{i}\", npu_uuid=\"{}\", npu_index=\"{i}\"",
                 self.gpu_name, gpu.uuid
             );
             template.push_str(&format!(
@@ -171,7 +176,7 @@ impl FuriosaMockGenerator {
 
         for (i, gpu) in gpus.iter().enumerate() {
             let labels = format!(
-                "gpu=\"{}\", instance=\"npu{i}\", gpu_uuid=\"{}\", gpu_index=\"{i}\"",
+                "npu=\"{}\", instance=\"npu{i}\", npu_uuid=\"{}\", npu_index=\"{i}\"",
                 self.gpu_name, gpu.uuid
             );
             template.push_str(&format!(
@@ -185,7 +190,7 @@ impl FuriosaMockGenerator {
 
         for (i, gpu) in gpus.iter().enumerate() {
             let labels = format!(
-                "gpu=\"{}\", instance=\"npu{i}\", gpu_uuid=\"{}\", gpu_index=\"{i}\"",
+                "npu=\"{}\", instance=\"npu{i}\", npu_uuid=\"{}\", npu_index=\"{i}\"",
                 self.gpu_name, gpu.uuid
             );
             template.push_str(&format!(

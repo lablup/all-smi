@@ -68,7 +68,7 @@ impl GaudiMockGenerator {
 
         for (i, gpu) in gpus.iter().enumerate() {
             let labels = format!(
-                "gpu=\"{}\", instance=\"{}\", gpu_uuid=\"{}\", gpu_index=\"{i}\"",
+                "npu=\"{}\", instance=\"{}\", npu_uuid=\"{}\", npu_index=\"{i}\"",
                 self.gpu_name, self.instance_name, gpu.uuid
             );
             template.push_str(&format!(
@@ -82,7 +82,7 @@ impl GaudiMockGenerator {
 
         for (i, gpu) in gpus.iter().enumerate() {
             let labels = format!(
-                "gpu=\"{}\", instance=\"{}\", gpu_uuid=\"{}\", gpu_index=\"{i}\"",
+                "npu=\"{}\", instance=\"{}\", npu_uuid=\"{}\", npu_index=\"{i}\"",
                 self.gpu_name, self.instance_name, gpu.uuid
             );
             template.push_str(&format!(
@@ -99,7 +99,7 @@ impl GaudiMockGenerator {
 
         for (i, gpu) in gpus.iter().enumerate() {
             let labels = format!(
-                "gpu=\"{}\", instance=\"{}\", gpu_uuid=\"{}\", gpu_index=\"{i}\"",
+                "npu=\"{}\", instance=\"{}\", npu_uuid=\"{}\", npu_index=\"{i}\"",
                 self.gpu_name, self.instance_name, gpu.uuid
             );
             template.push_str(&format!(
@@ -113,7 +113,7 @@ impl GaudiMockGenerator {
 
         for (i, gpu) in gpus.iter().enumerate() {
             let labels = format!(
-                "gpu=\"{}\", instance=\"{}\", gpu_uuid=\"{}\", gpu_index=\"{i}\"",
+                "npu=\"{}\", instance=\"{}\", npu_uuid=\"{}\", npu_index=\"{i}\"",
                 self.gpu_name, self.instance_name, gpu.uuid
             );
             template.push_str(&format!(
