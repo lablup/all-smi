@@ -657,14 +657,16 @@ mod tests {
     #[test]
     fn test_max_version_component_validation() {
         // Test that MAX_VERSION_COMPONENT is reasonable for Linux kernel versions
-        assert!(
-            MAX_VERSION_COMPONENT >= 99,
-            "Should support two-digit version components"
-        );
-        assert!(
-            MAX_VERSION_COMPONENT <= 9999,
-            "Should not be excessively large"
-        );
+        const {
+            assert!(
+                MAX_VERSION_COMPONENT >= 99,
+                "Should support two-digit version components"
+            );
+            assert!(
+                MAX_VERSION_COMPONENT <= 9999,
+                "Should not be excessively large"
+            );
+        }
 
         // Common kernel version components should be valid
         let common_versions = vec![
@@ -703,9 +705,9 @@ mod tests {
         ];
 
         for (major, minor, patch) in invalid_versions {
-            let major_valid = major >= 0 && major <= MAX_VERSION_COMPONENT;
-            let minor_valid = minor >= 0 && minor <= MAX_VERSION_COMPONENT;
-            let patch_valid = patch >= 0 && patch <= MAX_VERSION_COMPONENT;
+            let major_valid = (0..=MAX_VERSION_COMPONENT).contains(&major);
+            let minor_valid = (0..=MAX_VERSION_COMPONENT).contains(&minor);
+            let patch_valid = (0..=MAX_VERSION_COMPONENT).contains(&patch);
 
             assert!(
                 !(major_valid && minor_valid && patch_valid),

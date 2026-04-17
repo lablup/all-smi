@@ -596,6 +596,6 @@ mod tests {
     async fn test_grpc_connection() {
         // This test will pass if no TPU workload is running (expected to fail gracefully)
         let result = get_tpu_metrics_grpc().await;
-        println!("gRPC metrics result: {:?}", result);
+        println!("gRPC metrics result: {result:?}");
     }
 }
