@@ -23,7 +23,7 @@ use std::io::Write;
 use crossterm::{queue, style::Color, style::Print};
 
 use crate::device::VgpuHostInfo;
-use crate::ui::renderers::utils::truncate_str;
+use crate::ui::renderers::utils::{SECTION_HEADER_INDENT, SUB_ITEM_INDENT, truncate_str};
 use crate::ui::text::print_colored_text;
 
 /// Render a compact vGPU sub-section beneath a physical GPU row.
@@ -42,8 +42,9 @@ pub fn print_vgpu_section<W: Write>(stdout: &mut W, host: &VgpuHostInfo, _width:
         return;
     }
 
-    // Indent the entire section to visually nest under the parent GPU line.
-    print_colored_text(stdout, "  vGPU host: ", Color::DarkGrey, None, None);
+    // Indent the section header to visually nest under the parent GPU line.
+    print_colored_text(stdout, SECTION_HEADER_INDENT, Color::DarkGrey, None, None);
+    print_colored_text(stdout, "vGPU host: ", Color::DarkGrey, None, None);
     print_colored_text(stdout, &host.host_mode, Color::Cyan, None, None);
 
     print_colored_text(stdout, "  policy=", Color::DarkGrey, None, None);
@@ -82,7 +83,8 @@ pub fn print_vgpu_section<W: Write>(stdout: &mut W, host: &VgpuHostInfo, _width:
     queue!(stdout, Print("\r\n")).unwrap();
 
     for (i, vgpu) in host.vgpus.iter().enumerate() {
-        print_colored_text(stdout, "      [", Color::DarkGrey, None, None);
+        print_colored_text(stdout, SUB_ITEM_INDENT, Color::DarkGrey, None, None);
+        print_colored_text(stdout, "[", Color::DarkGrey, None, None);
         print_colored_text(stdout, &i.to_string(), Color::Cyan, None, None);
         print_colored_text(stdout, "] ", Color::DarkGrey, None, None);
 

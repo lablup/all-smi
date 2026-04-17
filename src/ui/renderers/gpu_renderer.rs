@@ -21,6 +21,7 @@ use crate::device::GpuInfo;
 use crate::device::MigGpuInfo;
 use crate::device::VgpuHostInfo;
 use crate::device::types::{NvLinkRemoteType, ThermalProximity, ThermalProximityConfig};
+use crate::ui::renderers::utils::SUB_ITEM_INDENT;
 use crate::ui::text::print_colored_text;
 use crate::ui::widgets::draw_bar;
 
@@ -417,7 +418,7 @@ pub fn print_gpu_info<W: Write>(
     // Optional tertiary row: extended hardware details (issue #132).
     //
     // Rendered when NUMA placement, GSP firmware, or NvLink topology is
-    // reported. Keeps the same 5-column indent as the thermal row above.
+    // reported. Uses the shared SUB_ITEM_INDENT like the thermal row above.
     render_hardware_details_row(stdout, info);
 
     // Calculate gauge widths with 5 char padding on each side and 2 space separation
@@ -514,8 +515,8 @@ fn render_thermal_pstate_row<W: Write>(stdout: &mut W, info: &GpuInfo) {
         return;
     }
 
-    // 5-char indent aligns with the gauge row below.
-    print_colored_text(stdout, "     ", Color::White, None, None);
+    // Indent aligns with the gauge row below.
+    print_colored_text(stdout, SUB_ITEM_INDENT, Color::White, None, None);
 
     let proximity = info.thermal_proximity(ThermalProximityConfig::default());
     let warn_color = match proximity {
@@ -629,8 +630,8 @@ fn render_hardware_details_row<W: Write>(stdout: &mut W, info: &GpuInfo) {
         return;
     }
 
-    // 5-char indent aligns with the other secondary rows.
-    print_colored_text(stdout, "     ", Color::White, None, None);
+    // Indent aligns with the other secondary rows.
+    print_colored_text(stdout, SUB_ITEM_INDENT, Color::White, None, None);
     print_colored_text(stdout, "HW", Color::DarkMagenta, None, None);
 
     if let Some(numa) = info.numa_node_id {
@@ -941,9 +942,9 @@ mod tests {
     #[test]
     fn render_pstate_only_has_no_double_leading_space() {
         // When only performance_state is populated the row must not start
-        // with two consecutive spaces. The indent ("     ") is always
-        // emitted, but no extra separator space should precede the first
-        // field on the row.
+        // with two consecutive spaces. SUB_ITEM_INDENT is always emitted,
+        // but no extra separator space should precede the first field on
+        // the row.
         let mut gpu = make_gpu(50);
         gpu.temperature_threshold_slowdown = None;
         gpu.temperature_threshold_shutdown = None;
@@ -975,7 +976,7 @@ mod tests {
         // The row must contain "P-State:" and "P3".
         assert!(plain.contains("P-State:"), "missing P-State: in {plain:?}");
         assert!(plain.contains("P3"), "missing P3 in {plain:?}");
-        // After the fixed 5-char indent the next printable character must
+        // After the shared SUB_ITEM_INDENT the next printable character must
         // not be another space — that would indicate a double leading space.
         let after_indent = plain.trim_start_matches(' ');
         assert!(

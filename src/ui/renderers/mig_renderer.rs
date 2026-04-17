@@ -23,7 +23,7 @@ use std::io::Write;
 use crossterm::{queue, style::Color, style::Print};
 
 use crate::device::MigGpuInfo;
-use crate::ui::renderers::utils::truncate_str;
+use crate::ui::renderers::utils::{SECTION_HEADER_INDENT, SUB_ITEM_INDENT, truncate_str};
 use crate::ui::text::print_colored_text;
 
 /// Render a compact MIG sub-section beneath a physical GPU row.
@@ -42,7 +42,8 @@ pub fn print_mig_section<W: Write>(stdout: &mut W, host: &MigGpuInfo, _width: us
         return;
     }
 
-    print_colored_text(stdout, "  MIG host: ", Color::DarkGrey, None, None);
+    print_colored_text(stdout, SECTION_HEADER_INDENT, Color::DarkGrey, None, None);
+    print_colored_text(stdout, "MIG host: ", Color::DarkGrey, None, None);
     if host.mig_mode {
         print_colored_text(stdout, "enabled", Color::Green, None, None);
     } else {
@@ -61,7 +62,8 @@ pub fn print_mig_section<W: Write>(stdout: &mut W, host: &MigGpuInfo, _width: us
     queue!(stdout, Print("\r\n")).unwrap();
 
     for inst in host.instances.iter() {
-        print_colored_text(stdout, "      [", Color::DarkGrey, None, None);
+        print_colored_text(stdout, SUB_ITEM_INDENT, Color::DarkGrey, None, None);
+        print_colored_text(stdout, "[", Color::DarkGrey, None, None);
         // Show NVML's `instance_id` (the slot NVML enumerated the instance
         // at), not the vec index. These diverge whenever the instances are
         // sparse — e.g. slots 0, 1, 4 present but 2 and 3 unprovisioned —
