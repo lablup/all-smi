@@ -418,7 +418,7 @@ pub fn print_gpu_info<W: Write>(
     // Optional tertiary row: extended hardware details (issue #132).
     //
     // Rendered when NUMA placement, GSP firmware, or NvLink topology is
-    // reported. Keeps the same 5-column indent as the thermal row above.
+    // reported. Uses the shared SUB_ITEM_INDENT like the thermal row above.
     render_hardware_details_row(stdout, info);
 
     // Calculate gauge widths with 5 char padding on each side and 2 space separation
@@ -976,7 +976,7 @@ mod tests {
         // The row must contain "P-State:" and "P3".
         assert!(plain.contains("P-State:"), "missing P-State: in {plain:?}");
         assert!(plain.contains("P3"), "missing P3 in {plain:?}");
-        // After the fixed 5-char indent the next printable character must
+        // After the shared SUB_ITEM_INDENT the next printable character must
         // not be another space — that would indicate a double leading space.
         let after_indent = plain.trim_start_matches(' ');
         assert!(
