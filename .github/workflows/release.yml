@@ -207,6 +207,60 @@ jobs:
             ${{ matrix.asset_name }}${{ matrix.archive_ext }}
             ${{ matrix.asset_name }}${{ matrix.archive_ext }}.sha256
 
+  # ============================================================================
+  # Microsoft Teams release notification (Power Automate Workflows webhook)
+  # ============================================================================
+  notify-teams:
+    name: Notify Teams on release
+    needs: build
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    permissions: {}
+
+    steps:
+      - name: Build Adaptive Card payload
+        env:
+          TAG:  ${{ github.event.release.tag_name }}
+          NAME: ${{ github.event.release.name }}
+          URL:  ${{ github.event.release.html_url }}
+          BODY: ${{ github.event.release.body }}
+          REPO: ${{ github.repository }}
+        run: |
+          TRIMMED=$(printf '%s' "$BODY" | head -c 2000)
+          jq -n \
+            --arg tag "$TAG" --arg name "$NAME" \
+            --arg url "$URL" --arg body "$TRIMMED" --arg repo "$REPO" '
+          {
+            type: "message",
+            attachments: [{
+              contentType: "application/vnd.microsoft.card.adaptive",
+              content: {
+                "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                type: "AdaptiveCard",
+                version: "1.5",
+                body: [
+                  { type: "TextBlock", size: "Large", weight: "Bolder",
+                    text: ("🚀 " + $repo + " " + $tag + " released") },
+                  { type: "TextBlock", text: $name, wrap: true, isSubtle: true },
+                  { type: "TextBlock", text: $body, wrap: true }
+                ],
+                actions: [
+                  { type: "Action.OpenUrl", title: "View release", url: $url }
+                ]
+              }
+            }]
+          }' > card.json
+
+      - name: POST to Teams workflow
+        if: env.WEBHOOK_URL != ''
+        env:
+          WEBHOOK_URL: ${{ secrets.TEAMS_RELEASE_NOTIFICATION_WORKFLOW_URL }}
+        run: |
+          curl -sSf -X POST \
+            -H "Content-Type: application/json" \
+            --data-binary @card.json \
+            "$WEBHOOK_URL"
+
   promote-release:
     name: Promote pre-release to release
     runs-on: ubuntu-latest
