@@ -35,8 +35,8 @@ impl TenstorrentExporter {
             let fw_labels = [
                 ("npu", info.name.as_str()),
                 ("instance", info.instance.as_str()),
-                ("uuid", info.uuid.as_str()),
-                ("index", &index.to_string()),
+                ("npu_uuid", info.uuid.as_str()),
+                ("npu_index", &index.to_string()),
                 ("version", arc_fw.as_str()),
             ];
             builder
@@ -53,8 +53,8 @@ impl TenstorrentExporter {
             let fw_labels = [
                 ("npu", info.name.as_str()),
                 ("instance", info.instance.as_str()),
-                ("uuid", info.uuid.as_str()),
-                ("index", &index.to_string()),
+                ("npu_uuid", info.uuid.as_str()),
+                ("npu_index", &index.to_string()),
                 ("version", eth_fw.as_str()),
             ];
             builder
@@ -71,8 +71,8 @@ impl TenstorrentExporter {
             let fw_labels = [
                 ("npu", info.name.as_str()),
                 ("instance", info.instance.as_str()),
-                ("uuid", info.uuid.as_str()),
-                ("index", &index.to_string()),
+                ("npu_uuid", info.uuid.as_str()),
+                ("npu_index", &index.to_string()),
                 ("date", fw_date.as_str()),
             ];
             builder
@@ -89,8 +89,8 @@ impl TenstorrentExporter {
             let fw_labels = [
                 ("npu", info.name.as_str()),
                 ("instance", info.instance.as_str()),
-                ("uuid", info.uuid.as_str()),
-                ("index", &index.to_string()),
+                ("npu_uuid", info.uuid.as_str()),
+                ("npu_index", &index.to_string()),
                 ("version", ddr_fw.as_str()),
             ];
             builder
@@ -107,8 +107,8 @@ impl TenstorrentExporter {
             let fw_labels = [
                 ("npu", info.name.as_str()),
                 ("instance", info.instance.as_str()),
-                ("uuid", info.uuid.as_str()),
-                ("index", &index.to_string()),
+                ("npu_uuid", info.uuid.as_str()),
+                ("npu_index", &index.to_string()),
                 ("version", spi_fw.as_str()),
             ];
             builder
@@ -129,8 +129,8 @@ impl TenstorrentExporter {
         let base_labels = [
             ("npu", info.name.as_str()),
             ("instance", info.instance.as_str()),
-            ("uuid", info.uuid.as_str()),
-            ("index", &index.to_string()),
+            ("npu_uuid", info.uuid.as_str()),
+            ("npu_index", &index.to_string()),
         ];
 
         // ASIC temperature (main chip temperature)
@@ -222,8 +222,8 @@ impl TenstorrentExporter {
         let base_labels = [
             ("npu", info.name.as_str()),
             ("instance", info.instance.as_str()),
-            ("uuid", info.uuid.as_str()),
-            ("index", &index.to_string()),
+            ("npu_uuid", info.uuid.as_str()),
+            ("npu_index", &index.to_string()),
         ];
 
         // AI clock
@@ -267,8 +267,8 @@ impl TenstorrentExporter {
         let base_labels = [
             ("npu", info.name.as_str()),
             ("instance", info.instance.as_str()),
-            ("uuid", info.uuid.as_str()),
-            ("index", &index.to_string()),
+            ("npu_uuid", info.uuid.as_str()),
+            ("npu_index", &index.to_string()),
         ];
 
         // Voltage
@@ -396,8 +396,8 @@ impl TenstorrentExporter {
         let base_labels = [
             ("npu", info.name.as_str()),
             ("instance", info.instance.as_str()),
-            ("uuid", info.uuid.as_str()),
-            ("index", &index.to_string()),
+            ("npu_uuid", info.uuid.as_str()),
+            ("npu_index", &index.to_string()),
         ];
 
         // PCIe status
@@ -405,8 +405,8 @@ impl TenstorrentExporter {
             let status_labels = [
                 ("npu", info.name.as_str()),
                 ("instance", info.instance.as_str()),
-                ("uuid", info.uuid.as_str()),
-                ("index", &index.to_string()),
+                ("npu_uuid", info.uuid.as_str()),
+                ("npu_index", &index.to_string()),
                 ("status", pcie_status.as_str()),
             ];
             builder
@@ -423,8 +423,8 @@ impl TenstorrentExporter {
             let status_labels = [
                 ("npu", info.name.as_str()),
                 ("instance", info.instance.as_str()),
-                ("uuid", info.uuid.as_str()),
-                ("index", &index.to_string()),
+                ("npu_uuid", info.uuid.as_str()),
+                ("npu_index", &index.to_string()),
                 ("port", "0"),
                 ("status", eth_status0.as_str()),
             ];
@@ -441,8 +441,8 @@ impl TenstorrentExporter {
             let status_labels = [
                 ("npu", info.name.as_str()),
                 ("instance", info.instance.as_str()),
-                ("uuid", info.uuid.as_str()),
-                ("index", &index.to_string()),
+                ("npu_uuid", info.uuid.as_str()),
+                ("npu_index", &index.to_string()),
                 ("port", "1"),
                 ("status", eth_status1.as_str()),
             ];
@@ -555,8 +555,8 @@ impl TenstorrentExporter {
             let board_labels = [
                 ("npu", info.name.as_str()),
                 ("instance", info.instance.as_str()),
-                ("uuid", info.uuid.as_str()),
-                ("index", &index.to_string()),
+                ("npu_uuid", info.uuid.as_str()),
+                ("npu_index", &index.to_string()),
                 ("board_type", board_type.as_str()),
                 ("board_id", board_id),
                 ("architecture", arch),
@@ -575,8 +575,8 @@ impl TenstorrentExporter {
             let method_labels = [
                 ("npu", info.name.as_str()),
                 ("instance", info.instance.as_str()),
-                ("uuid", info.uuid.as_str()),
-                ("index", &index.to_string()),
+                ("npu_uuid", info.uuid.as_str()),
+                ("npu_index", &index.to_string()),
                 ("method", method.as_str()),
             ];
             builder
@@ -597,8 +597,8 @@ impl TenstorrentExporter {
         let base_labels = [
             ("npu", info.name.as_str()),
             ("instance", info.instance.as_str()),
-            ("uuid", info.uuid.as_str()),
-            ("index", &index.to_string()),
+            ("npu_uuid", info.uuid.as_str()),
+            ("npu_index", &index.to_string()),
         ];
 
         // PCIe address
@@ -606,8 +606,8 @@ impl TenstorrentExporter {
             let pcie_labels = [
                 ("npu", info.name.as_str()),
                 ("instance", info.instance.as_str()),
-                ("uuid", info.uuid.as_str()),
-                ("index", &index.to_string()),
+                ("npu_uuid", info.uuid.as_str()),
+                ("npu_index", &index.to_string()),
                 ("address", pcie_addr.as_str()),
             ];
             builder
@@ -626,8 +626,8 @@ impl TenstorrentExporter {
             let pcie_labels = [
                 ("npu", info.name.as_str()),
                 ("instance", info.instance.as_str()),
-                ("uuid", info.uuid.as_str()),
-                ("index", &index.to_string()),
+                ("npu_uuid", info.uuid.as_str()),
+                ("npu_index", &index.to_string()),
                 ("vendor_id", vendor_id.as_str()),
                 ("device_id", device_id.as_str()),
             ];
@@ -671,8 +671,8 @@ impl TenstorrentExporter {
             let dram_labels = [
                 ("npu", info.name.as_str()),
                 ("instance", info.instance.as_str()),
-                ("uuid", info.uuid.as_str()),
-                ("index", &index.to_string()),
+                ("npu_uuid", info.uuid.as_str()),
+                ("npu_index", &index.to_string()),
                 ("speed", dram_speed.as_str()),
             ];
             builder

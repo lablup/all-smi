@@ -35,8 +35,8 @@ impl RebellionsExporter {
             let fw_labels = [
                 ("npu", info.name.as_str()),
                 ("instance", info.instance.as_str()),
-                ("uuid", info.uuid.as_str()),
-                ("index", &index.to_string()),
+                ("npu_uuid", info.uuid.as_str()),
+                ("npu_index", &index.to_string()),
                 ("firmware", fw_version.as_str()),
             ];
             builder
@@ -76,8 +76,8 @@ impl RebellionsExporter {
             let device_labels = [
                 ("npu", info.name.as_str()),
                 ("instance", info.instance.as_str()),
-                ("uuid", info.uuid.as_str()),
-                ("index", &index.to_string()),
+                ("npu_uuid", info.uuid.as_str()),
+                ("npu_index", &index.to_string()),
                 ("model", model_type),
                 ("sid", sid.as_str()),
                 ("location", "5"), // Default location from mock server
@@ -97,8 +97,8 @@ impl RebellionsExporter {
             let pstate_labels = [
                 ("npu", info.name.as_str()),
                 ("instance", info.instance.as_str()),
-                ("uuid", info.uuid.as_str()),
-                ("index", &index.to_string()),
+                ("npu_uuid", info.uuid.as_str()),
+                ("npu_index", &index.to_string()),
                 ("pstate", pstate.as_str()),
             ];
             builder

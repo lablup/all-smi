@@ -281,54 +281,54 @@ Note: For Apple Silicon (M1/M2/M3/M4), `gpu_temperature_celsius` is not availabl
 | `all_smi_gpu_power_consumption_watts` | NPU power consumption      | watts   | `gpu_index`, `gpu_name`                   |
 | `all_smi_gpu_frequency_mhz`           | NPU AI clock frequency     | MHz     | `gpu_index`, `gpu_name`                   |
 | `all_smi_gpu_info`                    | NPU device information     | info    | `gpu_index`, `gpu_name`, `driver_version` |
-| `all_smi_npu_firmware_info`           | NPU firmware version       | info    | `npu`, `instance`, `uuid`, `index`, `firmware` |
+| `all_smi_npu_firmware_info`           | NPU firmware version       | info    | `npu`, `instance`, `npu_uuid`, `npu_index`, `firmware` |
 
 #### Tenstorrent-Specific Metrics
 | Metric                                          | Description                        | Unit    | Labels                                                    |
 |-------------------------------------------------|------------------------------------|---------|-----------------------------------------------------------|
-| `all_smi_tenstorrent_board_info`                | Board and architecture information | info    | `npu`, `instance`, `uuid`, `index`, `board_type`, `board_id`, `architecture` |
-| `all_smi_tenstorrent_collection_method_info`    | Data collection method used        | info    | `npu`, `instance`, `uuid`, `index`, `method`             |
+| `all_smi_tenstorrent_board_info`                | Board and architecture information | info    | `npu`, `instance`, `npu_uuid`, `npu_index`, `board_type`, `board_id`, `architecture` |
+| `all_smi_tenstorrent_collection_method_info`    | Data collection method used        | info    | `npu`, `instance`, `npu_uuid`, `npu_index`, `method`             |
 | **Firmware Versions**                           |                                    |         |                                                           |
-| `all_smi_tenstorrent_arc_firmware_info`         | ARC firmware version               | info    | `npu`, `instance`, `uuid`, `index`, `version`            |
-| `all_smi_tenstorrent_eth_firmware_info`         | Ethernet firmware version          | info    | `npu`, `instance`, `uuid`, `index`, `version`            |
-| `all_smi_tenstorrent_ddr_firmware_info`         | DDR firmware version               | info    | `npu`, `instance`, `uuid`, `index`, `version`            |
-| `all_smi_tenstorrent_spibootrom_firmware_info`  | SPI Boot ROM firmware version      | info    | `npu`, `instance`, `uuid`, `index`, `version`            |
-| `all_smi_tenstorrent_firmware_date_info`        | Firmware build date                | info    | `npu`, `instance`, `uuid`, `index`, `date`               |
+| `all_smi_tenstorrent_arc_firmware_info`         | ARC firmware version               | info    | `npu`, `instance`, `npu_uuid`, `npu_index`, `version`            |
+| `all_smi_tenstorrent_eth_firmware_info`         | Ethernet firmware version          | info    | `npu`, `instance`, `npu_uuid`, `npu_index`, `version`            |
+| `all_smi_tenstorrent_ddr_firmware_info`         | DDR firmware version               | info    | `npu`, `instance`, `npu_uuid`, `npu_index`, `version`            |
+| `all_smi_tenstorrent_spibootrom_firmware_info`  | SPI Boot ROM firmware version      | info    | `npu`, `instance`, `npu_uuid`, `npu_index`, `version`            |
+| `all_smi_tenstorrent_firmware_date_info`        | Firmware build date                | info    | `npu`, `instance`, `npu_uuid`, `npu_index`, `date`               |
 | **Temperature Sensors**                         |                                    |         |                                                           |
-| `all_smi_tenstorrent_asic_temperature_celsius`  | ASIC temperature                   | celsius | `npu`, `instance`, `uuid`, `index`                       |
-| `all_smi_tenstorrent_vreg_temperature_celsius`  | Voltage regulator temperature      | celsius | `npu`, `instance`, `uuid`, `index`                       |
-| `all_smi_tenstorrent_inlet_temperature_celsius` | Inlet temperature                  | celsius | `npu`, `instance`, `uuid`, `index`                       |
-| `all_smi_tenstorrent_outlet1_temperature_celsius`| Outlet 1 temperature              | celsius | `npu`, `instance`, `uuid`, `index`                       |
-| `all_smi_tenstorrent_outlet2_temperature_celsius`| Outlet 2 temperature              | celsius | `npu`, `instance`, `uuid`, `index`                       |
+| `all_smi_tenstorrent_asic_temperature_celsius`  | ASIC temperature                   | celsius | `npu`, `instance`, `npu_uuid`, `npu_index`                       |
+| `all_smi_tenstorrent_vreg_temperature_celsius`  | Voltage regulator temperature      | celsius | `npu`, `instance`, `npu_uuid`, `npu_index`                       |
+| `all_smi_tenstorrent_inlet_temperature_celsius` | Inlet temperature                  | celsius | `npu`, `instance`, `npu_uuid`, `npu_index`                       |
+| `all_smi_tenstorrent_outlet1_temperature_celsius`| Outlet 1 temperature              | celsius | `npu`, `instance`, `npu_uuid`, `npu_index`                       |
+| `all_smi_tenstorrent_outlet2_temperature_celsius`| Outlet 2 temperature              | celsius | `npu`, `instance`, `npu_uuid`, `npu_index`                       |
 | **Clock Frequencies**                           |                                    |         |                                                           |
-| `all_smi_tenstorrent_aiclk_mhz`                | AI clock frequency                 | MHz     | `npu`, `instance`, `uuid`, `index`                       |
-| `all_smi_tenstorrent_axiclk_mhz`               | AXI clock frequency                | MHz     | `npu`, `instance`, `uuid`, `index`                       |
-| `all_smi_tenstorrent_arcclk_mhz`               | ARC clock frequency                | MHz     | `npu`, `instance`, `uuid`, `index`                       |
+| `all_smi_tenstorrent_aiclk_mhz`                | AI clock frequency                 | MHz     | `npu`, `instance`, `npu_uuid`, `npu_index`                       |
+| `all_smi_tenstorrent_axiclk_mhz`               | AXI clock frequency                | MHz     | `npu`, `instance`, `npu_uuid`, `npu_index`                       |
+| `all_smi_tenstorrent_arcclk_mhz`               | ARC clock frequency                | MHz     | `npu`, `instance`, `npu_uuid`, `npu_index`                       |
 | **Power and Electrical**                        |                                    |         |                                                           |
-| `all_smi_tenstorrent_voltage_volts`            | Core voltage                       | volts   | `npu`, `instance`, `uuid`, `index`                       |
-| `all_smi_tenstorrent_current_amperes`          | Current draw                       | amperes | `npu`, `instance`, `uuid`, `index`                       |
-| `all_smi_tenstorrent_power_raw_watts`          | Raw power consumption              | watts   | `npu`, `instance`, `uuid`, `index`                       |
-| `all_smi_tenstorrent_tdp_limit_watts`          | TDP limit                          | watts   | `npu`, `instance`, `uuid`, `index`                       |
-| `all_smi_tenstorrent_tdc_limit_amperes`        | TDC limit                          | amperes | `npu`, `instance`, `uuid`, `index`                       |
+| `all_smi_tenstorrent_voltage_volts`            | Core voltage                       | volts   | `npu`, `instance`, `npu_uuid`, `npu_index`                       |
+| `all_smi_tenstorrent_current_amperes`          | Current draw                       | amperes | `npu`, `instance`, `npu_uuid`, `npu_index`                       |
+| `all_smi_tenstorrent_power_raw_watts`          | Raw power consumption              | watts   | `npu`, `instance`, `npu_uuid`, `npu_index`                       |
+| `all_smi_tenstorrent_tdp_limit_watts`          | TDP limit                          | watts   | `npu`, `instance`, `npu_uuid`, `npu_index`                       |
+| `all_smi_tenstorrent_tdc_limit_amperes`        | TDC limit                          | amperes | `npu`, `instance`, `npu_uuid`, `npu_index`                       |
 | **Status and Health**                           |                                    |         |                                                           |
-| `all_smi_tenstorrent_heartbeat`                | Device heartbeat counter           | counter | `npu`, `instance`, `uuid`, `index`                       |
-| `all_smi_tenstorrent_arc0_health`              | ARC0 health counter                | counter | `npu`, `instance`, `uuid`, `index`                       |
-| `all_smi_tenstorrent_arc3_health`              | ARC3 health counter                | counter | `npu`, `instance`, `uuid`, `index`                       |
-| `all_smi_tenstorrent_faults`                   | Fault register value               | gauge   | `npu`, `instance`, `uuid`, `index`                       |
-| `all_smi_tenstorrent_throttler`                | Throttler state register           | gauge   | `npu`, `instance`, `uuid`, `index`                       |
-| `all_smi_tenstorrent_pcie_status_info`         | PCIe status register               | info    | `npu`, `instance`, `uuid`, `index`, `status`             |
-| `all_smi_tenstorrent_eth_status_info`          | Ethernet status register           | info    | `npu`, `instance`, `uuid`, `index`, `port`, `status`     |
-| `all_smi_tenstorrent_ddr_status`               | DDR status register                | gauge   | `npu`, `instance`, `uuid`, `index`                       |
+| `all_smi_tenstorrent_heartbeat`                | Device heartbeat counter           | counter | `npu`, `instance`, `npu_uuid`, `npu_index`                       |
+| `all_smi_tenstorrent_arc0_health`              | ARC0 health counter                | counter | `npu`, `instance`, `npu_uuid`, `npu_index`                       |
+| `all_smi_tenstorrent_arc3_health`              | ARC3 health counter                | counter | `npu`, `instance`, `npu_uuid`, `npu_index`                       |
+| `all_smi_tenstorrent_faults`                   | Fault register value               | gauge   | `npu`, `instance`, `npu_uuid`, `npu_index`                       |
+| `all_smi_tenstorrent_throttler`                | Throttler state register           | gauge   | `npu`, `instance`, `npu_uuid`, `npu_index`                       |
+| `all_smi_tenstorrent_pcie_status_info`         | PCIe status register               | info    | `npu`, `instance`, `npu_uuid`, `npu_index`, `status`             |
+| `all_smi_tenstorrent_eth_status_info`          | Ethernet status register           | info    | `npu`, `instance`, `npu_uuid`, `npu_index`, `port`, `status`     |
+| `all_smi_tenstorrent_ddr_status`               | DDR status register                | gauge   | `npu`, `instance`, `npu_uuid`, `npu_index`                       |
 | **Fan Metrics**                                 |                                    |         |                                                           |
-| `all_smi_tenstorrent_fan_speed_percent`        | Fan speed percentage               | percent | `npu`, `instance`, `uuid`, `index`                       |
-| `all_smi_tenstorrent_fan_rpm`                  | Fan speed in RPM                   | gauge   | `npu`, `instance`, `uuid`, `index`                       |
+| `all_smi_tenstorrent_fan_speed_percent`        | Fan speed percentage               | percent | `npu`, `instance`, `npu_uuid`, `npu_index`                       |
+| `all_smi_tenstorrent_fan_rpm`                  | Fan speed in RPM                   | gauge   | `npu`, `instance`, `npu_uuid`, `npu_index`                       |
 | **PCIe Information**                            |                                    |         |                                                           |
-| `all_smi_tenstorrent_pcie_generation`          | PCIe generation                    | gauge   | `npu`, `instance`, `uuid`, `index`                       |
-| `all_smi_tenstorrent_pcie_width`               | PCIe link width                    | gauge   | `npu`, `instance`, `uuid`, `index`                       |
-| `all_smi_tenstorrent_pcie_address_info`        | PCIe address                       | info    | `npu`, `instance`, `uuid`, `index`, `address`            |
-| `all_smi_tenstorrent_pcie_device_info`         | PCIe device identification         | info    | `npu`, `instance`, `uuid`, `index`, `vendor_id`, `device_id` |
+| `all_smi_tenstorrent_pcie_generation`          | PCIe generation                    | gauge   | `npu`, `instance`, `npu_uuid`, `npu_index`                       |
+| `all_smi_tenstorrent_pcie_width`               | PCIe link width                    | gauge   | `npu`, `instance`, `npu_uuid`, `npu_index`                       |
+| `all_smi_tenstorrent_pcie_address_info`        | PCIe address                       | info    | `npu`, `instance`, `npu_uuid`, `npu_index`, `address`            |
+| `all_smi_tenstorrent_pcie_device_info`         | PCIe device identification         | info    | `npu`, `instance`, `npu_uuid`, `npu_index`, `vendor_id`, `device_id` |
 | **DRAM Information**                            |                                    |         |                                                           |
-| `all_smi_tenstorrent_dram_info`                | DRAM configuration                 | info    | `npu`, `instance`, `uuid`, `index`, `speed`              |
+| `all_smi_tenstorrent_dram_info`                | DRAM configuration                 | info    | `npu`, `instance`, `npu_uuid`, `npu_index`, `speed`              |
 
 Note: Tenstorrent NPUs use the same basic metric names as GPUs for compatibility with existing monitoring infrastructure. Additional Tenstorrent-specific metrics provide detailed hardware monitoring capabilities.
 
@@ -348,15 +348,15 @@ Note: Tenstorrent NPUs use the same basic metric names as GPUs for compatibility
 #### Rebellions-Specific Metrics
 | Metric                                    | Description                          | Unit  | Labels                                                               |
 |-------------------------------------------|--------------------------------------|-------|----------------------------------------------------------------------|
-| `all_smi_rebellions_device_info`          | Device model and variant information | info  | `npu`, `instance`, `uuid`, `index`, `model`, `variant`              |
-| `all_smi_rebellions_firmware_info`        | NPU firmware version                 | info  | `npu`, `instance`, `uuid`, `index`, `firmware_version`              |
-| `all_smi_rebellions_kmd_info`             | Kernel Mode Driver version           | info  | `npu`, `instance`, `uuid`, `index`, `kmd_version`                   |
-| `all_smi_rebellions_device_status`        | Device operational status            | gauge | `npu`, `instance`, `uuid`, `index`                                  |
-| `all_smi_rebellions_performance_state`    | NPU performance state (P0-P15)       | gauge | `npu`, `instance`, `uuid`, `index`                                  |
-| `all_smi_rebellions_pcie_generation`      | PCIe generation (Gen4)               | gauge | `npu`, `instance`, `uuid`, `index`                                  |
-| `all_smi_rebellions_pcie_width`           | PCIe link width (x16)                | gauge | `npu`, `instance`, `uuid`, `index`                                  |
-| `all_smi_rebellions_memory_bandwidth_gbps`| Memory bandwidth capacity            | gauge | `npu`, `instance`, `uuid`, `index`                                  |
-| `all_smi_rebellions_compute_tops`         | Compute capacity in TOPS             | gauge | `npu`, `instance`, `uuid`, `index`                                  |
+| `all_smi_rebellions_device_info`          | Device model and variant information | info  | `npu`, `instance`, `npu_uuid`, `npu_index`, `model`, `variant`              |
+| `all_smi_rebellions_firmware_info`        | NPU firmware version                 | info  | `npu`, `instance`, `npu_uuid`, `npu_index`, `firmware_version`              |
+| `all_smi_rebellions_kmd_info`             | Kernel Mode Driver version           | info  | `npu`, `instance`, `npu_uuid`, `npu_index`, `kmd_version`                   |
+| `all_smi_rebellions_device_status`        | Device operational status            | gauge | `npu`, `instance`, `npu_uuid`, `npu_index`                                  |
+| `all_smi_rebellions_performance_state`    | NPU performance state (P0-P15)       | gauge | `npu`, `instance`, `npu_uuid`, `npu_index`                                  |
+| `all_smi_rebellions_pcie_generation`      | PCIe generation (Gen4)               | gauge | `npu`, `instance`, `npu_uuid`, `npu_index`                                  |
+| `all_smi_rebellions_pcie_width`           | PCIe link width (x16)                | gauge | `npu`, `instance`, `npu_uuid`, `npu_index`                                  |
+| `all_smi_rebellions_memory_bandwidth_gbps`| Memory bandwidth capacity            | gauge | `npu`, `instance`, `npu_uuid`, `npu_index`                                  |
+| `all_smi_rebellions_compute_tops`         | Compute capacity in TOPS             | gauge | `npu`, `instance`, `npu_uuid`, `npu_index`                                  |
 
 Note: Rebellions NPUs support ATOM, ATOM+, and ATOM Max variants with varying compute and memory capabilities. All variants use PCIe Gen4 x16 interface.
 
@@ -376,19 +376,19 @@ Note: Rebellions NPUs support ATOM, ATOM+, and ATOM Max variants with varying co
 #### Furiosa-Specific Metrics
 | Metric                                      | Description                            | Unit    | Labels                                                               |
 |---------------------------------------------|----------------------------------------|---------|----------------------------------------------------------------------|
-| `all_smi_furiosa_device_info`               | Device architecture and model info     | info    | `npu`, `instance`, `uuid`, `index`, `architecture`, `model`         |
-| `all_smi_furiosa_firmware_info`             | NPU firmware version                   | info    | `npu`, `instance`, `uuid`, `index`, `firmware_version`              |
-| `all_smi_furiosa_pert_info`                 | PERT (runtime) version                 | info    | `npu`, `instance`, `uuid`, `index`, `pert_version`                  |
-| `all_smi_furiosa_liveness_status`           | Device liveness status                 | gauge   | `npu`, `instance`, `uuid`, `index`                                  |
-| `all_smi_furiosa_core_count`                | Number of cores in NPU                 | gauge   | `npu`, `instance`, `uuid`, `index`                                  |
-| `all_smi_furiosa_core_status`               | Core availability status               | gauge   | `npu`, `instance`, `uuid`, `index`, `core`                          |
-| `all_smi_furiosa_pe_utilization`            | Processing Element utilization         | percent | `npu`, `instance`, `uuid`, `index`, `core`                          |
-| `all_smi_furiosa_core_frequency_mhz`        | Per-core frequency                     | MHz     | `npu`, `instance`, `uuid`, `index`, `core`                          |
-| `all_smi_furiosa_power_governor_info`       | Power governor mode                    | info    | `npu`, `instance`, `uuid`, `index`, `governor`                      |
-| `all_smi_furiosa_error_count`               | Cumulative error count                 | counter | `npu`, `instance`, `uuid`, `index`                                  |
-| `all_smi_furiosa_pcie_generation`           | PCIe generation                        | gauge   | `npu`, `instance`, `uuid`, `index`                                  |
-| `all_smi_furiosa_pcie_width`                | PCIe link width                        | gauge   | `npu`, `instance`, `uuid`, `index`                                  |
-| `all_smi_furiosa_memory_bandwidth_utilization` | Memory bandwidth utilization        | percent | `npu`, `instance`, `uuid`, `index`                                  |
+| `all_smi_furiosa_device_info`               | Device architecture and model info     | info    | `npu`, `instance`, `npu_uuid`, `npu_index`, `architecture`, `model`         |
+| `all_smi_furiosa_firmware_info`             | NPU firmware version                   | info    | `npu`, `instance`, `npu_uuid`, `npu_index`, `firmware_version`              |
+| `all_smi_furiosa_pert_info`                 | PERT (runtime) version                 | info    | `npu`, `instance`, `npu_uuid`, `npu_index`, `pert_version`                  |
+| `all_smi_furiosa_liveness_status`           | Device liveness status                 | gauge   | `npu`, `instance`, `npu_uuid`, `npu_index`                                  |
+| `all_smi_furiosa_core_count`                | Number of cores in NPU                 | gauge   | `npu`, `instance`, `npu_uuid`, `npu_index`                                  |
+| `all_smi_furiosa_core_status`               | Core availability status               | gauge   | `npu`, `instance`, `npu_uuid`, `npu_index`, `core`                          |
+| `all_smi_furiosa_pe_utilization`            | Processing Element utilization         | percent | `npu`, `instance`, `npu_uuid`, `npu_index`, `core`                          |
+| `all_smi_furiosa_core_frequency_mhz`        | Per-core frequency                     | MHz     | `npu`, `instance`, `npu_uuid`, `npu_index`, `core`                          |
+| `all_smi_furiosa_power_governor_info`       | Power governor mode                    | info    | `npu`, `instance`, `npu_uuid`, `npu_index`, `governor`                      |
+| `all_smi_furiosa_error_count`               | Cumulative error count                 | counter | `npu`, `instance`, `npu_uuid`, `npu_index`                                  |
+| `all_smi_furiosa_pcie_generation`           | PCIe generation                        | gauge   | `npu`, `instance`, `npu_uuid`, `npu_index`                                  |
+| `all_smi_furiosa_pcie_width`                | PCIe link width                        | gauge   | `npu`, `instance`, `npu_uuid`, `npu_index`                                  |
+| `all_smi_furiosa_memory_bandwidth_utilization` | Memory bandwidth utilization        | percent | `npu`, `instance`, `npu_uuid`, `npu_index`                                  |
 
 Note: Furiosa NPUs use the RNGD architecture with 8 cores per NPU. Each core contains multiple Processing Elements (PEs) that handle neural network computations. The power governor supports OnDemand mode for dynamic power management.
 
@@ -408,17 +408,17 @@ Note: Furiosa NPUs use the RNGD architecture with 8 cores per NPU. Each core con
 #### Intel Gaudi-Specific Metrics
 | Metric                                        | Description                              | Unit    | Labels                                                        |
 |-----------------------------------------------|------------------------------------------|---------|---------------------------------------------------------------|
-| `all_smi_gaudi_device_info`                   | Device model and information             | info    | `npu`, `instance`, `uuid`, `index`                           |
-| `all_smi_gaudi_internal_name_info`            | Internal device name (e.g., HL-325L)     | info    | `npu`, `instance`, `uuid`, `index`, `internal_name`          |
-| `all_smi_gaudi_driver_info`                   | Habana driver version                    | info    | `npu`, `instance`, `uuid`, `index`, `version`                |
-| `all_smi_gaudi_aip_utilization_percent`       | AIP (AI Processor) utilization           | percent | `npu`, `instance`, `uuid`, `index`                           |
-| `all_smi_gaudi_memory_used_bytes`             | HBM memory used                          | bytes   | `npu`, `instance`, `uuid`, `index`                           |
-| `all_smi_gaudi_memory_total_bytes`            | HBM total memory                         | bytes   | `npu`, `instance`, `uuid`, `index`                           |
-| `all_smi_gaudi_memory_utilization_percent`    | HBM memory utilization percentage        | percent | `npu`, `instance`, `uuid`, `index`                           |
-| `all_smi_gaudi_power_draw_watts`              | Current power consumption                | watts   | `npu`, `instance`, `uuid`, `index`                           |
-| `all_smi_gaudi_power_max_watts`               | Maximum power limit                      | watts   | `npu`, `instance`, `uuid`, `index`                           |
-| `all_smi_gaudi_power_utilization_percent`     | Power utilization percentage             | percent | `npu`, `instance`, `uuid`, `index`                           |
-| `all_smi_gaudi_temperature_celsius`           | AIP temperature                          | celsius | `npu`, `instance`, `uuid`, `index`                           |
+| `all_smi_gaudi_device_info`                   | Device model and information             | info    | `npu`, `instance`, `npu_uuid`, `npu_index`                           |
+| `all_smi_gaudi_internal_name_info`            | Internal device name (e.g., HL-325L)     | info    | `npu`, `instance`, `npu_uuid`, `npu_index`, `internal_name`          |
+| `all_smi_gaudi_driver_info`                   | Habana driver version                    | info    | `npu`, `instance`, `npu_uuid`, `npu_index`, `version`                |
+| `all_smi_gaudi_aip_utilization_percent`       | AIP (AI Processor) utilization           | percent | `npu`, `instance`, `npu_uuid`, `npu_index`                           |
+| `all_smi_gaudi_memory_used_bytes`             | HBM memory used                          | bytes   | `npu`, `instance`, `npu_uuid`, `npu_index`                           |
+| `all_smi_gaudi_memory_total_bytes`            | HBM total memory                         | bytes   | `npu`, `instance`, `npu_uuid`, `npu_index`                           |
+| `all_smi_gaudi_memory_utilization_percent`    | HBM memory utilization percentage        | percent | `npu`, `instance`, `npu_uuid`, `npu_index`                           |
+| `all_smi_gaudi_power_draw_watts`              | Current power consumption                | watts   | `npu`, `instance`, `npu_uuid`, `npu_index`                           |
+| `all_smi_gaudi_power_max_watts`               | Maximum power limit                      | watts   | `npu`, `instance`, `npu_uuid`, `npu_index`                           |
+| `all_smi_gaudi_power_utilization_percent`     | Power utilization percentage             | percent | `npu`, `instance`, `npu_uuid`, `npu_index`                           |
+| `all_smi_gaudi_temperature_celsius`           | AIP temperature                          | celsius | `npu`, `instance`, `npu_uuid`, `npu_index`                           |
 
 Note: Intel Gaudi NPUs (Gaudi 1/2/3) are monitored via the `hl-smi` command-line tool running as a background process. Device names are automatically mapped from internal identifiers (e.g., HL-325L) to human-friendly names (e.g., Intel Gaudi 3 PCIe LP). The tool supports various form factors including PCIe, OAM, UBB, and HLS variants.
 
@@ -438,23 +438,23 @@ Note: Intel Gaudi NPUs (Gaudi 1/2/3) are monitored via the `hl-smi` command-line
 #### TPU-Specific Metrics
 | Metric                                     | Description                          | Unit  | Labels                                                   |
 |--------------------------------------------|--------------------------------------|-------|----------------------------------------------------------|
-| `all_smi_tpu_utilization_percent`          | TPU duty cycle utilization           | percent| `npu`, `instance`, `uuid`, `index`                      |
-| `all_smi_tpu_memory_used_bytes`            | TPU HBM memory used                  | bytes | `npu`, `instance`, `uuid`, `index`                       |
-| `all_smi_tpu_memory_total_bytes`           | TPU HBM memory total                 | bytes | `npu`, `instance`, `uuid`, `index`                       |
-| `all_smi_tpu_memory_utilization_percent`   | TPU HBM memory utilization percentage| percent| `npu`, `instance`, `uuid`, `index`                      |
-| `all_smi_tpu_chip_version_info`            | TPU chip version information         | info  | `npu`, `instance`, `uuid`, `index`, `version`            |
-| `all_smi_tpu_accelerator_type_info`        | TPU accelerator type information     | info  | `npu`, `instance`, `uuid`, `index`, `type`               |
-| `all_smi_tpu_core_count`                   | Number of TPU cores                  | gauge | `npu`, `instance`, `uuid`, `index`                       |
-| `all_smi_tpu_tensorcore_count`             | Number of TensorCores per chip       | gauge | `npu`, `instance`, `uuid`, `index`                       |
-| `all_smi_tpu_memory_type_info`             | TPU memory type (HBM2/HBM2e/HBM3e)    | info  | `npu`, `instance`, `uuid`, `index`, `type`               |
-| `all_smi_tpu_runtime_version_info`         | TPU runtime/library version          | info  | `npu`, `instance`, `uuid`, `index`, `version`            |
-| `all_smi_tpu_power_max_watts`              | TPU maximum power limit              | watts | `npu`, `instance`, `uuid`, `index`                       |
-| `all_smi_tpu_hlo_queue_size`               | Number of pending HLO programs       | gauge | `npu`, `instance`, `uuid`, `index`                       |
-| `all_smi_tpu_hlo_exec_mean_microseconds`   | HLO execution timing (mean)          | µs    | `npu`, `instance`, `uuid`, `index`                       |
-| `all_smi_tpu_hlo_exec_p50_microseconds`    | HLO execution timing (P50)           | µs    | `npu`, `instance`, `uuid`, `index`                       |
-| `all_smi_tpu_hlo_exec_p90_microseconds`    | HLO execution timing (P90)           | µs    | `npu`, `instance`, `uuid`, `index`                       |
-| `all_smi_tpu_hlo_exec_p95_microseconds`    | HLO execution timing (P95)           | µs    | `npu`, `instance`, `uuid`, `index`                       |
-| `all_smi_tpu_hlo_exec_p999_microseconds`   | HLO execution timing (P99.9)         | µs    | `npu`, `instance`, `uuid`, `index`                       |
+| `all_smi_tpu_utilization_percent`          | TPU duty cycle utilization           | percent| `npu`, `instance`, `npu_uuid`, `npu_index`                      |
+| `all_smi_tpu_memory_used_bytes`            | TPU HBM memory used                  | bytes | `npu`, `instance`, `npu_uuid`, `npu_index`                       |
+| `all_smi_tpu_memory_total_bytes`           | TPU HBM memory total                 | bytes | `npu`, `instance`, `npu_uuid`, `npu_index`                       |
+| `all_smi_tpu_memory_utilization_percent`   | TPU HBM memory utilization percentage| percent| `npu`, `instance`, `npu_uuid`, `npu_index`                      |
+| `all_smi_tpu_chip_version_info`            | TPU chip version information         | info  | `npu`, `instance`, `npu_uuid`, `npu_index`, `version`            |
+| `all_smi_tpu_accelerator_type_info`        | TPU accelerator type information     | info  | `npu`, `instance`, `npu_uuid`, `npu_index`, `type`               |
+| `all_smi_tpu_core_count`                   | Number of TPU cores                  | gauge | `npu`, `instance`, `npu_uuid`, `npu_index`                       |
+| `all_smi_tpu_tensorcore_count`             | Number of TensorCores per chip       | gauge | `npu`, `instance`, `npu_uuid`, `npu_index`                       |
+| `all_smi_tpu_memory_type_info`             | TPU memory type (HBM2/HBM2e/HBM3e)    | info  | `npu`, `instance`, `npu_uuid`, `npu_index`, `type`               |
+| `all_smi_tpu_runtime_version_info`         | TPU runtime/library version          | info  | `npu`, `instance`, `npu_uuid`, `npu_index`, `version`            |
+| `all_smi_tpu_power_max_watts`              | TPU maximum power limit              | watts | `npu`, `instance`, `npu_uuid`, `npu_index`                       |
+| `all_smi_tpu_hlo_queue_size`               | Number of pending HLO programs       | gauge | `npu`, `instance`, `npu_uuid`, `npu_index`                       |
+| `all_smi_tpu_hlo_exec_mean_microseconds`   | HLO execution timing (mean)          | µs    | `npu`, `instance`, `npu_uuid`, `npu_index`                       |
+| `all_smi_tpu_hlo_exec_p50_microseconds`    | HLO execution timing (P50)           | µs    | `npu`, `instance`, `npu_uuid`, `npu_index`                       |
+| `all_smi_tpu_hlo_exec_p90_microseconds`    | HLO execution timing (P90)           | µs    | `npu`, `instance`, `npu_uuid`, `npu_index`                       |
+| `all_smi_tpu_hlo_exec_p95_microseconds`    | HLO execution timing (P95)           | µs    | `npu`, `instance`, `npu_uuid`, `npu_index`                       |
+| `all_smi_tpu_hlo_exec_p999_microseconds`   | HLO execution timing (P99.9)         | µs    | `npu`, `instance`, `npu_uuid`, `npu_index`                       |
 
 Note: Google Cloud TPUs (v2-v7/Ironwood) are monitored via the `tpu-info` command-line tool running in streaming mode. Metrics include duty cycle utilization, HBM memory tracking, and chip configuration details.
 

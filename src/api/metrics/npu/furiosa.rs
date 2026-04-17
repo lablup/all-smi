@@ -36,8 +36,8 @@ impl FuriosaExporter {
             let device_labels = [
                 ("npu", info.name.as_str()),
                 ("instance", info.instance.as_str()),
-                ("uuid", info.uuid.as_str()),
-                ("index", &index.to_string()),
+                ("npu_uuid", info.uuid.as_str()),
+                ("npu_index", &index.to_string()),
                 ("device_name", device_name.as_str()),
             ];
             builder
@@ -51,8 +51,8 @@ impl FuriosaExporter {
             let chip_labels = [
                 ("npu", info.name.as_str()),
                 ("instance", info.instance.as_str()),
-                ("uuid", info.uuid.as_str()),
-                ("index", &index.to_string()),
+                ("npu_uuid", info.uuid.as_str()),
+                ("npu_index", &index.to_string()),
                 ("chip", chip_name.as_str()),
             ];
             builder
@@ -68,8 +68,8 @@ impl FuriosaExporter {
             let driver_labels = [
                 ("npu", info.name.as_str()),
                 ("instance", info.instance.as_str()),
-                ("uuid", info.uuid.as_str()),
-                ("index", &index.to_string()),
+                ("npu_uuid", info.uuid.as_str()),
+                ("npu_index", &index.to_string()),
                 ("version", driver_version.as_str()),
             ];
             builder
@@ -83,8 +83,8 @@ impl FuriosaExporter {
             let fw_labels = [
                 ("npu", info.name.as_str()),
                 ("instance", info.instance.as_str()),
-                ("uuid", info.uuid.as_str()),
-                ("index", &index.to_string()),
+                ("npu_uuid", info.uuid.as_str()),
+                ("npu_index", &index.to_string()),
                 ("version", firmware_version.as_str()),
             ];
             builder
@@ -103,8 +103,8 @@ impl FuriosaExporter {
         let base_labels = [
             ("npu", info.name.as_str()),
             ("instance", info.instance.as_str()),
-            ("uuid", info.uuid.as_str()),
-            ("index", &index.to_string()),
+            ("npu_uuid", info.uuid.as_str()),
+            ("npu_index", &index.to_string()),
         ];
 
         // Export NPU utilization if available
@@ -142,8 +142,8 @@ impl FuriosaExporter {
         let base_labels = [
             ("npu", info.name.as_str()),
             ("instance", info.instance.as_str()),
-            ("uuid", info.uuid.as_str()),
-            ("index", &index.to_string()),
+            ("npu_uuid", info.uuid.as_str()),
+            ("npu_index", &index.to_string()),
         ];
 
         // Export memory usage if available
@@ -181,8 +181,8 @@ impl FuriosaExporter {
         let base_labels = [
             ("npu", info.name.as_str()),
             ("instance", info.instance.as_str()),
-            ("uuid", info.uuid.as_str()),
-            ("index", &index.to_string()),
+            ("npu_uuid", info.uuid.as_str()),
+            ("npu_index", &index.to_string()),
         ];
 
         // Export clock frequencies if available
