@@ -51,6 +51,125 @@ r = session.get('http+unix://%2Ftmp%2Fall-smi.sock/metrics')
 
 **Security**: Socket permissions are set to `0600` (owner-only access).
 
+## JSON Endpoints (Streaming + One-Shot)
+
+Alongside `/metrics`, API mode exposes two JSON endpoints that share the
+same schema as the `snapshot` subcommand (`schema: 1`).
+
+### `GET /snapshot`
+
+One-shot JSON payload reflecting the latest collection cycle. When the
+last cached frame is older than `2 × interval` (or no cycle has
+completed yet), the handler forces a fresh collection so the response
+never silently serves stale data.
+
+```
+GET /snapshot
+Content-Type: application/json
+Cache-Control: no-store
+X-Accel-Buffering: no
+
+{
+  "schema": 1,
+  "timestamp": "2026-04-20T12:34:56Z",
+  "hostname": "gpu-01",
+  "gpus":   [ … ],
+  "cpus":   [ … ],
+  "memory": [ … ],
+  "chassis":[ … ],
+  "errors": []
+}
+```
+
+**Query parameters**
+
+| Parameter | Default | Meaning |
+|-----------|---------|---------|
+| `include` | `gpu,cpu,memory,chassis` | Comma-separated sections. Valid values: `gpu`, `cpu`, `memory`, `chassis`, `process`, `storage`. |
+| `pretty`  | `0` | Pretty-print the JSON body when `1` / `true` / `yes`. |
+
+### `GET /events`
+
+Server-Sent Events stream. Emits one JSON frame per collection cycle.
+
+```
+GET /events
+Accept: text/event-stream
+
+event: snapshot
+id: 2026-04-20T12:34:56Z
+data: {"schema":1,"timestamp":"2026-04-20T12:34:56Z", …}
+
+event: snapshot
+id: 2026-04-20T12:34:57Z
+data: { … }
+```
+
+**Query parameters**
+
+| Parameter | Default | Meaning |
+|-----------|---------|---------|
+| `include` | `gpu,cpu,memory,chassis` | Same grammar as `/snapshot`. |
+| `throttle` | = collection interval | Minimum seconds between emitted events. Clamped to `>=` the collection interval. |
+| `heartbeat` | `30` | Keep-alive comment interval in seconds. |
+
+**Keep-alive and lag**
+
+The server emits a bare SSE comment every `heartbeat` seconds so reverse
+proxies do not idle-timeout the connection:
+
+```
+: keep-alive
+```
+
+When a client falls behind the server's broadcast buffer, the stream
+inserts a synthetic `lag` event and continues with the freshest live
+frame:
+
+```
+event: lag
+data: {"dropped": 3}
+```
+
+**Reconnect**
+
+`Last-Event-ID` is accepted but never triggers history replay — `all-smi`
+does not retain historical frames. On reconnect the client resumes with
+the next live frame regardless of the ID it sent.
+
+**Reverse-proxy guidance**
+
+The response advertises `X-Accel-Buffering: no` and `Cache-Control:
+no-store`. nginx operators should additionally set `proxy_buffering
+off;` on the location block. haproxy users want `option http-buffer-request`
+turned off for the SSE route.
+
+**Example clients**
+
+- [`examples/sse_client.html`](examples/sse_client.html) — browser
+  `EventSource` demo.
+- `curl -N http://localhost:9090/events` — raw inspection.
+
+### Security knobs
+
+| Env var | Default | Effect |
+|---------|---------|--------|
+| `ALL_SMI_API_CORS_ALLOWED_ORIGINS` | (empty → **no CORS**) | Comma-separated list of origins permitted to read `/metrics`, `/snapshot`, and `/events` cross-origin. Set to `*` to revert to the pre-0.21 wildcard; a warning is logged in that case. |
+| `ALL_SMI_API_MAX_SSE_SUBSCRIBERS` | `256` | Cap on concurrent `/events` subscribers. Extra clients get `503 Service Unavailable` with `Retry-After: 5`. Set to `0` to disable the cap. |
+
+The default CORS posture blocks cross-origin browser reads of the live
+telemetry stream. That includes process command lines (when
+`--processes` is enabled), usernames, GPU utilization, and power
+consumption — keep the allowlist narrow.
+
+**Process label truncation.** `command`, `process_name`, and `user`
+fields are truncated at 256 / 128 / 128 bytes respectively on all
+output surfaces (Prometheus `/metrics`, JSON `/snapshot`, and SSE
+`/events`). Longer strings are emitted with a trailing
+`...(N bytes truncated)` marker. This caps scrape-response
+amplification and limits the blast radius of secrets that happen to
+live in argv.
+
 ## Available Metrics
 
 ### GPU Metrics (All Platforms)

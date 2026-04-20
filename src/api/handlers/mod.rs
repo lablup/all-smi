@@ -12,12 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod collection_loop;
-pub mod frame_bus;
-pub mod handlers;
-pub mod metrics;
-pub mod server;
-pub mod server_state;
+//! HTTP handlers for the `all-smi api` mode.
+//!
+//! Layout:
+//!
+//! * [`metrics_render`] — legacy Prometheus `/metrics` endpoint.
+//! * [`events`] — Server-Sent Events `/events` stream (issue #193).
+//! * [`snapshot`] — one-shot `/snapshot` JSON endpoint (issue #193).
 
-pub use frame_bus::FrameBus;
-pub use server::*;
+pub mod events;
+pub mod metrics_render;
+pub mod snapshot;
+
+pub use metrics_render::{SharedState, metrics_handler};

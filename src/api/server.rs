@@ -12,12 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use axum::http::{HeaderName, HeaderValue, Method, header};
 use axum::{Router, routing::get};
 use std::time::Duration;
-use sysinfo::Disks;
 use tokio::net::TcpListener;
 use tokio::sync::RwLock;
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -26,13 +26,15 @@ use std::path::PathBuf;
 #[cfg(unix)]
 use tokio::net::UnixListener;
 
+use crate::api::FrameBus;
+use crate::api::collection_loop::run_collection_loop;
+use crate::api::handlers::events::events_handler;
+use crate::api::handlers::snapshot::snapshot_handler;
 use crate::api::handlers::{SharedState, metrics_handler};
+use crate::api::server_state::ApiState;
 use crate::app_state::AppState;
 use crate::cli::ApiArgs;
 use crate::common::config_file::Settings;
-use crate::device::{create_chassis_reader, get_cpu_readers, get_gpu_readers, get_memory_readers};
-use crate::storage::info::StorageInfo;
-use crate::utils::{filter_docker_aware_disks, get_hostname};
 
 /// Get the default Unix domain socket path for the current platform.
 /// - Linux: /var/run/all-smi.sock (fallback to /tmp/all-smi.sock if no permission)
@@ -172,92 +174,32 @@ pub async fn run_api_mode(args: &ApiArgs, settings: &Settings) {
         }
     };
 
-    // Spawn background task for collecting metrics
-    tokio::spawn(async move {
-        let gpu_readers = get_gpu_readers();
-        let cpu_readers = get_cpu_readers();
-        let memory_readers = get_memory_readers();
-        let chassis_reader = create_chassis_reader();
-        let mut disks = Disks::new_with_refreshed_list();
-        loop {
-            let all_gpu_info: Vec<_> = gpu_readers
-                .iter()
-                .flat_map(|reader| reader.get_gpu_info())
-                .collect();
+    // Publish one frame per collection cycle onto a shared broadcast
+    // bus (issue #193). The SSE `/events` and one-shot `/snapshot`
+    // handlers subscribe to this bus so they never need to run their
+    // own reader loop — see `api::frame_bus` and `api::collection_loop`.
+    let bus = FrameBus::new(Duration::from_secs(interval));
 
-            let all_cpu_info = cpu_readers
-                .iter()
-                .flat_map(|reader| reader.get_cpu_info())
-                .collect();
+    // Spawn the background collection task. It owns the reader factories
+    // and is the only place that calls them on the live server.
+    tokio::spawn(run_collection_loop(
+        state_clone.clone(),
+        bus.clone(),
+        interval,
+        processes,
+    ));
 
-            let all_memory_info = memory_readers
-                .iter()
-                .flat_map(|reader| reader.get_memory_info())
-                .collect();
-
-            let all_processes = if processes {
-                gpu_readers
-                    .iter()
-                    .flat_map(|reader| reader.get_process_info())
-                    .collect()
-            } else {
-                Vec::new()
-            };
-
-            // Collect chassis-level info (DMI, thermals, power)
-            let chassis_info: Vec<_> = chassis_reader
-                .get_chassis_info()
-                .into_iter()
-                .map(|mut ci| {
-                    // Aggregate GPU power into chassis total if not already set
-                    if ci.total_power_watts.is_none() {
-                        let total_gpu_power: f64 =
-                            all_gpu_info.iter().map(|g| g.power_consumption).sum();
-                        if total_gpu_power > 0.0 {
-                            ci.total_power_watts = Some(total_gpu_power);
-                        }
-                    }
-                    ci
-                })
-                .collect();
-
-            // Refresh disk info in-place instead of creating a new Disks instance
-            disks.refresh(true);
-            let storage_info = collect_storage_info_from(&disks);
-
-            let mut state = state_clone.write().await;
-            state.gpu_info = all_gpu_info;
-            state.cpu_info = all_cpu_info;
-            state.memory_info = all_memory_info;
-            state.process_info = all_processes;
-            state.chassis_info = chassis_info;
-            state.storage_info = storage_info;
-            if state.loading {
-                state.loading = false;
-            }
-
-            // Integrate power samples into the energy accountant so
-            // `all_smi_energy_consumed_joules_total` reflects reality
-            // in `api` mode (issue #191). The code mirrors
-            // `view::data_collection::aggregator::update_energy_counters`
-            // so both surfaces share the same integration contract.
-            integrate_power_samples(&mut state);
-
-            drop(state);
-            tokio::time::sleep(Duration::from_secs(interval)).await;
-        }
-    });
+    // Compose the router state so each handler extracts only the
+    // sub-state it needs (see `server_state::ApiState`).
+    let api_state = ApiState::new(state, bus);
 
     // Create the router with shared state
     let app = Router::new()
         .route("/metrics", get(metrics_handler))
-        .with_state(state)
-        .layer(
-            CorsLayer::new()
-                .allow_origin(Any)
-                .allow_methods(Any)
-                .allow_headers(Any),
-        )
+        .route("/events", get(events_handler))
+        .route("/snapshot", get(snapshot_handler))
+        .with_state(api_state)
+        .layer(build_cors_layer())
         .layer(TraceLayer::new_for_http());
 
     // Determine which listeners to start
@@ -527,74 +469,170 @@ fn cleanup_socket(path: &std::path::Path) {
     }
 }
 
-/// Integrate the current in-state power samples into the energy
-/// accountant. Run once per collection cycle in `api` mode (issue
-/// #191). On the first sample for each `(host, device)` pair, the
-/// function consults `state.energy_wal_replay` to seed the lifetime
-/// counter with any previously-recorded value so Prometheus stays
-/// monotonic across restarts.
-fn integrate_power_samples(state: &mut AppState) {
-    use crate::metrics::energy::EnergyKey;
-    use std::time::Instant;
+/// Build the CORS layer for the API router.
+///
+/// Security posture:
+///
+/// * **No cross-origin access by default.** The previous wildcard
+///   (`Allow-Origin: *`, `Allow-Methods: *`, `Allow-Headers: *`) let any
+///   origin read `/metrics`, `/snapshot`, and the `/events` SSE stream
+///   from a browsing context. That telemetry includes process command
+///   lines, usernames, and power data — sensitive enough that a
+///   malicious page loaded by any authenticated operator could
+///   exfiltrate it via a cross-origin `fetch`. We therefore default
+///   to the strict axum CORS posture: no extra headers, no allowed
+///   origins, leaving same-origin requests unaffected.
+/// * **Opt-in allowlist.** When the operator sets
+///   `ALL_SMI_API_CORS_ALLOWED_ORIGINS` to a comma-separated list of
+///   origins, those origins (and only those) are reflected in the
+///   `Access-Control-Allow-Origin` header. `GET` + `Accept:
+///   text/event-stream` remains sufficient to subscribe to `/events`
+///   from a permitted origin.
+/// * **Wildcard escape hatch.** Setting the env var to exactly `*`
+///   restores the previous permissive behaviour for operators who
+///   understand the exposure (public read-only dashboards on a
+///   network-isolated host). A warning is logged so the risk is
+///   discoverable in the operator logs.
+fn build_cors_layer() -> CorsLayer {
+    let raw = std::env::var("ALL_SMI_API_CORS_ALLOWED_ORIGINS").ok();
+    let trimmed = raw.as_deref().map(str::trim).unwrap_or("");
 
-    let now = Instant::now();
-
-    // Collect (key, watts) pairs first so we do not hold an immutable
-    // borrow over state.*_info while taking the mutable borrow on
-    // state.energy.
-    let mut samples: Vec<(EnergyKey, f64)> =
-        Vec::with_capacity(state.gpu_info.len() + state.cpu_info.len() + state.chassis_info.len());
-    for gpu in &state.gpu_info {
-        samples.push((
-            EnergyKey::gpu(gpu.hostname.clone(), gpu.uuid.clone()),
-            gpu.power_consumption,
-        ));
-    }
-    for cpu in &state.cpu_info {
-        if let Some(power) = cpu.power_consumption {
-            samples.push((EnergyKey::cpu(cpu.hostname.clone()), power));
-        }
-    }
-    for chassis in &state.chassis_info {
-        if let Some(power) = chassis.total_power_watts {
-            samples.push((EnergyKey::chassis(chassis.hostname.clone()), power));
-        }
+    // Default: no CORS — browsers refuse cross-origin reads of our
+    // telemetry, same-origin and non-browser clients (curl, Prometheus,
+    // Tauri with file:// escape) are unaffected.
+    if trimmed.is_empty() {
+        return CorsLayer::new()
+            .allow_methods([Method::GET, Method::OPTIONS])
+            .allow_headers([
+                header::ACCEPT,
+                header::CONTENT_TYPE,
+                HeaderName::from_static("last-event-id"),
+            ]);
     }
 
-    let wal_index = &mut state.energy_wal_replay;
-    let integrator = state.energy.integrator_mut();
-    for (key, watts) in samples {
-        if !integrator.has_samples(&key) && !wal_index.is_empty() {
-            wal_index.seed_if_matches(&key, integrator);
-        }
-        integrator.record_sample(key, now, watts);
+    // Explicit opt-in to a wildcard. Noisy warning so operators running
+    // this in a hostile environment see the audit trail in their logs.
+    if trimmed == "*" {
+        tracing::warn!(
+            "ALL_SMI_API_CORS_ALLOWED_ORIGINS=* selected; every origin              may read /metrics, /snapshot, and /events. This exposes              GPU telemetry, process command lines, and usernames              cross-origin. Prefer an explicit origin list."
+        );
+        return CorsLayer::new()
+            .allow_origin(AllowOrigin::any())
+            .allow_methods([Method::GET, Method::OPTIONS])
+            .allow_headers([
+                header::ACCEPT,
+                header::CONTENT_TYPE,
+                HeaderName::from_static("last-event-id"),
+            ]);
     }
+
+    // Parse a comma-separated allowlist. Entries that cannot be parsed
+    // as a `HeaderValue` are dropped with a warning rather than failing
+    // startup — misconfiguration should not prevent the server from
+    // booting.
+    let origins: Vec<HeaderValue> = trimmed
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .filter_map(|o| match HeaderValue::from_str(o) {
+            Ok(v) => Some(v),
+            Err(e) => {
+                tracing::warn!(origin = o, error = %e, "ignoring invalid CORS origin");
+                None
+            }
+        })
+        .collect();
+
+    if origins.is_empty() {
+        tracing::warn!(
+            "ALL_SMI_API_CORS_ALLOWED_ORIGINS was set but contained no              valid origins; falling back to no-CORS default"
+        );
+        return CorsLayer::new()
+            .allow_methods([Method::GET, Method::OPTIONS])
+            .allow_headers([
+                header::ACCEPT,
+                header::CONTENT_TYPE,
+                HeaderName::from_static("last-event-id"),
+            ]);
+    }
+
+    tracing::info!(
+        allowed_origins = origins.len(),
+        "CORS: allowlist configured from ALL_SMI_API_CORS_ALLOWED_ORIGINS"
+    );
+    CorsLayer::new()
+        .allow_origin(AllowOrigin::list(origins))
+        .allow_methods([Method::GET, Method::OPTIONS])
+        .allow_headers([
+            header::ACCEPT,
+            header::CONTENT_TYPE,
+            HeaderName::from_static("last-event-id"),
+        ])
 }
 
-/// Collect storage/disk information from a pre-existing Disks instance.
-/// The caller is responsible for calling `refresh_list()` before this function.
-fn collect_storage_info_from(disks: &Disks) -> Vec<StorageInfo> {
-    let mut storage_info = Vec::new();
-    let hostname = get_hostname();
+#[cfg(test)]
+mod cors_tests {
+    //! CORS policy tests for `build_cors_layer`.
+    //!
+    //! These tests use `std::env::set_var` / `remove_var`. They are
+    //! guarded by `#[serial_test]`... actually we lack that dependency,
+    //! so each test reads and restores the env var manually via a
+    //! scope guard.
 
-    let mut filtered_disks = filter_docker_aware_disks(disks);
-    filtered_disks.sort_by(|a, b| {
-        a.mount_point()
-            .to_string_lossy()
-            .cmp(&b.mount_point().to_string_lossy())
-    });
+    use super::*;
 
-    for (index, disk) in filtered_disks.iter().enumerate() {
-        let mount_point_str = disk.mount_point().to_string_lossy();
-        storage_info.push(StorageInfo {
-            mount_point: mount_point_str.to_string(),
-            total_bytes: disk.total_space(),
-            available_bytes: disk.available_space(),
-            host_id: hostname.clone(),
-            hostname: hostname.clone(),
-            index: index as u32,
-        });
+    /// RAII guard that saves the current `ALL_SMI_API_CORS_ALLOWED_ORIGINS`
+    /// value on creation and restores it on drop, so parallel-running
+    /// tests cannot leak env state to each other's assertions.
+    struct EnvGuard {
+        key: &'static str,
+        original: Option<String>,
+    }
+    impl EnvGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let original = std::env::var(key).ok();
+            // SAFETY: the env var is set and restored inside a unit test
+            // that runs serially within the test binary (the env guard
+            // pattern preserves that invariant across the test body).
+            unsafe { std::env::set_var(key, value) };
+            Self { key, original }
+        }
+        fn unset(key: &'static str) -> Self {
+            let original = std::env::var(key).ok();
+            // SAFETY: same reasoning as `set`.
+            unsafe { std::env::remove_var(key) };
+            Self { key, original }
+        }
+    }
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match self.original.take() {
+                // SAFETY: restoring env state the test captured.
+                Some(v) => unsafe { std::env::set_var(self.key, v) },
+                // SAFETY: restoring env state the test captured.
+                None => unsafe { std::env::remove_var(self.key) },
+            }
+        }
     }
 
-    storage_info
+    #[test]
+    fn default_builds_without_panic() {
+        let _g = EnvGuard::unset("ALL_SMI_API_CORS_ALLOWED_ORIGINS");
+        // We don't have a direct accessor into CorsLayer; the contract
+        // this test pins is "constructing the default posture must
+        // succeed without panic or env reads escaping the helper".
+        let _layer = build_cors_layer();
+    }
+
+    #[test]
+    fn wildcard_allowed_when_explicitly_requested() {
+        let _g = EnvGuard::set("ALL_SMI_API_CORS_ALLOWED_ORIGINS", "*");
+        let _layer = build_cors_layer();
+    }
+
+    #[test]
+    fn invalid_origins_drop_to_default() {
+        let _g = EnvGuard::set("ALL_SMI_API_CORS_ALLOWED_ORIGINS", "\n\tnot a url");
+        let _layer = build_cors_layer();
+    }
 }

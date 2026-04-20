@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>all-smi — Server-Sent Events demo</title>
+<!--
+  Minimal SSE client for the `/events` endpoint shipped in all-smi 0.21+
+  (issue #193). Opens an EventSource against http://localhost:9090/events,
+  renders each incoming snapshot as a compact table, and logs lag /
+  reconnect transitions to the bottom panel.
+
+  Usage:
+
+      all-smi api --port 9090 &
+      xdg-open examples/sse_client.html   # or just open in your browser
+
+  The page is self-contained — no build step, no CDN — so it can also be
+  saved next to a mock recording and opened from `file://` for quick
+  diagnosis.
+-->
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #1a1f27;
+    --text: #d5dfe8;
+    --muted: #8796a5;
+    --accent: #7cc9ff;
+    --ok: #8adf8e;
+    --warn: #ffd27a;
+    --err: #ff7a7a;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 16px;
+    font-family: "Inter", "Segoe UI", Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+  }
+  h1 {
+    margin: 0 0 8px 0;
+    font-size: 20px;
+  }
+  .meta {
+    color: var(--muted);
+    margin-bottom: 16px;
+    font-size: 13px;
+  }
+  .meta .dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--muted);
+    margin-right: 6px;
+    vertical-align: middle;
+  }
+  .meta.ok .dot   { background: var(--ok); }
+  .meta.warn .dot { background: var(--warn); }
+  .meta.err .dot  { background: var(--err); }
+  #controls {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    align-items: center;
+    margin-bottom: 12px;
+  }
+  #controls input,
+  #controls button {
+    padding: 6px 10px;
+    font-size: 13px;
+    background: var(--panel);
+    color: var(--text);
+    border: 1px solid #2d3643;
+    border-radius: 4px;
+  }
+  #controls button { cursor: pointer; }
+  #controls button.primary { background: var(--accent); color: var(--bg); border-color: var(--accent); }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    background: var(--panel);
+    border-radius: 6px;
+    overflow: hidden;
+    margin-bottom: 16px;
+  }
+  th, td {
+    padding: 8px 12px;
+    border-bottom: 1px solid #2d3643;
+    text-align: left;
+    font-size: 13px;
+  }
+  th {
+    background: #202734;
+    font-weight: 600;
+    color: var(--accent);
+  }
+  .num {
+    font-variant-numeric: tabular-nums;
+    text-align: right;
+  }
+  #log {
+    background: var(--panel);
+    border-radius: 6px;
+    padding: 8px 12px;
+    font-family: "JetBrains Mono", "Menlo", monospace;
+    font-size: 12px;
+    max-height: 220px;
+    overflow-y: auto;
+  }
+  #log .line.lag   { color: var(--warn); }
+  #log .line.err   { color: var(--err); }
+  #log .line.open  { color: var(--ok); }
+</style>
+</head>
+<body>
+
+<h1>all-smi — live metrics stream</h1>
+
+<div id="controls">
+  <label>
+    URL
+    <input id="url" type="text" value="http://localhost:9090/events" size="36">
+  </label>
+  <label>
+    include
+    <input id="include" type="text" value="gpu,cpu,memory,chassis" size="30">
+  </label>
+  <button id="connect" class="primary">Connect</button>
+  <button id="disconnect">Disconnect</button>
+</div>
+
+<div id="status" class="meta"><span class="dot"></span><span id="statusText">Idle.</span></div>
+
+<h2 style="font-size:15px;margin:12px 0 6px 0;">GPUs</h2>
+<table id="gpuTable">
+  <thead>
+    <tr>
+      <th>#</th>
+      <th>Name</th>
+      <th class="num">Util %</th>
+      <th class="num">Mem used / total</th>
+      <th class="num">Temp °C</th>
+      <th class="num">Power W</th>
+    </tr>
+  </thead>
+  <tbody></tbody>
+</table>
+
+<h2 style="font-size:15px;margin:12px 0 6px 0;">Log</h2>
+<div id="log"></div>
+
+<script>
+  const statusEl   = document.getElementById("status");
+  const statusText = document.getElementById("statusText");
+  const logEl      = document.getElementById("log");
+  const gpuBody    = document.querySelector("#gpuTable tbody");
+  const urlEl      = document.getElementById("url");
+  const includeEl  = document.getElementById("include");
+  const connectBtn = document.getElementById("connect");
+  const disconnBtn = document.getElementById("disconnect");
+
+  let source = null;
+
+  function setStatus(kind, text) {
+    statusEl.className = "meta " + kind;
+    statusText.textContent = text;
+  }
+  function log(kind, msg) {
+    const line = document.createElement("div");
+    line.className = "line " + kind;
+    const ts = new Date().toLocaleTimeString();
+    line.textContent = `[${ts}] ${msg}`;
+    logEl.appendChild(line);
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+  function fmtBytes(n) {
+    if (!Number.isFinite(n)) return "—";
+    const units = ["B","KB","MB","GB","TB"];
+    let i = 0;
+    while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+    return `${n.toFixed(1)} ${units[i]}`;
+  }
+
+  function addCell(row, text, cls) {
+    // Build every cell with textContent so snapshot fields cannot inject
+    // HTML into the demo page. Protects operators who point this client
+    // at a host whose reader returns crafted GPU names (hostile mock,
+    // compromised upstream, or a renamed device via driver tooling).
+    const td = document.createElement("td");
+    if (cls) td.className = cls;
+    td.textContent = text;
+    row.appendChild(td);
+  }
+
+  function renderGpus(gpus) {
+    gpuBody.innerHTML = "";
+    if (!Array.isArray(gpus)) return;
+    gpus.forEach((g, idx) => {
+      const tr = document.createElement("tr");
+      const used  = g.used_memory  ?? g.memory?.used  ?? NaN;
+      const total = g.total_memory ?? g.memory?.total ?? NaN;
+      addCell(tr, String(idx), "num");
+      addCell(tr, g.name ?? "—");
+      addCell(tr, String(g.utilization ?? "—"), "num");
+      addCell(tr, `${fmtBytes(used)} / ${fmtBytes(total)}`, "num");
+      addCell(tr, String(g.temperature ?? "—"), "num");
+      addCell(tr, String(g.power_consumption ?? "—"), "num");
+      gpuBody.appendChild(tr);
+    });
+  }
+
+  function connect() {
+    if (source) source.close();
+    const base = urlEl.value.trim();
+    const include = includeEl.value.trim();
+    const url = include ? `${base}?include=${encodeURIComponent(include)}` : base;
+    setStatus("warn", `Connecting to ${url}…`);
+    source = new EventSource(url);
+    source.onopen = () => {
+      setStatus("ok", `Connected to ${url}`);
+      log("open", `open: ${url}`);
+    };
+    source.onerror = (e) => {
+      setStatus("err", "Connection error (browser may retry).");
+      log("err", `error: readyState=${source.readyState}`);
+    };
+    source.addEventListener("snapshot", (ev) => {
+      try {
+        const snap = JSON.parse(ev.data);
+        renderGpus(snap.gpus);
+        setStatus("ok", `Last frame: ${snap.timestamp} (host=${snap.hostname})`);
+      } catch (e) {
+        log("err", `parse failure: ${e}`);
+      }
+    });
+    source.addEventListener("lag", (ev) => {
+      try {
+        const payload = JSON.parse(ev.data);
+        log("lag", `lag: dropped ${payload.dropped} frame(s)`);
+      } catch {
+        log("lag", `lag: ${ev.data}`);
+      }
+    });
+  }
+
+  function disconnect() {
+    if (source) {
+      source.close();
+      source = null;
+      setStatus("muted", "Disconnected.");
+      log("open", "closed by user");
+    }
+  }
+
+  connectBtn.addEventListener("click", connect);
+  disconnBtn.addEventListener("click", disconnect);
+</script>
+
+</body>
+</html>
