@@ -16,7 +16,9 @@ use crate::common::config::AlertConfig;
 use crate::device::{
     ChassisInfo, CpuInfo, GpuInfo, MemoryInfo, MigGpuInfo, ProcessInfo, VgpuHostInfo,
 };
+use crate::network::metrics_parser::ParsedProcessRow;
 use crate::storage::info::StorageInfo;
+use crate::ui::aggregation::user::{UserAggregationResult, UserSortKey};
 use crate::ui::alerts::{AlertTransition, Alerter};
 use crate::ui::filter_dsl::Expr as FilterExpr;
 use crate::ui::notification::NotificationManager;
@@ -164,6 +166,61 @@ impl ConnectionStatus {
     }
 }
 
+/// In-tab navigation state for the cluster-wide Users tab (issue #189).
+///
+/// Kept in its own struct so the `AppState` field can be `Default`-
+/// constructed and so the rendering path can pass `&UsersTabState`
+/// without cloning the whole app state.
+#[derive(Clone, Debug)]
+pub struct UsersTabState {
+    pub sort: UserSortKey,
+    /// Index into the rendered user rows (filter-aware).  Reset to 0
+    /// whenever the filter toggles or the underlying aggregation
+    /// changes shape.
+    pub selected_row: usize,
+    /// When `Some`, the drill-down view is open and these are the
+    /// coordinates of the highlighted user / host.  `drill_host = None`
+    /// means the intermediate per-host breakdown; `drill_host =
+    /// Some(_)` means the per-process view on that host.
+    pub drill_user: Option<String>,
+    pub drill_host: Option<String>,
+    /// Hide system accounts (root, uid < 1000).  Defaults to true to
+    /// keep the table legible on shared clusters.
+    pub filter_sys: bool,
+    /// Last toast shown when the operator hits `e` to export CSV.
+    pub last_export_path: Option<String>,
+    /// Last export error shown in the notification bar.
+    pub last_export_error: Option<String>,
+}
+
+impl Default for UsersTabState {
+    fn default() -> Self {
+        Self {
+            sort: UserSortKey::User,
+            selected_row: 0,
+            drill_user: None,
+            drill_host: None,
+            filter_sys: true,
+            last_export_path: None,
+            last_export_error: None,
+        }
+    }
+}
+
+/// Memoised aggregation result keyed against `AppState::data_version`.
+///
+/// The top-level table + drill-down derive from the same pure
+/// [`UserAggregationResult`]; caching by `data_version` means typing a
+/// sort hotkey does not re-group the 5 000-row cluster — it just
+/// re-sorts an already-computed vector.
+#[derive(Clone, Debug, Default)]
+pub struct UsersAggregationCache {
+    /// Data version the cached result was built against.  `None` on
+    /// cold startup before any aggregation has been performed.
+    pub data_version: Option<u64>,
+    pub result: UserAggregationResult,
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub gpu_info: Vec<GpuInfo>,
@@ -262,6 +319,17 @@ pub struct AppState {
     /// the status bar draws the `REPLAY | ts/total | speed | state`
     /// indicator instead of the normal hotkey strip.
     pub replay: Option<ReplayState>,
+    /// Per-process rows parsed from the remote `all_smi_process_*`
+    /// metric families (issue #189).  Populated by the remote collector
+    /// and consumed by the Users tab.  Empty in local mode — local
+    /// process data lives in `process_info` with richer fields.
+    pub remote_process_info: Vec<ParsedProcessRow>,
+    /// In-tab UI state for the cluster-wide Users tab (issue #189).
+    pub users_tab_state: UsersTabState,
+    /// Cached aggregation keyed by `data_version`.  Rebuilt only when
+    /// the version differs; sort/filter toggles re-use the cached
+    /// vector so keypresses stay sub-millisecond on 100-node clusters.
+    pub users_aggregation_cache: UsersAggregationCache,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -370,6 +438,9 @@ impl AppState {
             alert_history: VecDeque::with_capacity(ALERT_HISTORY_MAX),
             alert_panel_open: false,
             replay: None,
+            remote_process_info: Vec::new(),
+            users_tab_state: UsersTabState::default(),
+            users_aggregation_cache: UsersAggregationCache::default(),
         }
     }
 
@@ -402,6 +473,79 @@ impl AppState {
     /// Increment the data version to signal that data has changed
     pub fn mark_data_changed(&mut self) {
         self.data_version = self.data_version.wrapping_add(1);
+    }
+
+    /// Return the cached user aggregation, rebuilding it when the
+    /// snapshot version has advanced.  Keeps Users-tab keypresses from
+    /// re-grouping the cluster.
+    pub fn users_aggregation(&mut self) -> &UserAggregationResult {
+        use crate::ui::aggregation::user::{GpuForAggregation, HostSnapshot, aggregate_users};
+
+        if self.users_aggregation_cache.data_version == Some(self.data_version) {
+            return &self.users_aggregation_cache.result;
+        }
+
+        // Group GPUs + processes by host.  `remote_process_info` drives
+        // the host set; a host with GPUs but no processes still shows
+        // up as a "silent" entry in the partial-coverage summary
+        // because the remote collector feeds every known host into the
+        // snapshot regardless of `--processes`.
+        let mut per_host: std::collections::BTreeMap<String, HostSnapshot> =
+            std::collections::BTreeMap::new();
+
+        for gpu in &self.gpu_info {
+            let host = gpu.host_id.clone();
+            let entry = per_host
+                .entry(host.clone())
+                .or_insert_with(|| HostSnapshot {
+                    host: host.clone(),
+                    gpus: Vec::new(),
+                    processes: Vec::new(),
+                });
+            let gpu_index = gpu
+                .detail
+                .get("index")
+                .and_then(|s| s.parse::<u32>().ok())
+                .unwrap_or(0);
+            entry.gpus.push(GpuForAggregation {
+                host: host.clone(),
+                gpu_index,
+                power_watts: gpu.power_consumption,
+            });
+        }
+
+        for row in &self.remote_process_info {
+            let entry = per_host
+                .entry(row.host.clone())
+                .or_insert_with(|| HostSnapshot {
+                    host: row.host.clone(),
+                    gpus: Vec::new(),
+                    processes: Vec::new(),
+                });
+            entry.processes.push(row.clone());
+        }
+
+        // Ensure every known host tab contributes to the total count so
+        // partial-coverage is computed across every node the operator
+        // added, not just those with live GPUs.
+        for host in &self.known_hosts {
+            per_host
+                .entry(host.clone())
+                .or_insert_with(|| HostSnapshot {
+                    host: host.clone(),
+                    gpus: Vec::new(),
+                    processes: Vec::new(),
+                });
+        }
+
+        let snapshots: Vec<HostSnapshot> = per_host.into_values().collect();
+        let result = aggregate_users(&snapshots);
+
+        self.users_aggregation_cache = UsersAggregationCache {
+            data_version: Some(self.data_version),
+            result,
+        };
+        &self.users_aggregation_cache.result
     }
 }
 

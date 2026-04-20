@@ -152,11 +152,31 @@ impl RemoteCollector {
     }
 
     fn update_remote_tabs(state: &mut AppState) {
-        // Always create "All" tab for consistent UI behavior
-        let mut tabs = vec!["All".to_string()];
+        // Tab layout (issue #189): [All, Users, <host1>, <host2>, ...]
+        //
+        // Users tab sits immediately after "All" so cluster-level tabs
+        // cluster together at the left edge of the row.  Inserting
+        // between adjusts the indices but the subsequent `current_tab`
+        // snap-back guards against the previous index being out of
+        // range after tabs shrink (e.g. all hosts disconnected).
+        let mut tabs = vec![
+            "All".to_string(),
+            crate::ui::tabs::USERS_TAB_NAME.to_string(),
+        ];
         tabs.extend(state.known_hosts.clone());
 
+        // Preserve the operator's current selection where possible:
+        // if the tab name at `current_tab` still exists in the new
+        // layout, jump to its new index. Otherwise clamp to 0 ("All").
+        let previous_name = state.tabs.get(state.current_tab).cloned();
         state.tabs = tabs;
+        if let Some(name) = previous_name
+            && let Some(idx) = state.tabs.iter().position(|t| *t == name)
+        {
+            state.current_tab = idx;
+        } else if state.current_tab >= state.tabs.len() {
+            state.current_tab = 0;
+        }
     }
 }
 
@@ -174,6 +194,7 @@ impl DataCollectionStrategy for RemoteCollector {
             storage_info,
             vgpu_info,
             mig_info,
+            remote_process_info,
             connection_statuses,
         ) = self
             .network_client
@@ -186,12 +207,16 @@ impl DataCollectionStrategy for RemoteCollector {
             gpu_info,
             cpu_info,
             memory_info,
-            process_info: Vec::new(), // No process info in remote mode
+            // Local `ProcessInfo` is only populated in local mode — the
+            // remote path feeds `remote_process_info` instead (see
+            // CollectionData docs).
+            process_info: Vec::new(),
             storage_info: deduplicated_storage,
             chassis_info: Vec::new(), // TODO: Parse chassis info from remote metrics
             vgpu_info,
             mig_info,
             connection_statuses,
+            remote_process_info,
         })
     }
 
@@ -217,6 +242,7 @@ impl DataCollectionStrategy for RemoteCollector {
         state.storage_info = data.storage_info;
         state.vgpu_info = data.vgpu_info;
         state.mig_info = data.mig_info;
+        state.remote_process_info = data.remote_process_info;
 
         // Update connection status and maintain known hosts
         Self::update_connection_status(&mut state, data.connection_statuses, &config.hosts);

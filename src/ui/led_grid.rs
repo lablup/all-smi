@@ -72,27 +72,36 @@ pub fn render_led_grid_lines(state: &AppState, grid_width: usize, max_rows: usiz
         return Vec::new();
     }
 
-    // Collect nodes: tabs[1..] are the remote host addresses (skip "All")
-    let nodes: Vec<&String> = state.tabs.iter().skip(1).collect();
+    // Collect nodes: skip "All" and the cluster-wide Users tab (issue
+    // #189).  After those synthetic tabs the remainder are remote host
+    // addresses.
+    let nodes: Vec<(usize, &String)> = state
+        .tabs
+        .iter()
+        .enumerate()
+        .filter(|(_, name)| {
+            name.as_str() != "All" && name.as_str() != crate::ui::tabs::USERS_TAB_NAME
+        })
+        .collect();
     if nodes.is_empty() {
         return Vec::new();
     }
 
     // Calculate per-node GPU utilization keyed by host address
-    let node_utils = compute_node_utils(state, &nodes);
+    let just_nodes: Vec<&String> = nodes.iter().map(|(_, n)| *n).collect();
+    let node_utils = compute_node_utils(state, &just_nodes);
 
     // Build LED data for each node
     let leds: Vec<NodeLed> = nodes
         .iter()
-        .enumerate()
-        .map(|(idx, node)| {
+        .map(|(tab_idx, node)| {
             let util = node_utils.get(*node).copied().unwrap_or(0.0);
             let is_connected = state
                 .connection_status
                 .get(*node)
                 .map(|s| s.is_connected)
                 .unwrap_or(false);
-            let is_selected = state.current_tab == idx + 1;
+            let is_selected = state.current_tab == *tab_idx;
             node_led(util, is_selected, is_connected)
         })
         .collect();

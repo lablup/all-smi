@@ -20,6 +20,7 @@ use crate::app_state::{AppState, ConnectionStatus};
 use crate::device::{
     ChassisInfo, CpuInfo, GpuInfo, MemoryInfo, MigGpuInfo, ProcessInfo, VgpuHostInfo,
 };
+use crate::network::metrics_parser::ParsedProcessRow;
 use crate::storage::info::StorageInfo;
 
 /// Result type for data collection operations
@@ -39,6 +40,11 @@ pub struct CollectionData {
     /// Per-GPU MIG information. Empty on non-MIG hosts.
     pub mig_info: Vec<MigGpuInfo>,
     pub connection_statuses: Vec<ConnectionStatus>,
+    /// Parsed per-process rows from remote `all_smi_process_*` metric
+    /// families. Populated by the remote collector when hosts were
+    /// started with `--processes`; always empty in local mode
+    /// (local-mode process data lives in `process_info` instead).
+    pub remote_process_info: Vec<ParsedProcessRow>,
 }
 
 impl CollectionData {
@@ -53,6 +59,7 @@ impl CollectionData {
             vgpu_info: Vec::new(),
             mig_info: Vec::new(),
             connection_statuses: Vec::new(),
+            remote_process_info: Vec::new(),
         }
     }
 }

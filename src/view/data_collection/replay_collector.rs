@@ -244,6 +244,30 @@ async fn apply_frame_to_state(
     state.chassis_info = snap.chassis.clone().unwrap_or_default();
     state.process_info = snap.processes.clone().unwrap_or_default();
     state.storage_info = snap.storage.clone().unwrap_or_default();
+
+    // Cluster-wide Users tab (issue #189): lift the recorded processes
+    // into the remote-style row representation so replays render the
+    // tab identically to a live scrape.  The host label is whichever
+    // identifier the recording stored alongside the snapshot — prefer
+    // the first GPU's `host_id` (what the remote collector uses) and
+    // fall back to the frame's hostname.
+    let host_label = snap
+        .gpus
+        .as_ref()
+        .and_then(|v| v.first())
+        .map(|g| g.host_id.clone())
+        .unwrap_or_else(|| snap.hostname.clone());
+    if let Some(procs) = snap.processes.as_ref() {
+        state.remote_process_info = procs
+            .iter()
+            .map(|p| {
+                crate::network::metrics_parser::ParsedProcessRow::from_local_process(p, &host_label)
+            })
+            .collect();
+    } else {
+        state.remote_process_info.clear();
+    }
+
     state.loading = false;
 
     // Keep the replay status bar in sync.
@@ -256,7 +280,8 @@ async fn apply_frame_to_state(
 
     // Tabs: for replay we take the union of hosts seen in the
     // recording so the tab bar mirrors what the operator would have
-    // seen live. "All" is always first.
+    // seen live. "All" is always first, Users is always second
+    // (issue #189) so cluster-level tabs cluster together.
     let mut host_ids: std::collections::BTreeSet<String> = state
         .gpu_info
         .iter()
@@ -270,9 +295,22 @@ async fn apply_frame_to_state(
             host_ids.insert(snap.hostname.clone());
         }
     }
-    let mut tabs = vec!["All".to_string()];
+    let mut tabs = vec![
+        "All".to_string(),
+        crate::ui::tabs::USERS_TAB_NAME.to_string(),
+    ];
     tabs.extend(host_ids);
+
+    // Preserve the operator's current selection where possible.
+    let previous_name = state.tabs.get(state.current_tab).cloned();
     state.tabs = tabs;
+    if let Some(name) = previous_name
+        && let Some(idx) = state.tabs.iter().position(|t| *t == name)
+    {
+        state.current_tab = idx;
+    } else if state.current_tab >= state.tabs.len() {
+        state.current_tab = 0;
+    }
 
     state.mark_data_changed();
 }

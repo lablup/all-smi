@@ -442,6 +442,8 @@ impl LocalCollector {
             vgpu_info: all_vgpu_info,
             mig_info: all_mig_info,
             connection_statuses: Vec::new(),
+            // Local mode has no cluster-wide Users tab (issue #189).
+            remote_process_info: Vec::new(),
         }
     }
 
@@ -569,6 +571,8 @@ impl LocalCollector {
             vgpu_info: all_vgpu_info,
             mig_info: all_mig_info,
             connection_statuses: Vec::new(),
+            // Local mode has no cluster-wide Users tab (issue #189).
+            remote_process_info: Vec::new(),
         }
     }
 

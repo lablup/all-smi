@@ -162,7 +162,12 @@ pub async fn run_replay_mode(args: &ViewArgs) {
         header_hosts.truncate(crate::record::replay::MAX_HEADER_HOSTS);
     }
     if !header_hosts.is_empty() {
-        let mut tabs = vec!["All".to_string()];
+        // Users tab sits right after "All" (issue #189) so the
+        // cluster-wide tabs live together at the left edge.
+        let mut tabs = vec![
+            "All".to_string(),
+            crate::ui::tabs::USERS_TAB_NAME.to_string(),
+        ];
         tabs.extend(header_hosts);
         initial_state.tabs = tabs;
     }

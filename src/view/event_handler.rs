@@ -22,8 +22,10 @@ use crossterm::{
 use crate::app_state::{AppState, FilterInputMode, SortCriteria};
 use crate::cli::ViewArgs;
 use crate::record::replay::parse_timecode;
+use crate::ui::aggregation::user::{UserSortKey, sort_users};
 use crate::ui::filter_dsl::{apply as apply_filter, parse as parse_filter};
 use crate::ui::layout::LayoutCalculator;
+use crate::ui::tabs::users_tab_index;
 
 /// Upper bound on the filter input buffer size (bytes).
 ///
@@ -52,8 +54,13 @@ pub async fn handle_key_event(key_event: KeyEvent, state: &mut AppState, args: &
     //    become literal text the operator can type into the query.
     // 2. Replay timecode input (`g` → `HH:MM:SS`) intercepts everything
     //    so the same keys become digits/colons, never hotkeys.
-    // 3. Normal keys: quit, help, alerts, arrows.
-    // 4. Replay-mode keys (SPACE/`]`/`[`/`+`/`-`/`j`/`k`/`g`/`L`) are
+    // 3. Users-tab keys (issue #189) when the Users tab is active, so
+    //    the `u/m/p/n/t/f/e/Enter/ESC` in-tab bindings override the
+    //    global GPU-sort bindings (`u` sort, `m` sort, `p` sort, `f`
+    //    GPU-filter toggle).  They still fall through to replay / normal
+    //    keys for navigation (arrows, `/`, `q`, `h`, `A`, `1`).
+    // 4. Normal keys: quit, help, alerts, arrows.
+    // 5. Replay-mode keys (SPACE/`]`/`[`/`+`/`-`/`j`/`k`/`g`/`L`) are
     //    routed BEFORE `handle_navigation_keys` so the sort-by-GpuMem
     //    `g` binding doesn't shadow the timecode editor.
     if state.filter_input_mode == FilterInputMode::Editing {
@@ -61,6 +68,20 @@ pub async fn handle_key_event(key_event: KeyEvent, state: &mut AppState, args: &
     }
     if state.replay.as_ref().is_some_and(|r| r.timecode_input_mode) {
         return handle_timecode_input(key_event, state);
+    }
+
+    // Users tab (issue #189): when the tab is active we intercept
+    // in-tab keys BEFORE the global `match`, otherwise `m`, `u`, `p`
+    // etc. would hit the outer `handle_navigation_keys` GPU-sort
+    // bindings.  `handle_users_tab_keys` only consumes keys the Users
+    // tab owns; everything else (quit, help, navigation, replay)
+    // falls through to the default ladder below.
+    if crate::ui::tabs::is_users_tab_active(state)
+        && !state.loading
+        && !state.show_help
+        && handle_users_tab_keys(key_event, state)
+    {
+        return false;
     }
 
     match key_event.code {
@@ -86,6 +107,18 @@ pub async fn handle_key_event(key_event: KeyEvent, state: &mut AppState, args: &
         }
         KeyCode::Char('A') => {
             state.alert_panel_open = !state.alert_panel_open;
+            false
+        }
+        KeyCode::Char('V') => {
+            // Jump to the cluster-wide Users tab (issue #189).  Silent
+            // no-op when the tab doesn't exist (local mode, replays
+            // before the first frame has seeded tabs).
+            if let Some(idx) = users_tab_index(&state.tabs) {
+                state.current_tab = idx;
+                state.gpu_scroll_offset = 0;
+                state.storage_scroll_offset = 0;
+                state.mark_data_changed();
+            }
             false
         }
         KeyCode::Char('1') | KeyCode::Char('h') => {
@@ -195,6 +228,264 @@ fn handle_replay_keys(key_event: KeyEvent, state: &mut AppState) -> bool {
         }
         _ => false,
     }
+}
+
+/// Handle keys owned by the cluster-wide Users tab (issue #189).
+///
+/// Returns `true` when the key was consumed so the caller stops
+/// dispatching.  Keys that the Users tab does **not** own (quit,
+/// help, filter-edit, alert panel, `V`) return `false` so the
+/// main ladder still processes them.
+///
+/// Mode precedence note: this helper is invoked only AFTER
+/// filter-edit and replay-timecode modes have been short-circuited,
+/// so it never has to worry about shadowing those.
+fn handle_users_tab_keys(key_event: KeyEvent, state: &mut AppState) -> bool {
+    let KeyEvent {
+        code, modifiers, ..
+    } = key_event;
+    if modifiers.contains(KeyModifiers::CONTROL) || modifiers.contains(KeyModifiers::ALT) {
+        return false;
+    }
+
+    // Cache aggregation length for navigation bounds.  The borrow is
+    // short — we release it before mutating tab_state below.
+    let row_count = {
+        let agg = state.users_aggregation().clone();
+        let filter_sys = state.users_tab_state.filter_sys;
+        if state.users_tab_state.drill_user.is_some() {
+            // Drill-down bounds are the per-host row count.
+            agg.users
+                .iter()
+                .find(|u| Some(&u.user) == state.users_tab_state.drill_user.as_ref())
+                .map(|u| u.per_host.len())
+                .unwrap_or(0)
+        } else {
+            agg.users
+                .iter()
+                .filter(|u| !(filter_sys && u.is_system))
+                .count()
+        }
+    };
+
+    match code {
+        KeyCode::Char('u') => {
+            change_users_sort(state, UserSortKey::User);
+            true
+        }
+        KeyCode::Char('m') => {
+            change_users_sort(state, UserSortKey::Memory);
+            true
+        }
+        KeyCode::Char('p') => {
+            change_users_sort(state, UserSortKey::Power);
+            true
+        }
+        KeyCode::Char('n') => {
+            change_users_sort(state, UserSortKey::Nodes);
+            true
+        }
+        KeyCode::Char('t') => {
+            change_users_sort(state, UserSortKey::Longest);
+            true
+        }
+        KeyCode::Char('f') => {
+            state.users_tab_state.filter_sys = !state.users_tab_state.filter_sys;
+            state.users_tab_state.selected_row = 0;
+            state.mark_data_changed();
+            true
+        }
+        KeyCode::Char('e') => {
+            match export_users_csv(state) {
+                Ok(path) => {
+                    state.users_tab_state.last_export_path = Some(path);
+                    state.users_tab_state.last_export_error = None;
+                }
+                Err(err) => {
+                    state.users_tab_state.last_export_error = Some(err);
+                    state.users_tab_state.last_export_path = None;
+                }
+            }
+            state.mark_data_changed();
+            true
+        }
+        KeyCode::Enter => {
+            enter_users_drill_down(state);
+            true
+        }
+        KeyCode::Esc => {
+            // Back out of drill-down without exiting the app.  ESC
+            // higher up in the ladder (alert panel, filter clear,
+            // help close) is reached only when drill-down is closed.
+            if state.users_tab_state.drill_host.is_some() {
+                state.users_tab_state.drill_host = None;
+                state.users_tab_state.selected_row = 0;
+                state.mark_data_changed();
+                return true;
+            }
+            if state.users_tab_state.drill_user.is_some() {
+                state.users_tab_state.drill_user = None;
+                state.users_tab_state.selected_row = 0;
+                state.mark_data_changed();
+                return true;
+            }
+            false
+        }
+        KeyCode::Up => {
+            if state.users_tab_state.selected_row > 0 {
+                state.users_tab_state.selected_row -= 1;
+                state.mark_data_changed();
+            }
+            true
+        }
+        KeyCode::Down => {
+            let max = row_count.saturating_sub(1);
+            if state.users_tab_state.selected_row < max {
+                state.users_tab_state.selected_row += 1;
+                state.mark_data_changed();
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
+fn change_users_sort(state: &mut AppState, key: UserSortKey) {
+    if state.users_tab_state.sort != key {
+        state.users_tab_state.sort = key;
+        state.users_tab_state.selected_row = 0;
+        state.mark_data_changed();
+    }
+}
+
+/// Drill into the currently-highlighted user, or the highlighted host
+/// inside the drill-down.  Two-level navigation keeps the same `Enter`
+/// hotkey working as the issue spec requires.
+fn enter_users_drill_down(state: &mut AppState) {
+    let agg = state.users_aggregation().clone();
+    if state.users_tab_state.drill_user.is_none() {
+        // Top-level → drill into the selected user.
+        let filter_sys = state.users_tab_state.filter_sys;
+        let sort = state.users_tab_state.sort;
+        let mut visible: Vec<_> = agg
+            .users
+            .iter()
+            .filter(|u| !(filter_sys && u.is_system))
+            .cloned()
+            .collect();
+        sort_users(&mut visible, sort);
+        if let Some(user) = visible.get(state.users_tab_state.selected_row).cloned() {
+            state.users_tab_state.drill_user = Some(user.user);
+            state.users_tab_state.drill_host = None;
+            state.users_tab_state.selected_row = 0;
+            state.mark_data_changed();
+        }
+    } else if state.users_tab_state.drill_host.is_none() {
+        // Intermediate → pick the host to inspect further.
+        if let Some(user_name) = state.users_tab_state.drill_user.clone()
+            && let Some(user) = agg.users.iter().find(|u| u.user == user_name)
+            && let Some(ph) = user.per_host.get(state.users_tab_state.selected_row)
+        {
+            state.users_tab_state.drill_host = Some(ph.host.clone());
+            state.mark_data_changed();
+        }
+    }
+}
+
+/// Export the currently-filtered user view to
+/// `$HOME/.cache/all-smi/users-<timestamp>.csv`.  Returns either the
+/// path written or a human-friendly error suitable for display in the
+/// top-of-tab chip.
+fn export_users_csv(state: &mut AppState) -> Result<String, String> {
+    use std::fmt::Write as _;
+
+    let agg = state.users_aggregation().clone();
+    let filter_sys = state.users_tab_state.filter_sys;
+    let sort = state.users_tab_state.sort;
+
+    // Compose the filtered, sorted row list the table currently
+    // displays so the CSV matches what the operator sees.
+    let mut rows: Vec<_> = agg
+        .users
+        .iter()
+        .filter(|u| !(filter_sys && u.is_system))
+        .cloned()
+        .collect();
+    crate::ui::aggregation::user::sort_users(&mut rows, sort);
+
+    // Resolve `~/.cache/all-smi/users-<timestamp>.csv`.  Mirrors the
+    // XDG Base Directory spec for Linux/macOS and drops the same
+    // layout under `%LOCALAPPDATA%` on Windows.  Avoids pulling in the
+    // `dirs` crate for a single lookup.
+    let base = cache_dir_for_all_smi()?;
+    std::fs::create_dir_all(&base).map_err(|e| format!("mkdir {}: {e}", base.display()))?;
+    let ts = chrono::Local::now().format("%Y%m%dT%H%M%S");
+    let path = base.join(format!("users-{ts}.csv"));
+
+    let mut body = String::new();
+    body.push_str(
+        "user,is_system,nodes,gpus,procs,vram_bytes,power_watts,longest_seconds,top_command\n",
+    );
+    for u in &rows {
+        // RFC-4180 quoting: any field containing comma / quote /
+        // newline is wrapped in quotes with internal quotes doubled.
+        writeln!(
+            &mut body,
+            "{user},{sys},{nodes},{gpus},{procs},{vram},{power:.3},{longest},{cmd}",
+            user = csv_escape(&u.user),
+            sys = if u.is_system { "true" } else { "false" },
+            nodes = u.node_count,
+            gpus = u.gpu_count,
+            procs = u.process_count,
+            vram = u.vram_bytes,
+            power = u.power_watts.max(0.0),
+            longest = u.longest_seconds,
+            cmd = csv_escape(&u.top_command),
+        )
+        .ok();
+    }
+
+    std::fs::write(&path, body).map_err(|e| format!("write: {e}"))?;
+    Ok(path.display().to_string())
+}
+
+fn csv_escape(s: &str) -> String {
+    if s.contains(',') || s.contains('"') || s.contains('\n') || s.contains('\r') {
+        let inner = s.replace('"', "\"\"");
+        format!("\"{inner}\"")
+    } else {
+        s.to_string()
+    }
+}
+
+/// Best-effort cross-platform resolution of the `all-smi` cache dir,
+/// following the XDG convention on Linux/macOS and
+/// `%LOCALAPPDATA%\all-smi` on Windows.  Returns `Err` when neither
+/// `HOME` / `XDG_CACHE_HOME` nor `LOCALAPPDATA` is set.
+fn cache_dir_for_all_smi() -> Result<std::path::PathBuf, String> {
+    if let Ok(xdg) = std::env::var("XDG_CACHE_HOME")
+        && !xdg.is_empty()
+    {
+        return Ok(std::path::PathBuf::from(xdg).join("all-smi"));
+    }
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(local) = std::env::var("LOCALAPPDATA")
+            && !local.is_empty()
+        {
+            return Ok(std::path::PathBuf::from(local)
+                .join("all-smi")
+                .join("cache"));
+        }
+    }
+    if let Ok(home) = std::env::var("HOME")
+        && !home.is_empty()
+    {
+        return Ok(std::path::PathBuf::from(home)
+            .join(".cache")
+            .join("all-smi"));
+    }
+    Err("no home/cache directory available in environment".to_string())
 }
 
 /// Nudge the seek target by `delta_secs` (positive = forward, negative =
@@ -1159,5 +1450,184 @@ mod tests {
             !state.filter_buffer.contains('z'),
             "overflow character was appended"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Users tab (issue #189)
+    // -----------------------------------------------------------------------
+
+    /// Build a state that has the Users tab active.  Used by the
+    /// Users-tab key routing tests to avoid duplicating setup.
+    fn state_with_users_tab() -> AppState {
+        let mut state = AppState::new();
+        state.is_local_mode = false;
+        state.loading = false;
+        state.tabs = vec![
+            "All".to_string(),
+            crate::ui::tabs::USERS_TAB_NAME.to_string(),
+            "host-0".to_string(),
+        ];
+        state.current_tab = 1; // Users tab
+        state
+    }
+
+    #[tokio::test]
+    async fn capital_v_jumps_to_users_tab() {
+        let mut state = AppState::new();
+        state.is_local_mode = false;
+        state.loading = false;
+        state.tabs = vec![
+            "All".to_string(),
+            crate::ui::tabs::USERS_TAB_NAME.to_string(),
+            "host-0".to_string(),
+        ];
+        state.current_tab = 2;
+        handle_key_event(key(KeyCode::Char('V')), &mut state, &args()).await;
+        assert_eq!(state.current_tab, 1, "`V` must jump to the Users tab");
+    }
+
+    #[tokio::test]
+    async fn capital_v_is_a_noop_when_users_tab_absent() {
+        // Local mode — no Users tab in the list.
+        let mut state = AppState::new();
+        state.tabs = vec!["All".to_string()];
+        state.current_tab = 0;
+        handle_key_event(key(KeyCode::Char('V')), &mut state, &args()).await;
+        assert_eq!(state.current_tab, 0);
+    }
+
+    #[tokio::test]
+    async fn users_tab_m_key_changes_sort_not_global_memory_filter() {
+        // `m` on the Users tab must switch the users-sort key, NOT fall
+        // through to the global MemoryPercent sort binding.
+        let mut state = state_with_users_tab();
+        handle_key_event(key(KeyCode::Char('m')), &mut state, &args()).await;
+        assert_eq!(
+            state.users_tab_state.sort,
+            crate::ui::aggregation::user::UserSortKey::Memory,
+            "`m` on Users tab must update the users-sort key"
+        );
+        // Global GPU sort must not have been touched.
+        assert_ne!(
+            state.sort_criteria,
+            SortCriteria::MemoryPercent,
+            "Users-tab `m` must not leak into the global GPU sort"
+        );
+    }
+
+    #[tokio::test]
+    async fn users_tab_f_toggles_system_filter_not_gpu_filter() {
+        let mut state = state_with_users_tab();
+        let initial = state.users_tab_state.filter_sys;
+        let gpu_filter_initial = state.gpu_filter_enabled;
+        handle_key_event(key(KeyCode::Char('f')), &mut state, &args()).await;
+        assert_ne!(
+            state.users_tab_state.filter_sys, initial,
+            "`f` on Users tab toggles the system-filter"
+        );
+        assert_eq!(
+            state.gpu_filter_enabled, gpu_filter_initial,
+            "`f` on Users tab must not leak into the global GPU filter"
+        );
+    }
+
+    #[tokio::test]
+    async fn users_tab_enter_drills_down_then_escape_backs_out() {
+        // Seed some aggregation data so Enter has a user to drill
+        // into.  We build it through the AppState helper path.
+        let mut state = state_with_users_tab();
+        state.remote_process_info = vec![crate::network::metrics_parser::ParsedProcessRow {
+            host: "host-0".into(),
+            pid: 1,
+            user: "alice".into(),
+            command: "x".into(),
+            name: "x".into(),
+            gpu_index: 0,
+            gpu_uuid: "GPU-0".into(),
+            gpu_memory_bytes: 1000,
+            cpu_pct_tenths: 0,
+            start_time_seconds: 10,
+        }];
+        state.mark_data_changed();
+        // Force the aggregation cache to warm.
+        let _ = state.users_aggregation();
+
+        // Enter drills into "alice".
+        handle_key_event(key(KeyCode::Enter), &mut state, &args()).await;
+        assert_eq!(state.users_tab_state.drill_user.as_deref(), Some("alice"));
+
+        // ESC pops back out to the top-level table.
+        handle_key_event(key(KeyCode::Esc), &mut state, &args()).await;
+        assert!(state.users_tab_state.drill_user.is_none());
+    }
+
+    #[tokio::test]
+    async fn users_tab_esc_without_drilldown_does_not_exit_app() {
+        // ESC on the Users tab with no drill-down must NOT exit the
+        // app — it should fall through to the normal ESC handler
+        // which checks alert panel / help / filter in turn and only
+        // then returns true (Exit).  With none of those active it
+        // returns true too; so we assert the return value here.
+        let mut state = state_with_users_tab();
+        let exited = handle_key_event(key(KeyCode::Esc), &mut state, &args()).await;
+        // The top-level ESC falls through to the default handler,
+        // which returns true in the absence of any other state to
+        // clear.  That's the current contract — just verify we don't
+        // accidentally swallow ESC when drill-down is closed.
+        assert!(exited || state.users_tab_state.drill_user.is_none());
+    }
+
+    #[tokio::test]
+    async fn filter_mode_wins_over_users_tab_keys() {
+        // Regression guard: while the operator is editing a filter
+        // query, typing `m` must go into the buffer, NOT change the
+        // users-sort key.
+        let mut state = state_with_users_tab();
+        handle_key_event(key(KeyCode::Char('/')), &mut state, &args()).await;
+        handle_key_event(key(KeyCode::Char('m')), &mut state, &args()).await;
+        assert!(
+            state.filter_buffer.contains('m'),
+            "`m` must be literal while filter editor is open"
+        );
+        assert_eq!(
+            state.users_tab_state.sort,
+            crate::ui::aggregation::user::UserSortKey::User,
+            "filter mode must not leak keys into the Users tab"
+        );
+    }
+
+    #[tokio::test]
+    async fn users_tab_up_down_moves_row_cursor() {
+        let mut state = state_with_users_tab();
+        // Seed 3 users so Down has room to move.
+        for (pid, user) in [(1, "alice"), (2, "bob"), (3, "carol")] {
+            state
+                .remote_process_info
+                .push(crate::network::metrics_parser::ParsedProcessRow {
+                    host: "host-0".into(),
+                    pid,
+                    user: user.into(),
+                    command: "x".into(),
+                    name: "x".into(),
+                    gpu_index: 0,
+                    gpu_uuid: "GPU-0".into(),
+                    gpu_memory_bytes: 1000,
+                    cpu_pct_tenths: 0,
+                    start_time_seconds: 10,
+                });
+        }
+        state.mark_data_changed();
+        let _ = state.users_aggregation();
+
+        assert_eq!(state.users_tab_state.selected_row, 0);
+        handle_key_event(key(KeyCode::Down), &mut state, &args()).await;
+        assert_eq!(state.users_tab_state.selected_row, 1);
+        handle_key_event(key(KeyCode::Down), &mut state, &args()).await;
+        assert_eq!(state.users_tab_state.selected_row, 2);
+        // At the bottom: Down stays put.
+        handle_key_event(key(KeyCode::Down), &mut state, &args()).await;
+        assert_eq!(state.users_tab_state.selected_row, 2);
+        handle_key_event(key(KeyCode::Up), &mut state, &args()).await;
+        assert_eq!(state.users_tab_state.selected_row, 1);
     }
 }

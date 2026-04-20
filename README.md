@@ -405,6 +405,7 @@ Stable check IDs (greppable across versions):
   - Filtering: 'f' (toggle GPU process filter - show only processes with GPU memory usage)
   - Query filter: '/' (open query bar), 'Ctrl-R' (recall last query), 'ESC' (clear)
   - Alerts: 'A' (toggle alert history panel)
+  - Users tab: 'V' (jump to cluster-wide user aggregation tab)
   - Interface: '1'/'h' (help), 'q' (quit), ESC (close help)
 - **Visual Design:**
   - Color-coded status: Green (≤60%), Yellow (60-80%), Red (>80%)
@@ -412,6 +413,68 @@ Stable check IDs (greppable across versions):
   - Responsive layout adapting to terminal size
   - Double-buffered rendering for flicker-free display
 - **Help System:** Context-sensitive help with all keyboard shortcuts
+
+### Cluster-Wide Users Tab (`V`)
+
+Remote `view` mode adds a **Users** tab that aggregates per-process metrics
+across every scraped host so operators can answer "who is using the cluster
+and how much?" at a glance. Enable per-host process collection with
+`all-smi api --processes` on every node, then press `V` in the remote view to
+jump to the tab (it sits right after `All` in the tab row and is cycled by the
+arrow keys).
+
+Columns:
+
+| Column | Meaning |
+| --- | --- |
+| `USER` | Username from the per-process metrics (`?` when a host emits rows without `user` labels, e.g. Windows API mode) |
+| `NODES` | Distinct hosts the user has at least one process on |
+| `GPUs` | Distinct `(host, gpu_index)` pairs the user touches |
+| `PROCS` | Distinct `(host, pid)` pairs — the same PID on two hosts counts as two processes |
+| `VRAM` | Sum of GPU memory across all of the user's processes |
+| `POWER*` | Weighted power approximation (see below) |
+| `LONGEST` | Oldest `TIME+` value across the user's processes |
+| `CMD (top-1 by GPU mem)` | Command owning the largest VRAM row |
+
+**Power approximation.** `POWER*` is computed as
+
+```
+sum_over_gpus(
+  gpu.power × (user_vram_on_gpu / total_vram_on_gpu_across_all_users)
+)
+```
+
+per GPU the user touches, summed across GPUs. The formula is an
+approximation because `nvidia-smi`/NVML does not report per-process power
+directly; we proxy it with the user's share of VRAM on each GPU. The value
+is clamped to ≥ 0 to guard against race conditions where the sum of process
+VRAM exceeds the GPU's reported `memory_used`. The `*` in the header marks
+the column as approximate.
+
+**In-tab keybindings**
+
+- `u` sort by username (default)
+- `m` sort by total GPU memory
+- `p` sort by total power (derived)
+- `n` sort by node count
+- `t` sort by oldest process start time (`LONGEST`)
+- `Enter` drill down into the highlighted user (per-host breakdown)
+- `Enter` again drills into the host for the selected user (process list)
+- `ESC` exits drill-down (ESC outside drill-down returns to normal handling)
+- `f` toggles the system-account filter (hides `root`/`uid<1000` by default)
+- `e` exports the current visible table to
+  `~/.cache/all-smi/users-<timestamp>.csv`
+
+**Partial coverage.** When some hosts report `--processes` data and others
+don't, the tab shows a yellow chip `⚠ partial coverage: M of N nodes reporting
+process data` so operators don't misread the numbers. If zero hosts report
+process data, the tab renders a hint pointing at the `--processes` flag
+instead of an empty table.
+
+Mock clusters can exercise the tab without real hosts by setting
+`ALL_SMI_MOCK_PROCESSES=1`, which makes every synthetic node emit a small
+rotation of users and commands through the `all_smi_process_*` metric
+families.
 
 ### Filtering & Alerts
 

@@ -21,6 +21,28 @@ use std::io::Write;
 use crate::app_state::AppState;
 use crate::ui::text::print_colored_text;
 
+/// Reserved tab name for the cluster-wide Users tab (issue #189).
+///
+/// Stored in `AppState::tabs` as a literal string so the existing
+/// `Vec<String>` representation keeps working without a breaking
+/// enum-based rewrite; the renderer treats this name specially and
+/// skips the GPU / storage sections when it is active.
+pub const USERS_TAB_NAME: &str = "Users";
+
+/// Return the index of the Users tab inside `tabs`, or `None` when the
+/// tab has not been inserted yet (local mode, replay streams that do
+/// not carry process rows).
+#[inline]
+pub fn users_tab_index(tabs: &[String]) -> Option<usize> {
+    tabs.iter().position(|t| t == USERS_TAB_NAME)
+}
+
+/// True when `state.current_tab` is the Users tab.
+#[inline]
+pub fn is_users_tab_active(state: &AppState) -> bool {
+    users_tab_index(&state.tabs).is_some_and(|i| i == state.current_tab)
+}
+
 pub fn draw_tabs<W: Write>(stdout: &mut W, state: &AppState, cols: u16) {
     // Print tabs
     let mut labels: Vec<(String, Color)> = Vec::new();
