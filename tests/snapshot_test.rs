@@ -410,18 +410,39 @@ async fn prometheus_output_reuses_api_exporter_format() {
 async fn prometheus_output_is_byte_identical_to_api_exporter_for_same_data() {
     // Acceptance criterion: "snapshot --format prometheus byte-for-byte
     // matches a single scrape of api mode's /metrics for the same data".
-    // We can't hit the HTTP handler from a library integration test without
-    // spinning up a server, but we CAN assert that the snapshot output
-    // contains exactly the byte sequence produced by the underlying
-    // exporter, which is what the /metrics handler concatenates. This
-    // proves the codepath is reused rather than re-implemented.
-    use all_smi::api::metrics::{MetricExporter, gpu::GpuMetricExporter};
+    //
+    // The `/metrics` HTTP handler is a thin wrapper around
+    // `render_prometheus_exposition`, which is also what the snapshot path
+    // calls. We assert byte equality against that helper fed the same
+    // section vectors the `AppState` would carry at scrape time — proving
+    // the paths are equivalent without needing to spin up an axum server.
+    use all_smi::api::metrics::render::{MetricsRenderInputs, render_prometheus_exposition};
+    use all_smi::utils::RuntimeEnvironment;
 
-    let gpu = mock_gpu("A100", 80.0, 65);
-    let expected = GpuMetricExporter::new(std::slice::from_ref(&gpu)).export_metrics();
+    let gpus = vec![mock_gpu("A100", 80.0, 65)];
+    let cpus = vec![mock_cpu()];
+    let memory = vec![mock_memory()];
+
+    let runtime_env = RuntimeEnvironment::default();
+    let empty_vgpu = Vec::new();
+    let empty_mig = Vec::new();
+    let inputs = MetricsRenderInputs {
+        gpu_info: &gpus,
+        process_info: &[],
+        cpu_info: &cpus,
+        memory_info: &memory,
+        storage_info: &[],
+        runtime_environment: &runtime_env,
+        chassis_info: &[],
+        vgpu_info: &empty_vgpu,
+        mig_info: &empty_mig,
+    };
+    let expected = render_prometheus_exposition(&inputs);
 
     let collector = Arc::new(MockCollector {
-        gpus: vec![gpu],
+        gpus: gpus.clone(),
+        cpus: cpus.clone(),
+        memory: memory.clone(),
         ..MockCollector::empty()
     });
     let path = std::env::temp_dir().join(format!("snapshot-byteid-{}.prom", std::process::id()));
@@ -429,6 +450,8 @@ async fn prometheus_output_is_byte_identical_to_api_exporter_for_same_data() {
         SnapshotFormat::Prometheus,
         SnapshotIncludes {
             gpu: true,
+            cpu: true,
+            memory: true,
             ..Default::default()
         },
         Some(path.to_string_lossy().into_owned()),
@@ -437,13 +460,9 @@ async fn prometheus_output_is_byte_identical_to_api_exporter_for_same_data() {
         .await
         .expect("snapshot run");
     let contents = fs::read_to_string(&path).expect("read snapshot file");
-    // The expected chunk must appear verbatim inside the larger snapshot
-    // output (the NPU/hardware exporters run after it and self-filter to
-    // nothing for this mock GPU, so they emit no trailing bytes here).
-    assert!(
-        contents.contains(&expected),
-        "snapshot prometheus output does not contain the exporter's byte sequence.\n\
-         expected:\n{expected}\n---actual:---\n{contents}"
+    assert_eq!(
+        contents, expected,
+        "snapshot prometheus output must be byte-identical to the shared renderer"
     );
     let _ = fs::remove_file(&path);
 }

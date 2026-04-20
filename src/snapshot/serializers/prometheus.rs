@@ -14,23 +14,26 @@
 //
 //! Prometheus snapshot serializer.
 //!
-//! Reuses the existing per-section exporters from [`crate::api::metrics`]
-//! — `GpuMetricExporter`, `CpuMetricExporter`, `MemoryMetricExporter`, and
-//! friends — so the output is byte-for-byte identical to a single scrape
-//! of the `/metrics` endpoint exposed by `all-smi api`. Any drift here
-//! would violate the acceptance criterion:
+//! Delegates to the shared
+//! [`crate::api::metrics::render::render_prometheus_exposition`] helper so
+//! the output is byte-for-byte identical to what the `/metrics` endpoint of
+//! `all-smi api` emits for the same inputs. This upholds the acceptance
+//! criterion:
 //!
 //! > `all-smi snapshot --format prometheus` byte-for-byte matches a single
 //! > scrape of `api` mode's `/metrics` for the same data.
+//!
+//! Caveat: both code paths today pass `RuntimeEnvironment::default()`,
+//! empty `vgpu_info`, and empty `mig_info` because neither
+//! `api::server::run_api_mode` nor the snapshot collector populates those
+//! extras. When (and if) one path starts populating them, the other must
+//! follow to keep parity.
 
 use anyhow::Result;
 
-use crate::api::metrics::{
-    MetricExporter, chassis::ChassisMetricExporter, cpu::CpuMetricExporter,
-    disk::DiskMetricExporter, gpu::GpuMetricExporter, hardware::HardwareMetricExporter,
-    memory::MemoryMetricExporter, npu::NpuMetricExporter, process::ProcessMetricExporter,
-};
+use crate::api::metrics::render::{MetricsRenderInputs, render_prometheus_exposition};
 use crate::snapshot::Snapshot;
+use crate::utils::RuntimeEnvironment;
 
 /// Render a *single* snapshot to the Prometheus exposition format.
 ///
@@ -46,65 +49,26 @@ pub fn render(snapshots: &[Snapshot]) -> Result<String> {
         .first()
         .ok_or_else(|| anyhow::anyhow!("Prometheus serializer requires at least one snapshot"))?;
 
-    let mut out = String::new();
+    // Empty slices for sections the snapshot did not collect so the
+    // per-section exporters stay silent — matching `api::server::run_api_mode`
+    // which leaves vgpu/mig empty and uses the default `RuntimeEnvironment`.
+    let runtime_env = RuntimeEnvironment::default();
+    let empty_vgpu = Vec::new();
+    let empty_mig = Vec::new();
 
-    if let Some(gpus) = snap.gpus.as_ref()
-        && !gpus.is_empty()
-    {
-        // Match the ordering in `api::handlers::metrics_handler` so the
-        // scrape output is byte-identical. NPU and hardware exporters
-        // self-filter non-applicable rows.
-        let gpu_exporter = GpuMetricExporter::new(gpus);
-        out.push_str(&gpu_exporter.export_metrics());
+    let inputs = MetricsRenderInputs {
+        gpu_info: snap.gpus.as_deref().unwrap_or(&[]),
+        process_info: snap.processes.as_deref().unwrap_or(&[]),
+        cpu_info: snap.cpus.as_deref().unwrap_or(&[]),
+        memory_info: snap.memory.as_deref().unwrap_or(&[]),
+        storage_info: snap.storage.as_deref().unwrap_or(&[]),
+        runtime_environment: &runtime_env,
+        chassis_info: snap.chassis.as_deref().unwrap_or(&[]),
+        vgpu_info: &empty_vgpu,
+        mig_info: &empty_mig,
+    };
 
-        let npu_exporter = NpuMetricExporter::new(gpus);
-        out.push_str(&npu_exporter.export_metrics());
-    }
-
-    if let Some(procs) = snap.processes.as_ref()
-        && !procs.is_empty()
-    {
-        let p = ProcessMetricExporter::new(procs);
-        out.push_str(&p.export_metrics());
-    }
-
-    if let Some(cpus) = snap.cpus.as_ref()
-        && !cpus.is_empty()
-    {
-        let c = CpuMetricExporter::new(cpus);
-        out.push_str(&c.export_metrics());
-    }
-
-    if let Some(memory) = snap.memory.as_ref()
-        && !memory.is_empty()
-    {
-        let m = MemoryMetricExporter::new(memory);
-        out.push_str(&m.export_metrics());
-    }
-
-    if let Some(storage) = snap.storage.as_ref()
-        && !storage.is_empty()
-    {
-        let d = DiskMetricExporter::new(storage);
-        out.push_str(&d.export_metrics());
-    }
-
-    if let Some(chassis) = snap.chassis.as_ref()
-        && !chassis.is_empty()
-    {
-        let ch = ChassisMetricExporter::new(chassis);
-        out.push_str(&ch.export_metrics());
-    }
-
-    // Extended hardware details (per api::handlers::metrics_handler): this
-    // exporter self-filters to NVIDIA GPUs that populated at least one of
-    // the hardware-detail fields, so non-NVIDIA paths stay silent.
-    if let Some(gpus) = snap.gpus.as_ref()
-        && !gpus.is_empty()
-    {
-        let hw = HardwareMetricExporter::new(gpus);
-        out.push_str(&hw.export_metrics());
-    }
+    let out = render_prometheus_exposition(&inputs);
 
     // Surface reader errors on stderr rather than polluting the exposition.
     for err in &snap.errors {
