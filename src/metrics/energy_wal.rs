@@ -939,4 +939,64 @@ mod tests {
             }
         }
     }
+
+    /// Verify that `WalFlushHandle::shutdown()` terminates the background
+    /// flush task and persists any pending deltas accumulated before the
+    /// signal is sent.
+    ///
+    /// This exercises the graceful-shutdown path: a SIGTERM / Ctrl+C
+    /// handler calls `.shutdown()`, which fires the oneshot and waits
+    /// for the task's final `flush_cycle` to complete. Without this
+    /// path the last batch of Joules (up to one flush interval's worth)
+    /// would be lost across a restart, causing the Prometheus counter to
+    /// silently reset.
+    #[cfg(feature = "cli")]
+    #[tokio::test]
+    async fn wal_flush_handle_shutdown_persists_pending_deltas() {
+        use crate::app_state::AppState;
+        use crate::metrics::energy::{EnergyKey, PowerIntegrator};
+        use std::sync::Arc;
+        use tokio::sync::RwLock;
+
+        let dir = tempfile::tempdir().unwrap();
+        let wal_path = dir.path().join("shutdown-test.bin");
+
+        // Build a minimal AppState with one GPU sample already integrated
+        // so there is a non-zero WAL delta to flush on shutdown.
+        let state = Arc::new(RwLock::new(AppState::new()));
+        {
+            let mut s = state.write().await;
+            let key = EnergyKey::gpu("test-host", "uuid-shutdown");
+            let origin = std::time::Instant::now();
+            s.energy
+                .integrator_mut()
+                .record_sample(key.clone(), origin, 300.0);
+            s.energy.integrator_mut().record_sample(
+                key.clone(),
+                origin + std::time::Duration::from_secs(10),
+                300.0,
+            );
+        }
+
+        // Spawn the WAL task with a very long flush interval so only the
+        // shutdown-triggered flush runs during the test.
+        let handle = crate::metrics::energy_wal::spawn_wal_flush_task(
+            state.clone(),
+            wal_path.to_str().unwrap().to_string(),
+            std::time::Duration::from_secs(3600),
+        );
+
+        // Trigger graceful shutdown. This must return within a reasonable
+        // time (a panicking join would surface as a test failure).
+        handle.shutdown().await;
+
+        // The file must exist and contain at least one valid record —
+        // proving that the final flush ran before the task exited.
+        let mut integ = PowerIntegrator::default();
+        let index = replay_from_path(&wal_path, &mut integ).unwrap();
+        assert!(
+            !index.is_empty(),
+            "shutdown must flush pending deltas to disk; WAL index is empty"
+        );
+    }
 }

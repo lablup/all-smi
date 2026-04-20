@@ -1465,6 +1465,53 @@ mod tests {
         assert!(!state.alert_panel_open);
     }
 
+    /// `R` resets the session counter (zeroes per-device session_joules
+    /// and advances `session_started_at`) while keeping the lifetime
+    /// counter intact so the Prometheus monotonic total is not disturbed.
+    #[tokio::test]
+    async fn capital_r_resets_energy_session_preserves_lifetime() {
+        use crate::metrics::energy::EnergyKey;
+        use std::time::{Duration, Instant};
+
+        let mut state = AppState::new();
+        let energy_key = EnergyKey::gpu("test-host", "uuid-0");
+        let origin = Instant::now();
+
+        // Feed two samples so there is a non-zero session and lifetime.
+        state
+            .energy
+            .integrator_mut()
+            .record_sample(energy_key.clone(), origin, 200.0);
+        state.energy.integrator_mut().record_sample(
+            energy_key.clone(),
+            origin + Duration::from_secs(10),
+            200.0,
+        );
+
+        let lifetime_before = state.energy.integrator().lifetime_joules(&energy_key);
+        assert!(
+            lifetime_before > 0.0,
+            "must have accumulated some energy before reset"
+        );
+        assert!(
+            state.energy.integrator().session_joules(&energy_key) > 0.0,
+            "session counter must be positive before reset"
+        );
+
+        // Press `R` — this should zero session counters and preserve lifetime.
+        handle_key_event(key(KeyCode::Char('R')), &mut state, &args()).await;
+
+        assert_eq!(
+            state.energy.integrator().session_joules(&energy_key),
+            0.0,
+            "session counter must be zeroed by R"
+        );
+        assert!(
+            (state.energy.integrator().lifetime_joules(&energy_key) - lifetime_before).abs() < 1e-9,
+            "lifetime counter must survive the R reset"
+        );
+    }
+
     // -----------------------------------------------------------------------
     // Replay mode (issue #187)
     // -----------------------------------------------------------------------
