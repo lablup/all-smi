@@ -603,10 +603,11 @@ impl MetricsParser {
                 }
             }
             "nvlink_remote_device_type" => {
-                // Info-style metric with `link_index` and `remote_type`
-                // labels. Enforce a defensive per-GPU cap so a malicious
-                // upstream cannot explode the `nvlink_remote_devices` vec
-                // by emitting thousands of distinct link indices.
+                // Info-style metric with `link_index`, `remote_type` and
+                // (issue #190) `bandwidth_mb_s` labels. Enforce a defensive
+                // per-GPU cap so a malicious upstream cannot explode the
+                // `nvlink_remote_devices` vec by emitting thousands of
+                // distinct link indices.
                 let Some(link_index) = labels.get("link_index").and_then(|s| s.parse::<u32>().ok())
                 else {
                     return;
@@ -618,6 +619,15 @@ impl MetricsParser {
                     .get("remote_type")
                     .map(|s| NvLinkRemoteType::from_label(s))
                     .unwrap_or_default();
+                // Optional bandwidth hint (issue #190). Absent from older
+                // exporters — `None` preserves backward compatibility with
+                // scrapes predating the topology tab. Reject obviously
+                // nonsensical upstream values so the TUI never classifies
+                // based on a malicious input.
+                let bandwidth_mb_s = labels
+                    .get("bandwidth_mb_s")
+                    .and_then(|s| s.parse::<u32>().ok())
+                    .filter(|&v| v > 0 && v <= MAX_NVLINK_BANDWIDTH_MB_S);
                 // Coalesce duplicate link_index emissions — most recent
                 // sample wins — so a scrape that contains the same link
                 // multiple times doesn't multiply the vector length.
@@ -627,10 +637,12 @@ impl MetricsParser {
                     .find(|l| l.link_index == link_index)
                 {
                     existing.remote_type = remote_type;
+                    existing.bandwidth_mb_s = bandwidth_mb_s;
                 } else if gpu_info.nvlink_remote_devices.len() < MAX_NVLINK_PER_GPU as usize {
                     gpu_info.nvlink_remote_devices.push(NvLinkRemoteDevice {
                         link_index,
                         remote_type,
+                        bandwidth_mb_s,
                     });
                 }
             }
@@ -1037,6 +1049,13 @@ const MAX_CPU_CORES: usize = 1024;
 /// hardware caps at 18 physical links; 32 leaves headroom for future
 /// generations while still rejecting absurd input.
 pub(crate) const MAX_NVLINK_PER_GPU: u32 = 32;
+
+/// Maximum per-link bandwidth in MB/s accepted from a remote scrape.
+/// NvLink 5 is ~900 GB/s per direction on H200/B200 boards (≈900 000
+/// MB/s); 2 000 000 (2 TB/s) leaves generous headroom for future
+/// generations while still rejecting obviously malicious input like
+/// `u32::MAX`.
+const MAX_NVLINK_BANDWIDTH_MB_S: u32 = 2_000_000;
 
 /// Maximum NUMA node id accepted from a remote scrape. No real system
 /// exposes more than a few hundred NUMA nodes; 4096 is paranoid.
@@ -2593,5 +2612,83 @@ all_smi_gpu_utilization{gpu="NVIDIA A100", instance="node-1", gpu_uuid="GPU-A", 
 "#;
         let parsed = parser.parse_metrics(text, host, &re);
         assert!(parsed.process_info.is_empty());
+    }
+
+    // ------------------------------------------------------------------
+    // Issue #190: NvLink `bandwidth_mb_s` label round-trip + backward
+    // compatibility with old exporters that omit the label entirely.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn nvlink_backward_compat_without_bandwidth_label() {
+        // Old exporters (pre-#190) emit `nvlink_remote_device_type` with
+        // only `link_index` and `remote_type` labels. The parser must
+        // still populate the device list so remote dashboards are not
+        // broken by the upgrade.
+        let parser = create_test_parser();
+        let re = create_test_regex();
+        let host = "legacy:9100";
+        let text = r#"
+all_smi_nvlink_remote_device_type{gpu="NVIDIA A100", instance="node-1", gpu_uuid="GPU-OLD", gpu_index="0", link_index="0", remote_type="gpu"} 1
+all_smi_nvlink_remote_device_type{gpu="NVIDIA A100", instance="node-1", gpu_uuid="GPU-OLD", gpu_index="0", link_index="1", remote_type="switch"} 1
+"#;
+        let parsed = parser.parse_metrics(text, host, &re);
+        assert_eq!(parsed.gpu_info.len(), 1);
+        let links = &parsed.gpu_info[0].nvlink_remote_devices;
+        assert_eq!(links.len(), 2);
+        // Bandwidth is None on every link since the label is absent.
+        assert!(links.iter().all(|l| l.bandwidth_mb_s.is_none()));
+    }
+
+    #[test]
+    fn nvlink_captures_bandwidth_when_present() {
+        let parser = create_test_parser();
+        let re = create_test_regex();
+        let host = "h100:9100";
+        let text = r#"
+all_smi_nvlink_remote_device_type{gpu="NVIDIA H100", instance="node-1", gpu_uuid="GPU-NEW", gpu_index="0", link_index="0", remote_type="gpu", bandwidth_mb_s="50000"} 1
+"#;
+        let parsed = parser.parse_metrics(text, host, &re);
+        let links = &parsed.gpu_info[0].nvlink_remote_devices;
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].bandwidth_mb_s, Some(50_000));
+    }
+
+    #[test]
+    fn nvlink_rejects_absurd_bandwidth_values() {
+        // A malicious upstream could emit `bandwidth_mb_s="4294967295"`.
+        // The parser clamps to MAX_NVLINK_BANDWIDTH_MB_S so the topology
+        // renderer never classifies against nonsense input.
+        let parser = create_test_parser();
+        let re = create_test_regex();
+        let host = "attacker:9100";
+        let text = r#"
+all_smi_nvlink_remote_device_type{gpu="NVIDIA H100", instance="node-1", gpu_uuid="GPU-X", gpu_index="0", link_index="0", remote_type="gpu", bandwidth_mb_s="4294967295"} 1
+"#;
+        let parsed = parser.parse_metrics(text, host, &re);
+        let links = &parsed.gpu_info[0].nvlink_remote_devices;
+        assert_eq!(links.len(), 1);
+        assert_eq!(
+            links[0].bandwidth_mb_s, None,
+            "absurd bandwidth must be filtered"
+        );
+    }
+
+    #[test]
+    fn nvlink_coalesces_duplicate_link_indices() {
+        // A scrape that contains the same link index twice (e.g. a
+        // racey refresh) must produce a single entry whose bandwidth
+        // reflects the most-recent sample.
+        let parser = create_test_parser();
+        let re = create_test_regex();
+        let host = "race:9100";
+        let text = r#"
+all_smi_nvlink_remote_device_type{gpu="NVIDIA H100", instance="node-1", gpu_uuid="GPU-A", gpu_index="0", link_index="0", remote_type="gpu", bandwidth_mb_s="25000"} 1
+all_smi_nvlink_remote_device_type{gpu="NVIDIA H100", instance="node-1", gpu_uuid="GPU-A", gpu_index="0", link_index="0", remote_type="gpu", bandwidth_mb_s="50000"} 1
+"#;
+        let parsed = parser.parse_metrics(text, host, &re);
+        let links = &parsed.gpu_info[0].nvlink_remote_devices;
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].bandwidth_mb_s, Some(50_000));
     }
 }

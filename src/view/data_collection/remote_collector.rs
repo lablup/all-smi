@@ -152,16 +152,18 @@ impl RemoteCollector {
     }
 
     fn update_remote_tabs(state: &mut AppState) {
-        // Tab layout (issue #189): [All, Users, <host1>, <host2>, ...]
+        // Tab layout (issues #189, #190):
+        //   [All, Users, Topology, <host1>, <host2>, ...]
         //
-        // Users tab sits immediately after "All" so cluster-level tabs
-        // cluster together at the left edge of the row.  Inserting
-        // between adjusts the indices but the subsequent `current_tab`
-        // snap-back guards against the previous index being out of
-        // range after tabs shrink (e.g. all hosts disconnected).
+        // Cluster-level tabs cluster together at the left edge of the
+        // row. Inserting them there adjusts the indices but the
+        // subsequent `current_tab` snap-back guards against the previous
+        // index being out of range after tabs shrink (e.g. all hosts
+        // disconnected).
         let mut tabs = vec![
             "All".to_string(),
             crate::ui::tabs::USERS_TAB_NAME.to_string(),
+            crate::ui::tabs::TOPOLOGY_TAB_NAME.to_string(),
         ];
         tabs.extend(state.known_hosts.clone());
 
@@ -176,6 +178,16 @@ impl RemoteCollector {
             state.current_tab = idx;
         } else if state.current_tab >= state.tabs.len() {
             state.current_tab = 0;
+        }
+
+        // Invalidate the Topology tab's remembered host when the stashed
+        // name is no longer present in the tab strip (e.g. the host
+        // disconnected). The renderer will fall back to the first host
+        // tab until the operator picks a new one.
+        if let Some(last) = state.topology_last_host_tab.as_ref()
+            && !state.tabs.iter().any(|t| t == last)
+        {
+            state.topology_last_host_tab = None;
         }
     }
 }

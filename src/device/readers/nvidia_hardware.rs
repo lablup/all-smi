@@ -270,6 +270,11 @@ pub fn collect_nvlink_remote_devices(
         out.push(NvLinkRemoteDevice {
             link_index: link,
             remote_type,
+            // Per-link bandwidth is not collected yet; NVML exposes it
+            // only on a narrow subset of boards. `None` preserves the
+            // current behaviour and lets the topology classifier fall
+            // back to a generic `"NV"` label.
+            bandwidth_mb_s: None,
         });
     }
     out

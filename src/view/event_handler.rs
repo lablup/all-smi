@@ -25,7 +25,7 @@ use crate::record::replay::parse_timecode;
 use crate::ui::aggregation::user::{UserSortKey, sort_users};
 use crate::ui::filter_dsl::{apply as apply_filter, parse as parse_filter};
 use crate::ui::layout::LayoutCalculator;
-use crate::ui::tabs::users_tab_index;
+use crate::ui::tabs::{topology_tab_index, users_tab_index};
 
 /// Upper bound on the filter input buffer size (bytes).
 ///
@@ -47,6 +47,24 @@ fn get_visible_process_rows(state: &AppState) -> usize {
     }
 }
 
+/// Stash the name of the currently-selected host tab into
+/// `state.topology_last_host_tab` so the Topology tab can later render the
+/// operator's preferred host instead of the first one in the tab strip.
+///
+/// Does nothing when the active tab is one of the cluster-level reserved
+/// tabs (`All`, `Users`, `Topology`) — those are not host tabs. Called from
+/// the `T` hotkey and from the arrow-key navigation handlers so Topology's
+/// target host follows whichever host the operator last selected.
+fn remember_current_host_tab(state: &mut AppState) {
+    if let Some(current_name) = state.tabs.get(state.current_tab).cloned()
+        && current_name != "All"
+        && current_name != crate::ui::tabs::USERS_TAB_NAME
+        && current_name != crate::ui::tabs::TOPOLOGY_TAB_NAME
+    {
+        state.topology_last_host_tab = Some(current_name);
+    }
+}
+
 pub async fn handle_key_event(key_event: KeyEvent, state: &mut AppState, args: &ViewArgs) -> bool {
     // Mode precedence (highest first) — do NOT reorder:
     //
@@ -59,8 +77,12 @@ pub async fn handle_key_event(key_event: KeyEvent, state: &mut AppState, args: &
     //    global GPU-sort bindings (`u` sort, `m` sort, `p` sort, `f`
     //    GPU-filter toggle).  They still fall through to replay / normal
     //    keys for navigation (arrows, `/`, `q`, `h`, `A`, `1`).
-    // 4. Normal keys: quit, help, alerts, arrows.
-    // 5. Replay-mode keys (SPACE/`]`/`[`/`+`/`-`/`j`/`k`/`g`/`L`) are
+    // 4. Topology-tab keys (issue #190) when the Topology tab is active:
+    //    `M` toggles the graph/matrix mode. Must come BEFORE the global
+    //    ladder so the Topology's `M` wins over the process-sort `m`.
+    // 5. Normal keys: quit, help, alerts, arrows. Includes `T` which
+    //    jumps to the Topology tab regardless of what tab is current.
+    // 6. Replay-mode keys (SPACE/`]`/`[`/`+`/`-`/`j`/`k`/`g`/`L`) are
     //    routed BEFORE `handle_navigation_keys` so the sort-by-GpuMem
     //    `g` binding doesn't shadow the timecode editor.
     if state.filter_input_mode == FilterInputMode::Editing {
@@ -80,6 +102,18 @@ pub async fn handle_key_event(key_event: KeyEvent, state: &mut AppState, args: &
         && !state.loading
         && !state.show_help
         && handle_users_tab_keys(key_event, state)
+    {
+        return false;
+    }
+
+    // Topology tab (issue #190): when active, `M` toggles the
+    // graph/matrix mode. Checked after Users-tab keys (per the mode-
+    // precedence ladder above) but BEFORE the global `match` so the
+    // Topology's `M` never collides with the global sort-by-memory `m`.
+    if crate::ui::tabs::is_topology_tab_active(state)
+        && !state.loading
+        && !state.show_help
+        && handle_topology_tab_keys(key_event, state)
     {
         return false;
     }
@@ -121,6 +155,23 @@ pub async fn handle_key_event(key_event: KeyEvent, state: &mut AppState, args: &
             }
             false
         }
+        KeyCode::Char('T') => {
+            // Jump to the per-host Topology tab (issue #190). Silent
+            // no-op when the tab is not present (local mode before the
+            // first data frame populates it).
+            if let Some(idx) = topology_tab_index(&state.tabs) {
+                // Remember the operator-selected host tab BEFORE
+                // overwriting `current_tab`, so the Topology renderer
+                // can point at that host instead of falling back to
+                // the first host tab.
+                remember_current_host_tab(state);
+                state.current_tab = idx;
+                state.gpu_scroll_offset = 0;
+                state.storage_scroll_offset = 0;
+                state.mark_data_changed();
+            }
+            false
+        }
         KeyCode::Char('1') | KeyCode::Char('h') => {
             state.show_help = !state.show_help;
             false
@@ -128,12 +179,14 @@ pub async fn handle_key_event(key_event: KeyEvent, state: &mut AppState, args: &
         KeyCode::Left => {
             if !state.show_help {
                 handle_left_arrow(state);
+                remember_current_host_tab(state);
             }
             false
         }
         KeyCode::Right => {
             if !state.show_help {
                 handle_right_arrow(state);
+                remember_current_host_tab(state);
             }
             false
         }
@@ -356,6 +409,36 @@ fn change_users_sort(state: &mut AppState, key: UserSortKey) {
         state.users_tab_state.selected_row = 0;
         state.mark_data_changed();
     }
+}
+
+/// Handle keys owned by the per-host Topology tab (issue #190).
+///
+/// Returns `true` when the key was consumed so the caller stops
+/// dispatching.  The tab currently owns a single key:
+///
+/// * `M` — toggle between graph and matrix render modes.
+///
+/// `Tab` / `Shift-Tab` / arrow navigation is intentionally **not** owned
+/// by the topology tab so the operator can still move between hosts
+/// without leaving the Topology view (per the issue spec: "Remote mode:
+/// defaults to showing selected host's topology; `Tab`/`Shift-Tab`
+/// cycles nodes").
+fn handle_topology_tab_keys(key_event: KeyEvent, state: &mut AppState) -> bool {
+    let KeyEvent {
+        code, modifiers, ..
+    } = key_event;
+    if modifiers.contains(KeyModifiers::CONTROL) || modifiers.contains(KeyModifiers::ALT) {
+        return false;
+    }
+    // Accept both `m` and `M` to minimise muscle-memory friction: the
+    // issue spec uses uppercase `M` but operators may hit it without
+    // Shift on systems where the caps-lock LED is off.
+    if matches!(code, KeyCode::Char('M') | KeyCode::Char('m')) {
+        state.topology_view_mode = state.topology_view_mode.toggled();
+        state.mark_data_changed();
+        return true;
+    }
+    false
 }
 
 /// Drill into the currently-highlighted user, or the highlighted host
@@ -2087,5 +2170,153 @@ mod tests {
             .mode()
             & 0o777;
         assert_eq!(mode, 0o600, "export CSV file must be 0o600, got {mode:o}");
+    }
+
+    // -----------------------------------------------------------------------
+    // Topology tab key handlers (issue #190)
+    // -----------------------------------------------------------------------
+
+    /// Build a minimal remote-mode state with the standard tab strip:
+    /// `[All, Users, Topology, host1, host2]`.
+    fn make_topology_state() -> AppState {
+        let mut state = AppState::new();
+        state.is_local_mode = false;
+        state.loading = false;
+        state.tabs = vec![
+            "All".to_string(),
+            crate::ui::tabs::USERS_TAB_NAME.to_string(),
+            crate::ui::tabs::TOPOLOGY_TAB_NAME.to_string(),
+            "host1".to_string(),
+            "host2".to_string(),
+        ];
+        // Start on host1 so the T hotkey has something to remember.
+        state.current_tab = 3;
+        state
+    }
+
+    #[tokio::test]
+    async fn t_key_jumps_to_topology_tab_and_remembers_host() {
+        let mut state = make_topology_state();
+        // current_tab == 3 == "host1"; pressing T should stash "host1"
+        // and move current_tab to the Topology index (2).
+        handle_key_event(key(KeyCode::Char('T')), &mut state, &args()).await;
+        let topo_idx = crate::ui::tabs::topology_tab_index(&state.tabs).unwrap();
+        assert_eq!(state.current_tab, topo_idx);
+        assert_eq!(
+            state.topology_last_host_tab.as_deref(),
+            Some("host1"),
+            "T must stash the previously-active host tab"
+        );
+    }
+
+    #[tokio::test]
+    async fn t_key_is_noop_when_topology_tab_absent() {
+        // In local mode the Topology tab is not inserted into the strip.
+        let mut state = AppState::new();
+        state.is_local_mode = true;
+        state.tabs = vec!["All".to_string()];
+        state.current_tab = 0;
+        let was_tab = state.current_tab;
+        handle_key_event(key(KeyCode::Char('T')), &mut state, &args()).await;
+        assert_eq!(
+            state.current_tab, was_tab,
+            "T must be a silent no-op when no Topology tab exists"
+        );
+    }
+
+    #[test]
+    fn remember_current_host_tab_skips_reserved_tabs() {
+        let mut state = make_topology_state();
+        // When the current tab is "All" (index 0), nothing should be stashed.
+        state.current_tab = 0;
+        super::remember_current_host_tab(&mut state);
+        assert!(
+            state.topology_last_host_tab.is_none(),
+            "All tab must not be stashed"
+        );
+
+        // When the current tab is Users (index 1), nothing should be stashed.
+        state.current_tab = 1;
+        super::remember_current_host_tab(&mut state);
+        assert!(
+            state.topology_last_host_tab.is_none(),
+            "Users tab must not be stashed"
+        );
+
+        // When the current tab is Topology itself (index 2), nothing should be
+        // stashed — the renderer's fallback handles the self-reference case.
+        state.current_tab = 2;
+        super::remember_current_host_tab(&mut state);
+        assert!(
+            state.topology_last_host_tab.is_none(),
+            "Topology tab must not be stashed"
+        );
+    }
+
+    #[test]
+    fn remember_current_host_tab_stashes_host_tab() {
+        let mut state = make_topology_state();
+        state.current_tab = 4; // "host2"
+        super::remember_current_host_tab(&mut state);
+        assert_eq!(
+            state.topology_last_host_tab.as_deref(),
+            Some("host2"),
+            "host tab must be stashed"
+        );
+    }
+
+    #[tokio::test]
+    async fn m_key_toggles_topology_view_mode_when_topology_active() {
+        let mut state = make_topology_state();
+        // Jump to the Topology tab first so the mode-specific handler fires.
+        let topo_idx = crate::ui::tabs::topology_tab_index(&state.tabs).unwrap();
+        state.current_tab = topo_idx;
+        assert_eq!(
+            state.topology_view_mode,
+            crate::ui::topology::TopologyViewMode::Graph
+        );
+        // Uppercase M (as documented in the help overlay).
+        handle_key_event(key(KeyCode::Char('M')), &mut state, &args()).await;
+        assert_eq!(
+            state.topology_view_mode,
+            crate::ui::topology::TopologyViewMode::Matrix,
+            "first M must switch to matrix"
+        );
+        // Second press cycles back to graph.
+        handle_key_event(key(KeyCode::Char('M')), &mut state, &args()).await;
+        assert_eq!(
+            state.topology_view_mode,
+            crate::ui::topology::TopologyViewMode::Graph,
+            "second M must cycle back to graph"
+        );
+    }
+
+    #[tokio::test]
+    async fn lowercase_m_also_toggles_topology_view_mode() {
+        // The handler accepts both 'm' and 'M' to reduce muscle-memory
+        // friction (operators may not use Shift).
+        let mut state = make_topology_state();
+        let topo_idx = crate::ui::tabs::topology_tab_index(&state.tabs).unwrap();
+        state.current_tab = topo_idx;
+        handle_key_event(key(KeyCode::Char('m')), &mut state, &args()).await;
+        assert_eq!(
+            state.topology_view_mode,
+            crate::ui::topology::TopologyViewMode::Matrix,
+            "lowercase m must toggle topology mode when Topology tab is active"
+        );
+    }
+
+    #[tokio::test]
+    async fn m_key_does_not_toggle_topology_mode_outside_topology_tab() {
+        // 'm' outside the Topology tab hits the global GPU-sort-by-memory
+        // binding instead; topology_view_mode must not change.
+        let mut state = make_topology_state();
+        state.current_tab = 3; // "host1" — not the Topology tab
+        handle_key_event(key(KeyCode::Char('M')), &mut state, &args()).await;
+        assert_eq!(
+            state.topology_view_mode,
+            crate::ui::topology::TopologyViewMode::Graph,
+            "M outside the Topology tab must not toggle topology_view_mode"
+        );
     }
 }

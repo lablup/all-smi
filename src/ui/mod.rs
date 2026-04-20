@@ -33,4 +33,5 @@ pub mod renderer;
 pub mod renderers;
 pub mod tabs;
 pub mod text;
+pub mod topology;
 pub mod widgets;

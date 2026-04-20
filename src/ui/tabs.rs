@@ -29,6 +29,15 @@ use crate::ui::text::print_colored_text;
 /// skips the GPU / storage sections when it is active.
 pub const USERS_TAB_NAME: &str = "Users";
 
+/// Reserved tab name for the per-host Topology tab (issue #190).
+///
+/// Like [`USERS_TAB_NAME`] this is stored as a literal string in
+/// `AppState::tabs` so the renderer can special-case it without
+/// touching the `Vec<String>` shape.  The Topology tab renders a single
+/// host's NvLink / NUMA / PCIe topology; the event handler's `T`
+/// binding jumps to this tab.
+pub const TOPOLOGY_TAB_NAME: &str = "Topology";
+
 /// Return the index of the Users tab inside `tabs`, or `None` when the
 /// tab has not been inserted yet (local mode, replay streams that do
 /// not carry process rows).
@@ -41,6 +50,19 @@ pub fn users_tab_index(tabs: &[String]) -> Option<usize> {
 #[inline]
 pub fn is_users_tab_active(state: &AppState) -> bool {
     users_tab_index(&state.tabs).is_some_and(|i| i == state.current_tab)
+}
+
+/// Return the index of the Topology tab inside `tabs`, or `None` when
+/// the tab has not been inserted yet.
+#[inline]
+pub fn topology_tab_index(tabs: &[String]) -> Option<usize> {
+    tabs.iter().position(|t| t == TOPOLOGY_TAB_NAME)
+}
+
+/// True when `state.current_tab` is the Topology tab.
+#[inline]
+pub fn is_topology_tab_active(state: &AppState) -> bool {
+    topology_tab_index(&state.tabs).is_some_and(|i| i == state.current_tab)
 }
 
 pub fn draw_tabs<W: Write>(stdout: &mut W, state: &AppState, cols: u16) {

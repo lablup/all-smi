@@ -26,6 +26,7 @@ pub mod nvidia;
 pub mod process;
 pub mod rebellions;
 pub mod tenstorrent;
+pub mod topology;
 pub mod vgpu;
 
 // Re-export commonly used items

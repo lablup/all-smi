@@ -115,6 +115,17 @@ pub struct NvLinkRemoteDevice {
     pub link_index: u32,
     /// Classification of the node sitting on the other side of the link.
     pub remote_type: NvLinkRemoteType,
+    /// Optional per-link bandwidth hint in MB/s as reported by NVML
+    /// `nvmlDeviceGetNvLinkUtilizationCounter` / Gen-specific ceilings.
+    /// `None` when the driver does not expose a per-link speed — the
+    /// topology tab's NVn classifier falls back to a generic `"NV"`
+    /// label in that case rather than misreporting a generation.
+    ///
+    /// Serialised with `#[serde(default)]` so snapshots / exporters
+    /// produced before this field existed continue to deserialise
+    /// cleanly (backward-compatibility requirement from issue #190).
+    #[serde(default)]
+    pub bandwidth_mb_s: Option<u32>,
 }
 
 /// NvLink remote device classification as returned by

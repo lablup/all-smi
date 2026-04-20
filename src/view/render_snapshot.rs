@@ -34,6 +34,7 @@ use crate::ui::aggregation::user::UserAggregationResult;
 use crate::ui::alerts::{AlertTransition, Alerter};
 use crate::ui::filter_dsl::Expr as FilterExpr;
 use crate::ui::notification::NotificationManager;
+use crate::ui::topology::TopologyViewMode;
 use crate::utils::RuntimeEnvironment;
 
 /// Pre-computed rendering decisions captured from `AppState` under lock.
@@ -160,6 +161,14 @@ pub struct RenderSnapshot {
     /// lock is held.  Cloning the result (small: one vector per user)
     /// keeps the render path lock-free.
     pub users_aggregation: UserAggregationResult,
+
+    // Topology tab (issue #190)
+    /// Render mode selected by the Topology tab's `M` toggle.
+    pub topology_view_mode: TopologyViewMode,
+    /// Operator-selected host tab remembered for the Topology view. When
+    /// `Some` and still present in `tabs`, the Topology renderer points at
+    /// that host; otherwise it falls back to the first host tab.
+    pub topology_last_host_tab: Option<String>,
 }
 
 impl RenderSnapshot {
@@ -264,6 +273,10 @@ impl RenderSnapshot {
             remote_process_info: state.remote_process_info.clone(),
             users_tab_state: state.users_tab_state.clone(),
             users_aggregation,
+
+            // Topology tab (issue #190)
+            topology_view_mode: state.topology_view_mode,
+            topology_last_host_tab: state.topology_last_host_tab.clone(),
         }
     }
 
@@ -368,6 +381,10 @@ impl RenderSnapshot {
             data_version: Some(self.collector_data_version),
             result: self.users_aggregation.clone(),
         };
+
+        // Topology tab (issue #190)
+        state.topology_view_mode = self.topology_view_mode;
+        state.topology_last_host_tab = self.topology_last_host_tab.clone();
 
         state
     }
@@ -494,5 +511,40 @@ mod tests {
         assert_eq!(restored.sort_criteria, SortCriteria::GpuMemory);
         assert_eq!(restored.data_version, 42);
         assert_eq!(restored.utilization_history.len(), 1);
+    }
+
+    #[test]
+    fn test_snapshot_capture_preserves_topology_state() {
+        use crate::ui::topology::TopologyViewMode;
+        let mut state = AppState::new();
+        state.topology_view_mode = TopologyViewMode::Matrix;
+        state.topology_last_host_tab = Some("host2".to_string());
+
+        let snapshot = RenderSnapshot::capture(&mut state);
+
+        assert_eq!(snapshot.topology_view_mode, TopologyViewMode::Matrix);
+        assert_eq!(
+            snapshot.topology_last_host_tab.as_deref(),
+            Some("host2"),
+            "last_host_tab must survive the snapshot capture"
+        );
+    }
+
+    #[test]
+    fn test_topology_state_roundtrips_through_as_app_state() {
+        use crate::ui::topology::TopologyViewMode;
+        let mut state = AppState::new();
+        state.topology_view_mode = TopologyViewMode::Matrix;
+        state.topology_last_host_tab = Some("host3".to_string());
+
+        let snapshot = RenderSnapshot::capture(&mut state);
+        let restored = snapshot.as_app_state();
+
+        assert_eq!(restored.topology_view_mode, TopologyViewMode::Matrix);
+        assert_eq!(
+            restored.topology_last_host_tab.as_deref(),
+            Some("host3"),
+            "topology state must survive the snapshot round-trip"
+        );
     }
 }

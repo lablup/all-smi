@@ -298,6 +298,7 @@ async fn apply_frame_to_state(
     let mut tabs = vec![
         "All".to_string(),
         crate::ui::tabs::USERS_TAB_NAME.to_string(),
+        crate::ui::tabs::TOPOLOGY_TAB_NAME.to_string(),
     ];
     tabs.extend(host_ids);
 
@@ -310,6 +311,16 @@ async fn apply_frame_to_state(
         state.current_tab = idx;
     } else if state.current_tab >= state.tabs.len() {
         state.current_tab = 0;
+    }
+
+    // Invalidate the Topology tab's remembered host when the stashed name
+    // is no longer present in the tab strip (e.g. switched recordings,
+    // host dropped out of the replay frame). The renderer will fall back
+    // to the first host tab until the operator picks a new one.
+    if let Some(last) = state.topology_last_host_tab.as_ref()
+        && !state.tabs.iter().any(|t| t == last)
+    {
+        state.topology_last_host_tab = None;
     }
 
     state.mark_collector_data_changed();
