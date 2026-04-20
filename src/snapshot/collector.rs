@@ -181,6 +181,22 @@ pub async fn collect_once<C: SnapshotCollector + 'static>(
                 });
             }
             Err(_elapsed) => {
+                // The `JoinHandle` is dropped when `timeout` returns
+                // `Elapsed`, but `spawn_blocking` does NOT cancel the
+                // underlying OS thread — it keeps running until the
+                // reader returns. A hung driver call therefore leaks a
+                // Tokio blocking-pool worker for the rest of the
+                // process's lifetime. Emit a warning so operators have a
+                // diagnostic trail. The CLI entrypoint in `src/main.rs`
+                // bounds the blast radius by using a dedicated runtime
+                // with `max_blocking_threads(32)` for the snapshot
+                // invocation.
+                tracing::warn!(
+                    section = *name,
+                    timeout_ms = per_reader_timeout.as_millis() as u64,
+                    "snapshot reader timed out; the blocking worker cannot be cancelled \
+                     and will continue until the reader returns"
+                );
                 snap.errors.push(SnapshotError {
                     section: (*name).to_string(),
                     kind: "timeout".to_string(),

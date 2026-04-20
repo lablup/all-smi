@@ -58,14 +58,61 @@ static NATIVE_METRICS_INITIALIZED: AtomicBool = AtomicBool::new(false);
 #[cfg(target_os = "linux")]
 static HLSMI_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
-#[tokio::main(flavor = "multi_thread", worker_threads = 4)]
-async fn main() {
+fn main() {
     // Set up panic handler for cleanup
     #[cfg(target_os = "macos")]
     setup_panic_handler();
 
     let cli = Cli::parse();
 
+    // The snapshot subcommand is one-shot, scriptable, and may call into
+    // potentially-hung hardware readers via `spawn_blocking`. Because
+    // `spawn_blocking` cannot cancel the underlying OS thread on a
+    // `tokio::time::timeout` firing, a hung NVML/TPU driver call would
+    // permanently leak a Tokio blocking-pool worker if we reused the
+    // long-running default runtime. We therefore build a dedicated
+    // runtime with a conservative `max_blocking_threads(32)` specifically
+    // for the snapshot invocation — the runtime drops when the function
+    // returns and any still-running blocking threads exit with the
+    // process. This bounds the per-invocation leak to at most 32
+    // threads.
+    if let Some(Commands::Snapshot(_)) = &cli.command {
+        let runtime = match tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .worker_threads(4)
+            .max_blocking_threads(32)
+            .build()
+        {
+            Ok(rt) => rt,
+            Err(e) => {
+                eprintln!("error: failed to build snapshot tokio runtime: {e}");
+                std::process::exit(1);
+            }
+        };
+        runtime.block_on(async move {
+            run_command(cli).await;
+        });
+        return;
+    }
+
+    // Default runtime for `api`, `local`, `view`, and no-subcommand paths.
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .worker_threads(4)
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("error: failed to build tokio runtime: {e}");
+            std::process::exit(1);
+        }
+    };
+    runtime.block_on(async move {
+        run_command(cli).await;
+    });
+}
+
+async fn run_command(cli: Cli) {
     // Set up signal handler for clean shutdown
     tokio::spawn(async {
         signal::ctrl_c().await.expect("Failed to listen for Ctrl+C");

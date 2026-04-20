@@ -147,6 +147,13 @@ pub mod ui;
 pub mod snapshot;
 
 /// Re-export of the snapshot entry point for programmatic use.
+///
+/// See [`snapshot::run`] for the full contract, including the note on
+/// blocking-pool leaks when a reader times out. Embedding callers should
+/// provision a conservative
+/// [`tokio::runtime::Builder::max_blocking_threads`] to bound the blast
+/// radius — the CLI in `main.rs` uses a dedicated short-lived runtime with
+/// `max_blocking_threads(32)` per snapshot invocation.
 #[cfg(feature = "cli")]
 pub use snapshot::{
     Snapshot, SnapshotError, SnapshotHardFailure, SnapshotOptions, run as run_snapshot,

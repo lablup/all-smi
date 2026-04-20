@@ -495,3 +495,187 @@ async fn output_dash_is_treated_as_stdout() {
         "`--output -` must not create a literal dash file"
     );
 }
+
+#[tokio::test]
+async fn non_finite_f64_fields_serialize_as_null_without_aborting() {
+    // Regression: `serde_json::to_string` refuses to emit `NaN`/`±Inf`, so
+    // without sanitization a single flaky driver field aborts the whole
+    // snapshot. Assert that the snapshot succeeds and the offending fields
+    // appear as `null` in the JSON output — consumers that need numeric
+    // defaults can substitute them themselves.
+    let mut gpu = mock_gpu("A100", 0.0, 0);
+    gpu.utilization = f64::NAN;
+    gpu.power_consumption = f64::INFINITY;
+    gpu.ane_utilization = f64::NEG_INFINITY;
+
+    let collector = Arc::new(MockCollector {
+        gpus: vec![gpu],
+        ..MockCollector::empty()
+    });
+    let path = std::env::temp_dir().join(format!("snapshot-nan-{}.json", std::process::id()));
+    let opts = base_options(
+        SnapshotFormat::Json,
+        SnapshotIncludes {
+            gpu: true,
+            ..Default::default()
+        },
+        Some(path.to_string_lossy().into_owned()),
+    );
+    run_with_collector(opts, collector)
+        .await
+        .expect("snapshot run must not fail on NaN/Inf");
+    let contents = fs::read_to_string(&path).expect("read snapshot file");
+    let parsed: serde_json::Value =
+        serde_json::from_str(&contents).expect("JSON must parse even with non-finite inputs");
+    let gpu0 = &parsed["gpus"][0];
+    assert!(gpu0["utilization"].is_null(), "NaN must become null");
+    assert!(gpu0["power_consumption"].is_null(), "+Inf must become null");
+    assert!(gpu0["ane_utilization"].is_null(), "-Inf must become null");
+    // Sibling finite fields must still round-trip.
+    assert_eq!(gpu0["name"], "A100");
+    let _ = fs::remove_file(&path);
+}
+
+#[tokio::test]
+async fn non_finite_f64_fields_survive_csv_path() {
+    // Same scenario as the JSON path but via CSV, where the old
+    // `unwrap_or(Value::Null)` pattern would have silently erased the
+    // whole device instead of emitting empty cells for the bad fields.
+    let mut gpu = mock_gpu("H100", 0.0, 70);
+    gpu.utilization = f64::NAN;
+
+    let collector = Arc::new(MockCollector {
+        gpus: vec![gpu],
+        ..MockCollector::empty()
+    });
+    let path = std::env::temp_dir().join(format!("snapshot-nan-{}.csv", std::process::id()));
+    let opts = SnapshotOptions {
+        query: vec![
+            "name".to_string(),
+            "utilization".to_string(),
+            "temperature".to_string(),
+        ],
+        ..base_options(
+            SnapshotFormat::Csv,
+            SnapshotIncludes {
+                gpu: true,
+                ..Default::default()
+            },
+            Some(path.to_string_lossy().into_owned()),
+        )
+    };
+    run_with_collector(opts, collector)
+        .await
+        .expect("snapshot CSV run must not fail on NaN");
+    let contents = fs::read_to_string(&path).expect("read snapshot file");
+    let mut lines = contents.lines();
+    assert_eq!(lines.next(), Some("name,utilization,temperature"));
+    // Device row must still be present; utilization cell should be empty
+    // (because `null` stringifies to the empty cell), temperature intact.
+    assert_eq!(lines.next(), Some("H100,,70"));
+    let _ = fs::remove_file(&path);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn output_file_has_owner_only_permissions() {
+    // `--output` now uses `OpenOptions::mode(0o600)` on Unix. Verify the
+    // mode bits on the emitted file so future regressions that reintroduce
+    // world-readable output show up in CI.
+    use std::os::unix::fs::PermissionsExt;
+
+    let collector = Arc::new(MockCollector {
+        memory: vec![mock_memory()],
+        ..MockCollector::empty()
+    });
+    let path = std::env::temp_dir().join(format!("snapshot-perms-{}.json", std::process::id()));
+    let opts = base_options(
+        SnapshotFormat::Json,
+        SnapshotIncludes {
+            memory: true,
+            ..Default::default()
+        },
+        Some(path.to_string_lossy().into_owned()),
+    );
+    run_with_collector(opts, collector)
+        .await
+        .expect("snapshot run");
+    let mode = fs::metadata(&path)
+        .expect("stat output")
+        .permissions()
+        .mode();
+    // The low 9 bits should be exactly 0o600 (rw- --- ---).
+    assert_eq!(
+        mode & 0o777,
+        0o600,
+        "snapshot file must be owner-only; got {mode:o}"
+    );
+    let _ = fs::remove_file(&path);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn output_refuses_to_follow_symlinks() {
+    // Plant a *dangling* symlink at the tmp sibling path (the only place
+    // our opener actually creates a file). Without `O_NOFOLLOW` the
+    // `OpenOptions::create(true).open(...)` call would follow the symlink
+    // and create the backing file at the attacker-controlled target;
+    // with `O_NOFOLLOW` it errors out with `ELOOP` instead.
+    //
+    // We can't use `Path::exists()` as a test fixture helper here because
+    // `exists()` returns `false` for dangling symlinks, which is exactly
+    // the case we want to trigger the `O_NOFOLLOW` branch on.
+    let target = std::env::temp_dir().join(format!("snapshot-sym-{}.json", std::process::id()));
+    let sibling_tmp = {
+        let mut p = target.as_os_str().to_os_string();
+        p.push(".tmp");
+        std::path::PathBuf::from(p)
+    };
+    let attacker_target = std::env::temp_dir().join(format!(
+        "snapshot-sym-target-does-not-exist-{}.json",
+        std::process::id()
+    ));
+    let _ = fs::remove_file(&target);
+    let _ = fs::remove_file(&sibling_tmp);
+    let _ = fs::remove_file(&attacker_target);
+    std::os::unix::fs::symlink(&attacker_target, &sibling_tmp).expect("plant symlink");
+    // Sanity-check the fixture: the symlink exists as a symlink but its
+    // target does not exist, so `Path::exists()` returns `false` and the
+    // `pick_tmp_path` collision-retry branch will NOT kick in.
+    assert!(
+        !sibling_tmp.exists(),
+        "dangling symlink should report !exists()"
+    );
+    assert!(
+        fs::symlink_metadata(&sibling_tmp)
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false)
+    );
+
+    let collector = Arc::new(MockCollector {
+        memory: vec![mock_memory()],
+        ..MockCollector::empty()
+    });
+    let opts = base_options(
+        SnapshotFormat::Json,
+        SnapshotIncludes {
+            memory: true,
+            ..Default::default()
+        },
+        Some(target.to_string_lossy().into_owned()),
+    );
+    let result = run_with_collector(opts, collector).await;
+    assert!(
+        result.is_err(),
+        "opening a symlinked tmp path must fail under O_NOFOLLOW"
+    );
+    // The attacker target MUST NOT have been created via follow-through.
+    assert!(
+        !attacker_target.exists(),
+        "O_NOFOLLOW must have prevented creating {}",
+        attacker_target.display()
+    );
+    let _ = fs::remove_file(&sibling_tmp);
+    let _ = fs::remove_file(&target);
+    let _ = fs::remove_file(&attacker_target);
+}

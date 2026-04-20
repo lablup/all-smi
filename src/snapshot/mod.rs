@@ -30,9 +30,9 @@
 //! * [`serializers`] — format-specific writers (json, csv, prometheus).
 
 use std::collections::HashSet;
-use std::fs::File;
+use std::fs::{self, OpenOptions};
 use std::io::{self, IsTerminal, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -67,6 +67,25 @@ pub use options::{
 /// * `Err` with a [`SnapshotHardFailure`] attached → exit `1` ("hard
 ///   failure": no devices collected at all across every sample).
 /// * Any other `Err` → exit `1` with the error message on stderr.
+///
+/// # Blocking-pool considerations
+///
+/// Each reader runs inside `tokio::task::spawn_blocking` guarded by a
+/// `tokio::time::timeout`. When a reader exceeds its budget the outer
+/// future's `Elapsed` branch fires and the `JoinHandle` is dropped — but
+/// `spawn_blocking` does **not** cancel the underlying OS thread. The
+/// thread continues running until the wrapped syscall returns, occupying
+/// one worker from Tokio's blocking pool (default cap 512). A misbehaving
+/// NVML/TPU call can therefore leak a worker for the entire process
+/// lifetime.
+///
+/// Callers embedding this function in a long-running service should
+/// provision the Tokio runtime with a conservative
+/// [`tokio::runtime::Builder::max_blocking_threads`] so a burst of
+/// pathological readers cannot exhaust the pool. The CLI dispatch in
+/// `main.rs` builds a short-lived runtime with
+/// `max_blocking_threads(32)` per snapshot invocation for exactly this
+/// reason.
 pub async fn run(opts: SnapshotOptions) -> Result<()> {
     let collector = Arc::new(DefaultSnapshotCollector::new());
     run_with_collector(opts, collector).await
@@ -126,14 +145,115 @@ pub async fn run_with_collector<C: SnapshotCollector + 'static>(
         handle.flush().ok();
     } else {
         let path = opts.output.as_deref().unwrap();
-        let mut file =
-            File::create(Path::new(path)).with_context(|| format!("failed to create {path}"))?;
-        file.write_all(rendered.as_bytes())
-            .with_context(|| format!("failed to write to {path}"))?;
-        file.flush().ok();
+        write_output_atomic(Path::new(path), &rendered)?;
     }
 
     Ok(())
+}
+
+/// Write `contents` to `final_path` atomically and with restrictive
+/// permissions.
+///
+/// On Unix the temporary file is opened with `O_NOFOLLOW` and mode `0o600`
+/// so an attacker cannot redirect the write via a pre-existing symlink and
+/// the result is only readable by its owner. On Windows the file is opened
+/// with `share_mode(0)` (exclusive access) — symlink TOCTOU on Windows is
+/// handled with different mitigations which are out of scope for this
+/// function.
+///
+/// The output is first written to a sibling file `<final_path>.tmp` (with
+/// up to 64 collision retries), `sync_all`-ed, then renamed onto the final
+/// path. Callers should assume the final file exists only if the function
+/// returned `Ok(())`.
+fn write_output_atomic(final_path: &Path, contents: &str) -> Result<()> {
+    let tmp_path = pick_tmp_path(final_path);
+
+    let file_result = {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .custom_flags(libc::O_NOFOLLOW)
+                .mode(0o600)
+                .open(&tmp_path)
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .share_mode(0)
+                .open(&tmp_path)
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&tmp_path)
+        }
+    };
+
+    let mut file = file_result
+        .with_context(|| format!("failed to create snapshot temp file {}", tmp_path.display()))?;
+
+    if let Err(e) = file.write_all(contents.as_bytes()) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(e)
+            .with_context(|| format!("failed to write snapshot data to {}", tmp_path.display()));
+    }
+    if let Err(e) = file.sync_all() {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(e)
+            .with_context(|| format!("failed to fsync snapshot temp file {}", tmp_path.display()));
+    }
+    drop(file);
+
+    if let Err(e) = fs::rename(&tmp_path, final_path) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(e).with_context(|| {
+            format!(
+                "failed to rename snapshot temp file {} -> {}",
+                tmp_path.display(),
+                final_path.display()
+            )
+        });
+    }
+
+    Ok(())
+}
+
+/// Pick a temp-file path next to `final_path`. Starts with `<path>.tmp` and
+/// appends a numeric suffix when that name is already taken to reduce
+/// collision risk when multiple snapshot invocations target the same
+/// directory concurrently.
+fn pick_tmp_path(final_path: &Path) -> PathBuf {
+    let base = {
+        let mut p = final_path.as_os_str().to_os_string();
+        p.push(".tmp");
+        PathBuf::from(p)
+    };
+    if !base.exists() {
+        return base;
+    }
+    for i in 1..=64 {
+        let mut p = final_path.as_os_str().to_os_string();
+        p.push(format!(".tmp.{i}"));
+        let candidate = PathBuf::from(p);
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    // Fall back to the original base name: the open call will fail if the
+    // conflicting file still exists, surfacing the error to the caller
+    // rather than guessing forever.
+    base
 }
 
 fn render(opts: &SnapshotOptions, snapshots: &[Snapshot], stdout_is_tty: bool) -> Result<String> {
@@ -144,6 +264,41 @@ fn render(opts: &SnapshotOptions, snapshots: &[Snapshot], stdout_is_tty: bool) -
         }
         SnapshotFormat::Csv => serializers::csv::render(opts, snapshots),
         SnapshotFormat::Prometheus => serializers::prometheus::render(snapshots),
+    }
+}
+
+/// Recursively replace non-finite `f64` numbers (`NaN`, `+Inf`, `-Inf`)
+/// inside a [`serde_json::Value`] with `Value::Null`. Called before any
+/// serialization path so that neither the JSON nor CSV writers can abort
+/// on a single misbehaving device field.
+///
+/// Rationale: `serde_json::Number::from_f64` refuses non-finite values,
+/// which causes `to_string(snapshot)` to fail for the WHOLE snapshot when
+/// any device carries a `NaN` (common on NVML drivers when a fan RPM is
+/// unavailable, for example) or `Infinity` (some vendors emit `+Inf` for
+/// "unknown"). Downgrading to `null` keeps the rest of the snapshot
+/// intact — consumers that need a numeric default can substitute it
+/// themselves.
+pub fn sanitize_json_floats(v: &mut Value) {
+    match v {
+        Value::Number(n) => {
+            if let Some(f) = n.as_f64()
+                && !f.is_finite()
+            {
+                *v = Value::Null;
+            }
+        }
+        Value::Array(arr) => {
+            for item in arr.iter_mut() {
+                sanitize_json_floats(item);
+            }
+        }
+        Value::Object(obj) => {
+            for item in obj.values_mut() {
+                sanitize_json_floats(item);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -167,6 +322,33 @@ pub fn augment_device_json(section: &str, index: usize, mut value: Value) -> Val
     value
 }
 
+/// Convert an iterable of typed devices into the sanitized `Vec<Value>`
+/// shape the CSV serializer consumes. A single device that fails to
+/// serialize (extremely rare — would require a custom `Serialize` impl to
+/// return an error) is logged to stderr and skipped rather than silently
+/// elided as `Value::Null` like the old `unwrap_or(Value::Null)` pattern.
+///
+/// Each resulting `Value` also has its non-finite `f64` numbers replaced
+/// with `Value::Null` via [`sanitize_json_floats`], so the CSV writer
+/// cannot fail on `NaN`/`Inf` emitted by flaky drivers.
+fn bucket<T: serde::Serialize>(section: &'static str, items: &[T]) -> Vec<Value> {
+    let mut out = Vec::with_capacity(items.len());
+    for (i, item) in items.iter().enumerate() {
+        match serde_json::to_value(item) {
+            Ok(mut v) => {
+                sanitize_json_floats(&mut v);
+                out.push(augment_device_json(section, i, v));
+            }
+            Err(e) => {
+                eprintln!(
+                    "snapshot: skipping {section} device index {i}: serialization failed: {e}"
+                );
+            }
+        }
+    }
+    out
+}
+
 /// Expand a typed snapshot into `(section, Vec<Value>)` buckets for the
 /// CSV writer. Each bucket is ordered as requested by the user via the
 /// `--include` flag so CSV output is deterministic.
@@ -183,93 +365,32 @@ pub fn buckets_for_csv(
     if includes.gpu
         && let Some(gpus) = snap.gpus.as_ref()
     {
-        buckets.push((
-            "gpu",
-            gpus.iter()
-                .enumerate()
-                .map(|(i, g)| {
-                    augment_device_json("gpu", i, serde_json::to_value(g).unwrap_or(Value::Null))
-                })
-                .collect(),
-        ));
+        buckets.push(("gpu", bucket("gpu", gpus)));
     }
     if includes.cpu
         && let Some(cpus) = snap.cpus.as_ref()
     {
-        buckets.push((
-            "cpu",
-            cpus.iter()
-                .enumerate()
-                .map(|(i, c)| {
-                    augment_device_json("cpu", i, serde_json::to_value(c).unwrap_or(Value::Null))
-                })
-                .collect(),
-        ));
+        buckets.push(("cpu", bucket("cpu", cpus)));
     }
     if includes.memory
         && let Some(mems) = snap.memory.as_ref()
     {
-        buckets.push((
-            "memory",
-            mems.iter()
-                .enumerate()
-                .map(|(i, m)| {
-                    augment_device_json("memory", i, serde_json::to_value(m).unwrap_or(Value::Null))
-                })
-                .collect(),
-        ));
+        buckets.push(("memory", bucket("memory", mems)));
     }
     if includes.chassis
         && let Some(ch) = snap.chassis.as_ref()
     {
-        buckets.push((
-            "chassis",
-            ch.iter()
-                .enumerate()
-                .map(|(i, c)| {
-                    augment_device_json(
-                        "chassis",
-                        i,
-                        serde_json::to_value(c).unwrap_or(Value::Null),
-                    )
-                })
-                .collect(),
-        ));
+        buckets.push(("chassis", bucket("chassis", ch)));
     }
     if includes.process
         && let Some(procs) = snap.processes.as_ref()
     {
-        buckets.push((
-            "process",
-            procs
-                .iter()
-                .enumerate()
-                .map(|(i, p)| {
-                    augment_device_json(
-                        "process",
-                        i,
-                        serde_json::to_value(p).unwrap_or(Value::Null),
-                    )
-                })
-                .collect(),
-        ));
+        buckets.push(("process", bucket("process", procs)));
     }
     if includes.storage
         && let Some(sto) = snap.storage.as_ref()
     {
-        buckets.push((
-            "storage",
-            sto.iter()
-                .enumerate()
-                .map(|(i, s)| {
-                    augment_device_json(
-                        "storage",
-                        i,
-                        serde_json::to_value(s).unwrap_or(Value::Null),
-                    )
-                })
-                .collect(),
-        ));
+        buckets.push(("storage", bucket("storage", sto)));
     }
     buckets
 }

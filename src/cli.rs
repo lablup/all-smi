@@ -147,6 +147,14 @@ pub struct SnapshotArgs {
     pub timeout_ms: u64,
 
     /// Write output to this file instead of stdout. Use `-` for stdout.
+    ///
+    /// On Unix the file is created with mode `0o600` (owner-only) and the
+    /// writer refuses to follow symlinks; the command fails if the target
+    /// path already exists as a symlink. The write is atomic: output first
+    /// goes to a sibling `<path>.tmp` file, is fsynced, then renamed over
+    /// the destination. On Windows the file is opened with exclusive
+    /// sharing; symlink-based TOCTOU has different mitigations on that
+    /// platform which are out of scope for this flag.
     #[arg(long, short)]
     pub output: Option<String>,
 }

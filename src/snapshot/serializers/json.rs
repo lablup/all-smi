@@ -22,10 +22,31 @@
 //!
 //! Missing sections (not requested via `--include`) are omitted entirely
 //! rather than serialized as empty arrays, per the issue spec.
+//!
+//! Non-finite `f64` values (`NaN`, `±Inf`) are replaced with `null` via
+//! [`crate::snapshot::sanitize_json_floats`] before the final
+//! stringification pass. Raw `serde_json::to_string(&Snapshot)` fails with
+//! "f64 is not JSON serializable" for the whole snapshot as soon as any
+//! device carries a non-finite number — flaky NVML drivers and TPU reader
+//! failures have both been observed to emit such values.
 
 use anyhow::{Context, Result};
+use serde_json::Value;
 
-use crate::snapshot::Snapshot;
+use crate::snapshot::{Snapshot, sanitize_json_floats};
+
+/// Convert a snapshot slice into a sanitized `serde_json::Value` tree.
+/// Centralised so the single-sample and multi-sample branches share the
+/// same sanitization logic.
+fn snapshots_to_sanitized_value(snapshots: &[Snapshot]) -> Result<Value> {
+    let mut value = if snapshots.len() == 1 {
+        serde_json::to_value(&snapshots[0]).context("failed to serialize snapshot to JSON value")?
+    } else {
+        serde_json::to_value(snapshots).context("failed to serialize snapshots to JSON value")?
+    };
+    sanitize_json_floats(&mut value);
+    Ok(value)
+}
 
 /// Render a slice of snapshots to JSON.
 ///
@@ -34,17 +55,11 @@ use crate::snapshot::Snapshot;
 /// `jq -c '.[]'`. A newline is appended so piped output does not leave the
 /// terminal prompt glued to the last `}`.
 pub fn render(snapshots: &[Snapshot], pretty: bool) -> Result<String> {
-    let mut out = if snapshots.len() == 1 {
-        let value = &snapshots[0];
-        if pretty {
-            serde_json::to_string_pretty(value).context("failed to serialize snapshot to JSON")?
-        } else {
-            serde_json::to_string(value).context("failed to serialize snapshot to JSON")?
-        }
-    } else if pretty {
-        serde_json::to_string_pretty(snapshots).context("failed to serialize snapshots to JSON")?
+    let value = snapshots_to_sanitized_value(snapshots)?;
+    let mut out = if pretty {
+        serde_json::to_string_pretty(&value).context("failed to serialize snapshot to JSON")?
     } else {
-        serde_json::to_string(snapshots).context("failed to serialize snapshots to JSON")?
+        serde_json::to_string(&value).context("failed to serialize snapshot to JSON")?
     };
     out.push('\n');
     Ok(out)
