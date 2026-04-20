@@ -159,11 +159,9 @@ impl LayoutCalculator {
         let separators = if num_bars > 1 { (num_bars - 1) * 2 } else { 0 }; // 2 spaces between bars
 
         let available_width = width.saturating_sub(total_padding + separators);
-        let bar_width = if num_bars > 0 {
-            available_width / num_bars
-        } else {
-            available_width
-        };
+        let bar_width = available_width
+            .checked_div(num_bars)
+            .unwrap_or(available_width);
 
         ProgressBarLayout {
             bar_width,

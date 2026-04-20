@@ -205,3 +205,71 @@ impl SnapshotIncludes {
         !(self.gpu || self.cpu || self.memory || self.chassis || self.process || self.storage)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn snapshot_includes_is_empty_when_all_false() {
+        let inc = SnapshotIncludes::default();
+        assert!(inc.is_empty());
+    }
+
+    #[test]
+    fn snapshot_includes_not_empty_when_one_set() {
+        let inc = SnapshotIncludes {
+            gpu: true,
+            ..Default::default()
+        };
+        assert!(!inc.is_empty());
+    }
+
+    #[test]
+    fn snapshot_args_includes_rejects_unknown_section() {
+        let args = SnapshotArgs {
+            format: SnapshotFormat::Json,
+            pretty: None,
+            include: vec!["gpu".to_string(), "unknown_section".to_string()],
+            query: Vec::new(),
+            samples: 1,
+            interval: 0,
+            timeout_ms: 5_000,
+            output: None,
+        };
+        let result = args.includes();
+        assert!(result.is_err());
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("unknown_section"),
+            "error must name the unknown section, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn snapshot_args_includes_accepts_process_alias() {
+        // Both "process" and "processes" are valid include names.
+        let args = SnapshotArgs {
+            format: SnapshotFormat::Json,
+            pretty: None,
+            include: vec!["processes".to_string(), "disk".to_string()],
+            query: Vec::new(),
+            samples: 1,
+            interval: 0,
+            timeout_ms: 5_000,
+            output: None,
+        };
+        let result = args
+            .includes()
+            .expect("process/disk aliases should be accepted");
+        assert!(result.process);
+        assert!(result.storage);
+    }
+
+    #[test]
+    fn snapshot_format_display() {
+        assert_eq!(SnapshotFormat::Json.to_string(), "json");
+        assert_eq!(SnapshotFormat::Csv.to_string(), "csv");
+        assert_eq!(SnapshotFormat::Prometheus.to_string(), "prometheus");
+    }
+}
