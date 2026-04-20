@@ -210,7 +210,11 @@ impl Alerter {
         let target = match current {
             AlertLevel::Crit => {
                 if temp <= crit_off {
-                    if temp <= warn_off {
+                    // Step down: only transit to Warn when the warn rule is
+                    // actually enabled. Otherwise jump straight to Ok so
+                    // operators who disabled the warn band don't see stale
+                    // Warn-level toasts on every recovery.
+                    if warn_on <= 0.0 || temp <= warn_off {
                         AlertLevel::Ok
                     } else {
                         AlertLevel::Warn
@@ -677,5 +681,36 @@ mod tests {
         // duplicate ok->warn.
         let t = a.evaluate(&[gpu(85, 0.0, 0.0)]);
         assert!(t.is_empty());
+    }
+
+    #[test]
+    fn warn_disabled_crit_enabled_recovers_straight_to_ok() {
+        // Regression: when the warn rule is disabled (temp_warn_c == 0)
+        // and the crit rule is enabled, a device in Crit that cools below
+        // crit_off must transition Crit -> Ok directly, never passing
+        // through a spurious Warn level (warn_off would otherwise be
+        // -hysteresis_c, which temp <= warn_off would almost never satisfy).
+        let mut cfg = default_cfg();
+        cfg.temp_warn_c = 0; // warn rule disabled
+        cfg.temp_crit_c = 90;
+        cfg.hysteresis_c = 2;
+        let mut a = Alerter::new(cfg);
+
+        // Observe 95C -> Crit.
+        let t1 = a.evaluate(&[gpu(95, 0.0, 0.0)]);
+        assert_eq!(t1.len(), 1);
+        assert_eq!(t1[0].from, AlertLevel::Ok);
+        assert_eq!(t1[0].to, AlertLevel::Crit);
+
+        // Observe 50C -> must be Ok, not Warn, and the single emitted
+        // transition must be Crit -> Ok.
+        let t2 = a.evaluate(&[gpu(50, 0.0, 0.0)]);
+        assert_eq!(t2.len(), 1, "expected exactly one transition, got {t2:?}");
+        assert_eq!(t2[0].from, AlertLevel::Crit);
+        assert_eq!(
+            t2[0].to,
+            AlertLevel::Ok,
+            "must recover straight to Ok when warn rule disabled"
+        );
     }
 }

@@ -18,8 +18,9 @@
 //! [`spawn_webhook_worker`]. Each transition pushes one
 //! [`WebhookPayload`] onto the channel; the worker drains and POSTs with a
 //! 2-second timeout. Failures are logged via `tracing::warn` and dropped.
-//! When the channel fills up, the caller uses `try_send` to drop the
-//! oldest item rather than block rendering.
+//! When the channel is saturated, the caller uses `try_send` to drop the
+//! **newest** payload rather than block rendering — the UI-never-blocks
+//! invariant is what matters here, not FIFO preservation.
 
 use std::time::Duration;
 
@@ -73,8 +74,12 @@ pub fn spawn_webhook_worker(url: String) -> mpsc::Sender<WebhookPayload> {
     tx
 }
 
-/// Enqueue a payload on the worker channel using `try_send`. Drops the
-/// payload when the channel is full (never blocks the UI).
+/// Enqueue a payload on the worker channel using `try_send`.
+///
+/// Non-blocking: new alerts are dropped if the worker queue is saturated
+/// (the **newest** payload is the one lost, not the oldest). This keeps
+/// the UI-never-blocks invariant even when the remote webhook is slow or
+/// unreachable — payload ordering is best-effort.
 ///
 /// Returns `true` when the payload was successfully enqueued, `false` when
 /// the queue was full or the worker has exited. The caller may use this to

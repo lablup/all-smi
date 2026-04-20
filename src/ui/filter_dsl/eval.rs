@@ -233,7 +233,11 @@ impl DeviceRowView for GpuInfo {
         Some(self.used_memory as f64)
     }
     fn mem_total_field(&self) -> Option<f64> {
-        Some(self.total_memory as f64)
+        if self.total_memory > 0 {
+            Some(self.total_memory as f64)
+        } else {
+            None
+        }
     }
     fn power_field(&self) -> Option<f64> {
         Some(self.power_consumption)
@@ -617,5 +621,14 @@ mod tests {
     fn numeric_equality_far_from_match() {
         let gpu = make_gpu(0, 60, 42.0, 100.0);
         assert!(!must_eval("util==100", &gpu));
+    }
+
+    #[test]
+    fn mem_total_absent_when_zero_fails_closed() {
+        // Symmetric with mem_pct_field's total_memory > 0 gate: a device
+        // with total_memory == 0 must NOT match mem_total==0.
+        let mut gpu = make_gpu(0, 60, 50.0, 100.0);
+        gpu.total_memory = 0;
+        assert!(!must_eval("mem_total==0", &gpu));
     }
 }
