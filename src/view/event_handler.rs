@@ -800,4 +800,32 @@ mod tests {
         handle_key_event(key(KeyCode::Esc), &mut state, &args()).await;
         assert!(!state.alert_panel_open);
     }
+
+    /// Regression guard: typing past `FILTER_BUFFER_MAX` (512 bytes) must be
+    /// silently dropped so a bracketed-paste of megabytes does not turn
+    /// every subsequent keystroke into an O(n) re-parse of the entire buffer.
+    #[tokio::test]
+    async fn filter_buffer_capped_at_max() {
+        let mut state = AppState::new();
+        // Enter filter-edit mode.
+        handle_key_event(key(KeyCode::Char('/')), &mut state, &args()).await;
+
+        // Fill the buffer to exactly FILTER_BUFFER_MAX using 'a'.
+        for _ in 0..FILTER_BUFFER_MAX {
+            handle_key_event(key(KeyCode::Char('a')), &mut state, &args()).await;
+        }
+        assert_eq!(state.filter_buffer.len(), FILTER_BUFFER_MAX);
+
+        // One more character must be silently dropped.
+        handle_key_event(key(KeyCode::Char('z')), &mut state, &args()).await;
+        assert_eq!(
+            state.filter_buffer.len(),
+            FILTER_BUFFER_MAX,
+            "buffer grew past FILTER_BUFFER_MAX"
+        );
+        assert!(
+            !state.filter_buffer.contains('z'),
+            "overflow character was appended"
+        );
+    }
 }

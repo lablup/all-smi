@@ -197,4 +197,28 @@ mod tests {
         let out = dim_ansi(input);
         assert_eq!(out, input);
     }
+
+    #[test]
+    fn truecolor_bg_is_preserved() {
+        // `\x1b[48;2;255;128;0m` is an RGB background (orange).
+        // The `48` parameter signals background; the full sequence must be
+        // preserved so an alert-flash highlight is not silently discarded.
+        let input = "\x1b[48;2;255;128;0mhighlight\x1b[0m";
+        let out = dim_ansi(input);
+        assert_eq!(out, input);
+    }
+
+    #[test]
+    fn fg_only_before_truecolor_bg_dims_correctly() {
+        // A foreground followed by a truecolor background: the fg should be
+        // replaced, the bg should be kept intact.
+        let fg = "\x1b[33m"; // yellow fg
+        let bg = "\x1b[48;2;0;0;128m"; // dark-blue RGB bg
+        let input = format!("{fg}{bg}text\x1b[0m");
+        let out = dim_ansi(&input);
+        // fg becomes dark-grey; bg is verbatim; reset is verbatim.
+        assert!(out.contains("\x1b[90m"), "fg not dimmed");
+        assert!(out.contains(bg), "truecolor bg was stripped");
+        assert!(out.contains("\x1b[0m"), "reset was stripped");
+    }
 }

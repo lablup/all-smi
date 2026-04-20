@@ -379,6 +379,20 @@ Press `A` to toggle the alert history panel, `ESC` to close it. When the
 configured URL as `{timestamp, host, gpu_index, rule, from, to, value,
 threshold}` JSON with a 2-second timeout, fire-and-forget.
 
+**Security notes**
+
+- **Webhook SSRF protection**: HTTP redirects are disabled on the webhook
+  client. If the configured URL responds with a 3xx redirect the response
+  is logged and the redirect target is *not* followed. This prevents a
+  misconfigured or attacker-controlled endpoint from pivoting the client to
+  cloud-metadata services (e.g. `169.254.169.254`) or other internal-only
+  hosts. Operators should configure the exact destination URL directly.
+- **Filter query buffer cap**: The interactive filter bar accepts at most
+  512 characters. Input beyond that limit is silently discarded. This keeps
+  a bracketed-paste of large text from turning every keystroke into an
+  unbounded O(n) re-parse. The lexer independently rejects inputs exceeding
+  16 KiB as an additional safeguard for any programmatic caller.
+
 ### Development & Testing
 - **Mock Server:** Built-in mock server for testing and development
   - Simulates realistic GPU clusters with 8 GPUs per node
