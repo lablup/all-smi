@@ -193,6 +193,65 @@ http://gpu-node3:9090
   - If temperature is not available, it will be shown as "N/A" without error messages
   - For best temperature monitoring on Windows, install and run LibreHardwareMonitor in the background
 
+## Diagnostics
+
+The `all-smi doctor` subcommand runs a read-only suite of environment checks and
+prints a PASS/WARN/FAIL report covering platform, privileges, container
+runtime, every supported hardware backend (NVIDIA, AMD, Apple, Gaudi, TPU,
+Tenstorrent, Rebellions, Furiosa, Windows), the relevant environment
+variables, and optional remote endpoint connectivity. Each check has a hard
+3-second timeout.
+
+```bash
+# Human-readable report (default)
+all-smi doctor
+
+# Machine-readable JSON for CI and scripts
+all-smi doctor --json
+
+# Support bundle for attaching to GitHub issues
+all-smi doctor --bundle report.tar.gz
+
+# Keep hostnames / IPs / MAC / usernames (default scrubs them)
+all-smi doctor --bundle report.tar.gz --include-identifiers
+
+# Run only a subset of checks
+all-smi doctor --only platform,privileges
+
+# Skip specific checks (prefix match)
+all-smi doctor --skip nvidia.mig.mode
+
+# Probe remote endpoints (DNS, TCP, HTTP /metrics)
+all-smi doctor --remote-check http://gpu-node1:9090
+```
+
+Exit codes:
+
+- `0` — every check passed (or skipped)
+- `1` — at least one check returned WARN
+- `2` — at least one check returned FAIL
+
+The `NO_COLOR` environment variable is respected for CI log readability.
+
+Stable check IDs (greppable across versions):
+
+| Category | Example IDs |
+|---|---|
+| `platform.*` | `platform.os`, `platform.runtime`, `platform.cpu`, `platform.memory`, `platform.hardware`, `platform.uptime` |
+| `privileges.*` | `privileges.user`, `privileges.root`, `privileges.video_render_group`, `privileges.dev_dri`, `privileges.dev_tenstorrent` |
+| `container.*` | `container.runtime`, `container.cgroup`, `container.k8s_serviceaccount` |
+| `nvidia.*` | `nvidia.nvml.loadable`, `nvidia.smi.binary`, `nvidia.driver.version`, `nvidia.env.visible_devices`, `nvidia.mig.mode` |
+| `amd.*` | `amd.rocm.version`, `amd.libamdgpu_top.abi`, `amd.dri.perms`, `amd.build.target_env` |
+| `apple.*` | `apple.macos.version`, `apple.silicon`, `apple.smc` |
+| `gaudi.*` | `gaudi.hlsmi`, `gaudi.devices`, `gaudi.driver` |
+| `tpu.*` | `tpu.libtpu`, `tpu.env.name`, `tpu.accel.vendor` |
+| `tenstorrent.*` | `tenstorrent.luwen`, `tenstorrent.kmd`, `tenstorrent.module` |
+| `rebellions.*` | `rebellions.rblnstat`, `rebellions.driver` |
+| `furiosa.*` | `furiosa.feature`, `furiosa.smi` |
+| `windows.*` | `windows.wmi`, `windows.amd_ryzen_master`, `windows.intel_wmi`, `windows.libre_hardware_monitor` |
+| `env.*` | `env.all_smi`, `env.cuda`, `env.rocr`, `env.tpu`, `env.hl` |
+| `network.*` | `network.dns`, `network.tcp`, `network.http` |
+
 ## Features
 
 ### GPU Monitoring

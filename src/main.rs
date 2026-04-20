@@ -17,6 +17,7 @@ mod app_state;
 mod cli;
 mod common;
 mod device;
+mod doctor;
 #[macro_use]
 mod parsing;
 mod metrics;
@@ -258,6 +259,18 @@ async fn run_command(cli: Cli) {
                         eprintln!("error: {e}");
                         std::process::exit(1);
                     }
+                    eprintln!("error: {e:#}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        Some(Commands::Doctor(args)) => {
+            // Doctor is a read-only diagnostic subcommand: no sudo, no
+            // long-lived manager init. Every check is bounded by a hard
+            // 3-second timeout enforced in the orchestrator.
+            match doctor::run_cli(&args).await {
+                Ok(code) => std::process::exit(code),
+                Err(e) => {
                     eprintln!("error: {e:#}");
                     std::process::exit(1);
                 }

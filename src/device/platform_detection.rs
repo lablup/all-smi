@@ -524,3 +524,101 @@ pub fn get_container_pid_namespace() -> Option<u32> {
     }
     None
 }
+
+/// Aggregated hardware-detection snapshot.
+///
+/// Extracted from the individual detector functions so `all-smi doctor`
+/// (issue #188) and `reader_factory` share a single call-site for
+/// "what hardware is present on this host?". Calling
+/// [`introspection::snapshot`] once at startup is cheaper than calling
+/// each detector individually because every detector is already cached in
+/// a `OnceLock` — the snapshot is just a struct wrapper with read-only
+/// accessors.
+pub mod introspection {
+    /// Summary of hardware detected on this host. Every field is the
+    /// result of the corresponding `has_*` / `is_*` detector in the
+    /// parent module. Fields are `bool`s so consumers can match on
+    /// structural shape rather than re-running detection.
+    #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+    pub struct PlatformSnapshot {
+        pub os: &'static str,
+        pub nvidia: bool,
+        pub jetson: bool,
+        /// `true` on glibc Linux targets when AMD is detected; always
+        /// `false` on musl builds because the `libamdgpu_top` dep is
+        /// compiled out.
+        pub amd: bool,
+        pub apple_silicon: bool,
+        pub gaudi: bool,
+        pub google_tpu: bool,
+        pub tenstorrent: bool,
+        pub rebellions: bool,
+        pub furiosa: bool,
+    }
+
+    /// Produce a fresh [`PlatformSnapshot`] from the cached detectors.
+    pub fn snapshot() -> PlatformSnapshot {
+        PlatformSnapshot {
+            os: super::get_os_type(),
+            nvidia: super::has_nvidia(),
+            jetson: super::is_jetson(),
+            amd: detect_amd(),
+            apple_silicon: super::is_apple_silicon(),
+            gaudi: super::has_gaudi(),
+            google_tpu: detect_google_tpu(),
+            tenstorrent: detect_tenstorrent(),
+            rebellions: super::has_rebellions(),
+            furiosa: super::has_furiosa(),
+        }
+    }
+
+    #[cfg(all(target_os = "linux", not(target_env = "musl")))]
+    fn detect_amd() -> bool {
+        super::has_amd()
+    }
+
+    #[cfg(not(all(target_os = "linux", not(target_env = "musl"))))]
+    fn detect_amd() -> bool {
+        false
+    }
+
+    #[cfg(target_os = "linux")]
+    fn detect_google_tpu() -> bool {
+        super::has_google_tpu()
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn detect_google_tpu() -> bool {
+        false
+    }
+
+    #[cfg(target_os = "linux")]
+    fn detect_tenstorrent() -> bool {
+        super::has_tenstorrent()
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn detect_tenstorrent() -> bool {
+        false
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn snapshot_os_matches_consts() {
+            let snap = snapshot();
+            assert_eq!(snap.os, std::env::consts::OS);
+        }
+
+        #[test]
+        fn snapshot_is_default_friendly() {
+            // Ensure `PlatformSnapshot` is constructible via `Default::default()`
+            // for mock/test scenarios.
+            let empty = PlatformSnapshot::default();
+            assert_eq!(empty.os, "");
+            assert!(!empty.nvidia);
+        }
+    }
+}
