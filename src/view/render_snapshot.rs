@@ -25,9 +25,11 @@ use crate::app_state::{
     AppState, ConnectionStatus, FilterInputMode, ReplayState, SortCriteria, SortDirection,
     UsersTabState,
 };
+use crate::common::config::EnergyConfig;
 use crate::device::{
     ChassisInfo, CpuInfo, GpuInfo, MemoryInfo, MigGpuInfo, ProcessInfo, VgpuHostInfo,
 };
+use crate::metrics::energy::EnergyAccountant;
 use crate::network::metrics_parser::ParsedProcessRow;
 use crate::storage::info::StorageInfo;
 use crate::ui::aggregation::user::UserAggregationResult;
@@ -169,6 +171,14 @@ pub struct RenderSnapshot {
     /// `Some` and still present in `tabs`, the Topology renderer points at
     /// that host; otherwise it falls back to the first host tab.
     pub topology_last_host_tab: Option<String>,
+
+    // Energy accounting (issue #191)
+    /// Cloned energy accountant so the chassis and energy renderers
+    /// can read session / lifetime counters without holding the
+    /// app-state lock.
+    pub energy: EnergyAccountant,
+    /// Energy configuration (price, currency, display toggles).
+    pub energy_config: EnergyConfig,
 }
 
 impl RenderSnapshot {
@@ -277,6 +287,10 @@ impl RenderSnapshot {
             // Topology tab (issue #190)
             topology_view_mode: state.topology_view_mode,
             topology_last_host_tab: state.topology_last_host_tab.clone(),
+
+            // Energy accounting (issue #191)
+            energy: state.energy.clone(),
+            energy_config: state.energy_config.clone(),
         }
     }
 
@@ -385,6 +399,10 @@ impl RenderSnapshot {
         // Topology tab (issue #190)
         state.topology_view_mode = self.topology_view_mode;
         state.topology_last_host_tab = self.topology_last_host_tab.clone();
+
+        // Energy accounting (issue #191)
+        state.energy = self.energy.clone();
+        state.energy_config = self.energy_config.clone();
 
         state
     }

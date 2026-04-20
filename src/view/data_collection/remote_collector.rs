@@ -262,6 +262,11 @@ impl DataCollectionStrategy for RemoteCollector {
         // Update utilization history
         self.aggregator.update_utilization_history(&mut state);
 
+        // Feed power samples into the energy integrator (issue #191).
+        // In remote mode this exercises the same code path as local
+        // mode — each host's energy accumulates under its own key.
+        self.aggregator.update_energy_counters(&mut state);
+
         // Update tabs from all device hostnames (including disconnected ones)
         Self::update_remote_tabs(&mut state);
 

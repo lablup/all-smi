@@ -12,8 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::time::Instant;
+
 use crate::app_state::AppState;
 use crate::common::config::AppConfig;
+use crate::metrics::energy::EnergyKey;
 
 /// Aggregates data from multiple sources and manages history tracking
 pub struct DataAggregator;
@@ -30,6 +33,68 @@ impl DataAggregator {
 
         // Update GPU history if we have GPU data OR if we're on Apple Silicon
         self.update_gpu_history(state);
+    }
+
+    /// Feed the current `gpu_info`, `cpu_info`, and `chassis_info`
+    /// samples into the energy integrator (issue #191).
+    ///
+    /// Devices that do not report power are silently skipped — the
+    /// integrator's "has this device ever been seen?" check is what
+    /// drives the Prometheus exporter's "no data → omit metric"
+    /// behavior, so this preserves the contract that a zero counter
+    /// is distinct from a missing counter.
+    ///
+    /// On the first sample for each `(host, device)` pair the method
+    /// consults `state.energy_wal_replay`, and if the pair was
+    /// previously written to the WAL, seeds the integrator's
+    /// lifetime counter with the replayed value. This preserves
+    /// Prometheus counter monotonicity across restarts.
+    pub fn update_energy_counters(&self, state: &mut AppState) {
+        let now = Instant::now();
+
+        // Collect `(key, watts)` pairs first so we do not hold an
+        // immutable borrow over `state.*_info` while taking the
+        // mutable borrow on `state.energy`.
+        let mut samples: Vec<(EnergyKey, f64)> = Vec::with_capacity(
+            state.gpu_info.len() + state.cpu_info.len() + state.chassis_info.len(),
+        );
+
+        // Per-GPU samples. The `hostname` field is the label that ends
+        // up on the Prometheus metric and the TUI top-consumer view,
+        // so we use it as the host component of the key (same as
+        // other per-GPU exporters).
+        for gpu in &state.gpu_info {
+            let key = EnergyKey::gpu(gpu.hostname.clone(), gpu.uuid.clone());
+            samples.push((key, gpu.power_consumption));
+        }
+
+        // Per-CPU samples (Apple Silicon, some Intel/AMD chipsets).
+        for cpu in &state.cpu_info {
+            if let Some(power) = cpu.power_consumption {
+                let key = EnergyKey::cpu(cpu.hostname.clone());
+                samples.push((key, power));
+            }
+        }
+
+        // Per-chassis samples.
+        for chassis in &state.chassis_info {
+            if let Some(power) = chassis.total_power_watts {
+                let key = EnergyKey::chassis(chassis.hostname.clone());
+                samples.push((key, power));
+            }
+        }
+
+        // First-sample WAL seeding. The index is populated by
+        // `replay_from_path` at startup and shrinks as matches are
+        // applied, so this runs in amortized O(1) per device.
+        let wal_index = &mut state.energy_wal_replay;
+        let integrator = state.energy.integrator_mut();
+        for (key, watts) in samples {
+            if !integrator.has_samples(&key) && !wal_index.is_empty() {
+                wal_index.seed_if_matches(&key, integrator);
+            }
+            integrator.record_sample(key, now, watts);
+        }
     }
 
     fn update_cpu_history(&self, state: &mut AppState) {

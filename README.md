@@ -341,6 +341,40 @@ Stable check IDs (greppable across versions):
   - Apple Silicon: CPU, GPU, ANE power breakdown with thermal pressure
   - Server systems: BMC sensor integration for comprehensive thermal monitoring
 
+### Energy & Cost Accounting
+- **Energy session row** under each chassis card shows cumulative Joules /
+  kWh and, when a price is configured, the approximate monetary cost for the
+  current session. The session starts when the process boots (or after the
+  `R` hotkey; see below) and is reset without touching the lifetime
+  Prometheus counter.
+- **`R` hotkey** zeroes the per-session counter and the "session started"
+  timestamp across every device so you can quickly bracket a workload.
+  The Prometheus `all_smi_energy_consumed_joules_total` counter keeps
+  climbing monotonically — `rate()` / `increase()` stay well-defined.
+- **WAL persistence** — in API mode the integrator periodically flushes
+  accumulated Joules to a write-ahead log so the Prometheus counter
+  survives restarts. The file lives at `~/.cache/all-smi/energy-wal.bin`
+  by default, is opened with `O_NOFOLLOW` + mode `0o600` on Unix, and is
+  compacted automatically once it grows past ~16 MiB. Flush + fsync run
+  on a dedicated blocking task so a slow filesystem (NFS, SAN failover)
+  cannot stall the tokio runtime.
+- **Environment overrides** (the Prometheus counter is always exported;
+  these only affect the TUI display and the WAL):
+  - `ALL_SMI_ENERGY_PRICE=<price_per_kwh>` — set the price used for the
+    cost column. Invalid / non-finite values are silently ignored.
+  - `ALL_SMI_ENERGY_CURRENCY=<code>` — display-only currency code
+    (`USD`, `KRW`, `EUR`, …).
+  - `ALL_SMI_ENERGY_NO_COST=1` — hide the cost column even if a price
+    is set.
+  - `ALL_SMI_ENERGY_WAL_PATH=/alt/path/energy-wal.bin` — override the
+    default WAL location.
+  - `ALL_SMI_ENERGY_NO_WAL=1` — disable the WAL entirely (counters
+    stay in memory only).
+  - `ALL_SMI_ENERGY_GAP_SECONDS=<seconds>` — gap threshold above which
+    the integrator holds the last sample instead of interpolating.
+    Accepted range is `1..=3600`; values outside that window fall
+    back to the 10-second default.
+
 ### Cluster Management
 
 > Note: The Cluster Overview Dashboard, Live Statistics History, and Tabbed Interface appear only in remote mode (when `--hosts` or `--hostfile` is specified). Local mode replaces these with a compact two-line host summary bar showing hostname, CPU model, architecture, uptime, and live sparkline metrics (CPU%, GPU%, RAM, power, temperature).

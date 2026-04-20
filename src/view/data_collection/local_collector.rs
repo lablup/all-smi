@@ -742,6 +742,11 @@ impl DataCollectionStrategy for LocalCollector {
         // Update utilization history
         self.aggregator.update_utilization_history(&mut state);
 
+        // Feed power samples into the energy integrator (issue #191).
+        // Must run AFTER the new GPU / CPU / chassis info has been
+        // written to state.
+        self.aggregator.update_energy_counters(&mut state);
+
         // Update tabs
         Self::update_tabs(&mut state);
 

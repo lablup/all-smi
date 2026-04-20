@@ -143,6 +143,26 @@ pub async fn handle_key_event(key_event: KeyEvent, state: &mut AppState, args: &
             state.alert_panel_open = !state.alert_panel_open;
             false
         }
+        KeyCode::Char('R') => {
+            // Energy session reset (issue #191). Lives in the global
+            // ladder because the TUI's "Energy session" row is visible
+            // on every tab; `r` (lowercase) is NOT bound so the
+            // operator cannot lose data by typing a filter character
+            // outside edit mode.
+            //
+            // The reset only zeroes the session counters — the
+            // lifetime counter that backs the Prometheus metric is
+            // preserved so `rate()` / `increase()` queries stay
+            // monotonic across resets. The WAL is not rewound for
+            // the same reason.
+            state.energy.reset_session();
+            let _ = state.notifications.show(
+                "Energy session reset".to_string(),
+                crate::ui::notification::NotificationType::Info,
+            );
+            state.mark_data_changed();
+            false
+        }
         KeyCode::Char('V') => {
             // Jump to the cluster-wide Users tab (issue #189).  Silent
             // no-op when the tab doesn't exist (local mode, replays
@@ -1443,6 +1463,53 @@ mod tests {
         state.alert_panel_open = true;
         handle_key_event(key(KeyCode::Esc), &mut state, &args()).await;
         assert!(!state.alert_panel_open);
+    }
+
+    /// `R` resets the session counter (zeroes per-device session_joules
+    /// and advances `session_started_at`) while keeping the lifetime
+    /// counter intact so the Prometheus monotonic total is not disturbed.
+    #[tokio::test]
+    async fn capital_r_resets_energy_session_preserves_lifetime() {
+        use crate::metrics::energy::EnergyKey;
+        use std::time::{Duration, Instant};
+
+        let mut state = AppState::new();
+        let energy_key = EnergyKey::gpu("test-host", "uuid-0");
+        let origin = Instant::now();
+
+        // Feed two samples so there is a non-zero session and lifetime.
+        state
+            .energy
+            .integrator_mut()
+            .record_sample(energy_key.clone(), origin, 200.0);
+        state.energy.integrator_mut().record_sample(
+            energy_key.clone(),
+            origin + Duration::from_secs(10),
+            200.0,
+        );
+
+        let lifetime_before = state.energy.integrator().lifetime_joules(&energy_key);
+        assert!(
+            lifetime_before > 0.0,
+            "must have accumulated some energy before reset"
+        );
+        assert!(
+            state.energy.integrator().session_joules(&energy_key) > 0.0,
+            "session counter must be positive before reset"
+        );
+
+        // Press `R` — this should zero session counters and preserve lifetime.
+        handle_key_event(key(KeyCode::Char('R')), &mut state, &args()).await;
+
+        assert_eq!(
+            state.energy.integrator().session_joules(&energy_key),
+            0.0,
+            "session counter must be zeroed by R"
+        );
+        assert!(
+            (state.energy.integrator().lifetime_joules(&energy_key) - lifetime_before).abs() < 1e-9,
+            "lifetime counter must survive the R reset"
+        );
     }
 
     // -----------------------------------------------------------------------

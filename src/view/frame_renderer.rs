@@ -42,6 +42,7 @@ use crate::ui::renderer::{
     print_loading_indicator, print_memory_info, print_mig_section, print_process_info,
     print_storage_info, print_vgpu_section,
 };
+use crate::ui::renderers::print_chassis_energy_row;
 use crate::ui::tabs::draw_tabs;
 use crate::ui::text::print_colored_text;
 use crate::view::render_snapshot::RenderSnapshot;
@@ -460,6 +461,14 @@ impl FrameRenderer {
                     .copied()
                     .unwrap_or(0);
                 print_chassis_info(buffer, i, chassis, width, hostname_scroll_offset);
+                // Energy session + cost row (issue #191). Self-hides
+                // when no chassis samples have been recorded yet.
+                print_chassis_energy_row(
+                    buffer,
+                    chassis,
+                    snapshot.energy.integrator(),
+                    &snapshot.energy_config,
+                );
             }
             return;
         }
@@ -487,6 +496,14 @@ impl FrameRenderer {
                 .copied()
                 .unwrap_or(0);
             print_chassis_info(buffer, i, chassis, width, hostname_scroll_offset);
+            // Energy session + cost row (issue #191). Self-hides when no
+            // chassis samples have been recorded yet.
+            print_chassis_energy_row(
+                buffer,
+                chassis,
+                snapshot.energy.integrator(),
+                &snapshot.energy_config,
+            );
         }
     }
 

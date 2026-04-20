@@ -105,10 +105,55 @@ pub async fn run_api_mode(args: &ApiArgs) {
         .init();
 
     println!("Starting API mode...");
-    let state = SharedState::new(RwLock::new(AppState::new()));
+    let mut initial_state = AppState::new();
+    // Replay any persisted energy WAL so Prometheus counters stay
+    // monotonic across restarts (issue #191). Failures are logged
+    // but do not block startup — the integrator simply begins at
+    // zero on this host.
+    if initial_state.energy_config.wal_enabled {
+        let wal_path = initial_state.energy_config.wal_path.clone();
+        match crate::metrics::energy_wal::replay_from_path(
+            std::path::Path::new(&wal_path),
+            initial_state.energy.integrator_mut(),
+        ) {
+            Ok(index) => {
+                if !index.is_empty() {
+                    tracing::info!(
+                        "energy WAL: replayed {} records from {wal_path}",
+                        index.len()
+                    );
+                }
+                initial_state.energy_wal_replay = index;
+            }
+            Err(e) => {
+                tracing::warn!("energy WAL: replay from {wal_path} failed: {e}");
+            }
+        }
+    }
+    let state = SharedState::new(RwLock::new(initial_state));
     let state_clone = state.clone();
     let processes = args.processes;
     let interval = args.interval;
+
+    // Spawn the WAL flush task if enabled. The returned handle owns a
+    // oneshot sender used by the Ctrl+C / SIGTERM path so the task can
+    // perform a final `flush_and_fsync` before the process exits
+    // (issue #191).
+    let wal_flush_handle = {
+        let state = state.clone();
+        let state_read = state.read().await;
+        let cfg = state_read.energy_config.clone();
+        drop(state_read);
+        if cfg.wal_enabled {
+            Some(crate::metrics::energy_wal::spawn_wal_flush_task(
+                state,
+                cfg.wal_path.clone(),
+                crate::metrics::energy_wal::DEFAULT_FLUSH_INTERVAL,
+            ))
+        } else {
+            None
+        }
+    };
 
     // Spawn background task for collecting metrics
     tokio::spawn(async move {
@@ -174,6 +219,13 @@ pub async fn run_api_mode(args: &ApiArgs) {
                 state.loading = false;
             }
 
+            // Integrate power samples into the energy accountant so
+            // `all_smi_energy_consumed_joules_total` reflects reality
+            // in `api` mode (issue #191). The code mirrors
+            // `view::data_collection::aggregator::update_energy_counters`
+            // so both surfaces share the same integration contract.
+            integrate_power_samples(&mut state);
+
             drop(state);
             tokio::time::sleep(Duration::from_secs(interval)).await;
         }
@@ -232,6 +284,14 @@ pub async fn run_api_mode(args: &ApiArgs) {
     {
         run_tcp_listener(app, args.port).await;
     }
+
+    // Signal the WAL flush task to perform a final flush and fsync
+    // before we exit, so the last batch of pending Joule deltas is not
+    // lost (issue #191). Has to run AFTER the listeners return because
+    // that is the moment Ctrl+C / SIGTERM has propagated through axum.
+    if let Some(handle) = wal_flush_handle {
+        handle.shutdown().await;
+    }
 }
 
 /// Run only the TCP listener
@@ -250,8 +310,43 @@ async fn run_tcp_listener(app: Router, port: u16) {
             .local_addr()
             .unwrap_or_else(|_| "unknown".parse().unwrap())
     );
-    if let Err(e) = axum::serve(listener, app).await {
+    if let Err(e) = axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+    {
         tracing::error!("TCP server error: {e}");
+    }
+}
+
+/// Complete when the process receives Ctrl+C on any platform, or a
+/// `SIGTERM` on Unix. Callers use this to let `axum::serve` return so
+/// the parent function can run post-shutdown cleanup (energy WAL flush,
+/// socket cleanup, etc.).
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut s) => {
+                s.recv().await;
+            }
+            Err(e) => {
+                tracing::warn!("failed to install SIGTERM handler: {e}");
+                // Fall back to ctrl_c only.
+                std::future::pending::<()>().await;
+            }
+        }
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {}
+        _ = terminate => {}
     }
 }
 
@@ -298,22 +393,16 @@ async fn run_unix_listener(app: Router, path: PathBuf) {
 
     tracing::info!("API server listening on Unix socket: {}", path.display());
 
-    // Set up socket cleanup on shutdown
-    let path_clone = path.clone();
-    let cleanup_handle = tokio::spawn(async move {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("Failed to listen for Ctrl+C");
-        cleanup_socket(&path_clone);
-    });
-
-    // Serve the application
-    if let Err(e) = axum::serve(listener, app).await {
+    // Serve the application with graceful shutdown so the caller can
+    // run post-serve cleanup (WAL flush, socket cleanup) once we see a
+    // SIGTERM / Ctrl+C.
+    if let Err(e) = axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+    {
         tracing::error!("Unix socket server error: {e}");
     }
 
-    // Cancel cleanup handle and do cleanup
-    cleanup_handle.abort();
     cleanup_socket(&path);
 }
 
@@ -383,31 +472,24 @@ async fn run_dual_listeners(app: Router, port: u16, socket_path: PathBuf) {
     // Clone the app for the second server
     let app_clone = app.clone();
 
-    // Set up socket cleanup on shutdown
-    let path_clone = socket_path.clone();
-    let cleanup_handle = tokio::spawn(async move {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("Failed to listen for Ctrl+C");
-        cleanup_socket(&path_clone);
-    });
-
-    // Run both servers concurrently
+    // Run both servers concurrently; each installs its own graceful
+    // shutdown listener so the select returns on SIGTERM / Ctrl+C and
+    // the caller can run post-serve cleanup.
     tokio::select! {
-        result = axum::serve(tcp_listener, app) => {
+        result = axum::serve(tcp_listener, app)
+            .with_graceful_shutdown(shutdown_signal()) => {
             if let Err(e) = result {
                 tracing::error!("TCP server error: {e}");
             }
         }
-        result = axum::serve(unix_listener, app_clone) => {
+        result = axum::serve(unix_listener, app_clone)
+            .with_graceful_shutdown(shutdown_signal()) => {
             if let Err(e) = result {
                 tracing::error!("Unix socket server error: {e}");
             }
         }
     }
 
-    // Cancel cleanup handle and do cleanup
-    cleanup_handle.abort();
     cleanup_socket(&socket_path);
 }
 
@@ -425,6 +507,50 @@ fn cleanup_socket(path: &std::path::Path) {
         Err(e) => {
             tracing::warn!("Failed to remove socket file on shutdown: {e}");
         }
+    }
+}
+
+/// Integrate the current in-state power samples into the energy
+/// accountant. Run once per collection cycle in `api` mode (issue
+/// #191). On the first sample for each `(host, device)` pair, the
+/// function consults `state.energy_wal_replay` to seed the lifetime
+/// counter with any previously-recorded value so Prometheus stays
+/// monotonic across restarts.
+fn integrate_power_samples(state: &mut AppState) {
+    use crate::metrics::energy::EnergyKey;
+    use std::time::Instant;
+
+    let now = Instant::now();
+
+    // Collect (key, watts) pairs first so we do not hold an immutable
+    // borrow over state.*_info while taking the mutable borrow on
+    // state.energy.
+    let mut samples: Vec<(EnergyKey, f64)> =
+        Vec::with_capacity(state.gpu_info.len() + state.cpu_info.len() + state.chassis_info.len());
+    for gpu in &state.gpu_info {
+        samples.push((
+            EnergyKey::gpu(gpu.hostname.clone(), gpu.uuid.clone()),
+            gpu.power_consumption,
+        ));
+    }
+    for cpu in &state.cpu_info {
+        if let Some(power) = cpu.power_consumption {
+            samples.push((EnergyKey::cpu(cpu.hostname.clone()), power));
+        }
+    }
+    for chassis in &state.chassis_info {
+        if let Some(power) = chassis.total_power_watts {
+            samples.push((EnergyKey::chassis(chassis.hostname.clone()), power));
+        }
+    }
+
+    let wal_index = &mut state.energy_wal_replay;
+    let integrator = state.energy.integrator_mut();
+    for (key, watts) in samples {
+        if !integrator.has_samples(&key) && !wal_index.is_empty() {
+            wal_index.seed_if_matches(&key, integrator);
+        }
+        integrator.record_sample(key, now, watts);
     }
 }
 

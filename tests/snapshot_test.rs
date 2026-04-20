@@ -436,6 +436,9 @@ async fn prometheus_output_is_byte_identical_to_api_exporter_for_same_data() {
         chassis_info: &[],
         vgpu_info: &empty_vgpu,
         mig_info: &empty_mig,
+        // Snapshot mode has no live integrator — aligns with the
+        // Prometheus serializer path.
+        energy_integrator: None,
     };
     let expected = render_prometheus_exposition(&inputs);
 

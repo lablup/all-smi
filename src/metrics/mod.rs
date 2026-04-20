@@ -14,3 +14,5 @@
 
 pub mod aggregator;
 pub mod coordinator;
+pub mod energy;
+pub mod energy_wal;

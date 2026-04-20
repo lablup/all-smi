@@ -132,6 +132,14 @@ pub mod cli;
 #[cfg(feature = "cli")]
 pub mod doctor;
 
+/// Cluster metrics aggregation, coordination, and energy accounting.
+///
+/// Gated on `cli` because `coordinator` and `energy` both depend on
+/// [`app_state`], and the Prometheus / TUI callers only exist in that
+/// feature tree.
+#[cfg(feature = "cli")]
+pub mod metrics;
+
 /// Network client for remote monitoring.
 #[cfg(feature = "cli")]
 pub mod network;

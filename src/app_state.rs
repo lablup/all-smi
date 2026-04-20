@@ -12,10 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::common::config::AlertConfig;
+use crate::common::config::{AlertConfig, EnergyConfig};
 use crate::device::{
     ChassisInfo, CpuInfo, GpuInfo, MemoryInfo, MigGpuInfo, ProcessInfo, VgpuHostInfo,
 };
+use crate::metrics::energy::EnergyAccountant;
+use crate::metrics::energy_wal::WalReplayIndex;
 use crate::network::metrics_parser::ParsedProcessRow;
 use crate::storage::info::StorageInfo;
 use crate::ui::aggregation::user::{UserAggregationResult, UserSortKey};
@@ -358,6 +360,21 @@ pub struct AppState {
     /// host. Cleared by the remote/replay tab updaters when the stashed
     /// host is no longer present (e.g. disconnected).
     pub topology_last_host_tab: Option<String>,
+    /// Energy accounting state (issue #191).  Collectors feed power
+    /// samples into
+    /// `energy.integrator_mut().record_sample(...)` each cycle; the
+    /// Prometheus exporter and the chassis / energy renderers read
+    /// back the cumulative Joule counters.
+    pub energy: EnergyAccountant,
+    /// Runtime-resolved energy configuration. Defaults plus env-var
+    /// overrides; the TOML config file loader (companion issue #192)
+    /// will layer on top of this field.
+    pub energy_config: EnergyConfig,
+    /// WAL replay index populated once at startup. Each first-sample
+    /// arrival in the aggregator consults this and, on a hash match,
+    /// seeds the integrator's lifetime counter so Prometheus stays
+    /// monotonic across restarts.
+    pub energy_wal_replay: WalReplayIndex,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -400,6 +417,10 @@ impl Default for AppState {
 
 impl AppState {
     pub fn new() -> Self {
+        let energy_config = EnergyConfig::default().with_env_overrides();
+        let energy = EnergyAccountant::new(std::time::Duration::from_secs(
+            energy_config.gap_interpolate_seconds,
+        ));
         AppState {
             gpu_info: Vec::new(),
             cpu_info: Vec::new(),
@@ -472,6 +493,9 @@ impl AppState {
             users_aggregation_cache: UsersAggregationCache::default(),
             topology_view_mode: TopologyViewMode::default(),
             topology_last_host_tab: None,
+            energy,
+            energy_config,
+            energy_wal_replay: WalReplayIndex::default(),
         }
     }
 

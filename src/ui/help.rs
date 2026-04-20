@@ -186,6 +186,11 @@ fn render_shortcuts_section(
             "shortcut",
         ),
         ("  A", "Toggle alert history panel", "shortcut"),
+        (
+            "  R",
+            "Reset energy session counter (keeps Prometheus total)",
+            "shortcut",
+        ),
         ("  V", "Jump to cluster-wide Users tab (remote)", "shortcut"),
         ("  T", "Jump to Topology tab (remote/replay)", "shortcut"),
         ("  Q", "Exit application", "shortcut"),
