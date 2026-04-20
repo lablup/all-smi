@@ -214,7 +214,8 @@ impl EnergyConfig {
     /// - `ALL_SMI_ENERGY_NO_WAL`: when set (any value), disables the
     ///   disk-backed WAL.
     /// - `ALL_SMI_ENERGY_GAP_SECONDS`: override
-    ///   `gap_interpolate_seconds`.
+    ///   `gap_interpolate_seconds`. Must be in the range `[1, 3600]`;
+    ///   values outside that window are silently ignored.
     pub fn with_env_overrides(mut self) -> Self {
         if let Ok(v) = std::env::var("ALL_SMI_ENERGY_PRICE")
             && let Ok(price) = v.parse::<f64>()
@@ -242,7 +243,12 @@ impl EnergyConfig {
         if let Ok(v) = std::env::var("ALL_SMI_ENERGY_GAP_SECONDS")
             && let Ok(secs) = v.parse::<u64>()
             && secs > 0
+            && secs <= 3600
         {
+            // Cap at 1 hour. A gap threshold longer than that would
+            // silently convert a multi-hour power outage into
+            // hold-last-reading time × nominal power — easy to
+            // misconfigure, almost never what the operator wanted.
             self.gap_interpolate_seconds = secs;
         }
         self
@@ -608,18 +614,50 @@ mod tests {
             }
             std::env::set_var("ALL_SMI_ENERGY_PRICE", "0.30");
             std::env::set_var("ALL_SMI_ENERGY_CURRENCY", "KRW");
+            std::env::set_var("ALL_SMI_ENERGY_NO_COST", "1");
             std::env::set_var("ALL_SMI_ENERGY_WAL_PATH", "/tmp/unit-wal.bin");
+            std::env::set_var("ALL_SMI_ENERGY_NO_WAL", "1");
             std::env::set_var("ALL_SMI_ENERGY_GAP_SECONDS", "15");
         }
         let cfg = EnergyConfig::default().with_env_overrides();
         assert!((cfg.price_per_kwh - 0.30).abs() < 1e-9);
         assert_eq!(cfg.currency, "KRW");
+        assert!(!cfg.show_cost, "ALL_SMI_ENERGY_NO_COST must disable cost");
         assert_eq!(cfg.wal_path, "/tmp/unit-wal.bin");
+        assert!(!cfg.wal_enabled, "ALL_SMI_ENERGY_NO_WAL must disable WAL");
         assert_eq!(cfg.gap_interpolate_seconds, 15);
         unsafe {
             for k in keys {
                 std::env::remove_var(k);
             }
+        }
+    }
+
+    #[test]
+    fn energy_config_gap_seconds_env_clamped_to_range() {
+        let _guard = ENERGY_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // A value beyond the 1-hour cap must be ignored so the default
+        // survives instead of allowing an hours-long hold-last window.
+        unsafe {
+            std::env::remove_var("ALL_SMI_ENERGY_GAP_SECONDS");
+            std::env::set_var("ALL_SMI_ENERGY_GAP_SECONDS", "7200");
+        }
+        let cfg = EnergyConfig::default().with_env_overrides();
+        assert_eq!(cfg.gap_interpolate_seconds, 10);
+        // Zero is already rejected; confirm the existing guard still holds.
+        unsafe {
+            std::env::set_var("ALL_SMI_ENERGY_GAP_SECONDS", "0");
+        }
+        let cfg = EnergyConfig::default().with_env_overrides();
+        assert_eq!(cfg.gap_interpolate_seconds, 10);
+        // Exact cap (3600 s) must be accepted.
+        unsafe {
+            std::env::set_var("ALL_SMI_ENERGY_GAP_SECONDS", "3600");
+        }
+        let cfg = EnergyConfig::default().with_env_overrides();
+        assert_eq!(cfg.gap_interpolate_seconds, 3600);
+        unsafe {
+            std::env::remove_var("ALL_SMI_ENERGY_GAP_SECONDS");
         }
     }
 

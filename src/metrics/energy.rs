@@ -43,9 +43,14 @@
 //!   doubling of draw, so we prefer the conservative estimate
 //!   `p_prev * dt` over an interpolation that could silently double-count
 //!   a transient spike.
-//! - Either power reading is `NaN` or negative: the window contributes
-//!   zero Joules but the timestamp is still advanced so the next sample
-//!   gets a sensible `dt`.
+//! - Either power reading is `NaN`, infinite, or negative: that
+//!   endpoint is replaced with `0.0` before the trapezoidal rule is
+//!   applied. The window therefore contributes `0.5 * p_other * dt`
+//!   (a linear glide toward zero from the adjacent valid reading)
+//!   rather than a full zero. The timestamp still advances so the
+//!   next sample gets a sensible `dt`. A sample above the
+//!   [`MAX_POWER_WATTS`] ceiling is clamped to that ceiling so a
+//!   bogus `f64::MAX` cannot overflow the accumulator to `+inf`.
 //!
 //! # Non-goals
 //!
@@ -64,6 +69,18 @@ pub const JOULES_PER_KWH: f64 = 3_600_000.0;
 /// Default gap-interpolation threshold in seconds. Matches the issue
 /// spec: ≤ 10 s trapezoidal, > 10 s hold-last.
 pub const DEFAULT_GAP_INTERPOLATE_SECONDS: u64 = 10;
+
+/// Per-device upper bound for an instantaneous power reading, in watts.
+///
+/// A malicious or buggy driver can report a value like `f64::MAX` or
+/// any unrealistically large number. Without a ceiling, a single such
+/// sample multiplied by the elapsed `dt` would produce `+inf` (via
+/// IEEE-754 overflow) and permanently poison the running `lifetime_joules`
+/// counter. 100 kW is a comfortable order of magnitude above any real
+/// single-chassis draw we can plausibly observe — it is roughly the
+/// limit of a high-density AI rack — so anything above is treated as
+/// a sensor-bug ceiling and clamped.
+pub const MAX_POWER_WATTS: f64 = 100_000.0;
 
 /// Scope tag for a single energy accumulator.
 ///
@@ -197,6 +214,18 @@ impl Default for DeviceState {
     }
 }
 
+/// Per-integrator upper bound on the number of distinct
+/// `(scope, host, device)` entries that will be tracked.
+///
+/// A hostname or UUID churn attack (e.g. a misconfigured collector that
+/// keeps reporting fresh device IDs) can otherwise grow the internal
+/// `HashMap` without bound, which in turn inflates the Prometheus
+/// exporter and eats RSS until OOM. 10 000 entries covers a realistic
+/// cluster ceiling (1 000 hosts × ~10 devices each) with room to spare,
+/// and additional unique keys beyond that are silently dropped rather
+/// than allowed to accumulate.
+pub const MAX_DEVICES: usize = 10_000;
+
 /// Trapezoidal energy integrator.
 ///
 /// Each device is driven by a stream of `(timestamp, watts)` samples.
@@ -230,8 +259,21 @@ impl PowerIntegrator {
     /// non-positive `dt`). The returned delta is ALSO added into the
     /// device's `wal_pending_joules` accumulator so a later WAL flush
     /// can persist it.
+    ///
+    /// If the integrator is already tracking [`MAX_DEVICES`] distinct
+    /// keys and the incoming sample is for a new key, the sample is
+    /// silently dropped (returns 0.0) to protect against unbounded
+    /// memory growth from hostname/UUID churn.
     pub fn record_sample(&mut self, key: EnergyKey, t: Instant, watts: f64) -> f64 {
         let gap = self.gap_interpolate;
+        if self.devices.len() >= MAX_DEVICES && !self.devices.contains_key(&key) {
+            // Cardinality cap: refuse to open a new bucket. Existing
+            // buckets keep accumulating normally; a later bounded-rate
+            // key eviction policy can be layered in via the WAL replay
+            // compaction, but for now a hard ceiling is the only
+            // protection we need against UUID-churn attacks.
+            return 0.0;
+        }
         let state = self.devices.entry(key).or_default();
 
         // Filter invalid readings up front — a NaN / negative sample
@@ -329,8 +371,15 @@ impl PowerIntegrator {
     ///
     /// Does NOT touch the session counter — a fresh session starts at
     /// zero regardless of how much energy was recorded on disk.
+    ///
+    /// Respects the [`MAX_DEVICES`] cardinality cap: once the map
+    /// already contains that many keys, additional seeds for *new*
+    /// keys are silently dropped.
     pub fn seed_lifetime(&mut self, key: EnergyKey, joules: f64) {
         if !joules.is_finite() || joules <= 0.0 {
+            return;
+        }
+        if self.devices.len() >= MAX_DEVICES && !self.devices.contains_key(&key) {
             return;
         }
         let state = self.devices.entry(key).or_default();
@@ -440,13 +489,22 @@ impl EnergyAccountant {
     }
 }
 
-/// Guard NaN / infinite / negative power readings. The integrator
-/// treats any such reading as zero for the affected window but still
-/// lets the timestamp advance.
+/// Guard NaN / infinite / negative / implausibly-large power readings.
+///
+/// - NaN, `±inf`, and negative values are treated as zero for the
+///   affected window (the timestamp still advances so the next sample
+///   gets a sensible `dt`).
+/// - Values above [`MAX_POWER_WATTS`] are clamped to that ceiling. An
+///   unclamped `f64::MAX` would overflow to `+inf` once multiplied by
+///   any non-zero `dt`, permanently poisoning the running
+///   `lifetime_joules` counter — a single bad sample could then show
+///   up forever in `all_smi_energy_consumed_joules_total`.
 #[inline]
 fn sanitize_power(watts: f64) -> f64 {
     if !watts.is_finite() || watts < 0.0 {
         0.0
+    } else if watts > MAX_POWER_WATTS {
+        MAX_POWER_WATTS
     } else {
         watts
     }
@@ -565,10 +623,13 @@ mod tests {
     }
 
     #[test]
-    fn nan_and_negative_samples_contribute_zero() {
-        // A NaN or negative sample in the middle of a stream should not
-        // poison the accumulator; it contributes zero for its window but
-        // still advances the clock.
+    fn nan_and_negative_samples_linear_glide_to_zero() {
+        // A NaN or negative sample in the middle of a stream is
+        // replaced with 0.0 at that endpoint (see `sanitize_power`).
+        // The trapezoidal rule then produces a linear glide toward
+        // zero from the adjacent valid reading rather than a full-zero
+        // window. The clock still advances so the next sample gets a
+        // sensible `dt`.
         let mut integ = PowerIntegrator::default();
         let key = EnergyKey::gpu("host", "uuid");
         let origin = Instant::now();
@@ -578,10 +639,10 @@ mod tests {
         integ.record_sample(key.clone(), origin + Duration::from_secs(3), 100.0);
 
         let joules = integ.lifetime_joules(&key);
-        // Windows:
-        //  t=0 → 1s: 0.5 * (100 + 0) * 1 = 50
-        //  t=1 → 2s: 0.5 * (0 + 0)   * 1 = 0
-        //  t=2 → 3s: 0.5 * (0 + 100) * 1 = 50
+        // Windows (sanitize_power replaces NaN / negative with 0.0):
+        //  t=0 → 1s: 0.5 * (100 + 0) * 1 = 50   (glide down from 100)
+        //  t=1 → 2s: 0.5 * (0 + 0)   * 1 = 0    (both endpoints zero)
+        //  t=2 → 3s: 0.5 * (0 + 100) * 1 = 50   (glide up to 100)
         assert!((joules - 100.0).abs() < 1e-9, "got {joules}");
     }
 
@@ -684,5 +745,83 @@ mod tests {
         let chassis = EnergyKey::chassis("host-a");
         let cpu = EnergyKey::cpu("host-a");
         assert_ne!(chassis.device_hash(), cpu.device_hash());
+    }
+
+    #[test]
+    fn pathological_power_samples_do_not_overflow_lifetime() {
+        // An attacker or buggy driver can feed f64::MAX / infinity; the
+        // integrator must clamp at MAX_POWER_WATTS so the counter stays
+        // finite even across a long `dt`.
+        let mut integ = PowerIntegrator::default();
+        let key = EnergyKey::gpu("host", "uuid");
+        let origin = Instant::now();
+        // 1 hour of f64::MAX readings, one per second.
+        for i in 0..3600 {
+            integ.record_sample(
+                key.clone(),
+                origin + Duration::from_secs(i),
+                if i == 0 { 100.0 } else { f64::MAX },
+            );
+        }
+        // Final sample: infinity.
+        integ.record_sample(
+            key.clone(),
+            origin + Duration::from_secs(3601),
+            f64::INFINITY,
+        );
+        let joules = integ.lifetime_joules(&key);
+        assert!(
+            joules.is_finite(),
+            "lifetime counter must remain finite under pathological input (got {joules})"
+        );
+        // Upper bound: MAX_POWER_WATTS * total_dt with a bit of slack.
+        let upper_bound = MAX_POWER_WATTS * 3601.0 * 1.01;
+        assert!(
+            joules <= upper_bound,
+            "lifetime counter should stay under the MAX_POWER_WATTS envelope: got {joules}, bound {upper_bound}"
+        );
+    }
+
+    #[test]
+    fn max_power_watts_clamps_single_sample() {
+        // One pathological sample followed by a normal one: the clamped
+        // sample should be treated as exactly MAX_POWER_WATTS for the
+        // trapezoidal integral.
+        let mut integ = PowerIntegrator::default();
+        let key = EnergyKey::gpu("host", "uuid");
+        let origin = Instant::now();
+        integ.record_sample(key.clone(), origin, f64::MAX);
+        integ.record_sample(key.clone(), origin + Duration::from_secs(1), 0.0);
+        let joules = integ.lifetime_joules(&key);
+        // Trapezoidal with p_prev=MAX_POWER_WATTS, p_now=0 over 1 s:
+        //   0.5 * (MAX_POWER_WATTS + 0) * 1 = MAX_POWER_WATTS / 2
+        assert!(
+            (joules - MAX_POWER_WATTS / 2.0).abs() < 1e-3,
+            "expected ~MAX_POWER_WATTS/2 J, got {joules}"
+        );
+    }
+
+    #[test]
+    fn record_sample_enforces_device_cardinality_cap() {
+        // Once the device cap is reached, further record_sample calls
+        // for NEW keys must silently drop rather than grow the map.
+        let mut integ = PowerIntegrator::default();
+        let origin = Instant::now();
+        for i in 0..MAX_DEVICES {
+            integ.record_sample(EnergyKey::gpu("host", format!("uuid-{i}")), origin, 100.0);
+        }
+        assert_eq!(integ.devices.len(), MAX_DEVICES);
+
+        // One more new key should be refused.
+        let overflow_key = EnergyKey::gpu("host", "uuid-overflow");
+        let delta = integ.record_sample(overflow_key.clone(), origin, 100.0);
+        assert_eq!(delta, 0.0);
+        assert_eq!(integ.devices.len(), MAX_DEVICES);
+        assert!(!integ.has_samples(&overflow_key));
+
+        // An existing key keeps working.
+        let existing = EnergyKey::gpu("host", "uuid-0");
+        integ.record_sample(existing.clone(), origin + Duration::from_secs(1), 100.0);
+        assert!(integ.has_samples(&existing));
     }
 }

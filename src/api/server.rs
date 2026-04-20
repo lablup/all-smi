@@ -135,9 +135,10 @@ pub async fn run_api_mode(args: &ApiArgs) {
     let processes = args.processes;
     let interval = args.interval;
 
-    // Spawn the WAL flush task if enabled. The handle is dropped on
-    // process exit; since the task runs forever until we are killed,
-    // dropping is equivalent to stopping.
+    // Spawn the WAL flush task if enabled. The returned handle owns a
+    // oneshot sender used by the Ctrl+C / SIGTERM path so the task can
+    // perform a final `flush_and_fsync` before the process exits
+    // (issue #191).
     let wal_flush_handle = {
         let state = state.clone();
         let state_read = state.read().await;
@@ -153,8 +154,6 @@ pub async fn run_api_mode(args: &ApiArgs) {
             None
         }
     };
-    // Suppress unused warning when the wal is disabled.
-    let _ = wal_flush_handle;
 
     // Spawn background task for collecting metrics
     tokio::spawn(async move {
@@ -285,6 +284,14 @@ pub async fn run_api_mode(args: &ApiArgs) {
     {
         run_tcp_listener(app, args.port).await;
     }
+
+    // Signal the WAL flush task to perform a final flush and fsync
+    // before we exit, so the last batch of pending Joule deltas is not
+    // lost (issue #191). Has to run AFTER the listeners return because
+    // that is the moment Ctrl+C / SIGTERM has propagated through axum.
+    if let Some(handle) = wal_flush_handle {
+        handle.shutdown().await;
+    }
 }
 
 /// Run only the TCP listener
@@ -303,8 +310,43 @@ async fn run_tcp_listener(app: Router, port: u16) {
             .local_addr()
             .unwrap_or_else(|_| "unknown".parse().unwrap())
     );
-    if let Err(e) = axum::serve(listener, app).await {
+    if let Err(e) = axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+    {
         tracing::error!("TCP server error: {e}");
+    }
+}
+
+/// Complete when the process receives Ctrl+C on any platform, or a
+/// `SIGTERM` on Unix. Callers use this to let `axum::serve` return so
+/// the parent function can run post-shutdown cleanup (energy WAL flush,
+/// socket cleanup, etc.).
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut s) => {
+                s.recv().await;
+            }
+            Err(e) => {
+                tracing::warn!("failed to install SIGTERM handler: {e}");
+                // Fall back to ctrl_c only.
+                std::future::pending::<()>().await;
+            }
+        }
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {}
+        _ = terminate => {}
     }
 }
 
@@ -351,22 +393,16 @@ async fn run_unix_listener(app: Router, path: PathBuf) {
 
     tracing::info!("API server listening on Unix socket: {}", path.display());
 
-    // Set up socket cleanup on shutdown
-    let path_clone = path.clone();
-    let cleanup_handle = tokio::spawn(async move {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("Failed to listen for Ctrl+C");
-        cleanup_socket(&path_clone);
-    });
-
-    // Serve the application
-    if let Err(e) = axum::serve(listener, app).await {
+    // Serve the application with graceful shutdown so the caller can
+    // run post-serve cleanup (WAL flush, socket cleanup) once we see a
+    // SIGTERM / Ctrl+C.
+    if let Err(e) = axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+    {
         tracing::error!("Unix socket server error: {e}");
     }
 
-    // Cancel cleanup handle and do cleanup
-    cleanup_handle.abort();
     cleanup_socket(&path);
 }
 
@@ -436,31 +472,24 @@ async fn run_dual_listeners(app: Router, port: u16, socket_path: PathBuf) {
     // Clone the app for the second server
     let app_clone = app.clone();
 
-    // Set up socket cleanup on shutdown
-    let path_clone = socket_path.clone();
-    let cleanup_handle = tokio::spawn(async move {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("Failed to listen for Ctrl+C");
-        cleanup_socket(&path_clone);
-    });
-
-    // Run both servers concurrently
+    // Run both servers concurrently; each installs its own graceful
+    // shutdown listener so the select returns on SIGTERM / Ctrl+C and
+    // the caller can run post-serve cleanup.
     tokio::select! {
-        result = axum::serve(tcp_listener, app) => {
+        result = axum::serve(tcp_listener, app)
+            .with_graceful_shutdown(shutdown_signal()) => {
             if let Err(e) = result {
                 tracing::error!("TCP server error: {e}");
             }
         }
-        result = axum::serve(unix_listener, app_clone) => {
+        result = axum::serve(unix_listener, app_clone)
+            .with_graceful_shutdown(shutdown_signal()) => {
             if let Err(e) = result {
                 tracing::error!("Unix socket server error: {e}");
             }
         }
     }
 
-    // Cancel cleanup handle and do cleanup
-    cleanup_handle.abort();
     cleanup_socket(&socket_path);
 }
 
