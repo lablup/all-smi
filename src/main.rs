@@ -114,40 +114,59 @@ fn main() {
 }
 
 async fn run_command(cli: Cli) {
-    // Set up signal handler for clean shutdown
-    tokio::spawn(async {
-        signal::ctrl_c().await.expect("Failed to listen for Ctrl+C");
-        #[cfg(target_os = "macos")]
-        {
-            // Cleanup native metrics manager on signal
-            shutdown_native_metrics_manager();
-        }
-        #[cfg(target_os = "linux")]
-        {
-            // Always cleanup hlsmi on signal
-            shutdown_hlsmi_manager();
-        }
-        std::process::exit(0);
-    });
+    // Signal-handling policy by subcommand:
+    //
+    // * `Record` installs its own SIGINT/SIGTERM handlers (see
+    //   `record::install_signal_handlers`) that set a cooperative stop
+    //   flag. The record loop polls that flag, finishes the in-flight
+    //   frame, and calls `RotatingWriter::finish()` to flush the zstd /
+    //   gzip trailer before returning. The unconditional
+    //   `std::process::exit(0)` handlers below would race with that
+    //   shutdown path and truncate the output file to zero bytes
+    //   (issue #187 acceptance: "SIGTERM during recording closes
+    //   cleanly with a complete final JSON line"). Skip them for
+    //   `Record` so the cooperative path wins.
+    //
+    // * Every other subcommand keeps the original behaviour — no device
+    //   manager does partial-state flushing, so an immediate exit on
+    //   signal is the desired shutdown semantics.
+    let is_record = matches!(cli.command, Some(Commands::Record(_)));
+    if !is_record {
+        // Set up signal handler for clean shutdown
+        tokio::spawn(async {
+            signal::ctrl_c().await.expect("Failed to listen for Ctrl+C");
+            #[cfg(target_os = "macos")]
+            {
+                // Cleanup native metrics manager on signal
+                shutdown_native_metrics_manager();
+            }
+            #[cfg(target_os = "linux")]
+            {
+                // Always cleanup hlsmi on signal
+                shutdown_hlsmi_manager();
+            }
+            std::process::exit(0);
+        });
 
-    // Also handle SIGTERM on Unix systems
-    #[cfg(unix)]
-    tokio::spawn(async {
-        let mut sigterm = signal::unix::signal(signal::unix::SignalKind::terminate())
-            .expect("Failed to listen for SIGTERM");
-        sigterm.recv().await;
-        #[cfg(target_os = "macos")]
-        {
-            // Cleanup native metrics manager on signal
-            shutdown_native_metrics_manager();
-        }
-        #[cfg(target_os = "linux")]
-        {
-            // Always cleanup hlsmi on signal
-            shutdown_hlsmi_manager();
-        }
-        std::process::exit(0);
-    });
+        // Also handle SIGTERM on Unix systems
+        #[cfg(unix)]
+        tokio::spawn(async {
+            let mut sigterm = signal::unix::signal(signal::unix::SignalKind::terminate())
+                .expect("Failed to listen for SIGTERM");
+            sigterm.recv().await;
+            #[cfg(target_os = "macos")]
+            {
+                // Cleanup native metrics manager on signal
+                shutdown_native_metrics_manager();
+            }
+            #[cfg(target_os = "linux")]
+            {
+                // Always cleanup hlsmi on signal
+                shutdown_hlsmi_manager();
+            }
+            std::process::exit(0);
+        });
+    }
 
     match cli.command {
         Some(Commands::Api(args)) => {

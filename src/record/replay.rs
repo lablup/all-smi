@@ -421,6 +421,14 @@ impl Replayer {
         self.next_disk_seq
     }
 
+    /// Number of sparse-index checkpoints observed so far. Useful for
+    /// tests that want to assert the fast-path seek code actually got
+    /// exercised. Public for cross-module tests.
+    #[cfg(test)]
+    pub fn index_points_seen(&self) -> usize {
+        self.index_points.len()
+    }
+
     /// Whether the underlying reader has hit EOF. When true, frames_seen()
     /// is the total count.
     pub fn at_eof(&self) -> bool {
@@ -483,7 +491,17 @@ impl Replayer {
                 }
                 self.line_number += 1;
             }
-            self.next_disk_seq = nearest_seq;
+            // Index frames are written AFTER their matching data frame
+            // (see `record::write_data_frame`): line N is data frame
+            // `nearest_seq`, line N+1 is the index frame carrying
+            // `seq=nearest_seq`. Skipping past the index leaves the
+            // reader at the NEXT data frame, whose absolute sequence is
+            // `nearest_seq + 1`. Setting `next_disk_seq` accordingly
+            // makes the cached frames' `seq` match the absolute
+            // position in the recording, so the REPLAY status-bar
+            // "frame N / M" display is correct after an index-frame
+            // fast-path seek.
+            self.next_disk_seq = nearest_seq + 1;
         }
 
         // Now do a data-frame-aware scan until we reach target_seq.
@@ -782,6 +800,65 @@ mod tests {
         }
         let r = Replayer::open(&path).unwrap();
         assert!(r.current().is_some(), "zstd stream primes frame 0");
+    }
+
+    /// Regression guard for the index-frame fast-path off-by-one: when the
+    /// replayer uses a sparse index to jump ahead, the next data frame must
+    /// be labeled with its true absolute sequence number. Index frames are
+    /// written AFTER their matching data frame in the record stream, so
+    /// skipping past the index lands on data frame `index.seq + 1`.
+    #[test]
+    fn replayer_seek_across_index_frame_preserves_absolute_seq() {
+        use std::fs::File;
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("indexed.ndjson");
+        {
+            let mut f = File::create(&path).unwrap();
+            // 10 data frames spaced 1s apart, plus an index frame after
+            // frame seq=5 (matching the record writer's ordering).
+            for i in 0..10u64 {
+                writeln!(
+                    f,
+                    "{{\"schema\":1,\"timestamp\":\"2026-04-20T00:00:{i:02}Z\",\"hostname\":\"a\",\"gpus\":[]}}"
+                )
+                .unwrap();
+                if i == 5 {
+                    writeln!(
+                        f,
+                        "{{\"schema\":1,\"index\":true,\"seq\":5,\"byte_offset\":0}}"
+                    )
+                    .unwrap();
+                }
+            }
+        }
+        // Open and walk to EOF so `index_points` is populated with the
+        // seq=5 checkpoint. `next()` returns `Ok(None)` only before the
+        // first frame has been materialised; after EOF it keeps returning
+        // the last cached frame, so drive the walk via `at_eof()`.
+        let mut r = Replayer::open(&path).unwrap();
+        while !r.at_eof() {
+            if r.next().unwrap().is_none() {
+                break;
+            }
+        }
+        assert!(
+            r.index_points_seen() >= 1,
+            "priming walk must have observed the seq=5 index frame"
+        );
+        // Now seek to 7s. The seek implementation rewinds and walks
+        // forward; with the index-frame fast path it skips past the
+        // seq=5 index frame, so the next data frame read after the
+        // checkpoint must be absolute seq=6, and the frame at T0+7s
+        // must land on absolute seq=7.
+        let landed = r
+            .seek(Duration::from_secs(7))
+            .unwrap()
+            .expect("frame at 7s");
+        assert_eq!(
+            landed.seq, 7,
+            "seek across an index frame must preserve absolute sequence numbering"
+        );
     }
 
     #[test]

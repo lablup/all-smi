@@ -525,7 +525,9 @@ fn handle_navigation_keys(key_event: KeyEvent, state: &mut AppState, args: &View
 }
 
 fn handle_up_arrow(state: &mut AppState, args: &ViewArgs) {
-    let is_remote = args.hosts.is_some() || args.hostfile.is_some();
+    // `args.replay` routes scrolling through the remote branch because the
+    // replay UI renders tabs + GPU columns (not the local process list).
+    let is_remote = args.hosts.is_some() || args.hostfile.is_some() || args.replay.is_some();
     if is_remote {
         // Unified scrolling for remote mode
         if state.gpu_scroll_offset > 0 {
@@ -546,7 +548,9 @@ fn handle_up_arrow(state: &mut AppState, args: &ViewArgs) {
 }
 
 fn handle_down_arrow(state: &mut AppState, args: &ViewArgs) {
-    let is_remote = args.hosts.is_some() || args.hostfile.is_some();
+    // `args.replay` routes scrolling through the remote branch because the
+    // replay UI renders tabs + GPU columns (not the local process list).
+    let is_remote = args.hosts.is_some() || args.hostfile.is_some() || args.replay.is_some();
     if is_remote {
         // Unified scrolling for remote mode
         let gpu_count = if state.current_tab == 0 {
@@ -591,7 +595,9 @@ fn handle_down_arrow(state: &mut AppState, args: &ViewArgs) {
 }
 
 fn handle_page_up(state: &mut AppState, args: &ViewArgs) {
-    let is_remote = args.hosts.is_some() || args.hostfile.is_some();
+    // `args.replay` routes scrolling through the remote branch because the
+    // replay UI renders tabs + GPU columns (not the local process list).
+    let is_remote = args.hosts.is_some() || args.hostfile.is_some() || args.replay.is_some();
     if is_remote {
         // Remote mode - page up through GPU list
         let (_cols, rows) = size().unwrap();
@@ -637,7 +643,9 @@ fn handle_page_up(state: &mut AppState, args: &ViewArgs) {
 }
 
 fn handle_page_down(state: &mut AppState, args: &ViewArgs) {
-    let is_remote = args.hosts.is_some() || args.hostfile.is_some();
+    // `args.replay` routes scrolling through the remote branch because the
+    // replay UI renders tabs + GPU columns (not the local process list).
+    let is_remote = args.hosts.is_some() || args.hostfile.is_some() || args.replay.is_some();
     if is_remote {
         // Remote mode - page down through GPU list
         let (_cols, rows) = size().unwrap();
