@@ -21,10 +21,22 @@
 //! When the channel is saturated, the caller uses `try_send` to drop the
 //! **newest** payload rather than block rendering — the UI-never-blocks
 //! invariant is what matters here, not FIFO preservation.
+//!
+//! # Security
+//!
+//! The webhook worker disables HTTP redirects (`Policy::none()`) to avoid
+//! an SSRF pivot where an attacker-controlled webhook returns a 3xx
+//! pointing at a cloud metadata endpoint (e.g. `169.254.169.254`) or other
+//! internal-only service. Operators explicitly configure the exact URL and
+//! we refuse to follow redirects away from it.
+//!
+//! URLs logged on failure are passed through [`redact_url_userinfo`] so
+//! that a misconfigured webhook containing Basic-Auth credentials does not
+//! spill them into log aggregators.
 
 use std::time::Duration;
 
-use reqwest::Client;
+use reqwest::{Client, redirect::Policy};
 use tokio::sync::mpsc;
 
 use crate::ui::alerts::WebhookPayload;
@@ -44,34 +56,90 @@ const WEBHOOK_TIMEOUT: Duration = Duration::from_secs(2);
 /// The worker lives until the sender is dropped. When `url` is empty the
 /// function still returns a sender but the worker silently drains without
 /// making HTTP calls — this keeps the call sites branch-free.
+///
+/// # Security
+///
+/// Redirects are disabled (`Policy::none()`). If an operator configures
+/// `https://hook.example.com/alerts` and that server returns a 302 to
+/// `http://169.254.169.254/latest/meta-data/...`, reqwest returns the 3xx
+/// response verbatim rather than fetching the redirect target. This keeps
+/// the webhook feature from becoming an SSRF primitive on clouds that
+/// expose metadata services on link-local addresses.
 pub fn spawn_webhook_worker(url: String) -> mpsc::Sender<WebhookPayload> {
     let (tx, mut rx) = mpsc::channel::<WebhookPayload>(WEBHOOK_QUEUE_CAPACITY);
     tokio::spawn(async move {
-        // `Client::new` already applies sane defaults (rustls, HTTP/2). We
-        // also set a per-call timeout via `.timeout()`, so a slow webhook
-        // can't wedge the worker across many items.
-        let client = match Client::builder().timeout(WEBHOOK_TIMEOUT).build() {
+        // Explicitly disable redirects: the operator configures the exact
+        // destination, and we refuse to chase server-side 3xx responses
+        // that could pivot to internal services (SSRF).
+        let client = match Client::builder()
+            .timeout(WEBHOOK_TIMEOUT)
+            .redirect(Policy::none())
+            .build()
+        {
             Ok(c) => c,
             Err(e) => {
                 tracing::warn!("alert-webhook: failed to build HTTP client: {e}");
                 return;
             }
         };
+        let safe_url = redact_url_userinfo(&url);
         while let Some(payload) = rx.recv().await {
             if url.is_empty() {
                 continue; // disabled — silently drain
             }
             match client.post(&url).json(&payload).send().await {
                 Ok(resp) => {
-                    if !resp.status().is_success() {
-                        tracing::warn!("alert-webhook: {} responded {}", url, resp.status());
+                    let status = resp.status();
+                    // Explicitly call out redirect responses so operators
+                    // who accidentally configured a URL that 302s to an
+                    // internal target know why their webhook never
+                    // reaches its intended destination.
+                    if status.is_redirection() {
+                        tracing::warn!(
+                            "alert-webhook: {} returned redirect {} (not followed)",
+                            safe_url,
+                            status
+                        );
+                    } else if !status.is_success() {
+                        tracing::warn!("alert-webhook: {} responded {}", safe_url, status);
                     }
                 }
-                Err(e) => tracing::warn!("alert-webhook: POST to {url} failed: {e}"),
+                Err(e) => tracing::warn!("alert-webhook: POST to {safe_url} failed: {e}"),
             }
         }
     });
     tx
+}
+
+/// Strip any `userinfo` component (credentials of the form
+/// `scheme://user:pass@host/...`) from a URL for logging.
+///
+/// Only the textual prefix is inspected, so this works for any scheme
+/// regardless of whether reqwest accepted the URL. When no userinfo is
+/// present the input is returned verbatim.
+fn redact_url_userinfo(url: &str) -> String {
+    // Find the `://` boundary; anything before that is the scheme.
+    let Some(scheme_end) = url.find("://") else {
+        return url.to_string();
+    };
+    let after_scheme = &url[scheme_end + 3..];
+    // Userinfo ends at the first `@` that appears *before* the first path
+    // separator (`/`, `?`, `#`), so we can't be fooled by `@` characters
+    // inside query strings.
+    let authority_end = after_scheme
+        .find(['/', '?', '#'])
+        .unwrap_or(after_scheme.len());
+    let authority = &after_scheme[..authority_end];
+    if let Some(at_pos) = authority.find('@') {
+        let redacted_authority = format!("***@{host}", host = &authority[at_pos + 1..]);
+        let mut out = String::with_capacity(url.len());
+        out.push_str(&url[..scheme_end + 3]);
+        out.push_str(&redacted_authority);
+        out.push_str(&after_scheme[authority_end..]);
+        out
+    } else {
+        url.to_string()
+    }
 }
 
 /// Enqueue a payload on the worker channel using `try_send`.
@@ -139,5 +207,54 @@ mod tests {
             threshold: 80.0,
         };
         assert!(enqueue(&tx, p));
+    }
+
+    #[test]
+    fn redact_url_userinfo_strips_basic_auth() {
+        assert_eq!(
+            redact_url_userinfo("https://user:pass@hook.example.com/alerts"),
+            "https://***@hook.example.com/alerts"
+        );
+    }
+
+    #[test]
+    fn redact_url_userinfo_strips_user_only() {
+        assert_eq!(
+            redact_url_userinfo("https://token@hook.example.com/"),
+            "https://***@hook.example.com/"
+        );
+    }
+
+    #[test]
+    fn redact_url_userinfo_preserves_plain_url() {
+        assert_eq!(
+            redact_url_userinfo("https://hook.example.com/alerts"),
+            "https://hook.example.com/alerts"
+        );
+    }
+
+    #[test]
+    fn redact_url_userinfo_ignores_at_in_path() {
+        // `@` that appears only in the path must not be treated as
+        // userinfo; the URL should be returned verbatim.
+        assert_eq!(
+            redact_url_userinfo("https://hook.example.com/path/with@symbol"),
+            "https://hook.example.com/path/with@symbol"
+        );
+    }
+
+    #[test]
+    fn redact_url_userinfo_ignores_at_in_query() {
+        assert_eq!(
+            redact_url_userinfo("https://hook.example.com/alerts?email=a@b"),
+            "https://hook.example.com/alerts?email=a@b"
+        );
+    }
+
+    #[test]
+    fn redact_url_userinfo_handles_missing_scheme() {
+        // Malformed inputs are passed through verbatim rather than
+        // panicking.
+        assert_eq!(redact_url_userinfo("hook.example.com"), "hook.example.com");
     }
 }

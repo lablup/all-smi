@@ -108,15 +108,27 @@ impl DataCollector {
                 .iter()
                 .any(|t| t.to == crate::ui::alerts::AlertLevel::Crit)
         {
-            // Audible bell. Stdout is line-buffered under ratatui so a
-            // separate write + flush is the simplest way to ring.
-            use std::io::Write;
-            let mut out = std::io::stdout();
-            let _ = out.write_all(b"\x07");
-            let _ = out.flush();
+            // Audible bell. The raw write bypasses the crossterm buffer
+            // used by the UI loop so we offload it to the blocking pool:
+            // a paused or very slow terminal would otherwise stall the
+            // tokio executor on `write_all`/`flush`. BEL is a zero-width
+            // control code so a stray byte interleaved into a frame is
+            // visually harmless.
+            tokio::task::spawn_blocking(|| {
+                use std::io::Write;
+                let mut out = std::io::stdout();
+                let _ = out.write_all(b"\x07");
+                let _ = out.flush();
+            });
         }
 
         if !webhook_url.is_empty() {
+            // NOTE (issue #192 config reload): OnceLock captures the URL
+            // from the first evaluation tick. If AlertConfig.webhook_url
+            // is later mutated via Alerter::set_config the worker keeps
+            // pointing at the old URL. Config reload must rebuild the
+            // DataCollector instead of mutating the URL in place. This
+            // is intentional while the config-reload issue is pending.
             let tx = self
                 .webhook_tx
                 .get_or_init(|| spawn_webhook_worker(webhook_url.clone()));

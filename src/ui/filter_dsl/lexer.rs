@@ -101,12 +101,33 @@ impl fmt::Display for LexError {
 
 impl std::error::Error for LexError {}
 
+/// Hard upper bound on the length of an input string (bytes). The UI
+/// already caps the interactive filter buffer; this second gate protects
+/// any programmatic caller (config-file defaults, tests, future IPC) from
+/// triggering an unbounded `Vec<char>` allocation in the tokenizer.
+pub const MAX_INPUT_BYTES: usize = 16 * 1024;
+
 /// Scan `input` into a token stream.
 ///
 /// This is an all-or-nothing scan: the first illegal character aborts with a
 /// [`LexError`] carrying the 1-based column so the UI can surface a user
 /// friendly pointer. Whitespace is skipped silently.
+///
+/// Inputs longer than [`MAX_INPUT_BYTES`] are rejected with a [`LexError`]
+/// pointing at column 1 so the UI can surface a clear diagnostic instead
+/// of allocating a huge `Vec<char>` buffer. The cap is generous enough
+/// that realistic filters (even with long hostnames or regex patterns)
+/// pass unaffected.
 pub fn tokenize(input: &str) -> Result<Vec<Token>, LexError> {
+    if input.len() > MAX_INPUT_BYTES {
+        return Err(LexError {
+            col: 1,
+            msg: format!(
+                "input too long ({len} bytes, limit {MAX_INPUT_BYTES} bytes)",
+                len = input.len(),
+            ),
+        });
+    }
     let mut tokens = Vec::new();
     let chars: Vec<char> = input.chars().collect();
     let mut i = 0usize;
@@ -488,5 +509,24 @@ mod tests {
         assert_eq!(toks[0].col, 1);
         assert_eq!(toks[1].col, 3);
         assert_eq!(toks[2].col, 4);
+    }
+
+    #[test]
+    fn oversized_input_errors_at_column_one() {
+        // Regression guard: a pathologically long input must be rejected
+        // before any `Vec<char>` allocation that would DoS the tokenizer.
+        let huge = "a".repeat(MAX_INPUT_BYTES + 1);
+        let err = tokenize(&huge).unwrap_err();
+        assert_eq!(err.col, 1);
+        assert!(err.msg.contains("too long"));
+    }
+
+    #[test]
+    fn input_at_limit_is_accepted() {
+        // Exactly at the limit must still parse (the byte check uses `>`).
+        let ok = "a".repeat(MAX_INPUT_BYTES);
+        // An all-`a` identifier is a single ident token.
+        let toks = tokenize(&ok).unwrap();
+        assert_eq!(toks.len(), 1);
     }
 }

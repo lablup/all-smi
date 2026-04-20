@@ -26,11 +26,16 @@
 #[allow(dead_code)] // Used by the `dim_ansi` binary-side path which is gated by `view/`.
 const DARK_GREY_FG: &[u8] = b"\x1b[90m";
 
-/// Rewrite `input` so that every SGR sequence (`\x1b[...m`) is replaced
-/// with [`DARK_GREY_FG`]. The reset (`\x1b[0m`) sequences are preserved
-/// so background/reset boundaries stay intact.
+/// Rewrite `input` so that every SGR foreground color is replaced with
+/// [`DARK_GREY_FG`] while background colors and the reset (`\x1b[0m`) are
+/// preserved. Non-SGR CSI sequences (cursor movement, erase line, etc.)
+/// are copied verbatim.
 ///
-/// Anything outside of an SGR sequence is copied verbatim.
+/// The classification is conservative: any SGR body that contains a
+/// background-color parameter (`40`–`47`, `100`–`107`, or the 256/RGB
+/// forms prefixed with `48;`) is passed through unchanged. Anything else
+/// — foreground colors, intensity modifiers, reset — is collapsed into a
+/// single `\x1b[90m` so the rendered output visibly loses saturation.
 #[allow(dead_code)] // Called from `view/frame_renderer.rs` which is binary-side only.
 pub fn dim_ansi(input: &str) -> String {
     let bytes = input.as_bytes();
@@ -53,11 +58,11 @@ pub fn dim_ansi(input: &str) -> String {
             }
             let final_byte = bytes[j];
             if final_byte == b'm' {
-                // Preserve `\x1b[0m` (reset) so that paddings after
-                // colored text keep their semantics. Everything else
-                // becomes `\x1b[90m`.
+                // Preserve `\x1b[0m` (reset) and any SGR carrying a
+                // background color so we don't drop the highlight that
+                // a renderer deliberately painted (e.g. selected row).
                 let body = &bytes[i + 2..j];
-                if body == b"0" || body.is_empty() {
+                if body == b"0" || body.is_empty() || sgr_has_background(body) {
                     out.extend_from_slice(&bytes[start..=j]);
                 } else {
                     out.extend_from_slice(DARK_GREY_FG);
@@ -74,6 +79,34 @@ pub fn dim_ansi(input: &str) -> String {
         }
     }
     String::from_utf8(out).unwrap_or_else(|_| input.to_string())
+}
+
+/// Classify an SGR body as containing a background-color parameter.
+///
+/// Covers:
+/// - Standard backgrounds: `40`..=`47`
+/// - Bright backgrounds: `100`..=`107`
+/// - 256-color background: `48;5;<n>`
+/// - Truecolor background: `48;2;<r>;<g>;<b>`
+///
+/// Combined fg+bg sequences like `\x1b[1;37;44m` are also matched via the
+/// split-by-`;` loop because any single parameter in the bg range is
+/// enough to preserve the whole sequence.
+fn sgr_has_background(body: &[u8]) -> bool {
+    let Ok(s) = std::str::from_utf8(body) else {
+        return false;
+    };
+    for p in s.split(';') {
+        if p == "48" {
+            return true;
+        }
+        if let Ok(n) = p.parse::<u16>()
+            && ((40..=47).contains(&n) || (100..=107).contains(&n))
+        {
+            return true;
+        }
+    }
+    false
 }
 
 #[cfg(test)]
@@ -110,10 +143,40 @@ mod tests {
     }
 
     #[test]
-    fn background_color_also_replaced() {
+    fn background_color_is_preserved() {
+        // Background colors are applied intentionally by renderers
+        // (highlighted row, alert flash). Dropping them on dim would
+        // cancel out the renderer's signal, so we preserve the SGR
+        // verbatim when a bg parameter is present.
         let input = "\x1b[42mgreen bg\x1b[0m";
         let out = dim_ansi(input);
-        assert!(out.starts_with("\x1b[90m"));
+        assert_eq!(out, input);
+    }
+
+    #[test]
+    fn combined_fg_and_bg_preserves_the_sgr() {
+        // Combined fg+bg (`\x1b[31;42m`) must also be preserved so the
+        // background survives; otherwise we'd silently strip the
+        // intentional highlight.
+        let input = "\x1b[31;42mcolored\x1b[0m";
+        let out = dim_ansi(input);
+        assert_eq!(out, input);
+    }
+
+    #[test]
+    fn extended_bg_256_color_is_preserved() {
+        // `\x1b[48;5;226m` selects a 256-color bg (bright yellow).
+        let input = "\x1b[48;5;226mhighlight\x1b[0m";
+        let out = dim_ansi(input);
+        assert_eq!(out, input);
+    }
+
+    #[test]
+    fn bright_bg_is_preserved() {
+        // 100..=107 are the bright-background range.
+        let input = "\x1b[105mbright pink bg\x1b[0m";
+        let out = dim_ansi(input);
+        assert_eq!(out, input);
     }
 
     #[test]

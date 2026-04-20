@@ -22,6 +22,14 @@ use crate::cli::ViewArgs;
 use crate::ui::filter_dsl::{apply as apply_filter, parse as parse_filter};
 use crate::ui::layout::LayoutCalculator;
 
+/// Upper bound on the filter input buffer size (bytes).
+///
+/// Bracketed-paste can deliver an arbitrarily large blob into a single
+/// key-event burst, and `update_filter_preview` runs the lexer+parser on
+/// every keystroke. Capping the buffer keeps a 10 MB paste from
+/// turning into 10 MB of per-keystroke work on the UI thread.
+const FILTER_BUFFER_MAX: usize = 512;
+
 /// Get the actual number of visible process rows from the last rendered frame.
 /// Falls back to a conservative estimate if the renderer hasn't set it yet.
 fn get_visible_process_rows(state: &AppState) -> usize {
@@ -238,6 +246,13 @@ fn handle_filter_input(key_event: KeyEvent, state: &mut AppState) -> bool {
             // Do not treat modifier+char as literal characters unless the
             // modifier is Shift alone.
             if modifiers.contains(KeyModifiers::CONTROL) || modifiers.contains(KeyModifiers::ALT) {
+                return false;
+            }
+            // Cap the buffer so a bracketed-paste of megabytes of data
+            // cannot turn every subsequent keystroke into an O(n) parse
+            // over the entire buffer and DoS the UI thread. A 512-char
+            // filter is far beyond any practical query.
+            if state.filter_buffer.len() >= FILTER_BUFFER_MAX {
                 return false;
             }
             state.filter_buffer.push(c);

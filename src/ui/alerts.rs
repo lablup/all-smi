@@ -176,7 +176,14 @@ impl Alerter {
     pub fn evaluate(&mut self, gpus: &[GpuInfo]) -> Vec<AlertTransition> {
         let mut transitions = Vec::new();
         let now = Instant::now();
+        // Collect device ids present this tick up front so we can bound
+        // `self.states` at the end. Without this GC the HashMap grows
+        // monotonically on clusters with node churn (GPUs going away
+        // permanently still left stale entries). See PR #196 review.
+        let mut seen: std::collections::HashSet<String> =
+            std::collections::HashSet::with_capacity(gpus.len());
         for gpu in gpus {
+            seen.insert(device_id(gpu));
             self.evaluate_temperature(gpu, &mut transitions);
             self.evaluate_idle_utilization(gpu, now, &mut transitions);
             self.evaluate_power(gpu, &mut transitions);
@@ -185,6 +192,11 @@ impl Alerter {
         // without bound across long sessions.
         let now_cmp = Instant::now();
         self.flashing.retain(|_, d| *d > now_cmp);
+        // Garbage-collect rule state for devices that are no longer
+        // present. A device that drops out for a single tick loses its
+        // hysteresis state which is fine: the worst case is a re-issue
+        // of ok->warn when it reappears, not a missed alert.
+        self.states.retain(|k, _| seen.contains(&k.device_id));
         transitions
     }
 
@@ -372,6 +384,11 @@ impl Alerter {
             return;
         }
         let value = gpu.power_consumption;
+        // `hysteresis_c` is named after the °C unit used by the
+        // temperature rule but is reused verbatim here as a watt delta.
+        // The numeric value (default: 2) is appropriate for both rules;
+        // when a dedicated `hysteresis_w` field lands it should shadow
+        // this fallback for the power rule only.
         let off = limit - self.config.hysteresis_c as f64;
 
         let key = RuleKey {
@@ -712,5 +729,39 @@ mod tests {
             AlertLevel::Ok,
             "must recover straight to Ok when warn rule disabled"
         );
+    }
+
+    #[test]
+    fn evaluate_garbage_collects_states_for_vanished_devices() {
+        // Devices that disappear between ticks must not accumulate in
+        // `self.states`; otherwise a long session on a churning cluster
+        // grows memory without bound. See PR #196 review.
+        let mut cfg = default_cfg();
+        cfg.util_idle_warn_mins = 0; // isolate the temperature rule
+        let mut a = Alerter::new(cfg);
+
+        // Tick 1: two devices cross warn.
+        let mut g1 = gpu(85, 0.0, 0.0);
+        g1.uuid = "GPU-A".to_string();
+        let mut g2 = gpu(85, 0.0, 0.0);
+        g2.uuid = "GPU-B".to_string();
+        a.evaluate(&[g1.clone(), g2.clone()]);
+        assert_eq!(a.states.len(), 2, "two rule states after first tick");
+
+        // Tick 2: only GPU-A remains; GPU-B's state must be pruned.
+        a.evaluate(&[g1]);
+        assert_eq!(a.states.len(), 1, "stale state must be pruned");
+        assert!(a.states.keys().any(|k| k.device_id == "GPU-A"));
+    }
+
+    #[test]
+    fn evaluate_empty_snapshot_clears_states() {
+        // Defensive: an empty snapshot tick fully resets the state map so
+        // that a cluster going offline does not leak stale hysteresis.
+        let mut a = Alerter::new(default_cfg());
+        a.evaluate(&[gpu(85, 0.0, 0.0)]);
+        assert_eq!(a.states.len(), 1);
+        a.evaluate(&[]);
+        assert_eq!(a.states.len(), 0);
     }
 }

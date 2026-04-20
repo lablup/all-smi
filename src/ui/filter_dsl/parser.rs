@@ -181,6 +181,12 @@ impl From<LexError> for ParseError {
 /// at parse time, keeping one runaway query from blowing up memory use.
 const REGEX_SIZE_LIMIT_BYTES: usize = 128 * 1024;
 
+/// Maximum byte size of the lazy DFA built at match time. The `regex` crate
+/// defaults to 10 MiB which is well above what any reasonable operator
+/// filter needs; pin it to 1 MiB so a pathological pattern that slipped past
+/// [`REGEX_SIZE_LIMIT_BYTES`] still cannot balloon matching memory.
+const REGEX_DFA_SIZE_LIMIT_BYTES: usize = 1024 * 1024;
+
 /// Parse `input` into an [`Expr`] tree.
 ///
 /// Returns `Ok(None)` for an empty or whitespace-only input (no filter).
@@ -384,6 +390,7 @@ impl Parser {
 fn compile_regex(pattern: &str, col: usize) -> Result<Regex, ParseError> {
     RegexBuilder::new(pattern)
         .size_limit(REGEX_SIZE_LIMIT_BYTES)
+        .dfa_size_limit(REGEX_DFA_SIZE_LIMIT_BYTES)
         .build()
         .map_err(|e| ParseError {
             col,
