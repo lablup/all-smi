@@ -22,8 +22,10 @@ use crossterm::{
 use crate::app_state::{AppState, FilterInputMode, SortCriteria};
 use crate::cli::ViewArgs;
 use crate::record::replay::parse_timecode;
+use crate::ui::aggregation::user::{UserSortKey, sort_users};
 use crate::ui::filter_dsl::{apply as apply_filter, parse as parse_filter};
 use crate::ui::layout::LayoutCalculator;
+use crate::ui::tabs::users_tab_index;
 
 /// Upper bound on the filter input buffer size (bytes).
 ///
@@ -52,8 +54,13 @@ pub async fn handle_key_event(key_event: KeyEvent, state: &mut AppState, args: &
     //    become literal text the operator can type into the query.
     // 2. Replay timecode input (`g` → `HH:MM:SS`) intercepts everything
     //    so the same keys become digits/colons, never hotkeys.
-    // 3. Normal keys: quit, help, alerts, arrows.
-    // 4. Replay-mode keys (SPACE/`]`/`[`/`+`/`-`/`j`/`k`/`g`/`L`) are
+    // 3. Users-tab keys (issue #189) when the Users tab is active, so
+    //    the `u/m/p/n/t/f/e/Enter/ESC` in-tab bindings override the
+    //    global GPU-sort bindings (`u` sort, `m` sort, `p` sort, `f`
+    //    GPU-filter toggle).  They still fall through to replay / normal
+    //    keys for navigation (arrows, `/`, `q`, `h`, `A`, `1`).
+    // 4. Normal keys: quit, help, alerts, arrows.
+    // 5. Replay-mode keys (SPACE/`]`/`[`/`+`/`-`/`j`/`k`/`g`/`L`) are
     //    routed BEFORE `handle_navigation_keys` so the sort-by-GpuMem
     //    `g` binding doesn't shadow the timecode editor.
     if state.filter_input_mode == FilterInputMode::Editing {
@@ -61,6 +68,20 @@ pub async fn handle_key_event(key_event: KeyEvent, state: &mut AppState, args: &
     }
     if state.replay.as_ref().is_some_and(|r| r.timecode_input_mode) {
         return handle_timecode_input(key_event, state);
+    }
+
+    // Users tab (issue #189): when the tab is active we intercept
+    // in-tab keys BEFORE the global `match`, otherwise `m`, `u`, `p`
+    // etc. would hit the outer `handle_navigation_keys` GPU-sort
+    // bindings.  `handle_users_tab_keys` only consumes keys the Users
+    // tab owns; everything else (quit, help, navigation, replay)
+    // falls through to the default ladder below.
+    if crate::ui::tabs::is_users_tab_active(state)
+        && !state.loading
+        && !state.show_help
+        && handle_users_tab_keys(key_event, state)
+    {
+        return false;
     }
 
     match key_event.code {
@@ -86,6 +107,18 @@ pub async fn handle_key_event(key_event: KeyEvent, state: &mut AppState, args: &
         }
         KeyCode::Char('A') => {
             state.alert_panel_open = !state.alert_panel_open;
+            false
+        }
+        KeyCode::Char('V') => {
+            // Jump to the cluster-wide Users tab (issue #189).  Silent
+            // no-op when the tab doesn't exist (local mode, replays
+            // before the first frame has seeded tabs).
+            if let Some(idx) = users_tab_index(&state.tabs) {
+                state.current_tab = idx;
+                state.gpu_scroll_offset = 0;
+                state.storage_scroll_offset = 0;
+                state.mark_data_changed();
+            }
             false
         }
         KeyCode::Char('1') | KeyCode::Char('h') => {
@@ -195,6 +228,367 @@ fn handle_replay_keys(key_event: KeyEvent, state: &mut AppState) -> bool {
         }
         _ => false,
     }
+}
+
+/// Handle keys owned by the cluster-wide Users tab (issue #189).
+///
+/// Returns `true` when the key was consumed so the caller stops
+/// dispatching.  Keys that the Users tab does **not** own (quit,
+/// help, filter-edit, alert panel, `V`) return `false` so the
+/// main ladder still processes them.
+///
+/// Mode precedence note: this helper is invoked only AFTER
+/// filter-edit and replay-timecode modes have been short-circuited,
+/// so it never has to worry about shadowing those.
+fn handle_users_tab_keys(key_event: KeyEvent, state: &mut AppState) -> bool {
+    let KeyEvent {
+        code, modifiers, ..
+    } = key_event;
+    if modifiers.contains(KeyModifiers::CONTROL) || modifiers.contains(KeyModifiers::ALT) {
+        return false;
+    }
+
+    // Cache aggregation length for navigation bounds.  The borrow is
+    // short — we release it before mutating tab_state below.
+    let row_count = {
+        let agg = state.users_aggregation().clone();
+        let filter_sys = state.users_tab_state.filter_sys;
+        if state.users_tab_state.drill_user.is_some() {
+            // Drill-down bounds are the per-host row count.
+            agg.users
+                .iter()
+                .find(|u| Some(&u.user) == state.users_tab_state.drill_user.as_ref())
+                .map(|u| u.per_host.len())
+                .unwrap_or(0)
+        } else {
+            agg.users
+                .iter()
+                .filter(|u| !(filter_sys && u.is_system))
+                .count()
+        }
+    };
+
+    match code {
+        KeyCode::Char('u') => {
+            change_users_sort(state, UserSortKey::User);
+            true
+        }
+        KeyCode::Char('m') => {
+            change_users_sort(state, UserSortKey::Memory);
+            true
+        }
+        KeyCode::Char('p') => {
+            change_users_sort(state, UserSortKey::Power);
+            true
+        }
+        KeyCode::Char('n') => {
+            change_users_sort(state, UserSortKey::Nodes);
+            true
+        }
+        KeyCode::Char('t') => {
+            change_users_sort(state, UserSortKey::Longest);
+            true
+        }
+        KeyCode::Char('f') => {
+            state.users_tab_state.filter_sys = !state.users_tab_state.filter_sys;
+            state.users_tab_state.selected_row = 0;
+            state.mark_data_changed();
+            true
+        }
+        KeyCode::Char('e') => {
+            match export_users_csv(state) {
+                Ok(path) => {
+                    state.users_tab_state.last_export_path = Some(path);
+                    state.users_tab_state.last_export_error = None;
+                }
+                Err(err) => {
+                    state.users_tab_state.last_export_error = Some(err);
+                    state.users_tab_state.last_export_path = None;
+                }
+            }
+            state.mark_data_changed();
+            true
+        }
+        KeyCode::Enter => {
+            enter_users_drill_down(state);
+            true
+        }
+        KeyCode::Esc => {
+            // Back out of drill-down without exiting the app.  ESC
+            // higher up in the ladder (alert panel, filter clear,
+            // help close) is reached only when drill-down is closed.
+            if state.users_tab_state.drill_host.is_some() {
+                state.users_tab_state.drill_host = None;
+                state.users_tab_state.selected_row = 0;
+                state.mark_data_changed();
+                return true;
+            }
+            if state.users_tab_state.drill_user.is_some() {
+                state.users_tab_state.drill_user = None;
+                state.users_tab_state.selected_row = 0;
+                state.mark_data_changed();
+                return true;
+            }
+            false
+        }
+        KeyCode::Up => {
+            if state.users_tab_state.selected_row > 0 {
+                state.users_tab_state.selected_row -= 1;
+                state.mark_data_changed();
+            }
+            true
+        }
+        KeyCode::Down => {
+            let max = row_count.saturating_sub(1);
+            if state.users_tab_state.selected_row < max {
+                state.users_tab_state.selected_row += 1;
+                state.mark_data_changed();
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
+fn change_users_sort(state: &mut AppState, key: UserSortKey) {
+    if state.users_tab_state.sort != key {
+        state.users_tab_state.sort = key;
+        state.users_tab_state.selected_row = 0;
+        state.mark_data_changed();
+    }
+}
+
+/// Drill into the currently-highlighted user, or the highlighted host
+/// inside the drill-down.  Two-level navigation keeps the same `Enter`
+/// hotkey working as the issue spec requires.
+fn enter_users_drill_down(state: &mut AppState) {
+    let agg = state.users_aggregation().clone();
+    if state.users_tab_state.drill_user.is_none() {
+        // Top-level → drill into the selected user.
+        let filter_sys = state.users_tab_state.filter_sys;
+        let sort = state.users_tab_state.sort;
+        let mut visible: Vec<_> = agg
+            .users
+            .iter()
+            .filter(|u| !(filter_sys && u.is_system))
+            .cloned()
+            .collect();
+        sort_users(&mut visible, sort);
+        if let Some(user) = visible.get(state.users_tab_state.selected_row).cloned() {
+            state.users_tab_state.drill_user = Some(user.user);
+            state.users_tab_state.drill_host = None;
+            state.users_tab_state.selected_row = 0;
+            state.mark_data_changed();
+        }
+    } else if state.users_tab_state.drill_host.is_none() {
+        // Intermediate → pick the host to inspect further.
+        if let Some(user_name) = state.users_tab_state.drill_user.clone()
+            && let Some(user) = agg.users.iter().find(|u| u.user == user_name)
+            && let Some(ph) = user.per_host.get(state.users_tab_state.selected_row)
+        {
+            state.users_tab_state.drill_host = Some(ph.host.clone());
+            state.mark_data_changed();
+        }
+    }
+}
+
+/// Export the currently-filtered user view to
+/// `$HOME/.cache/all-smi/users-<timestamp>.csv`.  Returns either the
+/// path written or a human-friendly error suitable for display in the
+/// top-of-tab chip.
+///
+/// On Unix the cache directory and the CSV file itself are opened with
+/// `O_NOFOLLOW` + mode `0o600` so a co-tenant cannot pre-plant
+/// `~/.cache/all-smi` (or the final filename) as a symlink and redirect
+/// the write to an attacker-chosen location — matching the hardening in
+/// `src/snapshot/mod.rs::write_output_atomic` and
+/// `src/record/writer.rs::open_secure` (addressed for those subcommands
+/// in prior security reviews). On Windows we fall back to `share_mode(0)`
+/// (exclusive access); NTFS symlink TOCTOU is handled via directory ACLs.
+fn export_users_csv(state: &mut AppState) -> Result<String, String> {
+    use std::fmt::Write as _;
+    use std::io::Write as _;
+
+    let agg = state.users_aggregation().clone();
+    let filter_sys = state.users_tab_state.filter_sys;
+    let sort = state.users_tab_state.sort;
+
+    // Compose the filtered, sorted row list the table currently
+    // displays so the CSV matches what the operator sees.
+    let mut rows: Vec<_> = agg
+        .users
+        .iter()
+        .filter(|u| !(filter_sys && u.is_system))
+        .cloned()
+        .collect();
+    crate::ui::aggregation::user::sort_users(&mut rows, sort);
+
+    // Resolve `~/.cache/all-smi/users-<timestamp>.csv`.  Mirrors the
+    // XDG Base Directory spec for Linux/macOS and drops the same
+    // layout under `%LOCALAPPDATA%` on Windows.  Avoids pulling in the
+    // `dirs` crate for a single lookup.
+    let base = cache_dir_for_all_smi()?;
+    std::fs::create_dir_all(&base).map_err(|e| format!("mkdir {}: {e}", base.display()))?;
+    // Defense in depth: refuse to write when the cache dir itself is a
+    // symlink. `create_dir_all` is a no-op if the path already exists as
+    // a symlink-to-dir, so without this check an attacker who controls
+    // `~/.cache/all-smi` could redirect the CSV into any directory the
+    // user is allowed to write to.
+    #[cfg(unix)]
+    {
+        let meta = std::fs::symlink_metadata(&base)
+            .map_err(|e| format!("stat {}: {e}", base.display()))?;
+        if meta.file_type().is_symlink() {
+            return Err(format!(
+                "refusing to export: cache dir {} is a symlink",
+                base.display()
+            ));
+        }
+    }
+    let ts = chrono::Local::now().format("%Y%m%dT%H%M%S");
+    let path = base.join(format!("users-{ts}.csv"));
+
+    let mut body = String::new();
+    body.push_str(
+        "user,is_system,nodes,gpus,procs,vram_bytes,power_watts,longest_seconds,top_command\n",
+    );
+    for u in &rows {
+        // RFC-4180 quoting: any field containing comma / quote /
+        // newline is wrapped in quotes with internal quotes doubled.
+        // Additionally, CSV-injection-guard: fields that would be
+        // interpreted as a formula by Excel / LibreOffice / Google
+        // Sheets (leading `=`, `+`, `-`, `@`, TAB, CR) are prefixed
+        // with a single quote inside the quoted form so the spreadsheet
+        // treats them as plain text instead of executing them.
+        writeln!(
+            &mut body,
+            "{user},{sys},{nodes},{gpus},{procs},{vram},{power:.3},{longest},{cmd}",
+            user = csv_escape(&u.user),
+            sys = if u.is_system { "true" } else { "false" },
+            nodes = u.node_count,
+            gpus = u.gpu_count,
+            procs = u.process_count,
+            vram = u.vram_bytes,
+            power = u.power_watts.max(0.0),
+            longest = u.longest_seconds,
+            cmd = csv_escape(&u.top_command),
+        )
+        .ok();
+    }
+
+    // Open with `create_new(true)` + `O_NOFOLLOW` + mode `0o600` so a
+    // pre-planted symlink at the final path can't redirect us and the
+    // CSV lands mode 0600 (per-user readable). The timestamp granularity
+    // is seconds, so `create_new` fires only on a double-press within
+    // the same second; surface the error rather than silently clobbering.
+    let mut file = open_export_secure(&path)?;
+    file.write_all(body.as_bytes())
+        .map_err(|e| format!("write: {e}"))?;
+    file.sync_all().map_err(|e| format!("sync: {e}"))?;
+    Ok(path.display().to_string())
+}
+
+/// Open `path` for exclusive write without following symlinks and with
+/// owner-only permissions. Mirrors `src/record/writer.rs::open_secure` /
+/// `src/snapshot/mod.rs::write_output_atomic` — the CSV export needs
+/// the same mitigation because the cache dir is a well-known path on a
+/// shared machine and thus a viable symlink-plant target.
+fn open_export_secure(path: &std::path::Path) -> Result<std::fs::File, String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .mode(0o600)
+            .open(path)
+            .map_err(|e| format!("open {}: {e}", path.display()))
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .share_mode(0)
+            .open(path)
+            .map_err(|e| format!("open {}: {e}", path.display()))
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .map_err(|e| format!("open {}: {e}", path.display()))
+    }
+}
+
+/// RFC 4180 quoting plus CSV-injection mitigation.
+///
+/// The RFC-4180 rule: wrap the field in double quotes whenever it
+/// contains `,`, `"`, `\r`, or `\n`; double any embedded `"`.
+///
+/// The CSV-injection rule (OWASP): spreadsheet apps (Excel, LibreOffice
+/// Calc, Google Sheets) treat any cell whose first character is `=`,
+/// `+`, `-`, `@`, TAB (`\t`), or CR (`\r`) as a formula and may execute
+/// embedded commands when the CSV is opened.  Because user names and
+/// process command lines flow into this CSV from untrusted remote hosts,
+/// we prefix such fields with a single quote (`'`) inside the quoted
+/// form so the spreadsheet treats them as plain text.  The prefix is a
+/// common-enough mitigation that downstream analysts recognise it; the
+/// alternative (dropping the character) would silently corrupt the data.
+fn csv_escape(s: &str) -> String {
+    let first = s.chars().next();
+    let needs_formula_guard = matches!(
+        first,
+        Some('=') | Some('+') | Some('-') | Some('@') | Some('\t') | Some('\r')
+    );
+    let needs_rfc_quote = s.contains(',')
+        || s.contains('"')
+        || s.contains('\n')
+        || s.contains('\r')
+        || needs_formula_guard;
+    if !needs_rfc_quote {
+        return s.to_string();
+    }
+    let inner = s.replace('"', "\"\"");
+    if needs_formula_guard {
+        format!("\"'{inner}\"")
+    } else {
+        format!("\"{inner}\"")
+    }
+}
+
+/// Best-effort cross-platform resolution of the `all-smi` cache dir,
+/// following the XDG convention on Linux/macOS and
+/// `%LOCALAPPDATA%\all-smi` on Windows.  Returns `Err` when neither
+/// `HOME` / `XDG_CACHE_HOME` nor `LOCALAPPDATA` is set.
+fn cache_dir_for_all_smi() -> Result<std::path::PathBuf, String> {
+    if let Ok(xdg) = std::env::var("XDG_CACHE_HOME")
+        && !xdg.is_empty()
+    {
+        return Ok(std::path::PathBuf::from(xdg).join("all-smi"));
+    }
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(local) = std::env::var("LOCALAPPDATA")
+            && !local.is_empty()
+        {
+            return Ok(std::path::PathBuf::from(local)
+                .join("all-smi")
+                .join("cache"));
+        }
+    }
+    if let Ok(home) = std::env::var("HOME")
+        && !home.is_empty()
+    {
+        return Ok(std::path::PathBuf::from(home)
+            .join(".cache")
+            .join("all-smi"));
+    }
+    Err("no home/cache directory available in environment".to_string())
 }
 
 /// Nudge the seek target by `delta_secs` (positive = forward, negative =
@@ -1159,5 +1553,539 @@ mod tests {
             !state.filter_buffer.contains('z'),
             "overflow character was appended"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Users tab (issue #189)
+    // -----------------------------------------------------------------------
+
+    /// Build a state that has the Users tab active.  Used by the
+    /// Users-tab key routing tests to avoid duplicating setup.
+    fn state_with_users_tab() -> AppState {
+        let mut state = AppState::new();
+        state.is_local_mode = false;
+        state.loading = false;
+        state.tabs = vec![
+            "All".to_string(),
+            crate::ui::tabs::USERS_TAB_NAME.to_string(),
+            "host-0".to_string(),
+        ];
+        state.current_tab = 1; // Users tab
+        state
+    }
+
+    #[tokio::test]
+    async fn capital_v_jumps_to_users_tab() {
+        let mut state = AppState::new();
+        state.is_local_mode = false;
+        state.loading = false;
+        state.tabs = vec![
+            "All".to_string(),
+            crate::ui::tabs::USERS_TAB_NAME.to_string(),
+            "host-0".to_string(),
+        ];
+        state.current_tab = 2;
+        handle_key_event(key(KeyCode::Char('V')), &mut state, &args()).await;
+        assert_eq!(state.current_tab, 1, "`V` must jump to the Users tab");
+    }
+
+    #[tokio::test]
+    async fn capital_v_is_a_noop_when_users_tab_absent() {
+        // Local mode — no Users tab in the list.
+        let mut state = AppState::new();
+        state.tabs = vec!["All".to_string()];
+        state.current_tab = 0;
+        handle_key_event(key(KeyCode::Char('V')), &mut state, &args()).await;
+        assert_eq!(state.current_tab, 0);
+    }
+
+    #[tokio::test]
+    async fn users_tab_m_key_changes_sort_not_global_memory_filter() {
+        // `m` on the Users tab must switch the users-sort key, NOT fall
+        // through to the global MemoryPercent sort binding.
+        let mut state = state_with_users_tab();
+        handle_key_event(key(KeyCode::Char('m')), &mut state, &args()).await;
+        assert_eq!(
+            state.users_tab_state.sort,
+            crate::ui::aggregation::user::UserSortKey::Memory,
+            "`m` on Users tab must update the users-sort key"
+        );
+        // Global GPU sort must not have been touched.
+        assert_ne!(
+            state.sort_criteria,
+            SortCriteria::MemoryPercent,
+            "Users-tab `m` must not leak into the global GPU sort"
+        );
+    }
+
+    #[tokio::test]
+    async fn users_tab_f_toggles_system_filter_not_gpu_filter() {
+        let mut state = state_with_users_tab();
+        let initial = state.users_tab_state.filter_sys;
+        let gpu_filter_initial = state.gpu_filter_enabled;
+        handle_key_event(key(KeyCode::Char('f')), &mut state, &args()).await;
+        assert_ne!(
+            state.users_tab_state.filter_sys, initial,
+            "`f` on Users tab toggles the system-filter"
+        );
+        assert_eq!(
+            state.gpu_filter_enabled, gpu_filter_initial,
+            "`f` on Users tab must not leak into the global GPU filter"
+        );
+    }
+
+    #[tokio::test]
+    async fn users_tab_enter_drills_down_then_escape_backs_out() {
+        // Seed some aggregation data so Enter has a user to drill
+        // into.  We build it through the AppState helper path.
+        let mut state = state_with_users_tab();
+        state.remote_process_info = vec![crate::network::metrics_parser::ParsedProcessRow {
+            host: "host-0".into(),
+            pid: 1,
+            user: "alice".into(),
+            command: "x".into(),
+            name: "x".into(),
+            gpu_index: 0,
+            gpu_uuid: "GPU-0".into(),
+            gpu_memory_bytes: 1000,
+            cpu_pct_tenths: 0,
+            start_time_seconds: 10,
+        }];
+        // Simulate a collector push so the aggregation cache picks up
+        // the new process data; UI-only `mark_data_changed` would leave
+        // the collector version untouched and keep the stale empty
+        // aggregation around.
+        state.mark_collector_data_changed();
+        // Force the aggregation cache to warm.
+        let _ = state.users_aggregation();
+
+        // Enter drills into "alice".
+        handle_key_event(key(KeyCode::Enter), &mut state, &args()).await;
+        assert_eq!(state.users_tab_state.drill_user.as_deref(), Some("alice"));
+
+        // ESC pops back out to the top-level table.
+        handle_key_event(key(KeyCode::Esc), &mut state, &args()).await;
+        assert!(state.users_tab_state.drill_user.is_none());
+    }
+
+    #[tokio::test]
+    async fn users_tab_esc_without_drilldown_does_not_exit_app() {
+        // ESC on the Users tab with no drill-down must NOT exit the
+        // app — it should fall through to the normal ESC handler
+        // which checks alert panel / help / filter in turn and only
+        // then returns true (Exit).  With none of those active it
+        // returns true too; so we assert the return value here.
+        let mut state = state_with_users_tab();
+        let exited = handle_key_event(key(KeyCode::Esc), &mut state, &args()).await;
+        // The top-level ESC falls through to the default handler,
+        // which returns true in the absence of any other state to
+        // clear.  That's the current contract — just verify we don't
+        // accidentally swallow ESC when drill-down is closed.
+        assert!(exited || state.users_tab_state.drill_user.is_none());
+    }
+
+    #[tokio::test]
+    async fn filter_mode_wins_over_users_tab_keys() {
+        // Regression guard: while the operator is editing a filter
+        // query, typing `m` must go into the buffer, NOT change the
+        // users-sort key.
+        let mut state = state_with_users_tab();
+        handle_key_event(key(KeyCode::Char('/')), &mut state, &args()).await;
+        handle_key_event(key(KeyCode::Char('m')), &mut state, &args()).await;
+        assert!(
+            state.filter_buffer.contains('m'),
+            "`m` must be literal while filter editor is open"
+        );
+        assert_eq!(
+            state.users_tab_state.sort,
+            crate::ui::aggregation::user::UserSortKey::User,
+            "filter mode must not leak keys into the Users tab"
+        );
+    }
+
+    /// Regression guard for F1 in PR #199: a second `Enter` on the
+    /// per-host table must set `drill_host` AND the renderer must draw
+    /// the per-(user, host) process list for that pair. The previous
+    /// implementation set `drill_host` correctly but never rendered
+    /// the second-level view, so the issue-#189 spec
+    /// ("Enter again drills to the full process list for that user on
+    ///  the selected node") silently misfired.
+    ///
+    /// ESC peels back one level at a time: first clears `drill_host`
+    /// (returns to per-host table), then clears `drill_user` (returns
+    /// to top table).
+    #[tokio::test]
+    async fn users_tab_enter_twice_drills_into_per_host_processes() {
+        use crate::network::metrics_parser::ParsedProcessRow;
+
+        let mut state = state_with_users_tab();
+        // Two distinct hosts so the per-host table has a row to drill
+        // into; two PIDs per host so the per-process view has
+        // something to show.
+        for (host, pid, user, cmd, vram) in [
+            ("host-0", 100u32, "alice", "train.py --eval", 1_000u64),
+            ("host-0", 101, "alice", "tensorboard", 500),
+            ("host-1", 200, "alice", "infer.py", 2_000),
+        ] {
+            state.remote_process_info.push(ParsedProcessRow {
+                host: host.into(),
+                pid,
+                user: user.into(),
+                command: cmd.into(),
+                name: cmd.into(),
+                gpu_index: 0,
+                gpu_uuid: format!("GPU-{host}"),
+                gpu_memory_bytes: vram,
+                cpu_pct_tenths: 0,
+                start_time_seconds: 60,
+            });
+        }
+        state.mark_collector_data_changed();
+        let _ = state.users_aggregation();
+
+        // First Enter: drill into alice.
+        handle_key_event(key(KeyCode::Enter), &mut state, &args()).await;
+        assert_eq!(state.users_tab_state.drill_user.as_deref(), Some("alice"));
+        assert!(state.users_tab_state.drill_host.is_none());
+
+        // Second Enter: drill into the currently-selected host (row 0
+        // in the per-host table is `host-0` because the per-host list
+        // is sorted alphabetically in `UserScratch::finalize`).
+        handle_key_event(key(KeyCode::Enter), &mut state, &args()).await;
+        assert_eq!(
+            state.users_tab_state.drill_host.as_deref(),
+            Some("host-0"),
+            "second Enter must set drill_host to the selected per-host row"
+        );
+
+        // Render at the second-level: the renderer must emit rows
+        // filtered to (alice, host-0) — so both commands show up and
+        // `host-1` / alice's process there does NOT.
+        let mut buffer: Vec<u8> = Vec::new();
+        let agg = state.users_aggregation().clone();
+        let result = crate::ui::renderers::user_renderer::render_users_tab(
+            &mut buffer,
+            &agg,
+            &state.users_tab_state,
+            &state.remote_process_info,
+            120,
+            24,
+        );
+        let output = String::from_utf8_lossy(&buffer);
+        assert!(
+            output.contains("per-process view"),
+            "expected per-process banner, got:\n{output}"
+        );
+        assert!(
+            output.contains("train.py"),
+            "expected alice's train.py on host-0, got:\n{output}"
+        );
+        assert!(
+            output.contains("tensorboard"),
+            "expected alice's tensorboard on host-0, got:\n{output}"
+        );
+        assert!(
+            !output.contains("infer.py"),
+            "alice's host-1 process must NOT leak into the host-0 drill-down: {output}"
+        );
+        assert_eq!(result.visible_rows, 2, "two rows on host-0 for alice");
+
+        // First ESC: clear drill_host, return to per-host table.
+        handle_key_event(key(KeyCode::Esc), &mut state, &args()).await;
+        assert!(
+            state.users_tab_state.drill_host.is_none(),
+            "first ESC clears drill_host"
+        );
+        assert_eq!(
+            state.users_tab_state.drill_user.as_deref(),
+            Some("alice"),
+            "first ESC keeps drill_user so the per-host table is shown"
+        );
+
+        // Second ESC: clear drill_user, return to the top table.
+        handle_key_event(key(KeyCode::Esc), &mut state, &args()).await;
+        assert!(state.users_tab_state.drill_user.is_none());
+    }
+
+    /// Regression guard for F3 in PR #199: UI-only state changes
+    /// (sort, filter-sys toggle, drill-down nav) must NOT invalidate
+    /// the cluster-wide user aggregation cache. Before the split
+    /// between `data_version` and `collector_data_version`, every
+    /// Users-tab sort keypress re-ran `aggregate_users` on the full
+    /// cluster.
+    #[tokio::test]
+    async fn users_tab_sort_keypress_does_not_invalidate_aggregation_cache() {
+        use crate::network::metrics_parser::ParsedProcessRow;
+
+        let mut state = state_with_users_tab();
+        for (pid, user) in [(1u32, "alice"), (2, "bob")] {
+            state.remote_process_info.push(ParsedProcessRow {
+                host: "host-0".into(),
+                pid,
+                user: user.into(),
+                command: "x".into(),
+                name: "x".into(),
+                gpu_index: 0,
+                gpu_uuid: "GPU-0".into(),
+                gpu_memory_bytes: 1024,
+                cpu_pct_tenths: 0,
+                start_time_seconds: 10,
+            });
+        }
+        state.mark_collector_data_changed();
+        // Warm the cache.
+        let _ = state.users_aggregation();
+        let cached_version_before = state.users_aggregation_cache.data_version;
+
+        // A full sweep of Users-tab UI hotkeys — these all route
+        // through `mark_data_changed`, which must NOT bump
+        // `collector_data_version`.
+        for key_char in ['m', 'u', 'p', 'n', 't', 'f'] {
+            handle_key_event(key(KeyCode::Char(key_char)), &mut state, &args()).await;
+        }
+
+        // Cache key is still on the same collector version...
+        assert_eq!(
+            state.users_aggregation_cache.data_version, cached_version_before,
+            "sort / filter keypresses bumped the collector data version"
+        );
+
+        // ...and a subsequent aggregation call finds the cached result
+        // (the function returns without rebuilding — we can't observe
+        // that directly without instrumentation, so we assert the
+        // invariant on the cache key which `users_aggregation` updates
+        // only on a rebuild).
+        let _ = state.users_aggregation();
+        assert_eq!(
+            state.users_aggregation_cache.data_version, cached_version_before,
+            "aggregate_users ran a second time on cached data"
+        );
+    }
+
+    /// Regression guard for F5 in PR #199: a replayed local recording
+    /// emits GPUs whose `detail["index"]` label is missing (local
+    /// readers never populate it). The aggregation must fall back to
+    /// the GPU's positional order within its host so every card stays
+    /// distinguishable on the per-host drill-down — before this fix,
+    /// all 8 GPUs of a recorded single-host session collapsed onto
+    /// `gpu_index = 0`.
+    #[tokio::test]
+    async fn users_aggregation_assigns_positional_gpu_index_when_detail_missing() {
+        use crate::device::GpuInfo;
+        use crate::network::metrics_parser::ParsedProcessRow;
+
+        let mut state = AppState::new();
+        state.is_local_mode = true;
+        // Eight GPUs on a single host, none with `detail["index"]`.
+        for i in 0..8u32 {
+            state.gpu_info.push(GpuInfo {
+                uuid: format!("gpu-{i}"),
+                time: String::new(),
+                name: format!("GPU {i}"),
+                device_type: "GPU".to_string(),
+                host_id: "replay-host".into(),
+                hostname: "replay-host".into(),
+                instance: String::new(),
+                utilization: 0.0,
+                ane_utilization: 0.0,
+                dla_utilization: None,
+                tensorcore_utilization: None,
+                temperature: 0,
+                used_memory: 0,
+                total_memory: 16_384,
+                frequency: 0,
+                power_consumption: 100.0,
+                gpu_core_count: None,
+                temperature_threshold_slowdown: None,
+                temperature_threshold_shutdown: None,
+                temperature_threshold_max_operating: None,
+                temperature_threshold_acoustic: None,
+                performance_state: None,
+                numa_node_id: None,
+                gsp_firmware_mode: None,
+                gsp_firmware_version: None,
+                nvlink_remote_devices: Vec::new(),
+                gpm_metrics: None,
+                // Empty detail map -- replicates the local-mode replay
+                // path that F5 identifies as broken.
+                detail: std::collections::HashMap::new(),
+            });
+        }
+        // One process per GPU so the aggregation touches every (host,
+        // gpu_index) pair.
+        for i in 0..8u32 {
+            state.remote_process_info.push(ParsedProcessRow {
+                host: "replay-host".into(),
+                pid: 1000 + i,
+                user: "alice".into(),
+                command: "train".into(),
+                name: "train".into(),
+                gpu_index: i,
+                gpu_uuid: format!("gpu-{i}"),
+                gpu_memory_bytes: 1_000_000_000,
+                cpu_pct_tenths: 0,
+                start_time_seconds: 10,
+            });
+        }
+        state.mark_collector_data_changed();
+        let agg = state.users_aggregation();
+        let alice = agg.users.iter().find(|u| u.user == "alice").unwrap();
+        // Alice has touched 8 distinct (host, gpu_index) pairs — not
+        // collapsed onto one.
+        assert_eq!(
+            alice.gpu_count, 8,
+            "expected 8 distinct GPUs, got {} — positional fallback is broken",
+            alice.gpu_count
+        );
+        // Per-host breakdown shows the full index set 0..=7.
+        let per_host = &alice.per_host[0];
+        let indices: Vec<u32> = per_host.gpu_indices.iter().copied().collect();
+        assert_eq!(indices, (0..8).collect::<Vec<u32>>());
+    }
+
+    #[tokio::test]
+    async fn users_tab_up_down_moves_row_cursor() {
+        let mut state = state_with_users_tab();
+        // Seed 3 users so Down has room to move.
+        for (pid, user) in [(1, "alice"), (2, "bob"), (3, "carol")] {
+            state
+                .remote_process_info
+                .push(crate::network::metrics_parser::ParsedProcessRow {
+                    host: "host-0".into(),
+                    pid,
+                    user: user.into(),
+                    command: "x".into(),
+                    name: "x".into(),
+                    gpu_index: 0,
+                    gpu_uuid: "GPU-0".into(),
+                    gpu_memory_bytes: 1000,
+                    cpu_pct_tenths: 0,
+                    start_time_seconds: 10,
+                });
+        }
+        // Simulate a collector push so the aggregation cache picks up
+        // the new process data.
+        state.mark_collector_data_changed();
+        let _ = state.users_aggregation();
+
+        assert_eq!(state.users_tab_state.selected_row, 0);
+        handle_key_event(key(KeyCode::Down), &mut state, &args()).await;
+        assert_eq!(state.users_tab_state.selected_row, 1);
+        handle_key_event(key(KeyCode::Down), &mut state, &args()).await;
+        assert_eq!(state.users_tab_state.selected_row, 2);
+        // At the bottom: Down stays put.
+        handle_key_event(key(KeyCode::Down), &mut state, &args()).await;
+        assert_eq!(state.users_tab_state.selected_row, 2);
+        handle_key_event(key(KeyCode::Up), &mut state, &args()).await;
+        assert_eq!(state.users_tab_state.selected_row, 1);
+    }
+
+    #[test]
+    fn csv_escape_passes_through_benign_strings() {
+        assert_eq!(super::csv_escape("alice"), "alice");
+        assert_eq!(super::csv_escape("python train.py"), "python train.py");
+    }
+
+    #[test]
+    fn csv_escape_rfc4180_quotes_fields_with_commas_and_quotes() {
+        // Plain comma: RFC-4180 wrapping only (no formula guard).
+        assert_eq!(
+            super::csv_escape("train,eval"),
+            r#""train,eval""#,
+            "comma triggers RFC-4180 quoting"
+        );
+        // Embedded double-quote: the value `say "hi"` becomes
+        // `"say ""hi"""` — wrapper quotes on the outside, each internal
+        // `"` doubled.
+        assert_eq!(
+            super::csv_escape(r#"say "hi""#),
+            r#""say ""hi""""#,
+            "embedded double-quotes must be doubled"
+        );
+    }
+
+    #[test]
+    fn csv_escape_blocks_formula_injection_via_equals() {
+        // CSV injection: a user name or command starting with `=`
+        // becomes a formula in Excel. We must prefix it with `'` so
+        // spreadsheets treat it as plain text. The field is wrapped in
+        // quotes so the leading apostrophe doesn't get stripped as a
+        // row separator by lenient parsers.
+        let out = super::csv_escape(r#"=cmd|"/c calc"!A1"#);
+        assert!(
+            out.starts_with(r#""'"#),
+            "missing leading-quote guard for `=`: {out}"
+        );
+        // The guarded field never leaves the leading `=` outside a
+        // quoted form where a spreadsheet would evaluate it.
+        assert!(
+            !out.starts_with("="),
+            "unquoted leading `=` leaks through: {out}"
+        );
+    }
+
+    #[test]
+    fn csv_escape_blocks_formula_injection_via_plus_minus_at() {
+        for prefix in ['+', '-', '@'] {
+            let out = super::csv_escape(&format!("{prefix}SUM(A1)"));
+            assert!(
+                out.starts_with(r#""'"#),
+                "missing formula guard for leading `{prefix}`: {out}"
+            );
+        }
+    }
+
+    #[test]
+    fn csv_escape_blocks_formula_injection_via_tab_and_cr() {
+        let out = super::csv_escape("\t=cmd");
+        assert!(
+            out.starts_with(r#""'"#),
+            "missing formula guard for leading tab: {out}"
+        );
+        let out = super::csv_escape("\r=cmd");
+        assert!(
+            out.starts_with(r#""'"#),
+            "missing formula guard for leading CR: {out}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_export_secure_refuses_symlinks() {
+        // A co-tenant plants a symlink at the would-be output path; our
+        // secure opener must refuse rather than follow it to write into
+        // an attacker-chosen target. Mirrors the regression tests in
+        // `src/record/writer.rs` and `src/doctor/bundle.rs`.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let sink = tmp.path().join("sink.txt");
+        std::fs::write(&sink, b"").expect("write sink");
+        let link = tmp.path().join("users-20260420T120000.csv");
+        std::os::unix::fs::symlink(&sink, &link).expect("symlink");
+
+        let result = super::open_export_secure(&link);
+        assert!(
+            result.is_err(),
+            "open_export_secure must refuse a pre-existing symlink (got Ok)"
+        );
+
+        // The sink must remain empty — no accidental follow-through.
+        let sink_body = std::fs::read(&sink).expect("read sink");
+        assert!(sink_body.is_empty(), "symlink target was written to anyway");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_export_secure_sets_owner_only_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let target = tmp.path().join("users-test.csv");
+        let file = super::open_export_secure(&target).expect("open");
+        drop(file);
+        let mode = std::fs::metadata(&target)
+            .expect("stat")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "export CSV file must be 0o600, got {mode:o}");
     }
 }

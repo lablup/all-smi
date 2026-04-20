@@ -35,6 +35,77 @@ pub struct ParsedMetrics {
     pub storage_info: Vec<StorageInfo>,
     pub vgpu_info: Vec<VgpuHostInfo>,
     pub mig_info: Vec<MigGpuInfo>,
+    /// Per-process rows parsed from `all_smi_process_*` metric families on
+    /// the remote side. Populated by [`MetricsParser::process_process_metrics`]
+    /// and consumed by the cluster-wide Users tab aggregator (issue #189).
+    /// Empty when the scraped host was not started with `--processes`.
+    pub process_info: Vec<ParsedProcessRow>,
+}
+
+/// One row emitted by the remote metrics parser for each `(host, pid,
+/// gpu_index)` triple. The UI aggregator (see
+/// `src/ui/aggregation/user.rs`) groups these by `user` to build the
+/// cluster-wide Users tab (issue #189).
+///
+/// Rows are keyed by `(host, pid, gpu_index)` — not by `pid` alone —
+/// because:
+/// 1. The same PID on two different hosts refers to two completely
+///    different processes.
+/// 2. A single GPU process on a multi-GPU host may appear once per GPU it
+///    touches, and each appearance carries its own `gpu_index` /
+///    `gpu_memory_bytes` readings.
+///
+/// When `user` is unknown (Windows API mode, scraping a host that did not
+/// attribute the process) we render `?` in the UI and let the aggregator
+/// group it under the synthetic "unattributed" user.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ParsedProcessRow {
+    pub host: String,
+    pub pid: u32,
+    pub user: String,
+    pub command: String,
+    pub name: String,
+    pub gpu_index: u32,
+    pub gpu_uuid: String,
+    pub gpu_memory_bytes: u64,
+    /// CPU percent as an integer tenths-of-percent (e.g. `125` = 12.5 %).
+    /// Keeping it as an integer avoids dragging an `f64` into the
+    /// `PartialEq`/`Eq` bound on this struct — the downstream aggregator
+    /// only uses this for display, never for ranking.
+    pub cpu_pct_tenths: u32,
+    /// Wall-clock seconds since the process started, mirrored from
+    /// `all_smi_process_start_time_seconds`. 0 means "unknown" — the
+    /// aggregator treats unknown as "youngest" so mixed fleets don't
+    /// let unattributed processes win the "LONGEST" column.
+    pub start_time_seconds: u64,
+}
+
+impl ParsedProcessRow {
+    /// Convert a locally-collected [`crate::device::ProcessInfo`] into
+    /// the remote-side row representation.  Used by `view --replay` so
+    /// a recorded session (whose process rows are full `ProcessInfo`
+    /// objects) flows through the cluster-wide Users tab on playback.
+    pub fn from_local_process(process: &crate::device::ProcessInfo, host: &str) -> Self {
+        // `start_time` is a HH:MM:SS-ish elapsed string in local mode.
+        // Reuse the same parser the API exporter uses.
+        let start_seconds =
+            crate::api::metrics::process::ProcessMetricExporter::parse_start_time_seconds_public(
+                &process.start_time,
+            );
+        let cpu_pct_tenths = (process.cpu_percent.max(0.0) * 10.0).round() as u32;
+        Self {
+            host: host.to_string(),
+            pid: process.pid,
+            user: process.user.clone(),
+            command: process.command.clone(),
+            name: process.process_name.clone(),
+            gpu_index: process.device_id as u32,
+            gpu_uuid: process.device_uuid.clone(),
+            gpu_memory_bytes: process.used_memory,
+            cpu_pct_tenths,
+            start_time_seconds: start_seconds,
+        }
+    }
 }
 
 pub struct MetricsParser;
@@ -69,6 +140,12 @@ impl MetricsParser {
         // MIG accumulator — keyed by gpu_uuid for parent host rows, and by
         // (gpu_uuid, mig_instance) for per-instance rows.
         let mut mig_state = MigParseState::new();
+        // Per-process row accumulator (issue #189). Keyed by
+        // `(pid, gpu_index)` so the three metric families (memory,
+        // start-time, cpu-percent) collapse into a single row even though
+        // they arrive on separate lines.
+        let mut process_info_map: HashMap<(u32, u32), ParsedProcessRow> =
+            HashMap::with_capacity(32);
         let mut host_instance_name: Option<String> = None;
 
         for line in text.lines() {
@@ -141,6 +218,21 @@ impl MetricsParser {
                         value,
                         host,
                     );
+                } else if metric_name.starts_with("process_") {
+                    // Cap process rows to keep a pathological scrape from
+                    // turning into an OOM — 50 k rows is two orders of
+                    // magnitude beyond any realistic node (the issue
+                    // target is 100 nodes × 50 procs = 5 k).
+                    const MAX_PROCESS_ROWS: usize = 50_000;
+                    if process_info_map.len() < MAX_PROCESS_ROWS {
+                        self.process_process_metrics(
+                            &mut process_info_map,
+                            &metric_name,
+                            &labels,
+                            value,
+                            host,
+                        );
+                    }
                 }
             }
         }
@@ -163,6 +255,114 @@ impl MetricsParser {
             storage_info: storage_info_map.into_values().collect(),
             vgpu_info: vgpu_state.finish(),
             mig_info: mig_state.finish(),
+            process_info: process_info_map.into_values().collect(),
+        }
+    }
+
+    /// Absorb a single `all_smi_process_*` metric line into the per-PID
+    /// accumulator. Three families are recognised:
+    /// - `process_memory_used_bytes` (gauge, bytes)
+    /// - `process_start_time_seconds` (gauge, seconds since start)
+    /// - `process_cpu_percent` (gauge, %)
+    ///
+    /// Each family shares the same label set — `pid`, `name`, `user`,
+    /// `device_id`, `gpu_index`, `device_uuid`, `command` — so we only
+    /// populate the label-derived fields the first time we see a given
+    /// `(pid, gpu_index)` pair.
+    fn process_process_metrics(
+        &self,
+        process_info_map: &mut HashMap<(u32, u32), ParsedProcessRow>,
+        metric_name: &str,
+        labels: &HashMap<String, String>,
+        value: f64,
+        host: &str,
+    ) {
+        let Some(pid) = labels.get("pid").and_then(|s| s.parse::<u32>().ok()) else {
+            return;
+        };
+        // `gpu_index` is authoritative for the Users tab, but fall back
+        // to `device_id` to stay compatible with any dashboard still
+        // emitting only the legacy label.
+        let gpu_index = labels
+            .get("gpu_index")
+            .and_then(|s| s.parse::<u32>().ok())
+            .or_else(|| labels.get("device_id").and_then(|s| s.parse::<u32>().ok()))
+            .unwrap_or(0);
+
+        let row = process_info_map
+            .entry((pid, gpu_index))
+            .or_insert_with(|| ParsedProcessRow {
+                host: host.to_string(),
+                pid,
+                gpu_index,
+                ..Default::default()
+            });
+
+        // Tighter per-field caps than the generic 1024-byte label
+        // cap applied by `parse_labels`. These limits bound the total
+        // memory the accumulator can hold when a malicious remote host
+        // pushes the 50 000-row process cap with maximum-length labels:
+        // with 50 000 rows × 3 families × ~300 bytes of label content the
+        // accumulator ceiling is ~45 MB per host (vs ~150 MB at the
+        // generic 1024 cap, which would compound to several GB across
+        // 100 hosts). They also match the exporter-side caps in
+        // `src/api/metrics/process.rs` so our own output round-trips
+        // unchanged. Treat an incoming value longer than the cap as
+        // "take the prefix" (truncated at a UTF-8 boundary) — logging
+        // would be too noisy for a per-row hot path.
+        const MAX_COMMAND: usize = 256;
+        const MAX_NAME: usize = 128;
+        const MAX_USER: usize = 128;
+        const MAX_UUID: usize = 128;
+
+        fn utf8_truncate(s: &str, max_len: usize) -> String {
+            if s.len() <= max_len {
+                return s.to_string();
+            }
+            let mut boundary = max_len;
+            while boundary > 0 && !s.is_char_boundary(boundary) {
+                boundary -= 1;
+            }
+            s[..boundary].to_string()
+        }
+
+        // Fill label-derived fields on first sighting. Subsequent lines
+        // for the same (pid, gpu_index) overwrite only when the new
+        // string is non-empty — this keeps a future exporter that
+        // truncates labels on a per-metric basis from wiping a real
+        // value with an empty string.
+        let overwrite_capped = |dst: &mut String, src: Option<&String>, cap: usize| {
+            if let Some(v) = src
+                && !v.is_empty()
+            {
+                *dst = utf8_truncate(v, cap);
+            }
+        };
+        overwrite_capped(&mut row.user, labels.get("user"), MAX_USER);
+        overwrite_capped(&mut row.command, labels.get("command"), MAX_COMMAND);
+        overwrite_capped(&mut row.name, labels.get("name"), MAX_NAME);
+        overwrite_capped(&mut row.gpu_uuid, labels.get("device_uuid"), MAX_UUID);
+
+        match metric_name {
+            "process_memory_used_bytes" => {
+                // Prometheus gauges are doubles on the wire; clamp
+                // negatives (which shouldn't happen but let's not panic
+                // on garbage) and saturate at u64::MAX.
+                let clamped = value.max(0.0).min(u64::MAX as f64) as u64;
+                row.gpu_memory_bytes = clamped;
+            }
+            "process_start_time_seconds" => {
+                let clamped = value.max(0.0).min(u64::MAX as f64) as u64;
+                row.start_time_seconds = clamped;
+            }
+            "process_cpu_percent" => {
+                // Store as tenths of a percent (integer) so the struct
+                // can derive `Eq` without pulling in a float total-order
+                // implementation.
+                let tenths = (value.max(0.0) * 10.0).round() as u32;
+                row.cpu_pct_tenths = tenths;
+            }
+            _ => {}
         }
     }
 
@@ -2281,5 +2481,117 @@ all_smi_cpu_core_utilization{cpu_model="Intel Xeon", instance="node-1", index="0
             "per_core_utilization must be empty when core_id >= MAX_CPU_CORES, got len={}",
             parsed.cpu_info[0].per_core_utilization.len()
         );
+    }
+
+    // ------------------------------------------------------------------
+    // Process metric family (issue #189 - Users tab)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn parser_collects_process_rows_with_all_label_fields() {
+        let parser = create_test_parser();
+        let re = create_test_regex();
+        let host = "dgx-01:10001";
+
+        let text = r#"
+all_smi_process_memory_used_bytes{pid="1234", name="python", user="alice", device_id="0", gpu_index="0", device_uuid="GPU-abc", command="python train.py"} 2000000000
+all_smi_process_start_time_seconds{pid="1234", name="python", user="alice", device_id="0", gpu_index="0", device_uuid="GPU-abc", command="python train.py"} 3723
+all_smi_process_cpu_percent{pid="1234", name="python", user="alice", device_id="0", gpu_index="0", device_uuid="GPU-abc", command="python train.py"} 12.5
+"#;
+        let parsed = parser.parse_metrics(text, host, &re);
+        assert_eq!(parsed.process_info.len(), 1, "one row expected");
+        let row = &parsed.process_info[0];
+        assert_eq!(row.host, host);
+        assert_eq!(row.pid, 1234);
+        assert_eq!(row.user, "alice");
+        assert_eq!(row.gpu_index, 0);
+        assert_eq!(row.gpu_uuid, "GPU-abc");
+        assert_eq!(row.command, "python train.py");
+        assert_eq!(row.name, "python");
+        assert_eq!(row.gpu_memory_bytes, 2_000_000_000);
+        assert_eq!(row.start_time_seconds, 3723);
+        assert_eq!(row.cpu_pct_tenths, 125);
+    }
+
+    #[test]
+    fn parser_groups_process_families_by_pid_and_gpu_index() {
+        // A process touching two GPUs should produce two rows, each with
+        // a distinct `(pid, gpu_index)` key.
+        let parser = create_test_parser();
+        let re = create_test_regex();
+        let host = "dgx-01:10001";
+        let text = r#"
+all_smi_process_memory_used_bytes{pid="42", name="a", user="bob", device_id="0", gpu_index="0", device_uuid="U0", command="a"} 1000
+all_smi_process_memory_used_bytes{pid="42", name="a", user="bob", device_id="1", gpu_index="1", device_uuid="U1", command="a"} 2000
+"#;
+        let parsed = parser.parse_metrics(text, host, &re);
+        assert_eq!(parsed.process_info.len(), 2);
+        let mut mem_by_index: Vec<(u32, u64)> = parsed
+            .process_info
+            .iter()
+            .map(|p| (p.gpu_index, p.gpu_memory_bytes))
+            .collect();
+        mem_by_index.sort();
+        assert_eq!(mem_by_index, vec![(0, 1000), (1, 2000)]);
+    }
+
+    #[test]
+    fn parser_tolerates_missing_user_label() {
+        // Windows API mode may omit the `user` label. The row still
+        // lands with user="" so the aggregator can group it under the
+        // synthetic "unattributed" user.
+        let parser = create_test_parser();
+        let re = create_test_regex();
+        let host = "win-01:10001";
+        let text = r#"
+all_smi_process_memory_used_bytes{pid="99", name="svchost", device_id="0", gpu_index="0", device_uuid="U0", command="svchost"} 5000
+"#;
+        let parsed = parser.parse_metrics(text, host, &re);
+        assert_eq!(parsed.process_info.len(), 1);
+        assert_eq!(parsed.process_info[0].user, "");
+        assert_eq!(parsed.process_info[0].pid, 99);
+    }
+
+    #[test]
+    fn parser_drops_process_rows_without_pid() {
+        // A scrape that omits `pid` from the label set is unusable —
+        // the parser must drop it silently rather than panic.
+        let parser = create_test_parser();
+        let re = create_test_regex();
+        let host = "dgx-01:10001";
+        let text = r#"
+all_smi_process_memory_used_bytes{name="a", user="bob", device_id="0", gpu_index="0", device_uuid="U0", command="a"} 1000
+"#;
+        let parsed = parser.parse_metrics(text, host, &re);
+        assert!(parsed.process_info.is_empty());
+    }
+
+    #[test]
+    fn parser_falls_back_to_device_id_when_gpu_index_missing() {
+        // Backward compatibility: the legacy exporter only emitted
+        // `device_id`. The parser must still key the row correctly.
+        let parser = create_test_parser();
+        let re = create_test_regex();
+        let host = "legacy-01:10001";
+        let text = r#"
+all_smi_process_memory_used_bytes{pid="5", name="a", user="u", device_id="3", device_uuid="U3", command="c"} 1000
+"#;
+        let parsed = parser.parse_metrics(text, host, &re);
+        assert_eq!(parsed.process_info.len(), 1);
+        assert_eq!(parsed.process_info[0].gpu_index, 3);
+    }
+
+    #[test]
+    fn parser_returns_empty_process_list_when_no_process_metrics() {
+        // Hosts without --processes don't emit the family — the parser
+        // must return an empty vec rather than synthesising rows.
+        let parser = create_test_parser();
+        let re = create_test_regex();
+        let host = "no-procs:10001";
+        let text = r#"
+all_smi_gpu_utilization{gpu="NVIDIA A100", instance="node-1", gpu_uuid="GPU-A", gpu_index="0"} 77
+"#;
+        let parsed = parser.parse_metrics(text, host, &re);
+        assert!(parsed.process_info.is_empty());
     }
 }

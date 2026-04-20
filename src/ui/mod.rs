@@ -13,6 +13,7 @@
 // limitations under the License.
 
 pub mod activity_panel;
+pub mod aggregation;
 pub mod alerts;
 pub mod braille;
 pub mod buffer;

@@ -27,6 +27,7 @@ use url::Url;
 use crate::app_state::ConnectionStatus;
 use crate::common::config::{AppConfig, EnvConfig};
 use crate::device::{CpuInfo, GpuInfo, MemoryInfo};
+use crate::network::metrics_parser::ParsedProcessRow;
 use crate::storage::info::StorageInfo;
 
 pub struct NetworkClient {
@@ -275,6 +276,7 @@ impl NetworkClient {
         Vec<StorageInfo>,
         Vec<crate::device::VgpuHostInfo>,
         Vec<crate::device::MigGpuInfo>,
+        Vec<ParsedProcessRow>,
         Vec<ConnectionStatus>,
     ) {
         let mut all_gpu_info = Vec::new();
@@ -283,6 +285,7 @@ impl NetworkClient {
         let mut all_storage_info = Vec::new();
         let mut all_vgpu_info: Vec<crate::device::VgpuHostInfo> = Vec::new();
         let mut all_mig_info: Vec<crate::device::MigGpuInfo> = Vec::new();
+        let mut all_process_info: Vec<ParsedProcessRow> = Vec::new();
         let mut connection_statuses = Vec::new();
 
         // Parallel data collection with concurrency limiting and retries
@@ -438,6 +441,7 @@ impl NetworkClient {
                                     all_storage_info.extend(parsed.storage_info);
                                     all_vgpu_info.extend(parsed.vgpu_info);
                                     all_mig_info.extend(parsed.mig_info);
+                                    all_process_info.extend(parsed.process_info);
                                 }
                             }
                         }
@@ -478,6 +482,7 @@ impl NetworkClient {
             all_storage_info,
             all_vgpu_info,
             all_mig_info,
+            all_process_info,
             connection_statuses,
         )
     }

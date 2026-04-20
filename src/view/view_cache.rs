@@ -404,7 +404,7 @@ mod tests {
         ];
         state.is_local_mode = false;
         state.mark_data_changed();
-        RenderSnapshot::capture(&state)
+        RenderSnapshot::capture(&mut state)
     }
 
     // ------------------------------------------------------------------
@@ -482,7 +482,7 @@ mod tests {
             });
         }
         state.mark_data_changed();
-        let snap1 = RenderSnapshot::capture(&state);
+        let snap1 = RenderSnapshot::capture(&mut state);
 
         let mut cache = ViewCache::new();
         cache.update(&snap1);
@@ -490,7 +490,7 @@ mod tests {
 
         // Bump version
         state.mark_data_changed();
-        let snap2 = RenderSnapshot::capture(&state);
+        let snap2 = RenderSnapshot::capture(&mut state);
         assert!(
             cache.update(&snap2),
             "cache should invalidate on data_version change"
@@ -509,7 +509,7 @@ mod tests {
         state.tabs = snapshot.tabs.clone();
         state.current_tab = 1; // host-a
         state.data_version = snapshot.data_version;
-        let snap2 = RenderSnapshot::capture(&state);
+        let snap2 = RenderSnapshot::capture(&mut state);
 
         assert!(
             cache.update(&snap2),
@@ -537,7 +537,7 @@ mod tests {
         state.tabs = snapshot.tabs.clone();
         state.sort_criteria = SortCriteria::Utilization;
         state.data_version = snapshot.data_version;
-        let snap2 = RenderSnapshot::capture(&state);
+        let snap2 = RenderSnapshot::capture(&mut state);
 
         assert!(
             cache.update(&snap2),
@@ -575,7 +575,7 @@ mod tests {
             threads: 1,
             uses_gpu: false,
         });
-        let snapshot = RenderSnapshot::capture(&state);
+        let snapshot = RenderSnapshot::capture(&mut state);
         let mut cache = ViewCache::new();
         cache.update(&snapshot);
 
@@ -636,7 +636,7 @@ mod tests {
             threads: 1,
             uses_gpu: false,
         });
-        let snapshot = RenderSnapshot::capture(&state);
+        let snapshot = RenderSnapshot::capture(&mut state);
         let mut cache = ViewCache::new();
         cache.update(&snapshot);
 
@@ -691,7 +691,7 @@ mod tests {
             utilization: 50.0,
             time: "".into(),
         });
-        let snapshot = RenderSnapshot::capture(&state);
+        let snapshot = RenderSnapshot::capture(&mut state);
         let mut cache = ViewCache::new();
         cache.update(&snapshot);
 
@@ -726,7 +726,7 @@ mod tests {
             per_core_utilization: Vec::new(),
             time: "".into(),
         });
-        let snapshot = RenderSnapshot::capture(&state);
+        let snapshot = RenderSnapshot::capture(&mut state);
         let mut cache = ViewCache::new();
         cache.update(&snapshot);
 
@@ -761,7 +761,7 @@ mod tests {
             available_bytes: 512,
             index: 0,
         });
-        let snapshot = RenderSnapshot::capture(&state);
+        let snapshot = RenderSnapshot::capture(&mut state);
         let mut cache = ViewCache::new();
         cache.update(&snapshot);
 

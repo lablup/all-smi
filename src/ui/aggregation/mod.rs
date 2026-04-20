@@ -1,5 +1,3 @@
-//! Platform-specific mock template generators
-
 // Copyright 2025 Lablup Inc. and Jeongkyu Shin
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -14,18 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod amd_gpu;
-pub mod apple_silicon;
-pub mod common;
-pub mod disk;
-pub mod furiosa;
-pub mod gaudi;
-pub mod jetson;
-pub mod mig;
-pub mod nvidia;
-pub mod process;
-pub mod rebellions;
-pub mod tenstorrent;
-pub mod vgpu;
+//! Cluster-wide aggregation primitives for the remote `view`.
+//!
+//! The submodules here take already-parsed per-host records (see
+//! `src/network/metrics_parser.rs`) and collapse them into operator-facing
+//! summaries without touching the terminal or the UI loop.  Keeping the
+//! math in a pure-function module makes the Users tab (issue #189) easy
+//! to unit-test independently of the rendering path.
 
-// Re-export commonly used items
+pub mod user;

@@ -221,6 +221,28 @@ impl FrameRenderer {
             draw_tabs(&mut buffer, &view_state, cols);
         }
 
+        // Users tab (issue #189) owns its own section and skips the
+        // normal GPU / chassis / device pipeline.  The tab is only
+        // present in remote / replay mode; local mode never inserts
+        // the `"Users"` entry into `AppState::tabs`.
+        let on_users_tab = is_users_tab_selected(snapshot);
+        if on_users_tab {
+            // Budget: rows minus function-key footer minus the 4-row
+            // heading we already printed above.
+            let heading_rows = buffer.line_count() as u16;
+            let avail = rows.saturating_sub(heading_rows).saturating_sub(1).max(1);
+            crate::ui::renderers::user_renderer::render_users_tab(
+                &mut buffer,
+                &snapshot.users_aggregation,
+                &snapshot.users_tab_state,
+                &snapshot.remote_process_info,
+                cols,
+                avail,
+            );
+            print_function_keys(&mut buffer, cols, rows, &view_state, is_remote);
+            return (buffer.get_buffer().to_string(), 0);
+        }
+
         // Render chassis information (node-level metrics)
         Self::render_chassis_section(&mut buffer, snapshot, width, cache);
 
@@ -796,6 +818,18 @@ impl FrameRenderer {
     }
 }
 
+/// True when the snapshot's current tab is the cluster-wide Users tab
+/// (issue #189).  Kept outside of [`FrameRenderer`] so it can be used
+/// by tests and `render_main` alike without plumbing a snapshot through
+/// multiple call sites.
+fn is_users_tab_selected(snapshot: &RenderSnapshot) -> bool {
+    snapshot
+        .tabs
+        .get(snapshot.current_tab)
+        .map(|t| t == crate::ui::tabs::USERS_TAB_NAME)
+        .unwrap_or(false)
+}
+
 /// Locate the [`crate::device::VgpuHostInfo`] record matching a given GPU row.
 ///
 /// Build an O(1) lookup map from `gpu_uuid` to index in the vGPU info slice.
@@ -886,8 +920,8 @@ mod tests {
     }
 
     fn make_snapshot() -> RenderSnapshot {
-        let state = AppState::new();
-        RenderSnapshot::capture(&state)
+        let mut state = AppState::new();
+        RenderSnapshot::capture(&mut state)
     }
 
     // -----------------------------------------------------------------------
@@ -925,7 +959,7 @@ mod tests {
         state
             .startup_status_lines
             .push("Connecting to GPUs...".to_string());
-        let snapshot = RenderSnapshot::capture(&state);
+        let snapshot = RenderSnapshot::capture(&mut state);
         // Should not panic and produce output with the status line.
         let output = FrameRenderer::render_loading(&snapshot, false, 80, 24);
         assert!(!output.is_empty());

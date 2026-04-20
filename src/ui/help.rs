@@ -186,6 +186,7 @@ fn render_shortcuts_section(
             "shortcut",
         ),
         ("  A", "Toggle alert history panel", "shortcut"),
+        ("  V", "Jump to cluster-wide Users tab (remote)", "shortcut"),
         ("  Q", "Exit application", "shortcut"),
         ("  ESC", "Close help / clear filter / exit", "shortcut"),
         ("", "", ""),
@@ -200,6 +201,28 @@ fn render_shortcuts_section(
         left_column.extend(vec![
             ("  P", "Sort processes by PID", "shortcut"),
             ("  M", "Sort processes by memory", "shortcut"),
+        ]);
+    }
+
+    // Users-tab keybindings (issue #189).  Only emitted in remote /
+    // replay modes; the tab itself doesn't exist in local mode.
+    if is_remote || state.replay.is_some() {
+        left_column.extend(vec![
+            ("", "", ""),
+            ("Users tab (V):", "", "header"),
+            ("  u", "Sort by username (default)", "shortcut"),
+            ("  m", "Sort by total GPU memory", "shortcut"),
+            ("  p", "Sort by total power (derived)", "shortcut"),
+            ("  n", "Sort by node count", "shortcut"),
+            ("  t", "Sort by oldest process start time", "shortcut"),
+            ("  Enter", "Drill down on the selected user", "shortcut"),
+            (
+                "  ESC",
+                "Exit drill-down (or close if top-level)",
+                "shortcut",
+            ),
+            ("  f", "Toggle system-account filter (uid<1000)", "shortcut"),
+            ("  e", "Export visible table to CSV", "shortcut"),
         ]);
     }
 

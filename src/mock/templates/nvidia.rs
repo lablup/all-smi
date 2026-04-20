@@ -121,6 +121,17 @@ impl NvidiaMockGenerator {
             gpus,
         );
 
+        // Optional per-process rows — gated by
+        // `ALL_SMI_MOCK_PROCESSES` (issue #189).  Populates the
+        // cluster-wide Users tab with synthetic owners so operators
+        // can exercise the feature against a mock cluster without
+        // enabling `--processes` on every node.
+        crate::mock::templates::process::maybe_add_process_template(
+            &mut template,
+            &self.instance_name,
+            gpus,
+        );
+
         template
     }
 

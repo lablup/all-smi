@@ -405,6 +405,7 @@ Stable check IDs (greppable across versions):
   - Filtering: 'f' (toggle GPU process filter - show only processes with GPU memory usage)
   - Query filter: '/' (open query bar), 'Ctrl-R' (recall last query), 'ESC' (clear)
   - Alerts: 'A' (toggle alert history panel)
+  - Users tab: 'V' (jump to cluster-wide user aggregation tab)
   - Interface: '1'/'h' (help), 'q' (quit), ESC (close help)
 - **Visual Design:**
   - Color-coded status: Green (≤60%), Yellow (60-80%), Red (>80%)
@@ -412,6 +413,68 @@ Stable check IDs (greppable across versions):
   - Responsive layout adapting to terminal size
   - Double-buffered rendering for flicker-free display
 - **Help System:** Context-sensitive help with all keyboard shortcuts
+
+### Cluster-Wide Users Tab (`V`)
+
+Remote `view` mode adds a **Users** tab that aggregates per-process metrics
+across every scraped host so operators can answer "who is using the cluster
+and how much?" at a glance. Enable per-host process collection with
+`all-smi api --processes` on every node, then press `V` in the remote view to
+jump to the tab (it sits right after `All` in the tab row and is cycled by the
+arrow keys).
+
+Columns:
+
+| Column | Meaning |
+| --- | --- |
+| `USER` | Username from the per-process metrics (`?` when a host emits rows without `user` labels, e.g. Windows API mode) |
+| `NODES` | Distinct hosts the user has at least one process on |
+| `GPUs` | Distinct `(host, gpu_index)` pairs the user touches |
+| `PROCS` | Distinct `(host, pid)` pairs — the same PID on two hosts counts as two processes |
+| `VRAM` | Sum of GPU memory across all of the user's processes |
+| `POWER*` | Weighted power approximation (see below) |
+| `LONGEST` | Oldest `TIME+` value across the user's processes |
+| `CMD (top-1 by GPU mem)` | Command owning the largest VRAM row |
+
+**Power approximation.** `POWER*` is computed as
+
+```
+sum_over_gpus(
+  gpu.power × (user_vram_on_gpu / total_vram_on_gpu_across_all_users)
+)
+```
+
+per GPU the user touches, summed across GPUs. The formula is an
+approximation because `nvidia-smi`/NVML does not report per-process power
+directly; we proxy it with the user's share of VRAM on each GPU. The value
+is clamped to ≥ 0 to guard against race conditions where the sum of process
+VRAM exceeds the GPU's reported `memory_used`. The `*` in the header marks
+the column as approximate.
+
+**In-tab keybindings**
+
+- `u` sort by username (default)
+- `m` sort by total GPU memory
+- `p` sort by total power (derived)
+- `n` sort by node count
+- `t` sort by oldest process start time (`LONGEST`)
+- `Enter` drill down into the highlighted user (per-host breakdown)
+- `Enter` again drills into the host for the selected user (process list)
+- `ESC` exits drill-down (ESC outside drill-down returns to normal handling)
+- `f` toggles the system-account filter (hides `root`/`uid<1000` by default)
+- `e` exports the current visible table to
+  `~/.cache/all-smi/users-<timestamp>.csv`
+
+**Partial coverage.** When some hosts report `--processes` data and others
+don't, the tab shows a yellow chip `⚠ partial coverage: M of N nodes reporting
+process data` so operators don't misread the numbers. If zero hosts report
+process data, the tab renders a hint pointing at the `--processes` flag
+instead of an empty table.
+
+Mock clusters can exercise the tab without real hosts by setting
+`ALL_SMI_MOCK_PROCESSES=1`, which makes every synthetic node emit a small
+rotation of users and commands through the `all_smi_process_*` metric
+families.
 
 ### Filtering & Alerts
 
@@ -481,6 +544,27 @@ threshold}` JSON with a 2-second timeout, fire-and-forget.
   a bracketed-paste of large text from turning every keystroke into an
   unbounded O(n) re-parse. The lexer independently rejects inputs exceeding
   16 KiB as an additional safeguard for any programmatic caller.
+- **Users tab CSV export (`e`) — symlink refusal**: The export file is
+  opened with `O_NOFOLLOW` and mode `0600`. On a shared machine a co-tenant
+  could pre-plant `~/.cache/all-smi` or the final filename as a symlink to
+  redirect the write to an arbitrary path. This is refused: any pre-existing
+  symlink at either the cache directory path or the timestamped filename
+  causes the export to fail with an error rather than follow the link.
+  Windows falls back to `share_mode(0)` (exclusive access).
+- **Users tab CSV export — formula injection mitigation**: Usernames and
+  command lines in the exported CSV come from untrusted remote hosts.
+  Spreadsheet applications (Excel, LibreOffice Calc, Google Sheets) treat
+  cells whose first character is `=`, `+`, `-`, `@`, TAB, or CR as formula
+  expressions and may execute embedded commands when the file is opened.
+  All such fields are quoted per RFC 4180 and prefixed with a single quote
+  (`'`) inside the quoted value so the spreadsheet treats them as plain text.
+- **Process label caps in the remote parser**: The Prometheus scrape parser
+  enforces per-field length limits on process-metric labels received from
+  remote hosts — `user` and `command` are capped at 128 and 256 bytes
+  respectively (truncated at a UTF-8 boundary), and the global label parser
+  rejects any string longer than 1024 bytes per key or value and any metric
+  block with more than 100 labels. This bounds the memory a malicious host
+  can consume via the `all_smi_process_*` metric families.
 
 ### Development & Testing
 - **Mock Server:** Built-in mock server for testing and development
@@ -876,7 +960,7 @@ See the [LICENSE](./LICENSE) file for details.
 ## Changelog
 
 ### Recent Updates
-- **v0.21.0 (upcoming):** **BREAKING**: Rename Prometheus GPU labels `index`→`gpu_index` and `uuid`→`gpu_uuid` across all NVIDIA-specific metrics (pcie, thermal thresholds, performance state, hardware details, vGPU, MIG); also rename `index`→`npu_index` and `uuid`→`npu_uuid` across all non-NVIDIA NPU exporters (Tenstorrent, Rebellions, Furiosa, Gaudi, Google TPU) and NPU mock templates; remote parser accepts both old and new label names for backward compatibility during migration. Add NVIDIA vGPU SR-IOV monitoring — per-vGPU utilization, framebuffer memory, scheduler state, and host mode exported as Prometheus metrics; TUI renders per-GPU vGPU sub-sections; remote parser reconstructs vGPU view from scraped metrics; mock server can simulate vGPU data via `ALL_SMI_MOCK_VGPU=1`. Add NVIDIA extended thermal monitoring — slowdown, shutdown, max-operating, and acoustic temperature thresholds exported as Prometheus metrics; TUI shows per-GPU thermal row with proximity highlighting (yellow within 5°C of slowdown, red within 2°C of shutdown); P-state (P0–P15) surfaced in TUI and metrics; all fields degrade gracefully to `None` on older drivers or non-NVIDIA hardware. Add NVIDIA MIG (Multi-Instance GPU) monitoring — per-GPU MIG mode status and per-MIG-instance SM utilization, memory bandwidth utilization, and framebuffer used/total bytes exported as Prometheus metrics; TUI renders MIG instances as nested rows under each parent GPU; remote parser reconstructs MIG view from scraped metrics; mock server can simulate MIG data via `ALL_SMI_MOCK_MIG=1`. Add NVIDIA extended hardware details — NUMA node ID, GSP firmware mode and version, NvLink remote endpoint classification per active link, and GPM SM occupancy and memory bandwidth utilization exported as Prometheus metrics; TUI shows compact HW row per GPU with NUMA node, GSP state, and NvLink count; all fields degrade gracefully to absent on older drivers, non-NVIDIA hardware, or hosts without NUMA topology. Add `snapshot` subcommand — one-shot JSON/CSV/Prometheus export to stdout or file without starting a long-running server, with multi-sample collection (`--samples`/`--interval`), `--query` dot-path column selection for CSV, symlink-safe atomic file writes (Unix `O_NOFOLLOW` + mode `0600`), blocking-pool cap, and NaN/Inf float sanitization. Add `record` subcommand and `view --replay` — capture a live metric stream to a compressed NDJSON file (plain, gzip, zstd; rotating segments; local and remote sources) and play it back through the exact same TUI for post-hoc incident investigation; replay supports play/pause, per-frame stepping, speed cycling (0.25x–8x), ±10s seeks, timecode jumps, and loop mode; security hardening includes O_NOFOLLOW symlink refusal on the writer, 16 MiB per-line cap and 128 MiB zstd window ceiling on the reader, and bounded host-list and frame-cache limits; add interactive filter query bar (`/`) with DSL supporting field comparisons, range checks, and host-name pattern matching; add threshold alert history panel (`A`). Add `doctor` subcommand — read-only suite of 51 environment checks across 14 categories (platform, privileges, container, nvidia, amd, apple, gaudi, tpu, tenstorrent, rebellions, furiosa, windows, env, network) with stable dotted check IDs, parallel execution, 3-second per-check timeout, PASS/WARN/FAIL/SKIP report in human and JSON formats, and `--bundle` support-archive packer with O_NOFOLLOW symlink refusal, 0o600 owner-only permissions, secret-value redaction, and network-identifier scrubbing.
+- **v0.21.0 (upcoming):** Add cluster-wide Users tab (`V` key in remote `view` mode) — aggregates per-process metrics across all scraped hosts into a single table with columns USER, NODES, GPUs, PROCS, VRAM, POWER* (weighted approximation), LONGEST, and CMD; in-tab keys u/m/p/n/t for sorting, Enter for two-level drill-down (user → host → process list), ESC to exit drill-down, f to toggle system-account filter (uid<1000), and e to export the visible table to `~/.cache/all-smi/users-<timestamp>.csv`; partial-coverage chip warns when only a subset of hosts report `--processes` data; mock support via `ALL_SMI_MOCK_PROCESSES=1`; CSV export hardened with O_NOFOLLOW + mode 0600 symlink refusal, RFC 4180 quoting, and formula-injection mitigation; remote parser enforces per-field label caps for process metrics. **BREAKING**: Rename Prometheus GPU labels `index`→`gpu_index` and `uuid`→`gpu_uuid` across all NVIDIA-specific metrics (pcie, thermal thresholds, performance state, hardware details, vGPU, MIG); also rename `index`→`npu_index` and `uuid`→`npu_uuid` across all non-NVIDIA NPU exporters (Tenstorrent, Rebellions, Furiosa, Gaudi, Google TPU) and NPU mock templates; remote parser accepts both old and new label names for backward compatibility during migration. Add NVIDIA vGPU SR-IOV monitoring — per-vGPU utilization, framebuffer memory, scheduler state, and host mode exported as Prometheus metrics; TUI renders per-GPU vGPU sub-sections; remote parser reconstructs vGPU view from scraped metrics; mock server can simulate vGPU data via `ALL_SMI_MOCK_VGPU=1`. Add NVIDIA extended thermal monitoring — slowdown, shutdown, max-operating, and acoustic temperature thresholds exported as Prometheus metrics; TUI shows per-GPU thermal row with proximity highlighting (yellow within 5°C of slowdown, red within 2°C of shutdown); P-state (P0–P15) surfaced in TUI and metrics; all fields degrade gracefully to `None` on older drivers or non-NVIDIA hardware. Add NVIDIA MIG (Multi-Instance GPU) monitoring — per-GPU MIG mode status and per-MIG-instance SM utilization, memory bandwidth utilization, and framebuffer used/total bytes exported as Prometheus metrics; TUI renders MIG instances as nested rows under each parent GPU; remote parser reconstructs MIG view from scraped metrics; mock server can simulate MIG data via `ALL_SMI_MOCK_MIG=1`. Add NVIDIA extended hardware details — NUMA node ID, GSP firmware mode and version, NvLink remote endpoint classification per active link, and GPM SM occupancy and memory bandwidth utilization exported as Prometheus metrics; TUI shows compact HW row per GPU with NUMA node, GSP state, and NvLink count; all fields degrade gracefully to absent on older drivers, non-NVIDIA hardware, or hosts without NUMA topology. Add `snapshot` subcommand — one-shot JSON/CSV/Prometheus export to stdout or file without starting a long-running server, with multi-sample collection (`--samples`/`--interval`), `--query` dot-path column selection for CSV, symlink-safe atomic file writes (Unix `O_NOFOLLOW` + mode `0600`), blocking-pool cap, and NaN/Inf float sanitization. Add `record` subcommand and `view --replay` — capture a live metric stream to a compressed NDJSON file (plain, gzip, zstd; rotating segments; local and remote sources) and play it back through the exact same TUI for post-hoc incident investigation; replay supports play/pause, per-frame stepping, speed cycling (0.25x–8x), ±10s seeks, timecode jumps, and loop mode; security hardening includes O_NOFOLLOW symlink refusal on the writer, 16 MiB per-line cap and 128 MiB zstd window ceiling on the reader, and bounded host-list and frame-cache limits; add interactive filter query bar (`/`) with DSL supporting field comparisons, range checks, and host-name pattern matching; add threshold alert history panel (`A`). Add `doctor` subcommand — read-only suite of 51 environment checks across 14 categories (platform, privileges, container, nvidia, amd, apple, gaudi, tpu, tenstorrent, rebellions, furiosa, windows, env, network) with stable dotted check IDs, parallel execution, 3-second per-check timeout, PASS/WARN/FAIL/SKIP report in human and JSON formats, and `--bundle` support-archive packer with O_NOFOLLOW symlink refusal, 0o600 owner-only permissions, secret-value redaction, and network-identifier scrubbing.
 - **v0.20.1 (2026/04/10):** Fix local header metric row jitter by using fixed-width formatted fields; auto-promote pre-release to release in CI
 - **v0.20.0 (2026/04/10):** Redesign local-mode TUI with Activity panel featuring braille sparklines, CPU per-core view, host summary bar, and per-node LED grid; add Apple M5 Pro/Max Super core (S-CPU) support
 - **v0.19.0 (2026/04/08):** Fix Apple Silicon SMC float decoding to restore real CPU/GPU die temperatures, cache platform detection to avoid per-frame system_profiler on macOS, and fix TIME+/Command column alignment in process list

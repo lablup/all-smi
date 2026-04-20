@@ -23,11 +23,14 @@ use std::collections::HashMap;
 
 use crate::app_state::{
     AppState, ConnectionStatus, FilterInputMode, ReplayState, SortCriteria, SortDirection,
+    UsersTabState,
 };
 use crate::device::{
     ChassisInfo, CpuInfo, GpuInfo, MemoryInfo, MigGpuInfo, ProcessInfo, VgpuHostInfo,
 };
+use crate::network::metrics_parser::ParsedProcessRow;
 use crate::storage::info::StorageInfo;
+use crate::ui::aggregation::user::UserAggregationResult;
 use crate::ui::alerts::{AlertTransition, Alerter};
 use crate::ui::filter_dsl::Expr as FilterExpr;
 use crate::ui::notification::NotificationManager;
@@ -125,6 +128,10 @@ pub struct RenderSnapshot {
 
     // Data version for change detection
     pub data_version: u64,
+    /// Collector-only data version. Keys the Users-tab aggregation
+    /// cache so UI-only state changes (sort/filter/drill) do not
+    /// invalidate it.
+    pub collector_data_version: u64,
 
     // Filter state (issue #186)
     pub filter_query: Option<FilterExpr>,
@@ -142,6 +149,17 @@ pub struct RenderSnapshot {
 
     // Replay state (issue #187)
     pub replay: Option<ReplayState>,
+
+    // Users tab (issue #189)
+    /// Per-process rows from the remote `all_smi_process_*` families.
+    /// Used only when the aggregation cache is cold; in steady state the
+    /// pre-computed `users_aggregation` below is the read path.
+    pub remote_process_info: Vec<ParsedProcessRow>,
+    pub users_tab_state: UsersTabState,
+    /// Pre-computed aggregation copied out of the app state while the
+    /// lock is held.  Cloning the result (small: one vector per user)
+    /// keeps the render path lock-free.
+    pub users_aggregation: UserAggregationResult,
 }
 
 impl RenderSnapshot {
@@ -152,7 +170,11 @@ impl RenderSnapshot {
     ///
     /// History VecDeques are converted to Vec to avoid cloning the deque
     /// ring-buffer internals; the rendering path only iterates forward.
-    pub fn capture(state: &AppState) -> Self {
+    pub fn capture(state: &mut AppState) -> Self {
+        // Materialise the memoised user aggregation while we still hold
+        // the lock so the render path never has to.  `users_aggregation`
+        // is a no-op after the first call per data_version.
+        let users_aggregation = state.users_aggregation().clone();
         Self {
             // Flags -- Copy types, no allocation
             show_help: state.show_help,
@@ -219,6 +241,7 @@ impl RenderSnapshot {
 
             // Data version
             data_version: state.data_version,
+            collector_data_version: state.collector_data_version,
 
             // Filter state (issue #186)
             filter_query: state.filter_query.clone(),
@@ -236,6 +259,11 @@ impl RenderSnapshot {
 
             // Replay state (issue #187)
             replay: state.replay.clone(),
+
+            // Users tab (issue #189)
+            remote_process_info: state.remote_process_info.clone(),
+            users_tab_state: state.users_tab_state.clone(),
+            users_aggregation,
         }
     }
 
@@ -316,6 +344,7 @@ impl RenderSnapshot {
 
         // Data version
         state.data_version = self.data_version;
+        state.collector_data_version = self.collector_data_version;
 
         // Filter + alerter state (issue #186)
         state.filter_query = self.filter_query.clone();
@@ -331,6 +360,14 @@ impl RenderSnapshot {
 
         // Replay state (issue #187)
         state.replay = self.replay.clone();
+
+        // Users tab (issue #189)
+        state.remote_process_info = self.remote_process_info.clone();
+        state.users_tab_state = self.users_tab_state.clone();
+        state.users_aggregation_cache = crate::app_state::UsersAggregationCache {
+            data_version: Some(self.collector_data_version),
+            result: self.users_aggregation.clone(),
+        };
 
         state
     }
@@ -348,7 +385,7 @@ mod tests {
         state.is_local_mode = true;
         state.gpu_filter_enabled = true;
 
-        let snapshot = RenderSnapshot::capture(&state);
+        let snapshot = RenderSnapshot::capture(&mut state);
 
         assert!(snapshot.show_help);
         assert!(!snapshot.loading);
@@ -363,7 +400,7 @@ mod tests {
         state.current_tab = 1;
         state.tab_scroll_offset = 0;
 
-        let snapshot = RenderSnapshot::capture(&state);
+        let snapshot = RenderSnapshot::capture(&mut state);
 
         assert_eq!(snapshot.tabs.len(), 3);
         assert_eq!(snapshot.current_tab, 1);
@@ -378,7 +415,7 @@ mod tests {
         state.selected_process_index = 10;
         state.process_horizontal_scroll_offset = 20;
 
-        let snapshot = RenderSnapshot::capture(&state);
+        let snapshot = RenderSnapshot::capture(&mut state);
 
         assert_eq!(snapshot.gpu_scroll_offset, 5);
         assert_eq!(snapshot.storage_scroll_offset, 3);
@@ -392,7 +429,7 @@ mod tests {
         state.sort_criteria = SortCriteria::Utilization;
         state.sort_direction = SortDirection::Ascending;
 
-        let snapshot = RenderSnapshot::capture(&state);
+        let snapshot = RenderSnapshot::capture(&mut state);
 
         assert_eq!(snapshot.sort_criteria, SortCriteria::Utilization);
         assert_eq!(snapshot.sort_direction, SortDirection::Ascending);
@@ -404,7 +441,7 @@ mod tests {
         state.mark_data_changed();
         state.mark_data_changed();
 
-        let snapshot = RenderSnapshot::capture(&state);
+        let snapshot = RenderSnapshot::capture(&mut state);
         assert_eq!(snapshot.data_version, 2);
     }
 
@@ -415,7 +452,7 @@ mod tests {
         state.utilization_history.push_back(75.0);
         state.memory_history.push_back(40.0);
 
-        let snapshot = RenderSnapshot::capture(&state);
+        let snapshot = RenderSnapshot::capture(&mut state);
 
         assert_eq!(snapshot.utilization_history, vec![50.0, 75.0]);
         assert_eq!(snapshot.memory_history, vec![40.0]);
@@ -427,7 +464,7 @@ mod tests {
         state.current_tab = 0;
         state.gpu_scroll_offset = 5;
 
-        let snapshot = RenderSnapshot::capture(&state);
+        let snapshot = RenderSnapshot::capture(&mut state);
 
         // Mutate source state after snapshot
         state.current_tab = 2;
@@ -448,7 +485,7 @@ mod tests {
         state.data_version = 42;
         state.utilization_history.push_back(60.0);
 
-        let snapshot = RenderSnapshot::capture(&state);
+        let snapshot = RenderSnapshot::capture(&mut state);
         let restored = snapshot.as_app_state();
 
         assert!(restored.show_help);

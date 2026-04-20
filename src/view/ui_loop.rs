@@ -248,8 +248,11 @@ impl UiLoop {
                 self.last_render_time = now;
                 needs_render = false;
 
-                // Capture snapshot while still holding the lock
-                let snapshot = RenderSnapshot::capture(&state);
+                // Capture snapshot while still holding the lock.
+                // `capture` takes `&mut state` so it can materialise
+                // the memoised user-aggregation (issue #189) under the
+                // lock exactly once per data_version.
+                let snapshot = RenderSnapshot::capture(&mut state);
 
                 // Update previous-state tracking
                 self.previous_show_help = state.show_help;

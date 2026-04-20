@@ -442,6 +442,8 @@ impl LocalCollector {
             vgpu_info: all_vgpu_info,
             mig_info: all_mig_info,
             connection_statuses: Vec::new(),
+            // Local mode has no cluster-wide Users tab (issue #189).
+            remote_process_info: Vec::new(),
         }
     }
 
@@ -569,6 +571,8 @@ impl LocalCollector {
             vgpu_info: all_vgpu_info,
             mig_info: all_mig_info,
             connection_statuses: Vec::new(),
+            // Local mode has no cluster-wide Users tab (issue #189).
+            remote_process_info: Vec::new(),
         }
     }
 
@@ -728,8 +732,9 @@ impl DataCollectionStrategy for LocalCollector {
         state.vgpu_info = data.vgpu_info;
         state.mig_info = data.mig_info;
 
-        // Mark data as changed to trigger UI update
-        state.mark_data_changed();
+        // Mark data as changed to trigger UI update AND invalidate
+        // collector-keyed caches (e.g. Users-tab aggregation).
+        state.mark_collector_data_changed();
 
         // Update notifications
         Self::update_notifications(&mut state);
