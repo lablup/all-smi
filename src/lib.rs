@@ -139,6 +139,19 @@ pub mod traits;
 #[cfg(feature = "cli")]
 pub mod ui;
 
+/// One-shot snapshot subcommand (JSON / CSV / Prometheus).
+///
+/// Gated on `cli` because it reuses the Prometheus exporters from
+/// [`api::metrics`], which themselves depend on the CLI feature tree.
+#[cfg(feature = "cli")]
+pub mod snapshot;
+
+/// Re-export of the snapshot entry point for programmatic use.
+#[cfg(feature = "cli")]
+pub use snapshot::{
+    Snapshot, SnapshotError, SnapshotHardFailure, SnapshotOptions, run as run_snapshot,
+};
+
 /// Utility functions.
 pub mod utils;
 

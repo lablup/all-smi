@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -29,6 +29,12 @@ pub enum Commands {
     Local(LocalArgs),
     /// Run in remote view mode, monitoring remote nodes via API endpoints.
     View(ViewArgs),
+    /// Collect a one-shot machine-readable snapshot of hardware state.
+    ///
+    /// Emits JSON (default), CSV, or Prometheus exposition to stdout or a file.
+    /// Intended for scripting, CI probes, Slurm prolog/epilog hooks, and quick
+    /// `jq`/`yq` piping. Does not start a long-running server.
+    Snapshot(SnapshotArgs),
 }
 
 #[derive(Parser)]
@@ -69,4 +75,125 @@ pub struct ViewArgs {
     /// The interval in seconds at which to update the GPU information. If not specified, uses adaptive interval based on node count.
     #[arg(short, long)]
     pub interval: Option<u64>,
+}
+
+/// Output format for the `snapshot` subcommand.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+pub enum SnapshotFormat {
+    /// JSON object (or JSON array when `--samples > 1`).
+    Json,
+    /// Flat CSV with a header row.
+    Csv,
+    /// Prometheus exposition format.
+    ///
+    /// MUST match byte-for-byte the output of the `api` subcommand's
+    /// `/metrics` endpoint for the same collection cycle.
+    Prometheus,
+}
+
+impl std::fmt::Display for SnapshotFormat {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Json => write!(f, "json"),
+            Self::Csv => write!(f, "csv"),
+            Self::Prometheus => write!(f, "prometheus"),
+        }
+    }
+}
+
+#[derive(Parser, Clone)]
+pub struct SnapshotArgs {
+    /// Output format.
+    #[arg(long, value_enum, default_value_t = SnapshotFormat::Json)]
+    pub format: SnapshotFormat,
+
+    /// Pretty-print JSON output. Auto-off when stdout is not a TTY.
+    ///
+    /// Use `--pretty=false` to force compact output; use `--pretty=true` to
+    /// force pretty output even when piping.
+    #[arg(long, num_args = 0..=1, default_missing_value = "true")]
+    pub pretty: Option<bool>,
+
+    /// Sections to include in the output. Comma-separated.
+    ///
+    /// Valid values: `gpu`, `cpu`, `memory`, `chassis`, `process`, `storage`.
+    /// `process` and `storage` are opt-in because they are expensive.
+    #[arg(long, value_delimiter = ',', default_value = "gpu,cpu,memory,chassis")]
+    pub include: Vec<String>,
+
+    /// Comma-separated dot-path fields to select for CSV column layout.
+    ///
+    /// When omitted, CSV output uses a sensible default per included section.
+    /// Dot paths are resolved against the device's JSON representation; missing
+    /// paths yield empty cells rather than errors. Example:
+    /// `--query index,name,utilization,memory.used,memory.total`.
+    #[arg(long, value_delimiter = ',')]
+    pub query: Vec<String>,
+
+    /// Collect multiple samples spaced `--interval` seconds apart.
+    #[arg(long, default_value_t = 1)]
+    pub samples: u32,
+
+    /// Seconds between samples. Requires `--samples > 1` to have any effect.
+    #[arg(long, default_value_t = 0)]
+    pub interval: u64,
+
+    /// Per-reader timeout in milliseconds.
+    ///
+    /// Slow readers (TPU, Gaudi) that exceed this budget are recorded in the
+    /// top-level `errors` array (JSON) / `errors` column (CSV) / stderr
+    /// (Prometheus) instead of hanging the process.
+    #[arg(long, default_value_t = 5_000)]
+    pub timeout_ms: u64,
+
+    /// Write output to this file instead of stdout. Use `-` for stdout.
+    #[arg(long, short)]
+    pub output: Option<String>,
+}
+
+impl SnapshotArgs {
+    /// Parse and normalise `--include` into a [`SnapshotIncludes`] flag set.
+    ///
+    /// Unknown section names produce an error with a descriptive message —
+    /// clap reports this as a runtime error rather than a flag parse error,
+    /// so the caller can surface it through the standard `anyhow` chain.
+    pub fn includes(&self) -> Result<SnapshotIncludes, String> {
+        let mut set = SnapshotIncludes::default();
+        for raw in &self.include {
+            let name = raw.trim().to_ascii_lowercase();
+            match name.as_str() {
+                "" => continue,
+                "gpu" => set.gpu = true,
+                "cpu" => set.cpu = true,
+                "memory" => set.memory = true,
+                "chassis" => set.chassis = true,
+                "process" | "processes" => set.process = true,
+                "storage" | "disk" => set.storage = true,
+                other => {
+                    return Err(format!(
+                        "unknown --include section `{other}` (valid: gpu, cpu, memory, chassis, process, storage)"
+                    ));
+                }
+            }
+        }
+        Ok(set)
+    }
+}
+
+/// Which sections are requested for the snapshot.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct SnapshotIncludes {
+    pub gpu: bool,
+    pub cpu: bool,
+    pub memory: bool,
+    pub chassis: bool,
+    pub process: bool,
+    pub storage: bool,
+}
+
+impl SnapshotIncludes {
+    /// Returns `true` if no section was requested.
+    pub fn is_empty(&self) -> bool {
+        !(self.gpu || self.cpu || self.memory || self.chassis || self.process || self.storage)
+    }
 }

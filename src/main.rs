@@ -21,6 +21,7 @@ mod device;
 mod parsing;
 mod metrics;
 mod network;
+mod snapshot;
 mod storage;
 mod ui;
 mod utils;
@@ -169,6 +170,31 @@ async fn main() {
             }
 
             view::run_local_mode(&args).await;
+        }
+        Some(Commands::Snapshot(args)) => {
+            // Snapshot mode is one-shot and scriptable: DO NOT request sudo,
+            // do not initialize long-lived managers (macOS native / hlsmi).
+            // Readers that require sudo or specialised managers will gracefully
+            // degrade — their failures surface as `errors` entries rather than
+            // aborting the snapshot, per the issue spec.
+            let options = match snapshot::SnapshotOptions::from_args(&args) {
+                Ok(o) => o,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    std::process::exit(2);
+                }
+            };
+            match snapshot::run(options).await {
+                Ok(()) => std::process::exit(0),
+                Err(e) => {
+                    if e.downcast_ref::<snapshot::SnapshotHardFailure>().is_some() {
+                        eprintln!("error: {e}");
+                        std::process::exit(1);
+                    }
+                    eprintln!("error: {e:#}");
+                    std::process::exit(1);
+                }
+            }
         }
         Some(Commands::View(mut args)) => {
             // Remote mode - no sudo required

@@ -380,6 +380,88 @@ Metrics are available at `http://localhost:9090/metrics` (TCP) or via Unix socke
 
 For a complete list of all available metrics, see [API.md](API.md).
 
+### Scripting / CI (Snapshot Mode)
+
+The `snapshot` subcommand emits a single, one-shot machine-readable dump of
+the current hardware state to stdout (or a file) and exits. It is designed
+for shell piping, CI probes, Slurm prolog/epilog hooks, and any tool that
+wants `nvidia-smi --query-gpu=... --format=csv` ergonomics without starting
+a long-running HTTP server.
+
+```bash
+# Default: pretty-printed JSON when stdout is a TTY, compact when piped.
+all-smi snapshot
+
+# JSON piped to jq — pretty-print auto-off avoids shell pipeline churn.
+all-smi snapshot --format json | jq '.gpus[] | {name, utilization, temperature}'
+
+# CSV with nvidia-smi-style columns. Scope to GPUs with --include gpu to
+# keep the rows focused; the default CSV includes one row per CPU/memory
+# /chassis device too, which is usually not what you want for GPU tooling.
+all-smi snapshot --format csv --include gpu \
+  --query index,name,utilization,used_memory,total_memory,temperature,power_consumption
+
+# Prometheus exposition matching a single /metrics scrape.
+all-smi snapshot --format prometheus > /tmp/snapshot.prom
+
+# Take three samples one second apart, write a JSON array to a file.
+all-smi snapshot --samples 3 --interval 1 --output /tmp/snapshot-series.json
+
+# Include opt-in expensive sections (processes, storage).
+all-smi snapshot --include gpu,cpu,memory,chassis,process,storage
+
+# Exit non-zero when a reader times out hard enough to collect nothing.
+if ! all-smi snapshot --timeout-ms 2000 --format json >/dev/null; then
+    echo "no devices could be read"
+    exit 1
+fi
+```
+
+**Exit codes**
+
+| Code | Meaning                                                                   |
+|------|---------------------------------------------------------------------------|
+| `0`  | Success. Output was written; the `errors` array may contain partial failures. |
+| `1`  | Hard failure. No devices were collected from any reader.                  |
+| `2`  | Flag parse error (invalid `--include`, unknown format, etc.).             |
+
+**Slurm prolog example** — fail the prolog when a GPU is too hot to accept a
+job, using `jq` to enforce a temperature cap:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+TEMP_MAX=85
+JSON="$(all-smi snapshot --format json --include gpu)"
+HOT_COUNT="$(echo "$JSON" | jq "[.gpus[] | select(.temperature >= $TEMP_MAX)] | length")"
+if [[ "$HOT_COUNT" -gt 0 ]]; then
+    echo "Refusing to start: $HOT_COUNT GPU(s) at or above ${TEMP_MAX}C" >&2
+    echo "$JSON" | jq '.gpus[] | {name, temperature}' >&2
+    exit 1
+fi
+```
+
+**CSV → awk pipeline** — compute average utilization across all GPUs:
+
+```bash
+all-smi snapshot --format csv --include gpu --query utilization \
+  | awk -F, 'NR > 1 { sum += $1; n++ } END { if (n) printf "avg=%.1f%%\n", sum/n }'
+```
+
+**Options summary**
+
+| Flag              | Default                           | Description                                      |
+|-------------------|-----------------------------------|--------------------------------------------------|
+| `--format`        | `json`                            | `json` / `csv` / `prometheus`.                   |
+| `--pretty`        | auto (on when stdout is a TTY)    | Force pretty-print on or off for JSON.           |
+| `--include`       | `gpu,cpu,memory,chassis`          | Comma-separated sections to collect.             |
+| `--query`         | section-specific defaults         | CSV columns as comma-separated dot paths.        |
+| `--samples`       | `1`                               | Number of samples to collect.                    |
+| `--interval`      | `0`                               | Seconds between samples (only if `--samples > 1`). |
+| `--timeout-ms`    | `5000`                            | Per-reader timeout in milliseconds.              |
+| `--output` / `-o` | stdout                            | Write to this path (`-` also means stdout).      |
+
 ### Quick Start with Make Commands
 
 For development and testing, you can use the provided Makefile:
