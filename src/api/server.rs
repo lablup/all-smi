@@ -29,6 +29,7 @@ use tokio::net::UnixListener;
 use crate::api::handlers::{SharedState, metrics_handler};
 use crate::app_state::AppState;
 use crate::cli::ApiArgs;
+use crate::common::config_file::Settings;
 use crate::device::{create_chassis_reader, get_cpu_readers, get_gpu_readers, get_memory_readers};
 use crate::storage::info::StorageInfo;
 use crate::utils::{filter_docker_aware_disks, get_hostname};
@@ -95,7 +96,7 @@ fn set_socket_permissions(path: &std::path::Path) -> std::io::Result<()> {
 }
 
 /// Run the API server with TCP and optionally Unix Domain Socket listeners.
-pub async fn run_api_mode(args: &ApiArgs) {
+pub async fn run_api_mode(args: &ApiArgs, settings: &Settings) {
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -106,6 +107,9 @@ pub async fn run_api_mode(args: &ApiArgs) {
 
     println!("Starting API mode...");
     let mut initial_state = AppState::new();
+    // Apply the fully-merged energy configuration (file + env) so the
+    // WAL path, cost toggle, etc. honour the user's config.toml.
+    initial_state.energy_config = settings.energy.clone();
     // Replay any persisted energy WAL so Prometheus counters stay
     // monotonic across restarts (issue #191). Failures are logged
     // but do not block startup — the integrator simply begins at
@@ -133,7 +137,10 @@ pub async fn run_api_mode(args: &ApiArgs) {
     let state = SharedState::new(RwLock::new(initial_state));
     let state_clone = state.clone();
     let processes = args.processes;
-    let interval = args.interval;
+    // args.interval was resolved against settings in main.rs; fall back
+    // defensively to 3 (compiled default) when the caller somehow
+    // passed `None`.
+    let interval = args.interval.unwrap_or(3);
 
     // Spawn the WAL flush task if enabled. The returned handle owns a
     // oneshot sender used by the Ctrl+C / SIGTERM path so the task can
@@ -254,7 +261,7 @@ pub async fn run_api_mode(args: &ApiArgs) {
             }
         });
 
-        let port = args.port;
+        let port = args.port.unwrap_or(9090);
         match (port, socket_path) {
             // Both TCP and UDS (port > 0 with socket)
             (1..=u16::MAX, Some(path)) => {
@@ -282,7 +289,7 @@ pub async fn run_api_mode(args: &ApiArgs) {
 
     #[cfg(not(unix))]
     {
-        run_tcp_listener(app, args.port).await;
+        run_tcp_listener(app, args.port.unwrap_or(9090)).await;
     }
 
     // Signal the WAL flush task to perform a final flush and fsync

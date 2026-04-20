@@ -156,6 +156,38 @@ http://gpu-node2:9090
 http://gpu-node3:9090
 ```
 
+## Configuration
+
+`all-smi` reads optional settings from a TOML config file. Every field has a compiled default, so a fresh install requires no file; operators only create one when they want persistent overrides (hostfile path, update interval, alert thresholds, `$/kWh`, etc.).
+
+### File locations
+
+| Platform | Canonical path |
+|----------|----------------|
+| Linux    | `$XDG_CONFIG_HOME/all-smi/config.toml` (fallback `~/.config/all-smi/config.toml`) |
+| macOS    | `~/Library/Application Support/all-smi/config.toml` (also accepts `~/.config/all-smi/config.toml`) |
+| Windows  | `%APPDATA%\all-smi\config.toml` |
+
+Pass `--config <PATH>` to any subcommand to override the discovery and force a specific file. A missing or malformed `--config` target is a hard error (exit 2); implicit discovery silently falls back to defaults when no candidate file exists.
+
+### Precedence
+
+Highest to lowest: **CLI flag > environment variable > config file > compiled default.** For example, `--port 9091` beats `ALL_SMI_API_PORT=9200` beats `[api] port = 9300` in `config.toml` beats the compiled default of `9090`. Env-var names follow the canonical pattern `ALL_SMI_<SECTION>_<KEY>` in upper-snake; legacy aliases from earlier releases (`ALL_SMI_ALERT_TEMP`, `ALL_SMI_ENERGY_PRICE`, etc.) keep working.
+
+### Helpers
+
+- `all-smi config init [--force]` writes a commented example config to the platform-canonical path. Refuses to overwrite without `--force`. The file is created with `O_NOFOLLOW` and mode `0o600` on Unix.
+- `all-smi config print [--format toml|json] [--show-secrets]` prints the fully merged effective configuration. `webhook_url` is redacted unless `--show-secrets` is passed.
+- `all-smi config validate [<path>] [--strict]` parses a config file and reports any errors (with line/column on parse failures). Exit 0 valid, 2 invalid. `--strict` rejects unknown keys.
+
+### Reload
+
+Config reload is not supported in v1 — restart the process to pick up changes. This keeps the Prometheus counter and WAL state semantics simple.
+
+### Schema
+
+The canonical schema carries `schema_version = 1` at the top level and sections for `[general]`, `[local]`, `[view]`, `[api]`, `[alerts]`, `[energy]`, `[display]`, `[record]`, and `[snapshot]`. Unknown keys are tolerated by default (forward compat) but warned about in `config print`; `config validate --strict` rejects them. Future schema versions produce a clean error instead of silently loading.
+
 ## Platform-Specific Requirements
 
 ### macOS (Apple Silicon)

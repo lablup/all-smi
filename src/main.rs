@@ -15,7 +15,9 @@
 mod api;
 mod app_state;
 mod cli;
+mod cli_config;
 mod common;
+mod config_cmd;
 mod device;
 mod doctor;
 #[macro_use]
@@ -32,6 +34,7 @@ mod view;
 use api::run_api_mode;
 use clap::Parser;
 use cli::{Cli, Commands, LocalArgs};
+use common::config_file::{self, Settings, SocketSetting};
 use tokio::signal;
 use utils::{RuntimeEnvironment, ensure_sudo_permissions_for_api};
 
@@ -67,6 +70,32 @@ fn main() {
 
     let cli = Cli::parse();
 
+    // Handle the `config` subcommand synchronously — it never starts a
+    // Tokio runtime and its I/O is purely local filesystem work.
+    if let Some(Commands::Config(ref cfg_args)) = cli.command {
+        let code = config_cmd::run(cli.config.as_deref(), &cfg_args.action);
+        std::process::exit(code);
+    }
+
+    // Load the merged TOML + env settings now so every downstream mode
+    // entry point can consume them. A malformed or missing explicit
+    // `--config` file is a hard error and short-circuits startup.
+    let settings = match config_file::load(cli.config.as_deref()) {
+        Ok(outcome) => {
+            for w in &outcome.warnings {
+                eprintln!("warning: {w}");
+            }
+            outcome.settings
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            // `2` matches `config validate` semantics for consistency
+            // with the issue spec: malformed config is an actionable
+            // user error, not a crash.
+            std::process::exit(2);
+        }
+    };
+
     // The snapshot subcommand is one-shot, scriptable, and may call into
     // potentially-hung hardware readers via `spawn_blocking`. Because
     // `spawn_blocking` cannot cancel the underlying OS thread on a
@@ -92,7 +121,7 @@ fn main() {
             }
         };
         runtime.block_on(async move {
-            run_command(cli).await;
+            run_command(cli, settings).await;
         });
         return;
     }
@@ -110,11 +139,11 @@ fn main() {
         }
     };
     runtime.block_on(async move {
-        run_command(cli).await;
+        run_command(cli, settings).await;
     });
 }
 
-async fn run_command(cli: Cli) {
+async fn run_command(cli: Cli, settings: Settings) {
     // Signal-handling policy by subcommand:
     //
     // * `Record` installs its own SIGINT/SIGTERM handlers (see
@@ -170,7 +199,13 @@ async fn run_command(cli: Cli) {
     }
 
     match cli.command {
-        Some(Commands::Api(args)) => {
+        Some(Commands::Config(_)) => {
+            // Already handled synchronously in `main` before the runtime
+            // was built. This branch is unreachable in practice; keep it
+            // so the match is exhaustive.
+            unreachable!("config subcommand is dispatched before runtime");
+        }
+        Some(Commands::Api(mut args)) => {
             // When using native macOS APIs, no sudo is needed
             #[cfg(target_os = "macos")]
             let _ = ensure_sudo_permissions_for_api(); // Just for any other checks
@@ -178,10 +213,35 @@ async fn run_command(cli: Cli) {
             #[cfg(not(target_os = "macos"))]
             let _has_sudo = ensure_sudo_permissions_for_api();
 
+            // Resolve every CLI field via the precedence chain (CLI >
+            // env > file > default). Fields that were `None` on the CLI
+            // take their value from the merged `Settings`.
+            if args.port.is_none() {
+                args.port = Some(settings.api.port);
+            }
+            if args.interval.is_none() {
+                args.interval = Some(settings.api.interval_secs);
+            }
+            if !args.processes {
+                args.processes = settings.api.processes;
+            }
+            #[cfg(unix)]
+            {
+                if args.socket.is_none() {
+                    args.socket = match &settings.api.socket {
+                        SocketSetting::Unset | SocketSetting::Bool(false) => None,
+                        SocketSetting::Bool(true) => Some(String::new()),
+                        SocketSetting::Path(p) => Some(p.clone()),
+                    };
+                }
+            }
+
+            let interval = args.interval.unwrap_or(3);
+
             // Initialize native metrics manager (no sudo required)
             #[cfg(target_os = "macos")]
             if is_apple_silicon() {
-                if let Err(e) = initialize_native_metrics_manager(args.interval * 1000) {
+                if let Err(e) = initialize_native_metrics_manager(interval * 1000) {
                     eprintln!("Warning: Failed to initialize native metrics manager: {e}");
                 } else {
                     use std::sync::atomic::Ordering;
@@ -192,7 +252,7 @@ async fn run_command(cli: Cli) {
             // Initialize hlsmi manager for Intel Gaudi on Linux
             #[cfg(target_os = "linux")]
             if has_gaudi() {
-                match initialize_hlsmi_manager(args.interval) {
+                match initialize_hlsmi_manager(interval) {
                     Err(e) => {
                         eprintln!("Warning: Failed to initialize hlsmi manager: {e}");
                     }
@@ -203,12 +263,17 @@ async fn run_command(cli: Cli) {
                 }
             }
 
-            run_api_mode(&args).await;
+            run_api_mode(&args, &settings).await;
         }
-        Some(Commands::Local(args)) => {
+        Some(Commands::Local(mut args)) => {
             // On non-macOS platforms, require sudo
             #[cfg(not(target_os = "macos"))]
             ensure_sudo_permissions();
+
+            // Precedence: CLI > settings (env > file) > default.
+            if args.interval.is_none() {
+                args.interval = settings.local.interval_secs;
+            }
 
             // Initialize native metrics manager (no sudo required)
             #[cfg(target_os = "macos")]
@@ -237,7 +302,7 @@ async fn run_command(cli: Cli) {
                 });
             }
 
-            view::run_local_mode(&args).await;
+            view::run_local_mode(&args, &settings).await;
         }
         Some(Commands::Snapshot(args)) => {
             // Snapshot mode is one-shot and scriptable: DO NOT request sudo,
@@ -297,12 +362,26 @@ async fn run_command(cli: Cli) {
             }
         }
         Some(Commands::View(mut args)) => {
+            // Precedence: CLI > settings (env > file) > default.
+            // `hosts`/`hostfile` fill from config only when CLI omitted
+            // them; the Backend.AI detection later relies on this
+            // ordering too.
+            if args.hosts.is_none() && !settings.view.hosts.is_empty() {
+                args.hosts = Some(settings.view.hosts.clone());
+            }
+            if args.hostfile.is_none() {
+                args.hostfile = settings.view.hostfile.clone();
+            }
+            if args.interval.is_none() {
+                args.interval = settings.view.interval_secs;
+            }
+
             // Replay mode bypasses the remote scrape path entirely — it
             // reads frames from disk and pushes them into the same
             // AppState the live view renders. Hardware, sudo, and host
             // discovery are all irrelevant in this branch.
             if args.replay.is_some() {
-                view::run_replay_mode(&args).await;
+                view::run_replay_mode(&args, &settings).await;
                 return;
             }
 
@@ -335,7 +414,7 @@ async fn run_command(cli: Cli) {
                     std::process::exit(1);
                 }
             }
-            view::run_view_mode(&args).await;
+            view::run_view_mode(&args, &settings).await;
 
             // Cleanup after view mode exits
             #[cfg(target_os = "macos")]
@@ -384,12 +463,12 @@ async fn run_command(cli: Cli) {
                     });
                 }
 
-                view::run_local_mode(&LocalArgs {
-                    interval: None,
+                let local_args = LocalArgs {
+                    interval: settings.local.interval_secs,
                     alert_temp: None,
                     alert_util_low_mins: None,
-                })
-                .await;
+                };
+                view::run_local_mode(&local_args, &settings).await;
 
                 // Cleanup after local mode exits
                 #[cfg(target_os = "macos")]
