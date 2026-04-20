@@ -14,7 +14,6 @@
 
 use axum::{Router, routing::get};
 use std::time::Duration;
-use sysinfo::Disks;
 use tokio::net::TcpListener;
 use tokio::sync::RwLock;
 use tower_http::cors::{Any, CorsLayer};
@@ -26,13 +25,15 @@ use std::path::PathBuf;
 #[cfg(unix)]
 use tokio::net::UnixListener;
 
+use crate::api::FrameBus;
+use crate::api::collection_loop::run_collection_loop;
+use crate::api::handlers::events::events_handler;
+use crate::api::handlers::snapshot::snapshot_handler;
 use crate::api::handlers::{SharedState, metrics_handler};
+use crate::api::server_state::ApiState;
 use crate::app_state::AppState;
 use crate::cli::ApiArgs;
 use crate::common::config_file::Settings;
-use crate::device::{create_chassis_reader, get_cpu_readers, get_gpu_readers, get_memory_readers};
-use crate::storage::info::StorageInfo;
-use crate::utils::{filter_docker_aware_disks, get_hostname};
 
 /// Get the default Unix domain socket path for the current platform.
 /// - Linux: /var/run/all-smi.sock (fallback to /tmp/all-smi.sock if no permission)
@@ -172,86 +173,31 @@ pub async fn run_api_mode(args: &ApiArgs, settings: &Settings) {
         }
     };
 
-    // Spawn background task for collecting metrics
-    tokio::spawn(async move {
-        let gpu_readers = get_gpu_readers();
-        let cpu_readers = get_cpu_readers();
-        let memory_readers = get_memory_readers();
-        let chassis_reader = create_chassis_reader();
-        let mut disks = Disks::new_with_refreshed_list();
-        loop {
-            let all_gpu_info: Vec<_> = gpu_readers
-                .iter()
-                .flat_map(|reader| reader.get_gpu_info())
-                .collect();
+    // Publish one frame per collection cycle onto a shared broadcast
+    // bus (issue #193). The SSE `/events` and one-shot `/snapshot`
+    // handlers subscribe to this bus so they never need to run their
+    // own reader loop — see `api::frame_bus` and `api::collection_loop`.
+    let bus = FrameBus::new(Duration::from_secs(interval));
 
-            let all_cpu_info = cpu_readers
-                .iter()
-                .flat_map(|reader| reader.get_cpu_info())
-                .collect();
+    // Spawn the background collection task. It owns the reader factories
+    // and is the only place that calls them on the live server.
+    tokio::spawn(run_collection_loop(
+        state_clone.clone(),
+        bus.clone(),
+        interval,
+        processes,
+    ));
 
-            let all_memory_info = memory_readers
-                .iter()
-                .flat_map(|reader| reader.get_memory_info())
-                .collect();
-
-            let all_processes = if processes {
-                gpu_readers
-                    .iter()
-                    .flat_map(|reader| reader.get_process_info())
-                    .collect()
-            } else {
-                Vec::new()
-            };
-
-            // Collect chassis-level info (DMI, thermals, power)
-            let chassis_info: Vec<_> = chassis_reader
-                .get_chassis_info()
-                .into_iter()
-                .map(|mut ci| {
-                    // Aggregate GPU power into chassis total if not already set
-                    if ci.total_power_watts.is_none() {
-                        let total_gpu_power: f64 =
-                            all_gpu_info.iter().map(|g| g.power_consumption).sum();
-                        if total_gpu_power > 0.0 {
-                            ci.total_power_watts = Some(total_gpu_power);
-                        }
-                    }
-                    ci
-                })
-                .collect();
-
-            // Refresh disk info in-place instead of creating a new Disks instance
-            disks.refresh(true);
-            let storage_info = collect_storage_info_from(&disks);
-
-            let mut state = state_clone.write().await;
-            state.gpu_info = all_gpu_info;
-            state.cpu_info = all_cpu_info;
-            state.memory_info = all_memory_info;
-            state.process_info = all_processes;
-            state.chassis_info = chassis_info;
-            state.storage_info = storage_info;
-            if state.loading {
-                state.loading = false;
-            }
-
-            // Integrate power samples into the energy accountant so
-            // `all_smi_energy_consumed_joules_total` reflects reality
-            // in `api` mode (issue #191). The code mirrors
-            // `view::data_collection::aggregator::update_energy_counters`
-            // so both surfaces share the same integration contract.
-            integrate_power_samples(&mut state);
-
-            drop(state);
-            tokio::time::sleep(Duration::from_secs(interval)).await;
-        }
-    });
+    // Compose the router state so each handler extracts only the
+    // sub-state it needs (see `server_state::ApiState`).
+    let api_state = ApiState::new(state, bus);
 
     // Create the router with shared state
     let app = Router::new()
         .route("/metrics", get(metrics_handler))
-        .with_state(state)
+        .route("/events", get(events_handler))
+        .route("/snapshot", get(snapshot_handler))
+        .with_state(api_state)
         .layer(
             CorsLayer::new()
                 .allow_origin(Any)
@@ -525,76 +471,4 @@ fn cleanup_socket(path: &std::path::Path) {
             tracing::warn!("Failed to remove socket file on shutdown: {e}");
         }
     }
-}
-
-/// Integrate the current in-state power samples into the energy
-/// accountant. Run once per collection cycle in `api` mode (issue
-/// #191). On the first sample for each `(host, device)` pair, the
-/// function consults `state.energy_wal_replay` to seed the lifetime
-/// counter with any previously-recorded value so Prometheus stays
-/// monotonic across restarts.
-fn integrate_power_samples(state: &mut AppState) {
-    use crate::metrics::energy::EnergyKey;
-    use std::time::Instant;
-
-    let now = Instant::now();
-
-    // Collect (key, watts) pairs first so we do not hold an immutable
-    // borrow over state.*_info while taking the mutable borrow on
-    // state.energy.
-    let mut samples: Vec<(EnergyKey, f64)> =
-        Vec::with_capacity(state.gpu_info.len() + state.cpu_info.len() + state.chassis_info.len());
-    for gpu in &state.gpu_info {
-        samples.push((
-            EnergyKey::gpu(gpu.hostname.clone(), gpu.uuid.clone()),
-            gpu.power_consumption,
-        ));
-    }
-    for cpu in &state.cpu_info {
-        if let Some(power) = cpu.power_consumption {
-            samples.push((EnergyKey::cpu(cpu.hostname.clone()), power));
-        }
-    }
-    for chassis in &state.chassis_info {
-        if let Some(power) = chassis.total_power_watts {
-            samples.push((EnergyKey::chassis(chassis.hostname.clone()), power));
-        }
-    }
-
-    let wal_index = &mut state.energy_wal_replay;
-    let integrator = state.energy.integrator_mut();
-    for (key, watts) in samples {
-        if !integrator.has_samples(&key) && !wal_index.is_empty() {
-            wal_index.seed_if_matches(&key, integrator);
-        }
-        integrator.record_sample(key, now, watts);
-    }
-}
-
-/// Collect storage/disk information from a pre-existing Disks instance.
-/// The caller is responsible for calling `refresh_list()` before this function.
-fn collect_storage_info_from(disks: &Disks) -> Vec<StorageInfo> {
-    let mut storage_info = Vec::new();
-    let hostname = get_hostname();
-
-    let mut filtered_disks = filter_docker_aware_disks(disks);
-    filtered_disks.sort_by(|a, b| {
-        a.mount_point()
-            .to_string_lossy()
-            .cmp(&b.mount_point().to_string_lossy())
-    });
-
-    for (index, disk) in filtered_disks.iter().enumerate() {
-        let mount_point_str = disk.mount_point().to_string_lossy();
-        storage_info.push(StorageInfo {
-            mount_point: mount_point_str.to_string(),
-            total_bytes: disk.total_space(),
-            available_bytes: disk.available_space(),
-            host_id: hostname.clone(),
-            hostname: hostname.clone(),
-            index: index as u32,
-        });
-    }
-
-    storage_info
 }

@@ -12,13 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! Prometheus `/metrics` HTTP handler.
+//!
+//! Renders the merged reader outputs from [`AppState`] through the shared
+//! exposition writer in [`crate::api::metrics::render`]. Kept separate from
+//! the SSE / snapshot handlers (issue #193) so adding new routes does not
+//! force a rebuild of this unchanged hot path.
+
 use axum::extract::State;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+use crate::api::metrics::render::{MetricsRenderInputs, render_prometheus_exposition};
 use crate::app_state::AppState;
-
-use super::metrics::render::{MetricsRenderInputs, render_prometheus_exposition};
 
 pub type SharedState = Arc<RwLock<AppState>>;
 
