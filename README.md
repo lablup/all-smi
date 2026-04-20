@@ -889,6 +889,26 @@ An HTML+JS demo client is available at
 [`examples/sse_client.html`](examples/sse_client.html) — open it in a
 browser with `all-smi api` running on `localhost:9090`.
 
+#### Security notes for SSE/snapshot endpoints
+
+| Env var | Default | Effect |
+|---------|---------|--------|
+| `ALL_SMI_API_CORS_ALLOWED_ORIGINS` | (empty — no CORS) | Comma-separated origins permitted to read `/metrics`, `/snapshot`, and `/events` cross-origin. Set to `*` to allow all origins (logs a warning); omit for same-origin-only access. |
+| `ALL_SMI_API_MAX_SSE_SUBSCRIBERS` | `256` | Cap on concurrent `/events` subscribers. Clients beyond the cap receive `503 Service Unavailable` with `Retry-After: 5`. Set to `0` to disable the cap. |
+
+**Process label caps.** `command`, `process_name`, and `user` fields in
+`/snapshot` and SSE `/events` are truncated at 256 / 128 / 128 bytes
+respectively on all output surfaces (matching the Prometheus `/metrics`
+exporter). Longer strings appear with a trailing `...(N bytes truncated)`
+marker. This bounds response-size amplification and limits the blast radius
+of secrets that may appear in argv.
+
+**Single-flight stale fallback.** When the cached frame in `/snapshot` is
+older than `2 × collection_interval`, the handler serialises a fresh
+hardware collection behind a mutex (single-flight pattern). Concurrent
+requests against a freshly-started or stalled server therefore share one
+blocking collect rather than each spawning their own reader set.
+
 ### Scripting / CI (Snapshot Mode)
 
 The `snapshot` subcommand emits a single, one-shot machine-readable dump of
