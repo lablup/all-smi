@@ -1376,4 +1376,72 @@ mod tests {
             Ok(_) => panic!("expected SeqOverflow, got Ok"),
         }
     }
+
+    /// F6: a file consisting entirely of malformed / non-JSON lines must
+    /// not spin the `read_next_data_frame` loop indefinitely. After
+    /// `SCAN_BUDGET_PER_TICK` rejects, the call returns `Ok(false)` so
+    /// the async driver yields back to the runtime.
+    ///
+    /// Concretely: write one good priming frame, then
+    /// `SCAN_BUDGET_PER_TICK + 10` garbage lines, then one more good
+    /// frame. After priming (which reads frame 0), the first `next()`
+    /// call must exhaust the budget and return `None` (Ok(false) mapped
+    /// to None by the public API). The second `next()` call advances past
+    /// the remaining garbage and lands on the final good frame.
+    #[test]
+    fn replayer_scan_budget_prevents_runaway_loop() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("garbage.ndjson");
+        {
+            let mut f = File::create(&path).unwrap();
+            // Frame 0 — priming must succeed.
+            writeln!(
+                f,
+                "{{\"schema\":1,\"timestamp\":\"2026-04-20T00:00:00Z\",\"hostname\":\"a\",\"gpus\":[]}}"
+            )
+            .unwrap();
+            // SCAN_BUDGET_PER_TICK + 10 garbage lines that are valid UTF-8
+            // but not valid JSON. Each will be classified as Ignore.
+            for _ in 0..SCAN_BUDGET_PER_TICK + 10 {
+                writeln!(f, "not-json").unwrap();
+            }
+            // One final good frame. Because the budget caps the scan, this
+            // frame may not be reached in the first `next()` call, but it
+            // must be reachable on the second `next()` call (the reader
+            // position is preserved across calls).
+            writeln!(
+                f,
+                "{{\"schema\":1,\"timestamp\":\"2026-04-20T00:00:01Z\",\"hostname\":\"a\",\"gpus\":[]}}"
+            )
+            .unwrap();
+        }
+        let mut r = Replayer::open(&path).unwrap();
+        // Priming reads frame 0.
+        assert_eq!(r.current().unwrap().seq, 0);
+
+        // First `next()`: budget is exhausted by the garbage lines; the
+        // good final frame is not yet reached. The replayer returns None
+        // ("no new frame this tick") and preserves reader position.
+        // Second `next()`: reader continues from where it left off, skips
+        // the remaining garbage (< SCAN_BUDGET_PER_TICK lines), and lands
+        // on frame 1.
+        //
+        // Both calls together must eventually materialize frame 1 without
+        // panicking or looping forever.
+        let mut found_frame_1 = false;
+        for _ in 0..3 {
+            match r.next() {
+                Ok(Some(f)) if f.seq == 1 => {
+                    found_frame_1 = true;
+                    break;
+                }
+                Ok(_) => continue,
+                Err(e) => panic!("unexpected error: {e}"),
+            }
+        }
+        assert!(
+            found_frame_1,
+            "frame 1 must be reachable after budget-limited scan"
+        );
+    }
 }

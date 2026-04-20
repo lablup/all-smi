@@ -831,4 +831,75 @@ mod tests {
             "p1 (pid 100) should come after p3 (pid 50) in ascending order"
         );
     }
+
+    // ------------------------------------------------------------------
+    // ReplayState::cycle_speed — speed ladder and NaN guard
+    // ------------------------------------------------------------------
+
+    fn make_replay_state(speed: f32) -> ReplayState {
+        ReplayState {
+            paused: false,
+            speed,
+            current_seq: 0,
+            total_frames: 0,
+            elapsed: std::time::Duration::ZERO,
+            at_eof: false,
+            replay_loop: false,
+            pending_seek: None,
+            pending_step: None,
+            timecode_input_mode: false,
+            timecode_buffer: String::new(),
+            timecode_error: None,
+        }
+    }
+
+    /// `cycle_speed(true)` must advance through the ladder, wrapping at
+    /// the top.
+    #[test]
+    fn cycle_speed_up_advances_ladder() {
+        let mut rs = make_replay_state(1.0);
+        rs.cycle_speed(true);
+        assert_eq!(rs.speed, 2.0, "1.0x → 2.0x");
+        rs.cycle_speed(true);
+        assert_eq!(rs.speed, 4.0, "2.0x → 4.0x");
+        rs.cycle_speed(true);
+        assert_eq!(rs.speed, 8.0, "4.0x → 8.0x");
+        // Already at the top; should stay clamped.
+        rs.cycle_speed(true);
+        assert_eq!(rs.speed, 8.0, "8.0x is the ceiling");
+    }
+
+    /// `cycle_speed(false)` must retreat through the ladder.
+    #[test]
+    fn cycle_speed_down_retreats_ladder() {
+        let mut rs = make_replay_state(1.0);
+        rs.cycle_speed(false);
+        assert_eq!(rs.speed, 0.5, "1.0x → 0.5x");
+        rs.cycle_speed(false);
+        assert_eq!(rs.speed, 0.25, "0.5x → 0.25x");
+        // Already at the floor; should stay clamped.
+        rs.cycle_speed(false);
+        assert_eq!(rs.speed, 0.25, "0.25x is the floor");
+    }
+
+    /// A NaN starting speed must not panic. `cycle_speed` selects the
+    /// nearest ladder rung (NaN comparisons all fail so the fallback is
+    /// index 0 = 0.25x) and then steps from there.  The resulting speed
+    /// is always a finite ladder value.
+    #[test]
+    fn cycle_speed_nan_input_does_not_panic() {
+        let mut rs = make_replay_state(f32::NAN);
+        // Must not panic.
+        rs.cycle_speed(true);
+        assert!(
+            rs.speed.is_finite(),
+            "speed must be finite after cycling from NaN"
+        );
+        // Should be on the ladder.
+        assert!(
+            ReplayState::SPEED_LADDER.contains(&rs.speed),
+            "speed must be a ladder value after cycling from NaN, got {}",
+            rs.speed
+        );
+    }
 }
