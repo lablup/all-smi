@@ -48,27 +48,29 @@ pub const APP_DIR_NAME: &str = "all-smi";
 /// the leading-`~` case is handled, matching the `dirs` crate and the
 /// behaviour every other `all-smi` codepath already assumes.
 ///
-/// Currently this helper is not wired into any settings-consuming
-/// callsite — each downstream path (`energy_wal`, `hostfile`, etc.)
-/// applies its own tilde expansion already. Exposed publicly so future
-/// settings callers (e.g. `record.output_dir`) can share the
+/// Shared by every settings consumer that needs to resolve a
+/// potentially-tilde-prefixed path (`energy_wal`, `hostfile`,
+/// `record.output_dir`, etc.). Formerly duplicated in
+/// `metrics::energy_wal` — consolidated here so there is a single
 /// canonical implementation.
-#[allow(dead_code)]
-pub fn expand_tilde(input: impl AsRef<str>) -> PathBuf {
-    let s = input.as_ref();
+pub fn expand_tilde(input: impl AsRef<Path>) -> PathBuf {
+    let path = input.as_ref();
+    let Some(s) = path.to_str() else {
+        return path.to_path_buf();
+    };
     if let Some(rest) = s.strip_prefix("~/") {
         if let Some(home) = dirs::home_dir() {
             return home.join(rest);
         }
-        return PathBuf::from(s);
+        return path.to_path_buf();
     }
     if s == "~" {
         if let Some(home) = dirs::home_dir() {
             return home;
         }
-        return PathBuf::from(s);
+        return path.to_path_buf();
     }
-    PathBuf::from(s)
+    path.to_path_buf()
 }
 
 /// Resolve the canonical config directory for the current platform.
@@ -156,7 +158,7 @@ mod tests {
 
     #[test]
     fn expand_tilde_noop_without_prefix() {
-        let p = expand_tilde("/etc/passwd");
+        let p = expand_tilde(Path::new("/etc/passwd"));
         assert_eq!(p, PathBuf::from("/etc/passwd"));
     }
 
@@ -164,7 +166,7 @@ mod tests {
     fn expand_tilde_replaces_home_marker() {
         // When home is available, `~/foo` should resolve under it.
         if let Some(home) = dirs::home_dir() {
-            let p = expand_tilde("~/foo/bar");
+            let p = expand_tilde(Path::new("~/foo/bar"));
             assert_eq!(p, home.join("foo/bar"));
         }
     }
@@ -172,14 +174,14 @@ mod tests {
     #[test]
     fn expand_tilde_bare_tilde() {
         if let Some(home) = dirs::home_dir() {
-            let p = expand_tilde("~");
+            let p = expand_tilde(Path::new("~"));
             assert_eq!(p, home);
         }
     }
 
     #[test]
     fn expand_tilde_passthrough_for_relative() {
-        let p = expand_tilde("relative/path");
+        let p = expand_tilde(Path::new("relative/path"));
         assert_eq!(p, PathBuf::from("relative/path"));
     }
 

@@ -51,16 +51,21 @@ pub async fn run_local_mode(args: &LocalArgs, settings: &Settings) {
     // `is_local_mode = true` means no --hosts / --hostfile were supplied.
     // The UI gates the Cluster Overview card, dashboard items, and tabs row
     // behind `!is_local_mode` (see src/view/frame_renderer.rs render_main).
-    let mut initial_state = AppState::new();
+    // Build the AppState with the merged energy config so the
+    // integrator's `gap_interpolate_seconds` honours the TOML value.
+    // The settings layer has already merged defaults + file + env.
+    let mut initial_state = AppState::with_energy_config(&settings.energy);
     initial_state.is_local_mode = true;
     // Apply the CLI-supplied alert thresholds on top of the
     // settings-provided AlertConfig (which already merges defaults +
     // config file + env per issue #192's precedence chain).
     let alert_config = build_alert_config(settings, args.alert_temp, args.alert_util_low_mins);
     initial_state.alerter = Alerter::new(alert_config);
-    // Propagate the merged energy configuration (file + env) so the
-    // TUI cost column and WAL paths honour the user's config.toml.
-    initial_state.energy_config = settings.energy.clone();
+    // Propagate the `[display]` section so renderers consuming
+    // `AppState.display_config` honour the operator's color_scheme /
+    // gauge_style / show_led_grid choices. Defaults are equivalent to
+    // the pre-config-file behaviour when no config file is loaded.
+    initial_state.display_config = settings.display.clone();
     let app_state = Arc::new(Mutex::new(initial_state));
     startup_profiler.checkpoint("AppState initialized");
 
@@ -156,7 +161,7 @@ pub async fn run_replay_mode(args: &ViewArgs, settings: &Settings) {
 
     // Seed app state: treat replay as "remote-ish" (not is_local_mode)
     // so the tab row renders from the hostnames embedded in the stream.
-    let mut initial_state = AppState::new();
+    let mut initial_state = AppState::with_energy_config(&settings.energy);
     initial_state.is_local_mode = false;
     initial_state.loading = false;
     // Replay mode still honours config-file alert thresholds (the
@@ -164,7 +169,12 @@ pub async fn run_replay_mode(args: &ViewArgs, settings: &Settings) {
     // against recorded frames) but ignores --alert-temp / --alert-util
     // which don't semantically apply to historical data.
     initial_state.alerter = Alerter::new(settings.alerts.clone());
-    initial_state.energy_config = settings.energy.clone();
+    initial_state.display_config = settings.display.clone();
+    // Propagate the `[display]` section so renderers consuming
+    // `AppState.display_config` honour the operator's color_scheme /
+    // gauge_style / show_led_grid choices. Defaults are equivalent to
+    // the pre-config-file behaviour when no config file is loaded.
+    initial_state.display_config = settings.display.clone();
     initial_state.replay = Some(initial_replay_state(args.speed.max(0.05), args.replay_loop));
     // If `--start HH:MM:SS` was given, enqueue the seek so the first
     // ReplayDriver tick honors it before drawing the first frame.
@@ -249,11 +259,16 @@ pub async fn run_view_mode(args: &ViewArgs, settings: &Settings) {
     // supplied, including a single remote host.  The UI renders Cluster
     // Overview, dashboard items, and the tabs row only when this is false
     // (see src/view/frame_renderer.rs render_main).
-    let mut initial_state = AppState::new();
+    let mut initial_state = AppState::with_energy_config(&settings.energy);
     initial_state.is_local_mode = false;
     let alert_config = build_alert_config(settings, args.alert_temp, args.alert_util_low_mins);
     initial_state.alerter = Alerter::new(alert_config);
-    initial_state.energy_config = settings.energy.clone();
+    initial_state.display_config = settings.display.clone();
+    // Propagate the `[display]` section so renderers consuming
+    // `AppState.display_config` honour the operator's color_scheme /
+    // gauge_style / show_led_grid choices. Defaults are equivalent to
+    // the pre-config-file behaviour when no config file is loaded.
+    initial_state.display_config = settings.display.clone();
     let app_state = Arc::new(Mutex::new(initial_state));
 
     // Create shared notification handle for collector -> UI wakeups

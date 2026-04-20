@@ -281,11 +281,39 @@ pub fn render_json(settings: &Settings, show_secrets: bool) -> std::io::Result<S
         .map_err(|e| std::io::Error::other(format!("json render: {e}")))
 }
 
+/// Escape a string so it is valid inside a TOML basic string literal.
+///
+/// Covers the full set required by the TOML 1.0 grammar:
+/// * `\` and `"` (mandatory — otherwise the string terminates early).
+/// * `\n`, `\r`, `\t`, `\b`, `\f` (control characters with shorthand
+///   escapes; without them the rendered file would contain raw control
+///   bytes that most TOML parsers reject and that fail to round-trip
+///   through [`parse_toml`](crate::common::config_file::parse_toml)).
+/// * Any other `U+0000`–`U+001F` codepoint and `U+007F`, emitted as
+///   `\u{XXXX}`. A `webhook_url` or `wal_path` set via the TOML file
+///   could contain arbitrary bytes; without this branch the renderer
+///   would emit literal control characters that break the round-trip
+///   test (and potentially the parser on reload).
 fn escape_toml(s: &str) -> String {
-    // Minimal escape for the characters forbidden in basic TOML strings
-    // (we never render multi-line strings). Matches the subset produced
-    // by the `toml` crate's own serializer for our value set.
-    s.replace('\\', "\\\\").replace('"', "\\\"")
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{0008}' => out.push_str("\\b"),
+            '\u{000c}' => out.push_str("\\f"),
+            c if (c as u32) < 0x20 || (c as u32) == 0x7f => {
+                // TOML 1.0 spec: `\uXXXX` uses 4 hex digits with no
+                // braces (distinct from Rust's `\u{XXXX}` syntax).
+                out.push_str(&format!("\\u{:04X}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 fn format_float(f: f64) -> String {
@@ -361,5 +389,33 @@ mod tests {
     fn format_float_handles_non_finite() {
         assert_eq!(format_float(f64::NAN), "0.0");
         assert_eq!(format_float(f64::INFINITY), "0.0");
+    }
+
+    /// A `webhook_url` that contains newlines, tabs, or ESC sequences
+    /// must round-trip through `render_toml` -> `parse_toml` without
+    /// losing bytes or producing an invalid TOML document. Prior to the
+    /// full escape set the renderer emitted raw `\n` / `\r` / `\t`
+    /// characters, which either broke the string (newline) or
+    /// silently got stripped (tab, BEL, ESC) — either way breaking
+    /// round-trip.
+    #[test]
+    fn render_toml_roundtrips_control_characters() {
+        let mut s = Settings::default();
+        // Exercise every escape branch: `\n`, `\t`, `\r`, `\b`, `\f`,
+        // and a representative `\uXXXX` (ESC = 0x1b).
+        let nasty = "line1\nline2\twith\rtab\x08back\x0cff\x1b[31mRED\x7f";
+        s.alerts.webhook_url = nasty.to_string();
+
+        let toml_str = render_toml(&s, true).unwrap();
+        let (raw, unknown) = crate::common::config_file::parse_toml(&toml_str).unwrap();
+        assert!(
+            unknown.is_empty(),
+            "rendered toml with control chars must still parse clean, unknown: {unknown:?}"
+        );
+        assert_eq!(
+            raw.alerts.as_ref().and_then(|a| a.webhook_url.clone()),
+            Some(nasty.to_string()),
+            "full round-trip preserves every byte"
+        );
     }
 }

@@ -38,6 +38,7 @@
 //!   [`Settings`] (canonical + backward-compat legacy aliases).
 
 use std::collections::BTreeSet;
+use std::io;
 use std::path::{Path, PathBuf};
 
 use toml::Value as TomlValue;
@@ -47,6 +48,18 @@ use crate::common::config_apply;
 use crate::common::config_env;
 use crate::common::config_schema::{KNOWN_TOP_LEVEL, RawConfig};
 use crate::common::paths;
+
+/// Hard ceiling on the size of a config file we are willing to read.
+///
+/// A legitimate `config.toml` is hundreds of bytes; even with every
+/// commented option expanded it stays well under a kilobyte. Capping
+/// the read at 1 MiB prevents a malicious or accidental oversized file
+/// (e.g. a log file renamed over the config path, a `/dev/zero`
+/// symlink, etc.) from OOM-ing the process at startup. The cap is
+/// enforced both via metadata (fast path) and via `Read::take`
+/// (authoritative — covers named pipes, devices, and any path where
+/// the metadata length is a lie).
+pub(crate) const MAX_CONFIG_BYTES: u64 = 1 << 20; // 1 MiB
 
 // Re-export the on-disk schema types so existing callers can keep
 // importing through this module.
@@ -86,9 +99,39 @@ pub enum ConfigError {
     #[error("config file semantic error: {0}")]
     Semantic(String),
     /// With `--strict`, any unknown key at the top-level or inside a
-    /// known section is reported here.
+    /// known section is reported here. The key is pre-escaped via
+    /// [`escape_printable`] so a quoted TOML key containing ANSI
+    /// escapes cannot inject cursor-control sequences into operator
+    /// terminals.
     #[error("config file unknown key: {0}")]
     UnknownKey(String),
+}
+
+/// Escape control characters in a string so it is safe to print to a
+/// terminal.
+///
+/// TOML permits arbitrary codepoints inside quoted keys
+/// (e.g. `"foo\u001b[31mRED"`). Blindly passing such keys to
+/// `eprintln!` would allow a hostile config file to inject cursor
+/// movement, colour, or clear-screen sequences into the operator's
+/// terminal — a meaningful attack surface for multi-tenant hosts where
+/// one user controls the config file and another reads the validator
+/// output.
+///
+/// This helper replaces every control character (`U+0000` – `U+001F`
+/// and `U+007F`) with its `\u{XXXX}` escape so output stays printable
+/// and auditable. Non-control characters pass through unchanged.
+pub fn escape_printable(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        let code = c as u32;
+        if code < 0x20 || code == 0x7f {
+            out.push_str(&format!("\\u{{{code:04X}}}"));
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 // ---------------------------------------------------------------------
@@ -149,6 +192,16 @@ pub struct DisplaySettings {
     pub color_scheme: String,
     pub gauge_style: String,
     pub show_led_grid: bool,
+}
+
+impl Default for DisplaySettings {
+    fn default() -> Self {
+        Self {
+            color_scheme: "default".to_string(),
+            gauge_style: "blocks".to_string(),
+            show_led_grid: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -230,7 +283,7 @@ pub fn load(explicit: Option<&Path>) -> Result<LoadOutcome, ConfigError> {
 
     let (raw, source_path, unknown_keys): (RawConfig, Option<PathBuf>, Vec<String>) =
         if let Some(path) = explicit {
-            let contents = std::fs::read_to_string(path).map_err(|e| ConfigError::Io {
+            let contents = read_config_capped(path).map_err(|e| ConfigError::Io {
                 path: path.to_path_buf(),
                 source: e,
             })?;
@@ -238,7 +291,7 @@ pub fn load(explicit: Option<&Path>) -> Result<LoadOutcome, ConfigError> {
             check_schema_version(&raw)?;
             (raw, Some(path.to_path_buf()), unknown)
         } else if let Some(path) = paths::discover_existing_config() {
-            match std::fs::read_to_string(&path) {
+            match read_config_capped(&path) {
                 Ok(contents) => {
                     let (raw, unknown) = parse_toml(&contents)?;
                     check_schema_version(&raw)?;
@@ -289,7 +342,7 @@ fn check_schema_version(raw: &RawConfig) -> Result<(), ConfigError> {
 /// are present. Without `strict`, unknown keys are allowed — the caller
 /// should still call [`load`] to get the semantic errors.
 pub fn validate_file(path: &Path, strict: bool) -> Result<Settings, ConfigError> {
-    let contents = std::fs::read_to_string(path).map_err(|e| ConfigError::Io {
+    let contents = read_config_capped(path).map_err(|e| ConfigError::Io {
         path: path.to_path_buf(),
         source: e,
     })?;
@@ -316,22 +369,32 @@ pub fn validate_file(path: &Path, strict: bool) -> Result<Settings, ConfigError>
 
 /// Parse a TOML document and report any unknown top-level keys.
 ///
-/// Implementation detail: we first parse into a generic `toml::Value`
+/// Implementation detail: we parse once into a generic `toml::Value`
 /// so we can enumerate the top-level keys independently of the typed
 /// deserializer (which silently ignores unknown keys when
-/// `deny_unknown_fields` is not set). We then deserialize the same
-/// string into the typed [`RawConfig`]. Unknown sub-section keys are
-/// collected through a second pass over the generic value.
+/// `deny_unknown_fields` is not set). The same parsed value is then
+/// fed into `TomlValue::try_into` to materialise the typed
+/// [`RawConfig`] — no second parse of the source text, saving one full
+/// traversal of the document plus its allocations on every load.
 pub fn parse_toml(contents: &str) -> Result<(RawConfig, Vec<String>), ConfigError> {
     let value: TomlValue =
         toml::from_str(contents).map_err(|e| ConfigError::Parse(e.to_string()))?;
-    let raw: RawConfig = toml::from_str(contents).map_err(|e| ConfigError::Parse(e.to_string()))?;
+    let raw: RawConfig = value
+        .clone()
+        .try_into()
+        .map_err(|e: toml::de::Error| ConfigError::Parse(e.to_string()))?;
 
     let mut unknown = BTreeSet::new();
     if let TomlValue::Table(top) = &value {
         for key in top.keys() {
             if !KNOWN_TOP_LEVEL.contains(&key.as_str()) {
-                unknown.insert(key.clone());
+                // Pre-escape so downstream `eprintln!` sites cannot
+                // have ANSI / cursor-control sequences injected into
+                // operator terminals via a hostile config key. A
+                // quoted TOML key like `"x\u001b[31m"` is parsed
+                // verbatim; without this step the unknown-key warning
+                // would paint the rest of the stderr output red.
+                unknown.insert(escape_printable(key));
             }
         }
         scan_unknown_subkeys(top, &mut unknown);
@@ -340,15 +403,78 @@ pub fn parse_toml(contents: &str) -> Result<(RawConfig, Vec<String>), ConfigErro
     Ok((raw, unknown.into_iter().collect()))
 }
 
+/// Read a config file into a `String`, enforcing a hard size cap of
+/// [`MAX_CONFIG_BYTES`] and refusing to follow symlinks.
+///
+/// Defence-in-depth rationale:
+/// * **Size cap.** A legitimate config is well under a kilobyte. Without
+///   a cap, a renamed log file or a malicious attempt to OOM the daemon
+///   at startup would be read unconditionally. We check the metadata
+///   length first (fast path) and then also wrap the read in
+///   `Read::take(MAX + 1)` so pipes / devices / anything where
+///   `metadata().len()` lies still gets capped.
+/// * **Symlink refusal.** Even with `read_to_string`, a symlink at the
+///   canonical config path (e.g. `~/.config/all-smi/config.toml ->
+///   /etc/shadow`) would happily be followed and the target's contents
+///   leaked through parse-error messages. We refuse to read symlinks
+///   outright; if the operator genuinely wants to point at a file
+///   elsewhere they can use `--config /actual/path.toml`.
+fn read_config_capped(path: &Path) -> io::Result<String> {
+    use std::io::Read;
+
+    // Symlink rejection. `symlink_metadata` does NOT follow; a plain
+    // `metadata()` call would.
+    match std::fs::symlink_metadata(path) {
+        Ok(md) if md.file_type().is_symlink() => {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!(
+                    "refusing to read config at {} — path is a symlink",
+                    path.display()
+                ),
+            ));
+        }
+        Ok(_) => {}
+        // Fall through on metadata errors so `File::open` below produces
+        // the canonical NotFound / permission error the caller expects.
+        Err(_) => {}
+    }
+
+    let f = std::fs::File::open(path)?;
+    if let Ok(md) = f.metadata()
+        && md.len() > MAX_CONFIG_BYTES
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("config file > {MAX_CONFIG_BYTES} bytes; refusing to read"),
+        ));
+    }
+    let mut buf = String::new();
+    // `take(MAX + 1)` so that if we DO read past the cap we can tell the
+    // difference between "file is exactly at the cap" and "file exceeded
+    // the cap" without allocating beyond the cap + 1 byte.
+    f.take(MAX_CONFIG_BYTES + 1).read_to_string(&mut buf)?;
+    if buf.len() as u64 > MAX_CONFIG_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("config file > {MAX_CONFIG_BYTES} bytes; refusing to parse"),
+        ));
+    }
+    Ok(buf)
+}
+
 /// Walk each known section and record any unrecognised sub-keys. Keeps
-/// unknown keys fully qualified (e.g. `api.foo`).
+/// unknown keys fully qualified (e.g. `api.foo`). Sub-keys containing
+/// control characters are escaped via [`escape_printable`] so downstream
+/// consumers can print them safely — see the top-level key path for
+/// rationale.
 fn scan_unknown_subkeys(top: &toml::map::Map<String, TomlValue>, out: &mut BTreeSet<String>) {
     use toml::map::Map;
     let check = |name: &str, known: &[&str], out: &mut BTreeSet<String>, top: &Map<_, _>| {
         if let Some(TomlValue::Table(sec)) = top.get(name) {
             for k in sec.keys() {
                 if !known.contains(&k.as_str()) {
-                    out.insert(format!("{name}.{k}"));
+                    out.insert(format!("{name}.{}", escape_printable(k)));
                 }
             }
         }

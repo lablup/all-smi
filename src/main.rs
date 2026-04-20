@@ -85,6 +85,14 @@ fn main() {
             for w in &outcome.warnings {
                 eprintln!("warning: {w}");
             }
+            // Surface unknown-key warnings at boot so operators learn
+            // about typos (`[alarts]` instead of `[alerts]`) without
+            // having to run `config print` separately. The keys are
+            // already escape-sanitised at parse time, so printing them
+            // cannot inject control sequences into the terminal.
+            for k in &outcome.settings.unknown_keys {
+                eprintln!("warning: unknown config key `{k}` (forward-compat — preserved)");
+            }
             outcome.settings
         }
         Err(e) => {
@@ -222,8 +230,12 @@ async fn run_command(cli: Cli, settings: Settings) {
             if args.interval.is_none() {
                 args.interval = Some(settings.api.interval_secs);
             }
-            if !args.processes {
-                args.processes = settings.api.processes;
+            // `Option<bool>` encodes three states: explicit true /
+            // explicit false / not provided. Only fall back to the
+            // merged settings when the CLI left it as `None`; once
+            // resolved, downstream consumers always see a bare `bool`.
+            if args.processes.is_none() {
+                args.processes = Some(settings.api.processes);
             }
             #[cfg(unix)]
             {
@@ -310,7 +322,15 @@ async fn run_command(cli: Cli, settings: Settings) {
             // Readers that require sudo or specialised managers will gracefully
             // degrade — their failures surface as `errors` entries rather than
             // aborting the snapshot, per the issue spec.
-            let options = match snapshot::SnapshotOptions::from_args(&args) {
+            //
+            // Merge `[snapshot]` config defaults on top of the CLI args
+            // so `default_format` / `default_pretty` from `config.toml`
+            // take effect when the operator does not pass `--format` /
+            // `--pretty` explicitly.
+            let options = match snapshot::SnapshotOptions::from_args_with_settings(
+                &args,
+                Some(&settings.snapshot),
+            ) {
                 Ok(o) => o,
                 Err(e) => {
                     eprintln!("error: {e}");
@@ -346,7 +366,14 @@ async fn run_command(cli: Cli, settings: Settings) {
             // `snapshot` it runs without sudo and without initializing the
             // macOS native metrics manager — hardware readers that need
             // those privileges degrade gracefully into the error list.
-            let opts = match record::RecorderOptions::from_args(&args) {
+            //
+            // Merge `[record]` config defaults on top of CLI args so
+            // `output_dir` / `compress` from `config.toml` take effect
+            // when the operator does not pass `-o` / `--compress`.
+            let opts = match record::RecorderOptions::from_args_with_settings(
+                &args,
+                Some(&settings.record),
+            ) {
                 Ok(o) => o,
                 Err(e) => {
                     eprintln!("error: {e}");
@@ -429,6 +456,62 @@ async fn run_command(cli: Cli, settings: Settings) {
             }
         }
         None => {
+            // Honour `[general].default_mode` from the config file:
+            // when set to "view" or "api", redispatch through the
+            // matching branch instead of defaulting to local. This
+            // wires the documented-but-previously-orphaned option so
+            // operators can declare their preferred entry point once
+            // in `config.toml` and stop typing the subcommand.
+            match settings.general.default_mode.as_str() {
+                "view" => {
+                    let view_args = cli::ViewArgs {
+                        hosts: None,
+                        hostfile: None,
+                        interval: None,
+                        alert_temp: None,
+                        alert_util_low_mins: None,
+                        replay: None,
+                        speed: 1.0,
+                        start: None,
+                        replay_loop: false,
+                    };
+                    // Re-enter the View arm with synthetic args. A
+                    // cleaner factoring is a shared helper, but the
+                    // existing handler is only reachable through this
+                    // match; splitting it out is a larger change than
+                    // this PR wants.
+                    return Box::pin(run_command(
+                        Cli {
+                            config: cli.config,
+                            command: Some(Commands::View(view_args)),
+                        },
+                        settings,
+                    ))
+                    .await;
+                }
+                "api" => {
+                    let api_args = cli::ApiArgs {
+                        port: None,
+                        interval: None,
+                        processes: None,
+                        #[cfg(unix)]
+                        socket: None,
+                    };
+                    return Box::pin(run_command(
+                        Cli {
+                            config: cli.config,
+                            command: Some(Commands::Api(api_args)),
+                        },
+                        settings,
+                    ))
+                    .await;
+                }
+                _ => {
+                    // "local" — fall through to the original local
+                    // default behaviour below.
+                }
+            }
+
             // Default to local mode when no command is specified
             // On macOS, no sudo is needed
             #[cfg(target_os = "macos")]

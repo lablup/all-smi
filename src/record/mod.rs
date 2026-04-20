@@ -37,6 +37,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use serde_json::json;
 
 use crate::cli::{RecordArgs, RecordCompression, RecordSource, SnapshotIncludes};
+use crate::common::config_file::RecordSettings;
 use crate::snapshot::serializers::write_frame_json;
 use crate::snapshot::{
     DefaultSnapshotCollector, SNAPSHOT_SCHEMA_VERSION, Snapshot, SnapshotCollector,
@@ -68,8 +69,30 @@ pub struct RecorderOptions {
 impl RecorderOptions {
     /// Convert parsed CLI args into orchestrator options. All human-facing
     /// errors are raised here so the `record` subcommand fails fast before
-    /// opening any files.
+    /// opening any files. Thin wrapper over
+    /// [`Self::from_args_with_settings`] with no config layer — kept
+    /// for library consumers and tests.
+    #[allow(dead_code)]
     pub fn from_args(args: &RecordArgs) -> Result<Self> {
+        Self::from_args_with_settings(args, None)
+    }
+
+    /// Merged CLI + `[record]` config constructor. Precedence
+    /// (highest → lowest):
+    ///
+    /// * CLI flag (`--output`, `--compress`)
+    /// * Config file (`record.output_dir`, `record.compress`)
+    /// * Compiled default (`./all-smi-record.ndjson.zst`, codec zstd)
+    ///
+    /// `record.output_dir` is treated as the *directory* the default
+    /// basename is placed under — the operator can always pass `-o
+    /// /some/file.ndjson` to bypass it. Tilde expansion is applied so
+    /// `output_dir = "~/.cache/all-smi/records"` resolves to the
+    /// user's home at record time.
+    pub fn from_args_with_settings(
+        args: &RecordArgs,
+        settings: Option<&RecordSettings>,
+    ) -> Result<Self> {
         let includes = args
             .includes()
             .map_err(|msg| anyhow!("invalid --include: {msg}"))?;
@@ -88,18 +111,48 @@ impl RecorderOptions {
             bail!("--source=remote requires --hosts or --hostfile");
         }
 
-        let codec = Codec::detect(&args.output, args.compress);
+        // `--compress` wins when set; otherwise the `[record]` config
+        // chooses the codec. Without this the `record.compress` key
+        // was documented but silently ignored — detection fell through
+        // to the file extension.
+        let compress_override: Option<RecordCompression> = args.compress.or_else(|| {
+            settings.map(|s| s.compress.as_str()).and_then(|c| match c {
+                "zstd" => Some(RecordCompression::Zstd),
+                "gzip" => Some(RecordCompression::Gzip),
+                "none" => Some(RecordCompression::None),
+                _ => None, // apply_file_record already validated this
+            })
+        });
+
+        // Resolve the output path. clap hands us a default basename; if
+        // the operator did not pass `-o` AND the config supplied an
+        // `output_dir`, redirect the default basename under that dir.
+        // Detecting "operator did not pass -o" relies on the clap
+        // default being exactly the documented value — if that ever
+        // changes, update this guard.
+        let default_basename: std::path::PathBuf =
+            std::path::PathBuf::from("all-smi-record.ndjson.zst");
+        let output = if args.output == default_basename
+            && let Some(dir) = settings.map(|s| s.output_dir.as_str())
+            && !dir.is_empty()
+        {
+            crate::common::paths::expand_tilde(std::path::Path::new(dir)).join(&default_basename)
+        } else {
+            args.output.clone()
+        };
+
+        let codec = Codec::detect(&output, compress_override);
         // Sanity-check extension / codec combinations. We accept
         // mismatches (operator override wins) but warn so the file does
         // not end up unreadable-by-default.
-        if args.compress.is_some()
-            && let Some(warn) = codec_extension_mismatch(&args.output, args.compress)
+        if compress_override.is_some()
+            && let Some(warn) = codec_extension_mismatch(&output, compress_override)
         {
             eprintln!("warning: {warn}");
         }
 
         Ok(Self {
-            output: args.output.clone(),
+            output,
             interval: Duration::from_secs(args.interval.max(1)),
             duration,
             source: args.source,

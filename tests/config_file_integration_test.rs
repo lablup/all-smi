@@ -249,6 +249,29 @@ fn legacy_alert_temp_env_backcompat() {
     }
 }
 
+/// Canonical `ALL_SMI_ALERTS_TEMP_WARN_C` wins over legacy
+/// `ALL_SMI_ALERT_TEMP` when both are set. Mirrors the energy pattern;
+/// the reverse ordering (legacy wins) was the prior release's accidental
+/// behaviour and contradicts the documented canonical naming.
+#[test]
+fn canonical_alerts_env_beats_legacy() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    clear_all_env();
+    unsafe {
+        std::env::set_var("ALL_SMI_ALERT_TEMP", "60");
+        std::env::set_var("ALL_SMI_ALERTS_TEMP_WARN_C", "75");
+    }
+    let outcome = config_file::load(None).expect("must load");
+    assert_eq!(
+        outcome.settings.alerts.temp_warn_c, 75,
+        "canonical ALL_SMI_ALERTS_TEMP_WARN_C must override legacy ALL_SMI_ALERT_TEMP"
+    );
+    unsafe {
+        std::env::remove_var("ALL_SMI_ALERT_TEMP");
+        std::env::remove_var("ALL_SMI_ALERTS_TEMP_WARN_C");
+    }
+}
+
 /// Canonical `ALL_SMI_ENERGY_PRICE_PER_KWH` wins over legacy
 /// `ALL_SMI_ENERGY_PRICE` when both are set.
 #[test]
@@ -285,6 +308,37 @@ fn webhook_url_loaded_verbatim() {
         outcome.settings.alerts.webhook_url,
         "https://hooks.example/bot-secret"
     );
+}
+
+/// Oversized config files produce a clean `Io` error with an
+/// `InvalidData` kind, rather than OOM-ing the process on startup.
+/// Exercises the 1-MiB cap added to the loader as DoS mitigation.
+#[test]
+fn oversized_config_file_rejected_cleanly() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    clear_all_env();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+
+    // Build a 2 MiB blob of TOML comments — syntactically valid TOML
+    // but over the cap. Comments are cheap to generate and the parser
+    // does not reject them on the byte budget alone, so this exercises
+    // the size gate rather than the parse gate.
+    let padding = "# a".repeat(700_000); // ~2.1 MiB
+    let contents = format!("schema_version = 1\n{padding}\n[api]\nport = 9090\n");
+    std::fs::write(&path, contents).unwrap();
+
+    let result = config_file::load(Some(&path));
+    match result {
+        Err(ConfigError::Io { source, .. }) => {
+            assert_eq!(
+                source.kind(),
+                std::io::ErrorKind::InvalidData,
+                "oversized config must surface as InvalidData IO, got {source:?}"
+            );
+        }
+        other => panic!("expected ConfigError::Io{{InvalidData}}, got {other:?}"),
+    }
 }
 
 /// `~` expansion is done by per-feature consumers (energy WAL,

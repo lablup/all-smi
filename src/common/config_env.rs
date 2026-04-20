@@ -131,12 +131,37 @@ fn apply_env_api(settings: &mut Settings) {
 }
 
 /// Apply both the canonical `ALL_SMI_ALERTS_*` names and the legacy
-/// `ALL_SMI_ALERT_*` aliases introduced by issue #186. Canonical names
-/// are applied first and then the legacy names, matching the previous
-/// release's behaviour where `ALL_SMI_ALERT_TEMP` took effect.
+/// `ALL_SMI_ALERT_*` aliases introduced by issue #186.
+///
+/// Application order: **legacy first, canonical second.** This matches
+/// the pattern used by [`apply_env_energy`]: when an operator has both
+/// the old name and the new name set (e.g. during a rollout), the
+/// canonical one wins. Without this ordering a stale shell dotfile
+/// carrying `ALL_SMI_ALERT_TEMP` would silently clobber a freshly-set
+/// `ALL_SMI_ALERTS_TEMP_WARN_C`, making the documented canonical name
+/// a no-op.
 fn apply_env_alerts(settings: &mut Settings) {
     use std::env;
 
+    // Legacy aliases (issue #186) first. The old alias auto-bumped
+    // crit to keep `crit > warn`; reproduce that behaviour so
+    // backward-compat scripts stay faithful.
+    if let Ok(v) = env::var("ALL_SMI_ALERT_TEMP")
+        && let Ok(n) = v.parse::<u32>()
+    {
+        settings.alerts.temp_warn_c = n;
+        if settings.alerts.temp_crit_c < n + 5 {
+            settings.alerts.temp_crit_c = n + 10;
+        }
+    }
+    if let Ok(v) = env::var("ALL_SMI_ALERT_UTIL_LOW_MINS")
+        && let Ok(n) = v.parse::<u32>()
+    {
+        settings.alerts.util_idle_warn_mins = n;
+    }
+
+    // Canonical names second — they override the legacy values when
+    // both are present.
     if let Ok(v) = env::var("ALL_SMI_ALERTS_TEMP_WARN_C")
         && let Ok(n) = v.parse::<u32>()
     {
@@ -172,23 +197,6 @@ fn apply_env_alerts(settings: &mut Settings) {
         && let Ok(n) = v.parse::<u32>()
     {
         settings.alerts.power_crit_w = n;
-    }
-
-    // Legacy aliases (issue #186). The old alias auto-bumped crit to
-    // keep `crit > warn`; reproduce that behaviour so backward-compat
-    // scripts stay faithful.
-    if let Ok(v) = env::var("ALL_SMI_ALERT_TEMP")
-        && let Ok(n) = v.parse::<u32>()
-    {
-        settings.alerts.temp_warn_c = n;
-        if settings.alerts.temp_crit_c < n + 5 {
-            settings.alerts.temp_crit_c = n + 10;
-        }
-    }
-    if let Ok(v) = env::var("ALL_SMI_ALERT_UTIL_LOW_MINS")
-        && let Ok(n) = v.parse::<u32>()
-    {
-        settings.alerts.util_idle_warn_mins = n;
     }
 }
 

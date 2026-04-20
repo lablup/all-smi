@@ -106,10 +106,15 @@ pub async fn run_api_mode(args: &ApiArgs, settings: &Settings) {
         .init();
 
     println!("Starting API mode...");
-    let mut initial_state = AppState::new();
-    // Apply the fully-merged energy configuration (file + env) so the
-    // WAL path, cost toggle, etc. honour the user's config.toml.
-    initial_state.energy_config = settings.energy.clone();
+    // Build the state with the merged energy config so the integrator's
+    // `gap_interpolate_seconds` honours the TOML value. Without this
+    // constructor, later assignments to `energy_config` would not
+    // reconfigure the already-constructed `PowerIntegrator`.
+    let mut initial_state = AppState::with_energy_config(&settings.energy);
+    // Propagate `[display]` for symmetry with the TUI modes; the
+    // HTTP/Prometheus surface currently ignores it but future
+    // HTML/health-page renderers can read from a single location.
+    initial_state.display_config = settings.display.clone();
     // Replay any persisted energy WAL so Prometheus counters stay
     // monotonic across restarts (issue #191). Failures are logged
     // but do not block startup — the integrator simply begins at
@@ -136,7 +141,12 @@ pub async fn run_api_mode(args: &ApiArgs, settings: &Settings) {
     }
     let state = SharedState::new(RwLock::new(initial_state));
     let state_clone = state.clone();
-    let processes = args.processes;
+    // `args.processes` is now `Option<bool>` so the CLI can force
+    // `--processes=false` against a config file that sets it to true.
+    // `main.rs` always resolves the option before reaching here; the
+    // `unwrap_or(false)` is a defensive fallback so a direct
+    // library-level caller cannot crash by passing `None` through.
+    let processes = args.processes.unwrap_or(false);
     // args.interval was resolved against settings in main.rs; fall back
     // defensively to 3 (compiled default) when the caller somehow
     // passed `None`.

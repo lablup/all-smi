@@ -26,7 +26,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::cli::{ConfigAction, ConfigPrintArgs, ConfigPrintFormat, ConfigValidateArgs};
-use crate::common::config_file::{self, ConfigError, Settings, SocketSetting};
+use crate::common::config_file::{self, ConfigError, Settings, SocketSetting, escape_printable};
 use crate::common::paths;
 use crate::common::secure_write;
 
@@ -39,14 +39,23 @@ pub use render::{render_json, render_toml};
 /// Dispatch a `config` subcommand. Returns a process exit code.
 pub fn run(explicit_config_path: Option<&Path>, action: &ConfigAction) -> i32 {
     match action {
-        ConfigAction::Init(args) => run_init(args.force),
+        // `--config <path>` propagates to every sub-subcommand: `init`
+        // writes there (instead of the platform-canonical path), and
+        // `validate` treats it as the default target when the
+        // positional argument is omitted. Without this thread the
+        // global flag silently did nothing for `init`/`validate`,
+        // contradicting its "global" clap attribute.
+        ConfigAction::Init(args) => run_init(explicit_config_path, args.force),
         ConfigAction::Print(args) => run_print(explicit_config_path, args),
-        ConfigAction::Validate(args) => run_validate(args),
+        ConfigAction::Validate(args) => run_validate(explicit_config_path, args),
     }
 }
 
-fn run_init(force: bool) -> i32 {
-    let Some(target) = paths::default_config_path() else {
+fn run_init(explicit: Option<&Path>, force: bool) -> i32 {
+    let Some(target) = explicit
+        .map(Path::to_path_buf)
+        .or_else(paths::default_config_path)
+    else {
         eprintln!("error: could not determine a config directory for this platform");
         return 1;
     };
@@ -108,8 +117,16 @@ fn run_print(explicit: Option<&Path>, args: &ConfigPrintArgs) -> i32 {
     for w in &outcome.warnings {
         eprintln!("warning: {w}");
     }
+    // Unknown keys are already sanitised at parse time (see
+    // `config_file::parse_toml` -> `escape_printable`), but re-apply
+    // the escape defensively so a future code path that stores a raw
+    // key into `unknown_keys` cannot regress the terminal-injection
+    // guarantee.
     for k in &outcome.settings.unknown_keys {
-        eprintln!("warning: unknown config key `{k}` (forward-compat — preserved)");
+        eprintln!(
+            "warning: unknown config key `{}` (forward-compat — preserved)",
+            escape_printable(k)
+        );
     }
 
     let rendered = match args.format {
@@ -131,9 +148,14 @@ fn run_print(explicit: Option<&Path>, args: &ConfigPrintArgs) -> i32 {
     }
 }
 
-fn run_validate(args: &ConfigValidateArgs) -> i32 {
+fn run_validate(explicit: Option<&Path>, args: &ConfigValidateArgs) -> i32 {
+    // Resolution order mirrors the operator's expectation for a
+    // "global" `--config`: positional `validate <path>` wins first,
+    // then the global `--config`, then the platform-canonical default.
     let path: PathBuf = if let Some(p) = &args.path {
         p.clone()
+    } else if let Some(p) = explicit {
+        p.to_path_buf()
     } else if let Some(p) = paths::default_config_path() {
         p
     } else {
@@ -151,7 +173,7 @@ fn run_validate(args: &ConfigValidateArgs) -> i32 {
             if !settings.unknown_keys.is_empty() {
                 eprintln!("warnings:");
                 for k in &settings.unknown_keys {
-                    eprintln!("  - unknown key `{k}`");
+                    eprintln!("  - unknown key `{}`", escape_printable(k));
                 }
             }
             println!("config OK: {}", path.display());

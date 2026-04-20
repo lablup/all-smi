@@ -24,6 +24,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
 use crate::cli::{SnapshotArgs, SnapshotFormat, SnapshotIncludes};
+use crate::common::config_file::SnapshotSettings;
 use crate::device::{ChassisInfo, CpuInfo, GpuInfo, MemoryInfo, ProcessInfo};
 use crate::storage::info::StorageInfo;
 
@@ -74,7 +75,31 @@ impl Default for SnapshotOptions {
 
 impl SnapshotOptions {
     /// Construct options from parsed CLI args.
+    ///
+    /// Thin wrapper over [`Self::from_args_with_settings`] with no
+    /// config layer — kept as the legacy entry point for library
+    /// consumers and tests that never need the `[snapshot]` section.
+    #[allow(dead_code)]
     pub fn from_args(args: &SnapshotArgs) -> Result<Self> {
+        Self::from_args_with_settings(args, None)
+    }
+
+    /// Construct options merging CLI args with `[snapshot]` config
+    /// defaults. Precedence (highest → lowest):
+    ///
+    /// * CLI flag (`--format`, `--pretty`)
+    /// * Config file `[snapshot].default_format` /
+    ///   `[snapshot].default_pretty`
+    /// * Compiled defaults (json, auto-TTY pretty)
+    ///
+    /// Called from `main.rs` once the merged [`SnapshotSettings`] are
+    /// available. The legacy [`Self::from_args`] wrapper feeds `None`
+    /// for callers (tests, library consumers) that do not care about
+    /// the config layer.
+    pub fn from_args_with_settings(
+        args: &SnapshotArgs,
+        settings: Option<&SnapshotSettings>,
+    ) -> Result<Self> {
         let includes = args
             .includes()
             .map_err(|msg| anyhow::anyhow!("invalid --include: {msg}"))?;
@@ -84,9 +109,28 @@ impl SnapshotOptions {
         if args.samples == 0 {
             anyhow::bail!("--samples must be >= 1");
         }
+
+        // clap gives `args.format` a hardcoded `default_value_t =
+        // SnapshotFormat::Json`. That makes it impossible to tell "no
+        // flag given" apart from "--format=json" at parse time. We
+        // apply the config-file value only when the CLI chose the
+        // compiled default AND the config file has a different value,
+        // matching operator expectations ("my config says csv; one-
+        // shot runs should honour that").
+        let format = match settings.map(|s| s.default_format.as_str()) {
+            Some("csv") if args.format == SnapshotFormat::Json => SnapshotFormat::Csv,
+            Some("prometheus") if args.format == SnapshotFormat::Json => SnapshotFormat::Prometheus,
+            Some("json") | Some(_) | None => args.format,
+        };
+
+        // `--pretty` is already an `Option<bool>` so we can distinguish
+        // "unset" from "explicitly true/false" — only fall back to the
+        // config when the operator did not pass the flag.
+        let pretty = args.pretty.or_else(|| settings.map(|s| s.default_pretty));
+
         Ok(Self {
-            format: args.format,
-            pretty: args.pretty,
+            format,
+            pretty,
             includes,
             query: args.query.iter().map(|s| s.trim().to_string()).collect(),
             samples: args.samples,
@@ -225,6 +269,63 @@ mod tests {
         assert!(!opts.effective_pretty(true));
         opts.pretty = Some(true);
         assert!(opts.effective_pretty(false));
+    }
+
+    /// `[snapshot].default_format = "csv"` must take effect when the
+    /// operator does not pass `--format`. Without the merge the TOML
+    /// key was documented-but-ignored. A CLI `--format` value wins
+    /// back; we cannot test that case against clap's default here
+    /// because the compiled default is `Json`, but the precedence
+    /// direction is covered by the explicit-CLI branch below.
+    #[test]
+    fn snapshot_options_from_settings_uses_config_format() {
+        use crate::cli::SnapshotArgs;
+        use crate::common::config_file::SnapshotSettings;
+
+        let args = SnapshotArgs {
+            format: SnapshotFormat::Json,
+            pretty: None,
+            include: vec!["gpu".to_string()],
+            query: Vec::new(),
+            samples: 1,
+            interval: 0,
+            timeout_ms: 5_000,
+            output: None,
+        };
+        let settings = SnapshotSettings {
+            default_format: "csv".to_string(),
+            default_pretty: false,
+        };
+        let opts = SnapshotOptions::from_args_with_settings(&args, Some(&settings)).unwrap();
+        assert_eq!(opts.format, SnapshotFormat::Csv);
+        // `args.pretty` was `None` so the config `default_pretty` wins.
+        assert_eq!(opts.pretty, Some(false));
+    }
+
+    /// Explicit `--pretty=true` on the CLI overrides a config
+    /// `default_pretty = false`. Verifies the documented precedence
+    /// (CLI > config) at the merge boundary.
+    #[test]
+    fn snapshot_options_cli_pretty_overrides_config() {
+        use crate::cli::SnapshotArgs;
+        use crate::common::config_file::SnapshotSettings;
+
+        let args = SnapshotArgs {
+            format: SnapshotFormat::Json,
+            pretty: Some(true),
+            include: vec!["gpu".to_string()],
+            query: Vec::new(),
+            samples: 1,
+            interval: 0,
+            timeout_ms: 5_000,
+            output: None,
+        };
+        let settings = SnapshotSettings {
+            default_format: "json".to_string(),
+            default_pretty: false,
+        };
+        let opts = SnapshotOptions::from_args_with_settings(&args, Some(&settings)).unwrap();
+        assert_eq!(opts.pretty, Some(true), "CLI must win over config");
     }
 
     #[test]

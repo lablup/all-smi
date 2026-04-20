@@ -88,10 +88,16 @@ pub struct ApiArgs {
     pub interval: Option<u64>,
     /// Include the process list in the API output.
     ///
-    /// When omitted, value is taken from the config file or the
-    /// `ALL_SMI_API_PROCESSES` env var.
-    #[arg(long)]
-    pub processes: bool,
+    /// Use `--processes` or `--processes=true` to force-enable,
+    /// `--processes=false` to force-disable. When omitted, value is
+    /// taken from the config file or the `ALL_SMI_API_PROCESSES` env
+    /// var. Modelled as `Option<bool>` (not `bool`) so the CLI can
+    /// express the third state "no explicit override" — without this
+    /// an operator could not turn the flag OFF from the CLI when the
+    /// config file already set `processes = true`, since a bare
+    /// `--processes` flag has no natural "disable" spelling.
+    #[arg(long, num_args = 0..=1, default_missing_value = "true")]
+    pub processes: Option<bool>,
     /// Unix domain socket path for local IPC (Unix only).
     /// When specified without a value, uses platform default:
     /// - Linux: /var/run/all-smi.sock (fallback to /tmp/all-smi.sock if no permission)
