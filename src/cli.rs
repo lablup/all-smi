@@ -45,6 +45,15 @@ pub enum Commands {
     /// operator would have seen live, making post-hoc incident investigation
     /// possible without a Prometheus retention store. See issue #187.
     Record(RecordArgs),
+    /// Run self-diagnosis checks and optionally produce a support bundle.
+    ///
+    /// Emits a PASS/WARN/FAIL/SKIP report covering platform, privileges,
+    /// container runtime, every supported hardware backend (NVIDIA, AMD,
+    /// Apple, Gaudi, TPU, Tenstorrent, Rebellions, Furiosa, Windows), the
+    /// relevant environment variables, and optional remote endpoint
+    /// connectivity. Every check is read-only and bounded by a hard 3-second
+    /// timeout. See issue #188.
+    Doctor(DoctorArgs),
 }
 
 #[derive(Parser)]
@@ -379,6 +388,57 @@ impl RecordArgs {
         }
         Ok(set)
     }
+}
+
+/// Arguments for the `doctor` subcommand (issue #188).
+///
+/// The flag surface intentionally mirrors the issue spec so scripts and
+/// support templates can depend on stable names across versions.
+#[derive(Parser, Clone, Debug)]
+pub struct DoctorArgs {
+    /// Emit a machine-readable JSON report instead of the human-readable
+    /// text output. The JSON schema is versioned via a top-level `schema`
+    /// field; see `src/doctor/report.rs` for the current version.
+    #[arg(long)]
+    pub json: bool,
+
+    /// Include extra diagnostic detail per check (slow `system_profiler`
+    /// on macOS, verbose environment dump in the bundle, etc.).
+    #[arg(long)]
+    pub verbose: bool,
+
+    /// Write a tar.gz support bundle to this path. The archive contains
+    /// `report.txt`, `report.json`, and applicable system context files
+    /// (env, uname, lspci, lsmod, dmesg-gpu, version, and macOS-only
+    /// `system_profiler SPDisplaysDataType` when `--verbose` is set).
+    #[arg(long, value_name = "PATH")]
+    pub bundle: Option<PathBuf>,
+
+    /// By default the report and bundle scrub hostnames, IP addresses,
+    /// MAC addresses, and local usernames so the output is safe to attach
+    /// to public issues. Set this flag to preserve identifiers verbatim.
+    #[arg(long)]
+    pub include_identifiers: bool,
+
+    /// Opt-in remote endpoints to probe (host, host:port, or a full URL).
+    /// Each argument triggers DNS resolution, TCP reachability, latency
+    /// measurement, and an HTTP GET against `/metrics` when a URL is
+    /// given. May be passed multiple times.
+    #[arg(long = "remote-check", value_name = "HOST_OR_URL", num_args = 1..)]
+    pub remote_check: Vec<String>,
+
+    /// Skip checks whose ID starts with any of these prefixes. Example:
+    /// `--skip nvidia` omits every `nvidia.*` check; `--skip
+    /// nvidia.nvml.loadable` omits only that specific one. Comma-separated
+    /// values are accepted.
+    #[arg(long, value_name = "CHECK_ID", value_delimiter = ',')]
+    pub skip: Vec<String>,
+
+    /// Run only checks whose ID starts with any of these prefixes. Takes
+    /// precedence over `--skip`. Example: `--only privileges` runs only
+    /// the privileges group. Comma-separated values are accepted.
+    #[arg(long, value_name = "CHECK_ID", value_delimiter = ',')]
+    pub only: Vec<String>,
 }
 
 #[cfg(test)]

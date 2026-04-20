@@ -50,6 +50,8 @@ prost-types = "0.14"
 # operator to rebuild to record into a `.gz` stream.
 zstd = "0.13"
 flate2 = "1"
+# Support bundle packaging for the `doctor --bundle` subcommand (issue #188).
+tar = "0.4"
 [target.'cfg(target_os = "linux")'.dependencies]
 # Tenstorrent dependencies from GitHub
 all-smi-luwen-core = "0.2.0"
@@ -90,6 +92,11 @@ tonic-prost-build = "0.14"
 default = ["cli"]
 cli = ["dep:clap", "dep:crossterm", "dep:axum", "dep:tower-http", "dep:anyhow"]
 mock = ["cli", "dep:rand", "dep:hyper", "dep:hyper-util"]
+# Opt-in Furiosa NPU support. Surfaced by the `furiosa.*` doctor checks
+# (issue #188) and used by the Linux-target `furiosa-smi-rs` optional dep.
+# Note: the bare dep name form (without `dep:` prefix) preserves the
+# implicit `furiosa-smi-rs` feature that existing reader code keys on.
+furiosa = ["furiosa-smi-rs"]
 
 [lib]
 name = "all_smi"

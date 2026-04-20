@@ -193,6 +193,86 @@ http://gpu-node3:9090
   - If temperature is not available, it will be shown as "N/A" without error messages
   - For best temperature monitoring on Windows, install and run LibreHardwareMonitor in the background
 
+## Diagnostics
+
+The `all-smi doctor` subcommand runs a read-only suite of environment checks and
+prints a PASS/WARN/FAIL report covering platform, privileges, container
+runtime, every supported hardware backend (NVIDIA, AMD, Apple, Gaudi, TPU,
+Tenstorrent, Rebellions, Furiosa, Windows), the relevant environment
+variables, and optional remote endpoint connectivity. Each check has a hard
+3-second timeout.
+
+```bash
+# Human-readable report (default)
+all-smi doctor
+
+# Machine-readable JSON for CI and scripts
+all-smi doctor --json
+
+# Support bundle for attaching to GitHub issues
+all-smi doctor --bundle report.tar.gz
+
+# Keep hostnames / IPs / MAC / usernames (default scrubs them)
+all-smi doctor --bundle report.tar.gz --include-identifiers
+
+# Run only a subset of checks
+all-smi doctor --only platform,privileges
+
+# Skip specific checks (prefix match)
+all-smi doctor --skip nvidia.mig.mode
+
+# Probe remote endpoints (DNS, TCP, HTTP /metrics)
+all-smi doctor --remote-check http://gpu-node1:9090
+```
+
+Exit codes:
+
+- `0` — every check passed (or skipped)
+- `1` — at least one check returned WARN
+- `2` — at least one check returned FAIL
+
+The `NO_COLOR` environment variable is respected for CI log readability.
+
+### Support Bundle Security
+
+When `--bundle <PATH>` is used, the archive is written with the following
+hardening on Unix:
+
+- **Symlink refusal** — the output file is opened with `O_NOFOLLOW`. A
+  pre-existing symlink at `<PATH>` causes the command to fail with an error
+  rather than following the link (e.g., into `/etc/shadow`).
+- **Owner-only permissions** — the file is created with mode `0600` so only
+  the invoking user can read or write it.
+- **Secret-value redaction** — any environment variable whose name contains a
+  known credential keyword (`TOKEN`, `SECRET`, `PASSWORD`, `API_KEY`,
+  `ACCESS_KEY`, `PRIVATE_KEY`, `CREDENTIAL`, `AUTH`, `SESSION`, `COOKIE`,
+  `BEARER`, `SIGNATURE`, `ENCRYPTION_KEY`, `CLIENT_SECRET`) has its value
+  replaced with `<redacted:secret>` in `env.txt`. This redaction is always
+  applied, even when `--include-identifiers` is set.
+- **`--include-identifiers`** — by default the bundle scrubs hostnames, IPv4,
+  IPv6, MAC addresses, and the current username from all text files. Passing
+  `--include-identifiers` opts back in to those network-identity tokens only.
+  Credential values (above) are **never** restored by this flag.
+
+Stable check IDs (greppable across versions):
+
+| Category | Example IDs |
+|---|---|
+| `platform.*` | `platform.os`, `platform.runtime`, `platform.cpu`, `platform.memory`, `platform.hardware`, `platform.uptime` |
+| `privileges.*` | `privileges.user`, `privileges.root`, `privileges.video_render_group`, `privileges.dev_dri`, `privileges.dev_tenstorrent` |
+| `container.*` | `container.runtime`, `container.cgroup`, `container.k8s_serviceaccount` |
+| `nvidia.*` | `nvidia.nvml.loadable`, `nvidia.smi.binary`, `nvidia.driver.version`, `nvidia.env.visible_devices`, `nvidia.mig.mode` |
+| `amd.*` | `amd.rocm.version`, `amd.libamdgpu_top.abi`, `amd.dri.perms`, `amd.build.target_env` |
+| `apple.*` | `apple.macos.version`, `apple.silicon`, `apple.smc` |
+| `gaudi.*` | `gaudi.hlsmi`, `gaudi.devices`, `gaudi.driver` |
+| `tpu.*` | `tpu.libtpu`, `tpu.env.name`, `tpu.accel.vendor` |
+| `tenstorrent.*` | `tenstorrent.luwen`, `tenstorrent.kmd`, `tenstorrent.module` |
+| `rebellions.*` | `rebellions.rblnstat`, `rebellions.driver` |
+| `furiosa.*` | `furiosa.feature`, `furiosa.smi` |
+| `windows.*` | `windows.wmi`, `windows.amd_ryzen_master`, `windows.intel_wmi`, `windows.libre_hardware_monitor` |
+| `env.*` | `env.all_smi`, `env.cuda`, `env.rocr`, `env.tpu`, `env.hl` |
+| `network.*` | `network.dns`, `network.tcp`, `network.http` |
+
 ## Features
 
 ### GPU Monitoring
@@ -796,7 +876,7 @@ See the [LICENSE](./LICENSE) file for details.
 ## Changelog
 
 ### Recent Updates
-- **v0.21.0 (upcoming):** **BREAKING**: Rename Prometheus GPU labels `index`→`gpu_index` and `uuid`→`gpu_uuid` across all NVIDIA-specific metrics (pcie, thermal thresholds, performance state, hardware details, vGPU, MIG); also rename `index`→`npu_index` and `uuid`→`npu_uuid` across all non-NVIDIA NPU exporters (Tenstorrent, Rebellions, Furiosa, Gaudi, Google TPU) and NPU mock templates; remote parser accepts both old and new label names for backward compatibility during migration. Add NVIDIA vGPU SR-IOV monitoring — per-vGPU utilization, framebuffer memory, scheduler state, and host mode exported as Prometheus metrics; TUI renders per-GPU vGPU sub-sections; remote parser reconstructs vGPU view from scraped metrics; mock server can simulate vGPU data via `ALL_SMI_MOCK_VGPU=1`. Add NVIDIA extended thermal monitoring — slowdown, shutdown, max-operating, and acoustic temperature thresholds exported as Prometheus metrics; TUI shows per-GPU thermal row with proximity highlighting (yellow within 5°C of slowdown, red within 2°C of shutdown); P-state (P0–P15) surfaced in TUI and metrics; all fields degrade gracefully to `None` on older drivers or non-NVIDIA hardware. Add NVIDIA MIG (Multi-Instance GPU) monitoring — per-GPU MIG mode status and per-MIG-instance SM utilization, memory bandwidth utilization, and framebuffer used/total bytes exported as Prometheus metrics; TUI renders MIG instances as nested rows under each parent GPU; remote parser reconstructs MIG view from scraped metrics; mock server can simulate MIG data via `ALL_SMI_MOCK_MIG=1`. Add NVIDIA extended hardware details — NUMA node ID, GSP firmware mode and version, NvLink remote endpoint classification per active link, and GPM SM occupancy and memory bandwidth utilization exported as Prometheus metrics; TUI shows compact HW row per GPU with NUMA node, GSP state, and NvLink count; all fields degrade gracefully to absent on older drivers, non-NVIDIA hardware, or hosts without NUMA topology. Add `snapshot` subcommand — one-shot JSON/CSV/Prometheus export to stdout or file without starting a long-running server, with multi-sample collection (`--samples`/`--interval`), `--query` dot-path column selection for CSV, symlink-safe atomic file writes (Unix `O_NOFOLLOW` + mode `0600`), blocking-pool cap, and NaN/Inf float sanitization. Add `record` subcommand and `view --replay` — capture a live metric stream to a compressed NDJSON file (plain, gzip, zstd; rotating segments; local and remote sources) and play it back through the exact same TUI for post-hoc incident investigation; replay supports play/pause, per-frame stepping, speed cycling (0.25x–8x), ±10s seeks, timecode jumps, and loop mode; security hardening includes O_NOFOLLOW symlink refusal on the writer, 16 MiB per-line cap and 128 MiB zstd window ceiling on the reader, and bounded host-list and frame-cache limits; add interactive filter query bar (`/`) with DSL supporting field comparisons, range checks, and host-name pattern matching; add threshold alert history panel (`A`).
+- **v0.21.0 (upcoming):** **BREAKING**: Rename Prometheus GPU labels `index`→`gpu_index` and `uuid`→`gpu_uuid` across all NVIDIA-specific metrics (pcie, thermal thresholds, performance state, hardware details, vGPU, MIG); also rename `index`→`npu_index` and `uuid`→`npu_uuid` across all non-NVIDIA NPU exporters (Tenstorrent, Rebellions, Furiosa, Gaudi, Google TPU) and NPU mock templates; remote parser accepts both old and new label names for backward compatibility during migration. Add NVIDIA vGPU SR-IOV monitoring — per-vGPU utilization, framebuffer memory, scheduler state, and host mode exported as Prometheus metrics; TUI renders per-GPU vGPU sub-sections; remote parser reconstructs vGPU view from scraped metrics; mock server can simulate vGPU data via `ALL_SMI_MOCK_VGPU=1`. Add NVIDIA extended thermal monitoring — slowdown, shutdown, max-operating, and acoustic temperature thresholds exported as Prometheus metrics; TUI shows per-GPU thermal row with proximity highlighting (yellow within 5°C of slowdown, red within 2°C of shutdown); P-state (P0–P15) surfaced in TUI and metrics; all fields degrade gracefully to `None` on older drivers or non-NVIDIA hardware. Add NVIDIA MIG (Multi-Instance GPU) monitoring — per-GPU MIG mode status and per-MIG-instance SM utilization, memory bandwidth utilization, and framebuffer used/total bytes exported as Prometheus metrics; TUI renders MIG instances as nested rows under each parent GPU; remote parser reconstructs MIG view from scraped metrics; mock server can simulate MIG data via `ALL_SMI_MOCK_MIG=1`. Add NVIDIA extended hardware details — NUMA node ID, GSP firmware mode and version, NvLink remote endpoint classification per active link, and GPM SM occupancy and memory bandwidth utilization exported as Prometheus metrics; TUI shows compact HW row per GPU with NUMA node, GSP state, and NvLink count; all fields degrade gracefully to absent on older drivers, non-NVIDIA hardware, or hosts without NUMA topology. Add `snapshot` subcommand — one-shot JSON/CSV/Prometheus export to stdout or file without starting a long-running server, with multi-sample collection (`--samples`/`--interval`), `--query` dot-path column selection for CSV, symlink-safe atomic file writes (Unix `O_NOFOLLOW` + mode `0600`), blocking-pool cap, and NaN/Inf float sanitization. Add `record` subcommand and `view --replay` — capture a live metric stream to a compressed NDJSON file (plain, gzip, zstd; rotating segments; local and remote sources) and play it back through the exact same TUI for post-hoc incident investigation; replay supports play/pause, per-frame stepping, speed cycling (0.25x–8x), ±10s seeks, timecode jumps, and loop mode; security hardening includes O_NOFOLLOW symlink refusal on the writer, 16 MiB per-line cap and 128 MiB zstd window ceiling on the reader, and bounded host-list and frame-cache limits; add interactive filter query bar (`/`) with DSL supporting field comparisons, range checks, and host-name pattern matching; add threshold alert history panel (`A`). Add `doctor` subcommand — read-only suite of 51 environment checks across 14 categories (platform, privileges, container, nvidia, amd, apple, gaudi, tpu, tenstorrent, rebellions, furiosa, windows, env, network) with stable dotted check IDs, parallel execution, 3-second per-check timeout, PASS/WARN/FAIL/SKIP report in human and JSON formats, and `--bundle` support-archive packer with O_NOFOLLOW symlink refusal, 0o600 owner-only permissions, secret-value redaction, and network-identifier scrubbing.
 - **v0.20.1 (2026/04/10):** Fix local header metric row jitter by using fixed-width formatted fields; auto-promote pre-release to release in CI
 - **v0.20.0 (2026/04/10):** Redesign local-mode TUI with Activity panel featuring braille sparklines, CPU per-core view, host summary bar, and per-node LED grid; add Apple M5 Pro/Max Super core (S-CPU) support
 - **v0.19.0 (2026/04/08):** Fix Apple Silicon SMC float decoding to restore real CPU/GPU die temperatures, cache platform detection to avoid per-frame system_profiler on macOS, and fix TIME+/Command column alignment in process list

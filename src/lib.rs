@@ -125,6 +125,13 @@ pub mod app_state;
 #[cfg(feature = "cli")]
 pub mod cli;
 
+/// Self-diagnosis and support-bundle subcommand (issue #188).
+///
+/// Exposed under `cli` because the orchestrator depends on tokio + clap
+/// and the `anyhow` error plumbing used by every other CLI entry point.
+#[cfg(feature = "cli")]
+pub mod doctor;
+
 /// Network client for remote monitoring.
 #[cfg(feature = "cli")]
 pub mod network;
