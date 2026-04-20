@@ -307,7 +307,7 @@ async fn collect_one_host(
                 {
                     drop(hosts_guard);
                     let transport = lookup_transport(&hosts, &host_id).await;
-                    return exec_and_parse(&target, s, transport, status).await;
+                    return exec_and_parse(&hosts, &target, s, transport, status).await;
                 }
             }
 
@@ -345,7 +345,7 @@ async fn collect_one_host(
         }
     };
 
-    exec_and_parse(&target, session, transport, status).await
+    exec_and_parse(&hosts, &target, session, transport, status).await
 }
 
 async fn lookup_transport(
@@ -410,6 +410,7 @@ async fn probe_simple(session: &SshSession, cmd: &str) -> ProbeResult {
 }
 
 async fn exec_and_parse(
+    hosts: &Arc<Mutex<HashMap<String, HostState>>>,
     target: &SshTarget,
     session: SshSession,
     transport: SshTransport,
@@ -432,12 +433,17 @@ async fn exec_and_parse(
     let output = match session.exec(cmd).await {
         Ok(o) => o,
         Err(e) => {
+            // Clear the cached session so the next tick will
+            // reconnect rather than keep poking at a dead socket.
+            clear_cached_session(hosts, &target.host_id()).await;
             status.mark_failure(format!("{}: {e}", e.ui_label()));
             return Err((status,));
         }
     };
 
     if !output.is_success() {
+        // A non-zero exit is most often a local issue (missing binary,
+        // wrong sudo, etc.) — do NOT invalidate the session for that.
         status.mark_failure(format!(
             "exit {:?}: {}",
             output.exit_status,
@@ -504,9 +510,28 @@ fn truncate(s: &str, max: usize) -> String {
     if s.len() <= max {
         return s.to_string();
     }
-    let mut out = s[..max.min(s.len())].to_string();
+    // Slice on a char boundary so multi-byte stderr (e.g. remotes that
+    // emit non-ASCII error messages) cannot panic the view loop.
+    let mut end = 0;
+    for (idx, _) in s.char_indices() {
+        if idx > max {
+            break;
+        }
+        end = idx;
+    }
+    let mut out = s[..end].to_string();
     out.push('…');
     out
+}
+
+/// Clear the cached [`SshSession`] for `host_id`. Called after an exec
+/// that failed with a transport-level error so the next tick opens a
+/// fresh connection rather than retrying a dead session.
+async fn clear_cached_session(hosts: &Arc<Mutex<HashMap<String, HostState>>>, host_id: &str) {
+    let mut hosts_guard = hosts.lock().await;
+    if let Some(h) = hosts_guard.get_mut(host_id) {
+        h.session = None;
+    }
 }
 
 #[cfg(test)]
@@ -547,6 +572,19 @@ mod tests {
     #[test]
     fn truncate_preserves_short_strings() {
         assert_eq!(truncate("abc", 10), "abc");
+    }
+
+    #[test]
+    fn truncate_does_not_panic_on_multibyte_boundary() {
+        // Each `é` is two bytes in UTF-8.  Requesting a cut at a
+        // byte index that lands in the middle of a character used to
+        // panic; the fix walks `char_indices` so the cut always lands
+        // on a valid boundary.
+        let s = "éééééééé";
+        let out = truncate(s, 3);
+        assert!(out.ends_with('…'));
+        // Make sure the truncated portion is valid UTF-8.
+        assert!(out.is_char_boundary(out.len()));
     }
 
     #[tokio::test]
