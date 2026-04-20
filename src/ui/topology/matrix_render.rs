@@ -15,9 +15,10 @@
 //! `nvidia-smi topo -m`-style matrix rendering for the topology tab.
 //!
 //! Produces a plain-text table suitable for BufferWriter output. Each cell
-//! holds a short label (`NV8`, `SYS`, `PXB`, `X`). Extra columns at the
-//! end report CPU affinity (pulled from the GPU's `detail` map when
-//! available) and NUMA node.
+//! holds a short label (`NV8`, `SYS`, `PXB`, `X`). A trailing NUMA column
+//! reports each GPU's node. CPU affinity is intentionally omitted until
+//! the NVML `nvmlDeviceGetCpuAffinity` plumbing lands — shipping the
+//! column with a placeholder `-` value would just noise up the table.
 
 use super::TopologyModel;
 use super::classify_edge::classify;
@@ -53,14 +54,15 @@ pub fn render_matrix(model: &TopologyModel, width: u16) -> String {
 
     let mut out = String::new();
 
-    // Header row: blank corner + GPU column labels + CPU Affinity + NUMA
+    // Header row: blank corner + GPU column labels + NUMA. The CPU
+    // Affinity column is intentionally hidden (see module doc).
     let label_col_w = gpu_label_width(model);
     out.push_str(&" ".repeat(label_col_w));
     for gpu in &model.gpus {
         let hdr = format!("GPU{}", gpu.index);
         out.push_str(&center(&hdr, cell_width));
     }
-    out.push_str("   CPU Affinity   NUMA\n");
+    out.push_str("   NUMA\n");
 
     // Body rows: one row per GPU.
     let gpu_count_u32 = gpu_count as u32;
@@ -80,12 +82,11 @@ pub fn render_matrix(model: &TopologyModel, width: u16) -> String {
             let label = edge.label();
             out.push_str(&center(&label, cell_width));
         }
-        let cpu_aff = cpu_affinity(row_gpu);
         let numa = row_gpu
             .numa_node
             .map(|n| n.to_string())
             .unwrap_or_else(|| "-".to_string());
-        out.push_str(&format!("   {cpu_aff:<12}   {numa}\n"));
+        out.push_str(&format!("   {numa}\n"));
     }
 
     // Legend row — mirrors nvidia-smi's convention.
@@ -93,22 +94,6 @@ pub fn render_matrix(model: &TopologyModel, width: u16) -> String {
     out.push_str("NSW=NvSwitch   PXB=PCIe bridge   NODE=PCIe same NUMA   SYS=PCIe across NUMA\n");
 
     out
-}
-
-/// CPU affinity helper. Reads the string from the `detail` map under
-/// any of a few canonical keys; falls back to a dash when absent.
-fn cpu_affinity(gpu: &super::TopologyGpu) -> String {
-    // Walk known keys in the detail map. Topology renderer is informed
-    // directly from GpuInfo so we never populate this here — instead
-    // we require the caller to have set the `detail` map via
-    // `TopologyGpu::pcie_display` / a future `cpu_affinity` field. For
-    // v1 we surface whatever the NVML reader stored.
-    //
-    // The model doesn't currently carry this, so return "-" to keep the
-    // column aligned. Future work: propagate the affinity from the
-    // detail map into TopologyGpu.
-    let _ = gpu;
-    "-".to_string()
 }
 
 /// Build a minimal GpuInfo view from a TopologyGpu for the classifier.
@@ -166,21 +151,19 @@ fn pick_cell_width(gpu_count: usize, available: usize) -> usize {
     if gpu_count == 0 {
         return MAX_CELL;
     }
-    // The tail (CPU Affinity + NUMA + padding) eats ~22 cells.
-    // Label column ~ 5 cells.
-    let overhead = 5 + 22;
+    // The tail (NUMA column + padding) eats ~8 cells (3 spaces + "NUMA"
+    // header width + 1 trailing space). Label column ~ 5 cells.
+    let overhead = 5 + 8;
     let usable = available.saturating_sub(overhead);
     for cw in (MIN_CELL..=MAX_CELL).rev() {
         if cw * gpu_count <= usable {
             return cw;
         }
     }
-    // Sub-minimum: return 0 so the caller renders the narrow fallback.
-    if MIN_CELL * gpu_count <= usable {
-        MIN_CELL
-    } else {
-        0
-    }
+    // Sub-minimum: the loop above already covers `MIN_CELL`, so if we
+    // fell through, the table doesn't fit even at the smallest cell
+    // width — signal the caller to render the narrow fallback.
+    0
 }
 
 fn center(s: &str, w: usize) -> String {
@@ -275,8 +258,10 @@ mod tests {
         let out = render_matrix(&model, 120);
         assert!(out.contains("GPU0"), "{out}");
         assert!(out.contains("GPU3"), "{out}");
-        assert!(out.contains("CPU Affinity"), "{out}");
         assert!(out.contains("NUMA"), "{out}");
+        // CPU Affinity column is intentionally hidden until NVML plumbing
+        // lands — it must not appear in the header.
+        assert!(!out.contains("CPU Affinity"), "{out}");
     }
 
     #[test]
@@ -299,7 +284,10 @@ mod tests {
 
     #[test]
     fn falls_back_to_summary_under_80_col() {
-        let gpus: Vec<_> = (0..8).map(|i| mk_gpu(i, Some(0), 4)).collect();
+        // 16 GPUs × MIN_CELL(5) = 80 cells for the matrix alone, plus 13
+        // cells of label + NUMA overhead = 93. A 60-column terminal
+        // cannot accommodate even the narrowest grid → narrow fallback.
+        let gpus: Vec<_> = (0..16).map(|i| mk_gpu(i, Some(0), 4)).collect();
         let model = TopologyModel::from_host("h", &gpus);
         let out = render_matrix(&model, 60);
         assert!(out.contains("summary only"), "{out}");

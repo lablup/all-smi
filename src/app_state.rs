@@ -351,6 +351,13 @@ pub struct AppState {
     /// Render mode selected by the Topology tab's `M` toggle (issue #190).
     /// Defaults to [`TopologyViewMode::Graph`].
     pub topology_view_mode: TopologyViewMode,
+    /// Name of the host tab that was last active when the operator either
+    /// jumped to the Topology tab (via `T`) or navigated to Topology using
+    /// the arrow keys. Used by the renderer so the Topology view tracks the
+    /// operator's selection instead of always falling through to the first
+    /// host. Cleared by the remote/replay tab updaters when the stashed
+    /// host is no longer present (e.g. disconnected).
+    pub topology_last_host_tab: Option<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -464,6 +471,7 @@ impl AppState {
             users_tab_state: UsersTabState::default(),
             users_aggregation_cache: UsersAggregationCache::default(),
             topology_view_mode: TopologyViewMode::default(),
+            topology_last_host_tab: None,
         }
     }
 

@@ -165,6 +165,10 @@ pub struct RenderSnapshot {
     // Topology tab (issue #190)
     /// Render mode selected by the Topology tab's `M` toggle.
     pub topology_view_mode: TopologyViewMode,
+    /// Operator-selected host tab remembered for the Topology view. When
+    /// `Some` and still present in `tabs`, the Topology renderer points at
+    /// that host; otherwise it falls back to the first host tab.
+    pub topology_last_host_tab: Option<String>,
 }
 
 impl RenderSnapshot {
@@ -272,6 +276,7 @@ impl RenderSnapshot {
 
             // Topology tab (issue #190)
             topology_view_mode: state.topology_view_mode,
+            topology_last_host_tab: state.topology_last_host_tab.clone(),
         }
     }
 
@@ -379,6 +384,7 @@ impl RenderSnapshot {
 
         // Topology tab (issue #190)
         state.topology_view_mode = self.topology_view_mode;
+        state.topology_last_host_tab = self.topology_last_host_tab.clone();
 
         state
     }

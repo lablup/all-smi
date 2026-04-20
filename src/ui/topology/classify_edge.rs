@@ -103,9 +103,16 @@ impl EdgeClass {
 /// | 5   | 50                 |  50_000       |
 /// | 6   | 100                | 100_000       |
 ///
+/// NvLink Gen 2, 3, and 4 all share the same ~25 GB/s per-link ceiling;
+/// NVML does not expose a field that distinguishes them, so any sample
+/// in the 22–40 GB/s band is collapsed into the `Some(4)` label —
+/// chosen as the most common Gen for that bandwidth on current-gen
+/// datacenter GPUs. `Some(2)` and `Some(3)` are therefore never returned
+/// by design; the matrix labels `NV2` / `NV3` are never emitted.
+///
 /// We use widened floors so the classifier is forgiving of slight
-/// under-reporting (e.g. a 24 GB/s sample still resolves to Gen-3 territory
-/// rather than degrading to Gen-1).
+/// under-reporting (e.g. a 24 GB/s sample still resolves into the Gen
+/// 2/3/4 bucket rather than degrading to Gen-1).
 pub fn bandwidth_to_generation(bandwidth_mb_s: u32) -> Option<u8> {
     match bandwidth_mb_s {
         0 => None,

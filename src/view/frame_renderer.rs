@@ -860,13 +860,14 @@ fn is_topology_tab_selected(snapshot: &RenderSnapshot) -> bool {
 /// Pick the host to display in the Topology tab.
 ///
 /// When the operator last pointed at a specific host tab (e.g. "node-03"),
-/// we stash its name in `tabs[state.current_tab]` while they navigate.
-/// The Topology tab itself has no host, so we have to derive one:
+/// we stash its name in `snapshot.topology_last_host_tab`. The Topology
+/// tab itself has no host, so we have to derive one:
 ///
 /// * In local mode the lone known host (or empty string ⇒ "(local)") is
 ///   returned.
-/// * In remote mode we look at the operator's previously-selected host
-///   tab, falling back to the first host tab if none was selected.
+/// * In remote mode we first honour the operator's remembered selection
+///   (still present in the tab strip), falling back to the first host tab
+///   if the remembered tab is absent or stale.
 fn topology_target_host(snapshot: &RenderSnapshot) -> String {
     if snapshot.is_local_mode {
         return snapshot
@@ -875,7 +876,14 @@ fn topology_target_host(snapshot: &RenderSnapshot) -> String {
             .map(|g| g.host_id.clone())
             .unwrap_or_default();
     }
-    // Remote mode: first host-shaped tab after the reserved entries.
+    // Remote mode: honour the operator's last-selected host tab when it
+    // is still in the tab strip.
+    if let Some(last) = snapshot.topology_last_host_tab.as_ref()
+        && snapshot.tabs.iter().any(|t| t == last)
+    {
+        return last.clone();
+    }
+    // Fall through: first host-shaped tab after the reserved entries.
     for tab in &snapshot.tabs {
         if tab != "All"
             && tab != crate::ui::tabs::USERS_TAB_NAME
@@ -1116,5 +1124,52 @@ mod tests {
         let output = FrameRenderer::render_help(&snapshot, &args, 80, 24);
         // Help popup must produce output.
         assert!(!output.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // topology_target_host: remote-mode host selection
+    // -----------------------------------------------------------------------
+
+    /// Build a minimal remote-mode snapshot whose tab strip mirrors the
+    /// layout produced by `update_remote_tabs`:
+    /// `[All, Users, Topology, host1, host2]`. Helpers for the host-
+    /// selection tests below.
+    fn make_remote_topology_snapshot(last_host: Option<&str>) -> RenderSnapshot {
+        let mut state = AppState::new();
+        state.is_local_mode = false;
+        state.tabs = vec![
+            "All".to_string(),
+            crate::ui::tabs::USERS_TAB_NAME.to_string(),
+            crate::ui::tabs::TOPOLOGY_TAB_NAME.to_string(),
+            "host1".to_string(),
+            "host2".to_string(),
+        ];
+        state.topology_last_host_tab = last_host.map(|s| s.to_string());
+        RenderSnapshot::capture(&mut state)
+    }
+
+    #[test]
+    fn topology_target_host_uses_last_host_tab_when_set() {
+        // When the operator has previously selected "host2", the Topology
+        // tab should render that host — not fall through to the first
+        // host-shaped tab ("host1").
+        let snapshot = make_remote_topology_snapshot(Some("host2"));
+        assert_eq!(topology_target_host(&snapshot), "host2");
+    }
+
+    #[test]
+    fn topology_target_host_falls_back_to_first_host_when_unset() {
+        // With no remembered selection the renderer falls back to the
+        // first host-shaped tab after the reserved ones.
+        let snapshot = make_remote_topology_snapshot(None);
+        assert_eq!(topology_target_host(&snapshot), "host1");
+    }
+
+    #[test]
+    fn topology_target_host_falls_back_when_remembered_host_missing() {
+        // The remembered host "ghost" is not in the tab strip → fall back
+        // to the first host tab rather than returning the stale name.
+        let snapshot = make_remote_topology_snapshot(Some("ghost"));
+        assert_eq!(topology_target_host(&snapshot), "host1");
     }
 }

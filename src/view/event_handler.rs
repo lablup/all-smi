@@ -47,6 +47,24 @@ fn get_visible_process_rows(state: &AppState) -> usize {
     }
 }
 
+/// Stash the name of the currently-selected host tab into
+/// `state.topology_last_host_tab` so the Topology tab can later render the
+/// operator's preferred host instead of the first one in the tab strip.
+///
+/// Does nothing when the active tab is one of the cluster-level reserved
+/// tabs (`All`, `Users`, `Topology`) — those are not host tabs. Called from
+/// the `T` hotkey and from the arrow-key navigation handlers so Topology's
+/// target host follows whichever host the operator last selected.
+fn remember_current_host_tab(state: &mut AppState) {
+    if let Some(current_name) = state.tabs.get(state.current_tab).cloned()
+        && current_name != "All"
+        && current_name != crate::ui::tabs::USERS_TAB_NAME
+        && current_name != crate::ui::tabs::TOPOLOGY_TAB_NAME
+    {
+        state.topology_last_host_tab = Some(current_name);
+    }
+}
+
 pub async fn handle_key_event(key_event: KeyEvent, state: &mut AppState, args: &ViewArgs) -> bool {
     // Mode precedence (highest first) — do NOT reorder:
     //
@@ -142,6 +160,11 @@ pub async fn handle_key_event(key_event: KeyEvent, state: &mut AppState, args: &
             // no-op when the tab is not present (local mode before the
             // first data frame populates it).
             if let Some(idx) = topology_tab_index(&state.tabs) {
+                // Remember the operator-selected host tab BEFORE
+                // overwriting `current_tab`, so the Topology renderer
+                // can point at that host instead of falling back to
+                // the first host tab.
+                remember_current_host_tab(state);
                 state.current_tab = idx;
                 state.gpu_scroll_offset = 0;
                 state.storage_scroll_offset = 0;
@@ -156,12 +179,14 @@ pub async fn handle_key_event(key_event: KeyEvent, state: &mut AppState, args: &
         KeyCode::Left => {
             if !state.show_help {
                 handle_left_arrow(state);
+                remember_current_host_tab(state);
             }
             false
         }
         KeyCode::Right => {
             if !state.show_help {
                 handle_right_arrow(state);
+                remember_current_host_tab(state);
             }
             false
         }

@@ -481,8 +481,10 @@ families.
 Remote and replay `view` modes add a **Topology** tab that visualises the
 selected host's intra-node GPU interconnect: NvLink connections
 (GPU↔GPU, GPU↔NvSwitch), NUMA affinity, and PCIe lanes. Press `T` to
-jump to the tab (it sits right after `Users`); use `Tab`/`Shift-Tab` or
-the arrow keys to cycle between hosts while the Topology tab is active.
+jump to the tab (it sits right after `Users`); use the arrow keys
+(`Left`/`Right`) to cycle between hosts while the Topology tab is active.
+The tab remembers the host you last selected so pressing `T` returns to
+the same node instead of snapping to the first one in the strip.
 
 Two render modes are available; press `M` to toggle between them:
 

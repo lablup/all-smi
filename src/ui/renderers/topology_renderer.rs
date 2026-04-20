@@ -238,7 +238,10 @@ mod tests {
         let mut buf = BufferWriter::new();
         render_topology_tab(&mut buf, &gpus, "h1", TopologyViewMode::Matrix, 200, 40);
         let out = buf.get_buffer().to_string();
-        assert!(out.contains("CPU Affinity"), "{out}");
+        // Legend must surface the full `nvidia-smi topo -m` vocabulary;
+        // the NUMA column in the header anchors the tail of the table.
+        assert!(out.contains("X=self"), "{out}");
+        assert!(out.contains("NUMA"), "{out}");
     }
 
     #[test]

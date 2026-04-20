@@ -179,6 +179,16 @@ impl RemoteCollector {
         } else if state.current_tab >= state.tabs.len() {
             state.current_tab = 0;
         }
+
+        // Invalidate the Topology tab's remembered host when the stashed
+        // name is no longer present in the tab strip (e.g. the host
+        // disconnected). The renderer will fall back to the first host
+        // tab until the operator picks a new one.
+        if let Some(last) = state.topology_last_host_tab.as_ref()
+            && !state.tabs.iter().any(|t| t == last)
+        {
+            state.topology_last_host_tab = None;
+        }
     }
 }
 
