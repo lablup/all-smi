@@ -350,17 +350,16 @@ impl MetricsParser {
             "gpu_temperature_threshold_acoustic_celsius" => {
                 gpu_info.temperature_threshold_acoustic = saturating_u32(value);
             }
-            "gpu_performance_state" => {
+            "gpu_performance_state"
                 // NVML defines exactly P0–P15 (0..=15). Accept only values
                 // in that range so a malicious or buggy upstream cannot emit
                 // an out-of-range value (e.g. 9999) that the TUI would
                 // render as "P9999" and corrupt the secondary row layout.
                 // Fractional inputs (e.g. 1.5) are also rejected — the
                 // exporter only emits integer performance state indices.
-                if (0.0..=15.0).contains(&value) && value.fract() == 0.0 {
+                if (0.0..=15.0).contains(&value) && value.fract() == 0.0 => {
                     gpu_info.performance_state = saturating_u32(value);
                 }
-            }
             "gpu_numa_node_id" => {
                 // NUMA node ids are non-negative on every real system.
                 // Cap at a paranoid ceiling so a hostile upstream cannot
@@ -376,16 +375,15 @@ impl MetricsParser {
                     gpu_info.numa_node_id = Some(node);
                 }
             }
-            "gpu_gsp_firmware_mode" => {
+            "gpu_gsp_firmware_mode"
                 // Exporter emits exactly 0/1/2. Accept only integer values
                 // in that range so a malicious upstream cannot seed the UI
                 // with a bogus code. Fractional inputs (e.g. 1.5) saturate
                 // to 1 without this guard, producing a silently wrong code.
-                if (0.0..=2.0).contains(&value) && value.fract() == 0.0 {
+                if (0.0..=2.0).contains(&value) && value.fract() == 0.0 => {
                     gpu_info.gsp_firmware_mode =
                         saturating_u32(value).and_then(|v| u8::try_from(v).ok());
                 }
-            }
             "gpu_gsp_firmware_version_info" => {
                 // The numeric value is always 1 (info-style metric). The
                 // payload is the `version` label.
@@ -436,20 +434,18 @@ impl MetricsParser {
                     });
                 }
             }
-            "gpu_sm_occupancy" => {
+            "gpu_sm_occupancy"
                 // GPM fractional utilization — expected in [0.0, 1.0].
                 // Values outside that band come from a buggy upstream and
                 // are dropped rather than clamped so dashboards can
                 // distinguish "unavailable" from "definitely zero".
-                if value.is_finite() && (0.0..=1.0).contains(&value) {
+                if value.is_finite() && (0.0..=1.0).contains(&value) => {
                     ensure_gpm_metrics(gpu_info).sm_occupancy = Some(value as f32);
                 }
-            }
-            "gpu_memory_bandwidth_utilization" => {
-                if value.is_finite() && (0.0..=1.0).contains(&value) {
+            "gpu_memory_bandwidth_utilization"
+                if value.is_finite() && (0.0..=1.0).contains(&value) => {
                     ensure_gpm_metrics(gpu_info).memory_bandwidth_utilization = Some(value as f32);
                 }
-            }
             "npu_firmware_info" => {
                 // Handle NPU-specific firmware info metric
                 crate::extract_label_to_detail!(labels, "firmware", gpu_info.detail);

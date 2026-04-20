@@ -21,6 +21,7 @@ pub mod memory;
 pub mod mig;
 pub mod npu;
 pub mod process;
+pub mod render;
 pub mod runtime;
 pub mod vgpu;
 

@@ -82,8 +82,8 @@ tonic-prost-build = "0.14"
 
 [features]
 default = ["cli"]
-cli = ["dep:clap", "dep:crossterm", "dep:axum", "dep:tower-http"]
-mock = ["cli", "dep:anyhow", "dep:rand", "dep:hyper", "dep:hyper-util"]
+cli = ["dep:clap", "dep:crossterm", "dep:axum", "dep:tower-http", "dep:anyhow"]
+mock = ["cli", "dep:rand", "dep:hyper", "dep:hyper-util"]
 
 [lib]
 name = "all_smi"

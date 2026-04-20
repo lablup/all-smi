@@ -380,6 +380,88 @@ Metrics are available at `http://localhost:9090/metrics` (TCP) or via Unix socke
 
 For a complete list of all available metrics, see [API.md](API.md).
 
+### Scripting / CI (Snapshot Mode)
+
+The `snapshot` subcommand emits a single, one-shot machine-readable dump of
+the current hardware state to stdout (or a file) and exits. It is designed
+for shell piping, CI probes, Slurm prolog/epilog hooks, and any tool that
+wants `nvidia-smi --query-gpu=... --format=csv` ergonomics without starting
+a long-running HTTP server.
+
+```bash
+# Default: pretty-printed JSON when stdout is a TTY, compact when piped.
+all-smi snapshot
+
+# JSON piped to jq — pretty-print auto-off avoids shell pipeline churn.
+all-smi snapshot --format json | jq '.gpus[] | {name, utilization, temperature}'
+
+# CSV with nvidia-smi-style columns. Scope to GPUs with --include gpu to
+# keep the rows focused; the default CSV includes one row per CPU/memory
+# /chassis device too, which is usually not what you want for GPU tooling.
+all-smi snapshot --format csv --include gpu \
+  --query index,name,utilization,used_memory,total_memory,temperature,power_consumption
+
+# Prometheus exposition matching a single /metrics scrape.
+all-smi snapshot --format prometheus > /tmp/snapshot.prom
+
+# Take three samples one second apart, write a JSON array to a file.
+all-smi snapshot --samples 3 --interval 1 --output /tmp/snapshot-series.json
+
+# Include opt-in expensive sections (processes, storage).
+all-smi snapshot --include gpu,cpu,memory,chassis,process,storage
+
+# Exit non-zero when a reader times out hard enough to collect nothing.
+if ! all-smi snapshot --timeout-ms 2000 --format json >/dev/null; then
+    echo "no devices could be read"
+    exit 1
+fi
+```
+
+**Exit codes**
+
+| Code | Meaning                                                                   |
+|------|---------------------------------------------------------------------------|
+| `0`  | Success. Output was written; the `errors` array may contain partial failures. |
+| `1`  | Hard failure. No devices were collected from any reader.                  |
+| `2`  | Flag parse error (invalid `--include`, unknown format, etc.).             |
+
+**Slurm prolog example** — fail the prolog when a GPU is too hot to accept a
+job, using `jq` to enforce a temperature cap:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+TEMP_MAX=85
+JSON="$(all-smi snapshot --format json --include gpu)"
+HOT_COUNT="$(echo "$JSON" | jq "[.gpus[] | select(.temperature >= $TEMP_MAX)] | length")"
+if [[ "$HOT_COUNT" -gt 0 ]]; then
+    echo "Refusing to start: $HOT_COUNT GPU(s) at or above ${TEMP_MAX}C" >&2
+    echo "$JSON" | jq '.gpus[] | {name, temperature}' >&2
+    exit 1
+fi
+```
+
+**CSV → awk pipeline** — compute average utilization across all GPUs:
+
+```bash
+all-smi snapshot --format csv --include gpu --query utilization \
+  | awk -F, 'NR > 1 { sum += $1; n++ } END { if (n) printf "avg=%.1f%%\n", sum/n }'
+```
+
+**Options summary**
+
+| Flag              | Default                           | Description                                      |
+|-------------------|-----------------------------------|--------------------------------------------------|
+| `--format`        | `json`                            | `json` / `csv` / `prometheus`.                   |
+| `--pretty`        | auto (on when stdout is a TTY)    | Force pretty-print on or off for JSON.           |
+| `--include`       | `gpu,cpu,memory,chassis`          | Comma-separated sections to collect.             |
+| `--query`         | section-specific defaults         | CSV columns as comma-separated dot paths.        |
+| `--samples`       | `1`                               | Number of samples to collect.                    |
+| `--interval`      | `0`                               | Seconds between samples (only if `--samples > 1`). |
+| `--timeout-ms`    | `5000`                            | Per-reader timeout in milliseconds.              |
+| `--output` / `-o` | stdout                            | Write to this path (`-` also means stdout). On Unix: created with mode `0600` (owner-only), symlinks refused, atomic write via sibling `.tmp` + rename. |
+
 ### Quick Start with Make Commands
 
 For development and testing, you can use the provided Makefile:
@@ -549,7 +631,7 @@ See the [LICENSE](./LICENSE) file for details.
 ## Changelog
 
 ### Recent Updates
-- **v0.21.0 (upcoming):** **BREAKING**: Rename Prometheus GPU labels `index`→`gpu_index` and `uuid`→`gpu_uuid` across all NVIDIA-specific metrics (pcie, thermal thresholds, performance state, hardware details, vGPU, MIG); also rename `index`→`npu_index` and `uuid`→`npu_uuid` across all non-NVIDIA NPU exporters (Tenstorrent, Rebellions, Furiosa, Gaudi, Google TPU) and NPU mock templates; remote parser accepts both old and new label names for backward compatibility during migration. Add NVIDIA vGPU SR-IOV monitoring — per-vGPU utilization, framebuffer memory, scheduler state, and host mode exported as Prometheus metrics; TUI renders per-GPU vGPU sub-sections; remote parser reconstructs vGPU view from scraped metrics; mock server can simulate vGPU data via `ALL_SMI_MOCK_VGPU=1`. Add NVIDIA extended thermal monitoring — slowdown, shutdown, max-operating, and acoustic temperature thresholds exported as Prometheus metrics; TUI shows per-GPU thermal row with proximity highlighting (yellow within 5°C of slowdown, red within 2°C of shutdown); P-state (P0–P15) surfaced in TUI and metrics; all fields degrade gracefully to `None` on older drivers or non-NVIDIA hardware. Add NVIDIA MIG (Multi-Instance GPU) monitoring — per-GPU MIG mode status and per-MIG-instance SM utilization, memory bandwidth utilization, and framebuffer used/total bytes exported as Prometheus metrics; TUI renders MIG instances as nested rows under each parent GPU; remote parser reconstructs MIG view from scraped metrics; mock server can simulate MIG data via `ALL_SMI_MOCK_MIG=1`. Add NVIDIA extended hardware details — NUMA node ID, GSP firmware mode and version, NvLink remote endpoint classification per active link, and GPM SM occupancy and memory bandwidth utilization exported as Prometheus metrics; TUI shows compact HW row per GPU with NUMA node, GSP state, and NvLink count; all fields degrade gracefully to absent on older drivers, non-NVIDIA hardware, or hosts without NUMA topology
+- **v0.21.0 (upcoming):** **BREAKING**: Rename Prometheus GPU labels `index`→`gpu_index` and `uuid`→`gpu_uuid` across all NVIDIA-specific metrics (pcie, thermal thresholds, performance state, hardware details, vGPU, MIG); also rename `index`→`npu_index` and `uuid`→`npu_uuid` across all non-NVIDIA NPU exporters (Tenstorrent, Rebellions, Furiosa, Gaudi, Google TPU) and NPU mock templates; remote parser accepts both old and new label names for backward compatibility during migration. Add NVIDIA vGPU SR-IOV monitoring — per-vGPU utilization, framebuffer memory, scheduler state, and host mode exported as Prometheus metrics; TUI renders per-GPU vGPU sub-sections; remote parser reconstructs vGPU view from scraped metrics; mock server can simulate vGPU data via `ALL_SMI_MOCK_VGPU=1`. Add NVIDIA extended thermal monitoring — slowdown, shutdown, max-operating, and acoustic temperature thresholds exported as Prometheus metrics; TUI shows per-GPU thermal row with proximity highlighting (yellow within 5°C of slowdown, red within 2°C of shutdown); P-state (P0–P15) surfaced in TUI and metrics; all fields degrade gracefully to `None` on older drivers or non-NVIDIA hardware. Add NVIDIA MIG (Multi-Instance GPU) monitoring — per-GPU MIG mode status and per-MIG-instance SM utilization, memory bandwidth utilization, and framebuffer used/total bytes exported as Prometheus metrics; TUI renders MIG instances as nested rows under each parent GPU; remote parser reconstructs MIG view from scraped metrics; mock server can simulate MIG data via `ALL_SMI_MOCK_MIG=1`. Add NVIDIA extended hardware details — NUMA node ID, GSP firmware mode and version, NvLink remote endpoint classification per active link, and GPM SM occupancy and memory bandwidth utilization exported as Prometheus metrics; TUI shows compact HW row per GPU with NUMA node, GSP state, and NvLink count; all fields degrade gracefully to absent on older drivers, non-NVIDIA hardware, or hosts without NUMA topology. Add `snapshot` subcommand — one-shot JSON/CSV/Prometheus export to stdout or file without starting a long-running server, with multi-sample collection (`--samples`/`--interval`), `--query` dot-path column selection for CSV, symlink-safe atomic file writes (Unix `O_NOFOLLOW` + mode `0600`), blocking-pool cap, and NaN/Inf float sanitization.
 - **v0.20.1 (2026/04/10):** Fix local header metric row jitter by using fixed-width formatted fields; auto-promote pre-release to release in CI
 - **v0.20.0 (2026/04/10):** Redesign local-mode TUI with Activity panel featuring braille sparklines, CPU per-core view, host summary bar, and per-node LED grid; add Apple M5 Pro/Max Super core (S-CPU) support
 - **v0.19.0 (2026/04/08):** Fix Apple Silicon SMC float decoding to restore real CPU/GPU die temperatures, cache platform detection to avoid per-frame system_profiler on macOS, and fix TIME+/Command column alignment in process list

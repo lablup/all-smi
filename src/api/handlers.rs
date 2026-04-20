@@ -18,86 +18,22 @@ use tokio::sync::RwLock;
 
 use crate::app_state::AppState;
 
-use super::metrics::{
-    MetricExporter, chassis::ChassisMetricExporter, cpu::CpuMetricExporter,
-    disk::DiskMetricExporter, gpu::GpuMetricExporter, hardware::HardwareMetricExporter,
-    memory::MemoryMetricExporter, mig::MigMetricExporter, npu::NpuMetricExporter,
-    process::ProcessMetricExporter, runtime::RuntimeMetricExporter, vgpu::VgpuMetricExporter,
-};
+use super::metrics::render::{MetricsRenderInputs, render_prometheus_exposition};
 
 pub type SharedState = Arc<RwLock<AppState>>;
 
 pub async fn metrics_handler(State(state): State<SharedState>) -> String {
     let state = state.read().await;
-    let mut all_metrics = String::new();
-
-    // Export GPU/NPU metrics
-    if !state.gpu_info.is_empty() {
-        // Export GPU/NPU metrics together since the exporters handle filtering
-        let gpu_exporter = GpuMetricExporter::new(&state.gpu_info);
-        all_metrics.push_str(&gpu_exporter.export_metrics());
-
-        let npu_exporter = NpuMetricExporter::new(&state.gpu_info);
-        all_metrics.push_str(&npu_exporter.export_metrics());
-    }
-
-    // Export process metrics
-    if !state.process_info.is_empty() {
-        let process_exporter = ProcessMetricExporter::new(&state.process_info);
-        all_metrics.push_str(&process_exporter.export_metrics());
-    }
-
-    // Export CPU metrics
-    if !state.cpu_info.is_empty() {
-        let cpu_exporter = CpuMetricExporter::new(&state.cpu_info);
-        all_metrics.push_str(&cpu_exporter.export_metrics());
-    }
-
-    // Export memory metrics
-    if !state.memory_info.is_empty() {
-        let memory_exporter = MemoryMetricExporter::new(&state.memory_info);
-        all_metrics.push_str(&memory_exporter.export_metrics());
-    }
-
-    // Export disk metrics from cached storage_info
-    // This uses pre-collected data from the background task instead of collecting on each request
-    if !state.storage_info.is_empty() {
-        let disk_exporter = DiskMetricExporter::new(&state.storage_info);
-        all_metrics.push_str(&disk_exporter.export_metrics());
-    }
-
-    // Export runtime environment metrics
-    let runtime_exporter = RuntimeMetricExporter::new(&state.runtime_environment);
-    all_metrics.push_str(&runtime_exporter.export_metrics());
-
-    // Export chassis metrics
-    if !state.chassis_info.is_empty() {
-        let chassis_exporter = ChassisMetricExporter::new(&state.chassis_info);
-        all_metrics.push_str(&chassis_exporter.export_metrics());
-    }
-
-    // Export vGPU metrics (NVIDIA vGPU hosts only; silent no-op otherwise)
-    if !state.vgpu_info.is_empty() {
-        let vgpu_exporter = VgpuMetricExporter::new(&state.vgpu_info);
-        all_metrics.push_str(&vgpu_exporter.export_metrics());
-    }
-
-    // Export MIG metrics (NVIDIA datacenter GPUs with MIG enabled; silent
-    // no-op on consumer cards, pre-Ampere GPUs, and non-MIG hosts).
-    if !state.mig_info.is_empty() {
-        let mig_exporter = MigMetricExporter::new(&state.mig_info);
-        all_metrics.push_str(&mig_exporter.export_metrics());
-    }
-
-    // Export extended hardware details (issue #132): NUMA node id, GSP
-    // firmware mode + version, NvLink remote device types, optional GPM
-    // gauges. The exporter self-filters to NVIDIA GPUs that populated at
-    // least one of the new fields so non-NVIDIA and older-driver paths
-    // stay silent in the `/metrics` output.
-    if !state.gpu_info.is_empty() {
-        let hw_exporter = HardwareMetricExporter::new(&state.gpu_info);
-        all_metrics.push_str(&hw_exporter.export_metrics());
-    }
-
-    all_metrics
+    let inputs = MetricsRenderInputs {
+        gpu_info: &state.gpu_info,
+        process_info: &state.process_info,
+        cpu_info: &state.cpu_info,
+        memory_info: &state.memory_info,
+        storage_info: &state.storage_info,
+        runtime_environment: &state.runtime_environment,
+        chassis_info: &state.chassis_info,
+        vgpu_info: &state.vgpu_info,
+        mig_info: &state.mig_info,
+    };
+    render_prometheus_exposition(&inputs)
 }
