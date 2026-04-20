@@ -15,6 +15,7 @@
 pub mod chassis;
 pub mod cpu;
 pub mod disk;
+pub mod energy;
 pub mod gpu;
 pub mod hardware;
 pub mod memory;

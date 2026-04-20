@@ -105,10 +105,56 @@ pub async fn run_api_mode(args: &ApiArgs) {
         .init();
 
     println!("Starting API mode...");
-    let state = SharedState::new(RwLock::new(AppState::new()));
+    let mut initial_state = AppState::new();
+    // Replay any persisted energy WAL so Prometheus counters stay
+    // monotonic across restarts (issue #191). Failures are logged
+    // but do not block startup — the integrator simply begins at
+    // zero on this host.
+    if initial_state.energy_config.wal_enabled {
+        let wal_path = initial_state.energy_config.wal_path.clone();
+        match crate::metrics::energy_wal::replay_from_path(
+            std::path::Path::new(&wal_path),
+            initial_state.energy.integrator_mut(),
+        ) {
+            Ok(index) => {
+                if !index.is_empty() {
+                    tracing::info!(
+                        "energy WAL: replayed {} records from {wal_path}",
+                        index.len()
+                    );
+                }
+                initial_state.energy_wal_replay = index;
+            }
+            Err(e) => {
+                tracing::warn!("energy WAL: replay from {wal_path} failed: {e}");
+            }
+        }
+    }
+    let state = SharedState::new(RwLock::new(initial_state));
     let state_clone = state.clone();
     let processes = args.processes;
     let interval = args.interval;
+
+    // Spawn the WAL flush task if enabled. The handle is dropped on
+    // process exit; since the task runs forever until we are killed,
+    // dropping is equivalent to stopping.
+    let wal_flush_handle = {
+        let state = state.clone();
+        let state_read = state.read().await;
+        let cfg = state_read.energy_config.clone();
+        drop(state_read);
+        if cfg.wal_enabled {
+            Some(crate::metrics::energy_wal::spawn_wal_flush_task(
+                state,
+                cfg.wal_path.clone(),
+                crate::metrics::energy_wal::DEFAULT_FLUSH_INTERVAL,
+            ))
+        } else {
+            None
+        }
+    };
+    // Suppress unused warning when the wal is disabled.
+    let _ = wal_flush_handle;
 
     // Spawn background task for collecting metrics
     tokio::spawn(async move {
@@ -173,6 +219,13 @@ pub async fn run_api_mode(args: &ApiArgs) {
             if state.loading {
                 state.loading = false;
             }
+
+            // Integrate power samples into the energy accountant so
+            // `all_smi_energy_consumed_joules_total` reflects reality
+            // in `api` mode (issue #191). The code mirrors
+            // `view::data_collection::aggregator::update_energy_counters`
+            // so both surfaces share the same integration contract.
+            integrate_power_samples(&mut state);
 
             drop(state);
             tokio::time::sleep(Duration::from_secs(interval)).await;
@@ -425,6 +478,50 @@ fn cleanup_socket(path: &std::path::Path) {
         Err(e) => {
             tracing::warn!("Failed to remove socket file on shutdown: {e}");
         }
+    }
+}
+
+/// Integrate the current in-state power samples into the energy
+/// accountant. Run once per collection cycle in `api` mode (issue
+/// #191). On the first sample for each `(host, device)` pair, the
+/// function consults `state.energy_wal_replay` to seed the lifetime
+/// counter with any previously-recorded value so Prometheus stays
+/// monotonic across restarts.
+fn integrate_power_samples(state: &mut AppState) {
+    use crate::metrics::energy::EnergyKey;
+    use std::time::Instant;
+
+    let now = Instant::now();
+
+    // Collect (key, watts) pairs first so we do not hold an immutable
+    // borrow over state.*_info while taking the mutable borrow on
+    // state.energy.
+    let mut samples: Vec<(EnergyKey, f64)> =
+        Vec::with_capacity(state.gpu_info.len() + state.cpu_info.len() + state.chassis_info.len());
+    for gpu in &state.gpu_info {
+        samples.push((
+            EnergyKey::gpu(gpu.hostname.clone(), gpu.uuid.clone()),
+            gpu.power_consumption,
+        ));
+    }
+    for cpu in &state.cpu_info {
+        if let Some(power) = cpu.power_consumption {
+            samples.push((EnergyKey::cpu(cpu.hostname.clone()), power));
+        }
+    }
+    for chassis in &state.chassis_info {
+        if let Some(power) = chassis.total_power_watts {
+            samples.push((EnergyKey::chassis(chassis.hostname.clone()), power));
+        }
+    }
+
+    let wal_index = &mut state.energy_wal_replay;
+    let integrator = state.energy.integrator_mut();
+    for (key, watts) in samples {
+        if !integrator.has_samples(&key) && !wal_index.is_empty() {
+            wal_index.seed_if_matches(&key, integrator);
+        }
+        integrator.record_sample(key, now, watts);
     }
 }
 

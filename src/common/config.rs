@@ -154,6 +154,110 @@ impl AlertConfig {
     }
 }
 
+/// Energy accounting configuration (issue #191).
+///
+/// Built from defaults, then overlaid with the following sources in
+/// order of precedence (lowest to highest):
+///
+/// 1. `[energy]` section of the TOML config file (added by companion
+///    issue #192; loader is a no-op until that lands).
+/// 2. Environment-variable overrides (see
+///    [`EnergyConfig::with_env_overrides`]).
+///
+/// The TUI cost display is suppressed whenever `show_cost` is `false`
+/// or `price_per_kwh` is not a finite positive number. The Prometheus
+/// counter is exported unconditionally so downstream tooling can
+/// compute its own cost estimate.
+#[derive(Clone, Debug)]
+pub struct EnergyConfig {
+    /// Electricity price per kilowatt-hour in `currency` units.
+    pub price_per_kwh: f64,
+    /// Display-only currency code (e.g. `"USD"`, `"KRW"`, `"EUR"`).
+    pub currency: String,
+    /// When `false`, the TUI renders the kWh total but NOT the
+    /// monetary cost. Ignored when `price_per_kwh == 0` (there is no
+    /// cost to show in that case).
+    pub show_cost: bool,
+    /// Path to the WAL file. Tilde expansion is applied at open time.
+    pub wal_path: String,
+    /// Threshold (in seconds) above which the integrator switches from
+    /// trapezoidal to hold-last integration across sample gaps.
+    pub gap_interpolate_seconds: u64,
+    /// When `false`, no WAL is opened — counters are in-memory only.
+    /// Set via env-var `ALL_SMI_ENERGY_NO_WAL=1` for ephemeral hosts.
+    pub wal_enabled: bool,
+}
+
+impl Default for EnergyConfig {
+    fn default() -> Self {
+        Self {
+            price_per_kwh: 0.12,
+            currency: "USD".to_string(),
+            show_cost: true,
+            wal_path: "~/.cache/all-smi/energy-wal.bin".to_string(),
+            gap_interpolate_seconds: 10,
+            wal_enabled: true,
+        }
+    }
+}
+
+impl EnergyConfig {
+    /// Overlay env-var overrides.
+    ///
+    /// Recognised variables:
+    /// - `ALL_SMI_ENERGY_PRICE`: override `price_per_kwh` (invalid
+    ///   values are silently ignored so a typo cannot brick the TUI).
+    /// - `ALL_SMI_ENERGY_CURRENCY`: override `currency`.
+    /// - `ALL_SMI_ENERGY_NO_COST`: when set (any value), unsets
+    ///   `show_cost`.
+    /// - `ALL_SMI_ENERGY_WAL_PATH`: override `wal_path`.
+    /// - `ALL_SMI_ENERGY_NO_WAL`: when set (any value), disables the
+    ///   disk-backed WAL.
+    /// - `ALL_SMI_ENERGY_GAP_SECONDS`: override
+    ///   `gap_interpolate_seconds`.
+    pub fn with_env_overrides(mut self) -> Self {
+        if let Ok(v) = std::env::var("ALL_SMI_ENERGY_PRICE")
+            && let Ok(price) = v.parse::<f64>()
+            && price.is_finite()
+            && price >= 0.0
+        {
+            self.price_per_kwh = price;
+        }
+        if let Ok(v) = std::env::var("ALL_SMI_ENERGY_CURRENCY")
+            && !v.trim().is_empty()
+        {
+            self.currency = v.trim().to_string();
+        }
+        if std::env::var("ALL_SMI_ENERGY_NO_COST").is_ok() {
+            self.show_cost = false;
+        }
+        if let Ok(v) = std::env::var("ALL_SMI_ENERGY_WAL_PATH")
+            && !v.trim().is_empty()
+        {
+            self.wal_path = v.trim().to_string();
+        }
+        if std::env::var("ALL_SMI_ENERGY_NO_WAL").is_ok() {
+            self.wal_enabled = false;
+        }
+        if let Ok(v) = std::env::var("ALL_SMI_ENERGY_GAP_SECONDS")
+            && let Ok(secs) = v.parse::<u64>()
+            && secs > 0
+        {
+            self.gap_interpolate_seconds = secs;
+        }
+        self
+    }
+
+    /// `true` iff the TUI should render the monetary cost column.
+    ///
+    /// Returns `false` for non-positive or non-finite prices so a
+    /// mis-configured `ALL_SMI_ENERGY_PRICE=abc` quietly hides the
+    /// column instead of surfacing `$NaN`.
+    pub fn cost_visible(&self) -> bool {
+        self.show_cost && self.price_per_kwh.is_finite() && self.price_per_kwh > 0.0
+    }
+}
+
 /// Environment-specific configuration
 #[allow(dead_code)] // Functions used across modules but clippy may not detect cross-module usage
 pub struct EnvConfig;
@@ -441,6 +545,96 @@ mod tests {
 
         assert_eq!(EnvConfig::retry_delay(0), 0);
         assert_eq!(EnvConfig::retry_delay(1000), 50000);
+    }
+
+    #[test]
+    fn energy_config_defaults_match_issue_spec() {
+        let cfg = EnergyConfig::default();
+        assert!((cfg.price_per_kwh - 0.12).abs() < 1e-9);
+        assert_eq!(cfg.currency, "USD");
+        assert!(cfg.show_cost);
+        assert_eq!(cfg.wal_path, "~/.cache/all-smi/energy-wal.bin");
+        assert_eq!(cfg.gap_interpolate_seconds, 10);
+        assert!(cfg.wal_enabled);
+        assert!(cfg.cost_visible());
+    }
+
+    #[test]
+    fn energy_config_cost_hidden_when_price_zero_or_invalid() {
+        let cfg = EnergyConfig {
+            price_per_kwh: 0.0,
+            ..EnergyConfig::default()
+        };
+        assert!(!cfg.cost_visible(), "zero price must hide cost");
+        let cfg = EnergyConfig {
+            price_per_kwh: -0.5,
+            ..EnergyConfig::default()
+        };
+        assert!(!cfg.cost_visible(), "negative price must hide cost");
+        let cfg = EnergyConfig {
+            price_per_kwh: f64::NAN,
+            ..EnergyConfig::default()
+        };
+        assert!(!cfg.cost_visible(), "NaN price must hide cost");
+        let cfg = EnergyConfig {
+            show_cost: false,
+            ..EnergyConfig::default()
+        };
+        assert!(!cfg.cost_visible(), "show_cost=false must hide cost");
+    }
+
+    /// Shared mutex used by the env-var tests to serialize
+    /// mutations of `ALL_SMI_ENERGY_*`. Cargo runs test fns on
+    /// multiple threads by default; without this lock, the `set_var`
+    /// / `remove_var` calls from two tests would race and either
+    /// observe each other's partial state or observe the value the
+    /// OTHER test was mid-clearing.
+    static ENERGY_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn energy_config_env_overrides_apply() {
+        let _guard = ENERGY_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let keys = [
+            "ALL_SMI_ENERGY_PRICE",
+            "ALL_SMI_ENERGY_CURRENCY",
+            "ALL_SMI_ENERGY_NO_COST",
+            "ALL_SMI_ENERGY_WAL_PATH",
+            "ALL_SMI_ENERGY_NO_WAL",
+            "ALL_SMI_ENERGY_GAP_SECONDS",
+        ];
+        unsafe {
+            for k in keys {
+                std::env::remove_var(k);
+            }
+            std::env::set_var("ALL_SMI_ENERGY_PRICE", "0.30");
+            std::env::set_var("ALL_SMI_ENERGY_CURRENCY", "KRW");
+            std::env::set_var("ALL_SMI_ENERGY_WAL_PATH", "/tmp/unit-wal.bin");
+            std::env::set_var("ALL_SMI_ENERGY_GAP_SECONDS", "15");
+        }
+        let cfg = EnergyConfig::default().with_env_overrides();
+        assert!((cfg.price_per_kwh - 0.30).abs() < 1e-9);
+        assert_eq!(cfg.currency, "KRW");
+        assert_eq!(cfg.wal_path, "/tmp/unit-wal.bin");
+        assert_eq!(cfg.gap_interpolate_seconds, 15);
+        unsafe {
+            for k in keys {
+                std::env::remove_var(k);
+            }
+        }
+    }
+
+    #[test]
+    fn energy_config_invalid_price_env_ignored() {
+        let _guard = ENERGY_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe {
+            std::env::remove_var("ALL_SMI_ENERGY_PRICE");
+            std::env::set_var("ALL_SMI_ENERGY_PRICE", "not-a-number");
+        }
+        let cfg = EnergyConfig::default().with_env_overrides();
+        assert!((cfg.price_per_kwh - 0.12).abs() < 1e-9);
+        unsafe {
+            std::env::remove_var("ALL_SMI_ENERGY_PRICE");
+        }
     }
 
     #[test]

@@ -16,7 +16,11 @@ use std::io::Write;
 
 use crossterm::{queue, style::Color, style::Print};
 
+use crate::common::config::EnergyConfig;
 use crate::device::ChassisInfo;
+use crate::metrics::energy::{
+    EnergyKey, EnergyScope, PowerIntegrator, joules_to_cost, joules_to_kwh,
+};
 use crate::ui::text::print_colored_text;
 use crate::ui::widgets::draw_bar;
 
@@ -36,6 +40,78 @@ impl Default for ChassisRenderer {
 impl ChassisRenderer {
     pub fn new() -> Self {
         Self
+    }
+}
+
+/// Render the "Energy session" row below the chassis header (issue #191).
+///
+/// Emits nothing when no energy has accumulated yet — the renderer is
+/// indifferent to "device does not report power" vs "power is zero",
+/// which is the right behavior here because both collapse to "there
+/// is nothing meaningful to show".
+///
+/// `price_per_kwh` comes from the runtime [`EnergyConfig`].  When
+/// `cost_visible()` is false the renderer drops the `|  $cost` half
+/// of the line.
+pub fn print_chassis_energy_row<W: Write>(
+    stdout: &mut W,
+    info: &ChassisInfo,
+    integrator: &PowerIntegrator,
+    energy_config: &EnergyConfig,
+) {
+    let key = EnergyKey::chassis(info.hostname.clone());
+    let stats = integrator
+        .iter_stats()
+        .find(|s| s.key.scope == EnergyScope::Chassis && s.key.host == info.hostname);
+    let joules = match stats {
+        Some(s) if s.session_joules > 0.0 => s.session_joules,
+        _ => return, // No session energy — render nothing.
+    };
+    let _ = key; // suppress unused warning if future callers want to
+    // look up the key directly.
+
+    let kwh = joules_to_kwh(joules);
+    let kwh_display = if kwh >= 0.001 {
+        format!("{kwh:.3} kWh")
+    } else {
+        // Fall back to Joules for very early samples so the row does
+        // not print "0.000 kWh" for the first few integration cycles.
+        format!("{joules:.1} J")
+    };
+
+    print_colored_text(stdout, "     ", Color::White, None, None);
+    print_colored_text(stdout, "Energy session: ", Color::Yellow, None, None);
+    print_colored_text(stdout, &kwh_display, Color::White, None, None);
+
+    if energy_config.cost_visible() {
+        let cost = joules_to_cost(joules, energy_config.price_per_kwh);
+        let cost_display = format_cost(&energy_config.currency, cost);
+        let price_display = format!(
+            " (at {}/kWh)",
+            format_cost(&energy_config.currency, energy_config.price_per_kwh),
+        );
+        print_colored_text(stdout, "  |  ", Color::DarkGrey, None, None);
+        print_colored_text(stdout, &cost_display, Color::Green, None, None);
+        print_colored_text(stdout, &price_display, Color::DarkGrey, None, None);
+    }
+
+    queue!(stdout, Print("\r\n")).unwrap();
+}
+
+/// Pretty-print a monetary amount using a minimal currency-symbol
+/// table.  Unknown currency codes are printed as-is to the right of
+/// the amount — e.g. `0.35 GBP` — which is valid for display but keeps
+/// the renderer from shipping a full FX table.
+fn format_cost(currency: &str, amount: f64) -> String {
+    let trimmed = currency.trim();
+    match trimmed.to_ascii_uppercase().as_str() {
+        "USD" => format!("${amount:.2}"),
+        "EUR" => format!("\u{20AC}{amount:.2}"),
+        "GBP" => format!("\u{00A3}{amount:.2}"),
+        "JPY" => format!("\u{00A5}{amount:.0}"),
+        "KRW" => format!("\u{20A9}{amount:.0}"),
+        _ if trimmed.is_empty() => format!("{amount:.2}"),
+        _ => format!("{amount:.2} {trimmed}"),
     }
 }
 
@@ -190,6 +266,8 @@ pub fn print_chassis_info<W: Write>(
 mod tests {
     use super::*;
     use crate::device::ChassisInfo;
+    use crate::metrics::energy::{EnergyKey, PowerIntegrator};
+    use std::time::{Duration, Instant};
 
     #[test]
     fn test_chassis_renderer_new() {
@@ -212,5 +290,77 @@ mod tests {
 
         assert!(output.contains("NODE"));
         assert!(output.contains("test-host"));
+    }
+
+    #[test]
+    fn energy_row_emits_nothing_when_no_samples() {
+        let mut buffer = Vec::new();
+        let chassis = ChassisInfo {
+            hostname: "dgx-01".to_string(),
+            total_power_watts: Some(300.0),
+            ..Default::default()
+        };
+        let integrator = PowerIntegrator::default();
+        let cfg = EnergyConfig::default();
+        print_chassis_energy_row(&mut buffer, &chassis, &integrator, &cfg);
+        let output = String::from_utf8(buffer).unwrap();
+        assert!(output.is_empty(), "expected empty output, got: {output:?}");
+    }
+
+    #[test]
+    fn energy_row_shows_kwh_and_cost_when_enabled() {
+        let mut buffer = Vec::new();
+        let chassis = ChassisInfo {
+            hostname: "dgx-01".to_string(),
+            total_power_watts: Some(300.0),
+            ..Default::default()
+        };
+        let mut integrator = PowerIntegrator::default();
+        let key = EnergyKey::chassis("dgx-01");
+        let origin = Instant::now();
+        integrator.record_sample(key.clone(), origin, 300.0);
+        integrator.record_sample(key.clone(), origin + Duration::from_secs(600), 300.0);
+        // 300 W * 600 s = 180 000 J = 0.05 kWh
+        let cfg = EnergyConfig::default();
+        print_chassis_energy_row(&mut buffer, &chassis, &integrator, &cfg);
+        let output = String::from_utf8(buffer).unwrap();
+        assert!(output.contains("Energy session:"));
+        assert!(output.contains("0.050 kWh"));
+        // Default USD, default price 0.12 → cost $0.006 which is
+        // rounded to $0.01 in the renderer's two-digit format.
+        assert!(output.contains("$0.01"));
+        assert!(output.contains("$0.12/kWh"));
+    }
+
+    #[test]
+    fn energy_row_hides_cost_when_show_cost_false() {
+        let mut buffer = Vec::new();
+        let chassis = ChassisInfo {
+            hostname: "dgx-01".to_string(),
+            total_power_watts: Some(300.0),
+            ..Default::default()
+        };
+        let mut integrator = PowerIntegrator::default();
+        let key = EnergyKey::chassis("dgx-01");
+        let origin = Instant::now();
+        integrator.record_sample(key.clone(), origin, 300.0);
+        integrator.record_sample(key, origin + Duration::from_secs(600), 300.0);
+        let cfg = EnergyConfig {
+            show_cost: false,
+            ..EnergyConfig::default()
+        };
+        print_chassis_energy_row(&mut buffer, &chassis, &integrator, &cfg);
+        let output = String::from_utf8(buffer).unwrap();
+        assert!(output.contains("kWh"));
+        assert!(!output.contains('$'), "cost should be hidden: {output}");
+    }
+
+    #[test]
+    fn format_cost_respects_currency_code() {
+        assert_eq!(format_cost("USD", 1.234), "$1.23");
+        assert_eq!(format_cost("EUR", 1.234), "\u{20AC}1.23");
+        assert_eq!(format_cost("KRW", 1234.5), "\u{20A9}1234");
+        assert_eq!(format_cost("UNKNOWN", 1.234), "1.23 UNKNOWN");
+        assert_eq!(format_cost("", 1.234), "1.23");
     }
 }

@@ -15,6 +15,7 @@
 pub mod chassis_renderer;
 pub mod cpu_renderer;
 pub(crate) mod dim;
+pub mod energy_renderer;
 pub mod gpu_renderer;
 pub mod memory_renderer;
 pub mod mig_renderer;
@@ -26,8 +27,10 @@ pub mod vgpu_renderer;
 pub mod widgets;
 
 // Re-export the main rendering functions for backward compatibility
-pub use chassis_renderer::print_chassis_info;
+pub use chassis_renderer::{print_chassis_energy_row, print_chassis_info};
 pub use cpu_renderer::print_cpu_info;
+#[allow(unused_imports)] // Reserved for the optional `E` energy panel.
+pub use energy_renderer::{format_top_consumers, render_top_consumers};
 pub use gpu_renderer::print_gpu_info;
 pub use memory_renderer::print_memory_info;
 pub use mig_renderer::print_mig_section;

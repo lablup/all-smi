@@ -34,6 +34,11 @@ pub async fn metrics_handler(State(state): State<SharedState>) -> String {
         chassis_info: &state.chassis_info,
         vgpu_info: &state.vgpu_info,
         mig_info: &state.mig_info,
+        // Energy counter (issue #191) reflects the integrator owned by
+        // AppState; we export the PowerIntegrator directly so the
+        // counter's HELP/TYPE header lines are only emitted when there
+        // is at least one device with recorded samples.
+        energy_integrator: Some(state.energy.integrator()),
     };
     render_prometheus_exposition(&inputs)
 }

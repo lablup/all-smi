@@ -31,14 +31,16 @@
 use crate::device::{
     ChassisInfo, CpuInfo, GpuInfo, MemoryInfo, MigGpuInfo, ProcessInfo, VgpuHostInfo,
 };
+use crate::metrics::energy::PowerIntegrator;
 use crate::storage::info::StorageInfo;
 use crate::utils::RuntimeEnvironment;
 
 use super::{
     MetricExporter, chassis::ChassisMetricExporter, cpu::CpuMetricExporter,
-    disk::DiskMetricExporter, gpu::GpuMetricExporter, hardware::HardwareMetricExporter,
-    memory::MemoryMetricExporter, mig::MigMetricExporter, npu::NpuMetricExporter,
-    process::ProcessMetricExporter, runtime::RuntimeMetricExporter, vgpu::VgpuMetricExporter,
+    disk::DiskMetricExporter, energy::EnergyMetricExporter, gpu::GpuMetricExporter,
+    hardware::HardwareMetricExporter, memory::MemoryMetricExporter, mig::MigMetricExporter,
+    npu::NpuMetricExporter, process::ProcessMetricExporter, runtime::RuntimeMetricExporter,
+    vgpu::VgpuMetricExporter,
 };
 
 /// Borrowed references to the metric sources that feed the exposition.
@@ -57,6 +59,12 @@ pub struct MetricsRenderInputs<'a> {
     pub chassis_info: &'a [ChassisInfo],
     pub vgpu_info: &'a [VgpuHostInfo],
     pub mig_info: &'a [MigGpuInfo],
+    /// Energy integrator backing the
+    /// `all_smi_energy_consumed_joules_total` counter (issue #191).
+    /// `None` when the caller has no accountant to surface (e.g.
+    /// `snapshot --format prometheus` runs without a live integrator);
+    /// the exporter then omits the metric family entirely.
+    pub energy_integrator: Option<&'a PowerIntegrator>,
 }
 
 /// Render the Prometheus exposition string for the given inputs.
@@ -136,6 +144,14 @@ pub fn render_prometheus_exposition(inputs: &MetricsRenderInputs<'_>) -> String 
         all_metrics.push_str(&hw_exporter.export_metrics());
     }
 
+    // Export the energy counter (issue #191). Self-filters to non-empty
+    // integrators, so hosts that never reported power (no EnergyKey
+    // recorded yet) contribute no output.
+    if let Some(integrator) = inputs.energy_integrator {
+        let energy_exporter = EnergyMetricExporter::new(integrator, inputs.gpu_info);
+        all_metrics.push_str(&energy_exporter.export_metrics());
+    }
+
     all_metrics
 }
 
@@ -156,6 +172,7 @@ mod tests {
             chassis_info: &[],
             vgpu_info: &[],
             mig_info: &[],
+            energy_integrator: None,
         };
         let rendered = render_prometheus_exposition(&inputs);
         assert_eq!(rendered, "");

@@ -66,6 +66,11 @@ pub fn render(snapshots: &[Snapshot]) -> Result<String> {
         chassis_info: snap.chassis.as_deref().unwrap_or(&[]),
         vgpu_info: &empty_vgpu,
         mig_info: &empty_mig,
+        // Snapshot mode is one-shot; no integrator state exists to
+        // expose. Leaving this `None` keeps `snapshot --format
+        // prometheus` byte-for-byte identical to a single `api`
+        // scrape taken before any energy samples have been recorded.
+        energy_integrator: None,
     };
 
     let out = render_prometheus_exposition(&inputs);
