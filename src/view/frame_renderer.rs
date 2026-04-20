@@ -988,17 +988,7 @@ mod tests {
     use crate::view::render_snapshot::RenderSnapshot;
 
     fn make_local_args() -> ViewArgs {
-        ViewArgs {
-            hosts: None,
-            hostfile: None,
-            interval: None,
-            alert_temp: None,
-            alert_util_low_mins: None,
-            replay: None,
-            speed: 1.0,
-            start: None,
-            replay_loop: false,
-        }
+        ViewArgs::empty()
     }
 
     fn make_snapshot() -> RenderSnapshot {

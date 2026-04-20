@@ -14,6 +14,13 @@
 
 pub mod client;
 pub mod metrics_parser;
+pub mod nvidia_smi_shim;
+pub mod rocm_smi_shim;
+pub mod ssh_client;
+pub mod ssh_decision;
+pub mod ssh_host_key;
+pub mod ssh_target;
+pub mod ssh_transport;
 pub mod webhook;
 
 pub use client::NetworkClient;

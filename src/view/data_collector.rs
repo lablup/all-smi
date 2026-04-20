@@ -25,7 +25,7 @@ use crate::ui::notification::NotificationType;
 
 // Re-export for backward compatibility
 pub use super::data_collection::{
-    CollectionConfig, DataCollectionStrategy, LocalCollector, RemoteCollectorBuilder,
+    CollectionConfig, DataCollectionStrategy, LocalCollector, RemoteCollectorBuilder, SshStrategy,
 };
 
 pub struct DataCollector {
@@ -323,6 +323,45 @@ impl DataCollector {
             let interval = args
                 .interval
                 .unwrap_or_else(|| EnvConfig::adaptive_interval(hosts_list.len()));
+            tokio::time::sleep(Duration::from_secs(interval)).await;
+        }
+    }
+
+    /// Drive the SSH transport (`view --ssh`, issue #194).
+    ///
+    /// The caller supplies a fully-constructed [`SshStrategy`]; this
+    /// method owns the collection loop (polling + sleep), the
+    /// `AppState` update, and the alert-evaluation wiring.  Separating
+    /// strategy construction from the loop keeps the runner's CLI
+    /// parsing simple and prevents a misconfigured `--ssh-*` flag from
+    /// having to be revalidated on every tick.
+    pub async fn run_ssh_mode(&self, args: ViewArgs, strategy: std::sync::Arc<SshStrategy>) {
+        let target_count = strategy.target_count();
+        loop {
+            let config = CollectionConfig {
+                interval: args
+                    .interval
+                    .unwrap_or_else(|| EnvConfig::adaptive_interval(target_count.max(1))),
+                first_iteration: false,
+                hosts: Vec::new(),
+            };
+
+            match strategy.collect(&config).await {
+                Ok(data) => {
+                    strategy
+                        .update_state(self.app_state.clone(), data, &config)
+                        .await;
+                    self.notify_ui();
+                    self.evaluate_alerts().await;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "ssh collect failed");
+                }
+            }
+
+            let interval = args
+                .interval
+                .unwrap_or_else(|| EnvConfig::adaptive_interval(target_count.max(1)));
             tokio::time::sleep(Duration::from_secs(interval)).await;
         }
     }

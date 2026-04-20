@@ -1,0 +1,19 @@
+# Agentless SSH hostfile for `all-smi view --ssh-hostfile` (issue #194).
+#
+# Format: one `user@host[:port]` per line.
+# Comments start with `#` (both leading and inline).
+# Blank lines are ignored.
+
+# Datacenter nodes reachable on the default SSH port (22).
+admin@dgx-01
+admin@dgx-02
+admin@dgx-03
+
+# Node behind a custom port.
+admin@dgx-edge:2222
+
+# AMD GPU host — will auto-fall-back to rocm-smi if all-smi is not installed.
+admin@mi250-01
+
+# Bastion users per host are supported because the `user` is parsed per-line.
+# backup-admin@metrics-archive:2222  # inline comment works too

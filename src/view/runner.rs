@@ -86,15 +86,10 @@ pub async fn run_local_mode(args: &LocalArgs, settings: &Settings) {
     let data_collector =
         DataCollector::with_notify(Arc::clone(&app_state), Arc::clone(&data_notify));
     let view_args = ViewArgs {
-        hosts: None,
-        hostfile: None,
         interval: args.interval,
         alert_temp: args.alert_temp,
         alert_util_low_mins: args.alert_util_low_mins,
-        replay: None,
-        speed: 1.0,
-        start: None,
-        replay_loop: false,
+        ..ViewArgs::empty()
     };
     tokio::spawn(async move {
         data_collector.run_local_mode(view_args).await;
@@ -114,15 +109,10 @@ pub async fn run_local_mode(args: &LocalArgs, settings: &Settings) {
 
     // Create ViewArgs again for UI loop
     let view_args = ViewArgs {
-        hosts: None,
-        hostfile: None,
         interval: args.interval,
         alert_temp: args.alert_temp,
         alert_util_low_mins: args.alert_util_low_mins,
-        replay: None,
-        speed: 1.0,
-        start: None,
-        replay_loop: false,
+        ..ViewArgs::empty()
     };
     if let Err(e) = ui_loop.run(&view_args).await {
         eprintln!("UI loop error: {e}");
@@ -251,6 +241,114 @@ pub async fn run_replay_mode(args: &ViewArgs, settings: &Settings) {
     }
 
     driver_handle.abort();
+}
+
+/// Enter TUI with the agentless SSH transport (issue #194).
+///
+/// Unlike `run_view_mode`, this path does NOT need a pre-existing
+/// `all-smi api` to be running on each target — it opens an SSH
+/// session per target and runs `all-smi snapshot` (native) or
+/// falls back to `nvidia-smi` / `rocm-smi` per
+/// `--ssh-fallback`. Returns early with a user-facing error when
+/// neither `--ssh` nor `--ssh-hostfile` produced a non-empty
+/// target list.
+pub async fn run_ssh_mode(args: &ViewArgs, settings: &Settings) {
+    use std::time::Duration;
+
+    use crate::network::ssh_target::{parse_hostfile, parse_ssh_arg};
+    use crate::network::ssh_transport::{SshFallbackPolicy, StrictHostKey};
+    use crate::view::data_collection::{SshStrategy, SshStrategyConfig};
+
+    let mut targets = Vec::new();
+    if let Some(raw) = args.ssh.as_deref() {
+        match parse_ssh_arg(raw) {
+            Ok(mut t) => targets.append(&mut t),
+            Err(e) => {
+                eprintln!("error: {e}");
+                return;
+            }
+        }
+    }
+    if let Some(path) = args.ssh_hostfile.as_deref() {
+        match parse_hostfile(path) {
+            Ok(mut t) => targets.append(&mut t),
+            Err(e) => {
+                eprintln!("error: {e}");
+                return;
+            }
+        }
+    }
+
+    if targets.is_empty() {
+        eprintln!("error: --ssh and --ssh-hostfile produced no SSH targets");
+        return;
+    }
+
+    let strict_host_key = match StrictHostKey::from_cli(&args.ssh_strict_host_key) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return;
+        }
+    };
+
+    let fallback_policy = match SshFallbackPolicy::from_cli(args.ssh_fallback.as_deref()) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return;
+        }
+    };
+
+    let strategy_config = SshStrategyConfig {
+        targets,
+        explicit_key: args.ssh_key.clone(),
+        strict_host_key,
+        known_hosts: args.ssh_known_hosts.clone(),
+        connect_timeout: Duration::from_secs(args.ssh_timeout_secs.max(1)),
+        fallback_policy,
+        concurrency: args.ssh_concurrency.max(1),
+    };
+
+    let strategy = Arc::new(SshStrategy::new(strategy_config));
+
+    let mut initial_state = AppState::with_energy_config(&settings.energy);
+    initial_state.is_local_mode = false;
+    let alert_config = build_alert_config(settings, args.alert_temp, args.alert_util_low_mins);
+    initial_state.alerter = Alerter::new(alert_config);
+    initial_state.display_config = settings.display.clone();
+    let app_state = Arc::new(Mutex::new(initial_state));
+
+    let data_notify = Arc::new(Notify::new());
+
+    let _terminal_manager = match TerminalManager::new() {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("Failed to initialize terminal: {e}");
+            return;
+        }
+    };
+
+    let data_collector =
+        DataCollector::with_notify(Arc::clone(&app_state), Arc::clone(&data_notify));
+    let args_clone = args.clone();
+    let strategy_clone = Arc::clone(&strategy);
+    tokio::spawn(async move {
+        data_collector
+            .run_ssh_mode(args_clone, strategy_clone)
+            .await;
+    });
+
+    let mut ui_loop = match UiLoop::new(app_state, data_notify) {
+        Ok(u) => u,
+        Err(e) => {
+            eprintln!("Failed to initialize UI: {e}");
+            return;
+        }
+    };
+    if let Err(e) = ui_loop.run(args).await {
+        eprintln!("UI loop error: {e}");
+    }
 }
 
 pub async fn run_view_mode(args: &ViewArgs, settings: &Settings) {

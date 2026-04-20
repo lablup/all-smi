@@ -177,6 +177,19 @@ pub struct ViewSettings {
     pub hostfile: Option<String>,
     pub hosts: Vec<String>,
     pub interval_secs: Option<u64>,
+    // Agentless SSH transport (issue #194). Empty / None means "use CLI
+    // defaults". `ssh` (targets) and `ssh_hostfile` are *additive* with
+    // CLI: a TOML-provided target list is merged with `--ssh` on the
+    // command line at dispatch time.
+    pub ssh: Vec<String>,
+    pub ssh_hostfile: Option<String>,
+    pub ssh_key: Option<String>,
+    pub ssh_config: Option<String>,
+    pub ssh_strict_host_key: Option<String>,
+    pub ssh_timeout_secs: Option<u64>,
+    pub ssh_fallback: Option<String>,
+    pub ssh_known_hosts: Option<String>,
+    pub ssh_concurrency: Option<usize>,
 }
 
 #[derive(Debug, Clone)]

@@ -69,6 +69,18 @@ pub struct ViewSection {
     pub hostfile: Option<String>,
     pub hosts: Option<Vec<String>>,
     pub interval_secs: Option<u64>,
+    // Agentless SSH transport (issue #194). A missing section produces
+    // `None` which the CLI layer then ignores — the defaults baked into
+    // `clap` still apply.
+    pub ssh: Option<Vec<String>>,
+    pub ssh_hostfile: Option<String>,
+    pub ssh_key: Option<String>,
+    pub ssh_config: Option<String>,
+    pub ssh_strict_host_key: Option<String>,
+    pub ssh_timeout_secs: Option<u64>,
+    pub ssh_fallback: Option<String>,
+    pub ssh_known_hosts: Option<String>,
+    pub ssh_concurrency: Option<usize>,
 }
 
 /// `[api]` section — options for `all-smi api`.

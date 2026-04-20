@@ -168,6 +168,86 @@ pub struct ViewArgs {
     /// keyword; the CLI surface remains `--loop`.
     #[arg(long = "loop")]
     pub replay_loop: bool,
+
+    // --- Agentless SSH transport (issue #194) --------------------------
+    /// Comma-separated list of SSH targets (`user@host[:port]`).
+    ///
+    /// When set, `view` connects to each target over SSH and runs
+    /// `all-smi snapshot --format json` when installed, or falls back
+    /// to `nvidia-smi` / `rocm-smi` per `--ssh-fallback`. Mutually
+    /// exclusive with `--hosts` / `--hostfile`.
+    #[arg(long)]
+    pub ssh: Option<String>,
+
+    /// Path to a hostfile listing one `user@host[:port]` target per line.
+    /// `#` comments and blank lines are ignored.
+    #[arg(long = "ssh-hostfile")]
+    pub ssh_hostfile: Option<PathBuf>,
+
+    /// Explicit SSH private key path. Overrides the default probe of
+    /// `~/.ssh/id_ed25519`, `~/.ssh/id_ecdsa`, `~/.ssh/id_rsa`.
+    #[arg(long = "ssh-key")]
+    pub ssh_key: Option<PathBuf>,
+
+    /// OpenSSH config file (`~/.ssh/config`). Currently unused but
+    /// reserved so the flag is stable across versions.
+    #[arg(long = "ssh-config")]
+    pub ssh_config: Option<PathBuf>,
+
+    /// Host-key policy: `yes` (default, refuse unknown), `accept-new`
+    /// (TOFU), `no` (accept any — TUI warning shown).
+    #[arg(long = "ssh-strict-host-key", default_value = "yes")]
+    pub ssh_strict_host_key: String,
+
+    /// Per-target SSH connect timeout in seconds. Exec timeouts are
+    /// bounded separately by [`crate::network::ssh_client::DEFAULT_EXEC_TIMEOUT`].
+    #[arg(long = "ssh-timeout-secs", default_value_t = 10)]
+    pub ssh_timeout_secs: u64,
+
+    /// Comma-separated fallback probe order (`nvidia-smi`, `rocm-smi`,
+    /// `none`). When omitted, both fallbacks are enabled.
+    #[arg(long = "ssh-fallback")]
+    pub ssh_fallback: Option<String>,
+
+    /// Path to the known_hosts file for strict / accept-new verification.
+    /// Defaults to `~/.ssh/known_hosts`.
+    #[arg(long = "ssh-known-hosts")]
+    pub ssh_known_hosts: Option<PathBuf>,
+
+    /// Maximum concurrent SSH connections (semaphore-limited). Hosts
+    /// beyond this cap stagger their initial connection attempts.
+    #[arg(long = "ssh-concurrency", default_value_t = 32)]
+    pub ssh_concurrency: usize,
+}
+
+impl ViewArgs {
+    /// Constructor used by synthetic call sites (tests, the `default_mode`
+    /// redispatch in `main.rs`, and the local-mode runner that only
+    /// needs the interval / alert CLI flags). Keeps every callsite in
+    /// one place so adding a new `ViewArgs` field doesn't force
+    /// touching each synthetic site.
+    pub fn empty() -> Self {
+        Self {
+            hosts: None,
+            hostfile: None,
+            interval: None,
+            alert_temp: None,
+            alert_util_low_mins: None,
+            replay: None,
+            speed: 1.0,
+            start: None,
+            replay_loop: false,
+            ssh: None,
+            ssh_hostfile: None,
+            ssh_key: None,
+            ssh_config: None,
+            ssh_strict_host_key: "yes".to_string(),
+            ssh_timeout_secs: 10,
+            ssh_fallback: None,
+            ssh_known_hosts: None,
+            ssh_concurrency: 32,
+        }
+    }
 }
 
 /// Output format for the `snapshot` subcommand.

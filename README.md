@@ -556,6 +556,57 @@ Stable check IDs (greppable across versions):
 - **Storage Monitoring:** Disk usage information for all hosts
 - **High Availability:** Resilient to connection failures with automatic recovery
 
+### Agentless SSH mode
+
+`all-smi view --ssh user@host[,user@host2,...]` connects to one or more
+remote machines over SSH and renders their metrics in the same TUI,
+**without** first installing or starting `all-smi api` on the targets.
+
+On first connect the transport probes each host, in order:
+
+1. `all-smi snapshot --format json` — used when the binary is present
+   and at least v0.22. The tab chip shows `native`.
+2. `nvidia-smi --query-gpu=...` — CSV fallback for NVIDIA boxes without
+   `all-smi`. Chip shows `nvidia-smi`.
+3. `rocm-smi --json` — JSON fallback for AMD boxes. Chip shows
+   `rocm-smi`.
+4. Otherwise the host is marked `unsupported`.
+
+Quick start:
+
+```bash
+# Monitor two DGX boxes over SSH, using your agent key.
+all-smi view --ssh admin@dgx-01,admin@dgx-02
+
+# Bulk mode from a hostfile (see examples/hosts-ssh.txt).
+all-smi view --ssh-hostfile examples/hosts-ssh.txt
+
+# Accept unknown host keys on first connect (TOFU) and persist them.
+all-smi view --ssh admin@new-node --ssh-strict-host-key accept-new
+```
+
+Key flags:
+
+| Flag | Default | Notes |
+| --- | --- | --- |
+| `--ssh user@host[:port][,...]` | — | Comma-separated SSH targets. |
+| `--ssh-hostfile <path>` | — | One `user@host[:port]` per line; `#` comments allowed. |
+| `--ssh-key <path>` | auto-probe | Overrides agent / `~/.ssh/id_*` probe order. |
+| `--ssh-strict-host-key yes\|accept-new\|no` | `yes` | Matches OpenSSH semantics. |
+| `--ssh-timeout-secs <n>` | `10` | Per-target TCP/handshake timeout. |
+| `--ssh-fallback nvidia-smi,rocm-smi,none` | both enabled | Which shim(s) to try when `all-smi` is absent. |
+| `--ssh-known-hosts <path>` | `~/.ssh/known_hosts` | Custom known-hosts file. |
+| `--ssh-concurrency <n>` | `32` | Bound on concurrent SSH connects (semaphore-limited). |
+
+Security notes:
+
+- Password auth is **never** attempted; key / agent auth only. No
+  password ever flows through the CLI or logs.
+- The SSH command string emitted on the wire is fixed per transport and
+  does not interpolate remote input into shell commands.
+- `--ssh-strict-host-key=no` logs a prominent TUI warning so a
+  misconfiguration is obvious to the operator.
+
 ### Interactive UI
 - **Enhanced Controls:**
   - Keyboard: Arrow keys, Page Up/Down, Tab switching

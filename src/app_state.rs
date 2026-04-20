@@ -128,6 +128,16 @@ pub struct ConnectionStatus {
     pub consecutive_failures: u32,
     pub last_error: Option<String>,
     pub last_update: Instant,
+    /// Short transport tag rendered as a TUI chip next to the tab label.
+    /// Populated by the SSH strategy (`native`, `nvidia-smi`, `rocm-smi`,
+    /// `unsupported`) and by the HTTP scraper (`http`). `None` means
+    /// "not applicable" (local mode, replay mode).
+    pub transport_chip: Option<String>,
+    /// Short connection-state tag (`connecting`, `connected`,
+    /// `auth-failed`, `timeout`, `disconnected`). Used by the TUI to
+    /// render a per-host status chip. `None` when the status has not
+    /// yet been set.
+    pub connection_state: Option<String>,
 }
 
 impl ConnectionStatus {
@@ -141,6 +151,8 @@ impl ConnectionStatus {
             consecutive_failures: 0,
             last_error: None,
             last_update: Instant::now(),
+            transport_chip: None,
+            connection_state: None,
         }
     }
 
@@ -150,6 +162,7 @@ impl ConnectionStatus {
         self.consecutive_failures = 0;
         self.last_error = None;
         self.last_update = Instant::now();
+        self.connection_state = Some("connected".to_string());
     }
 
     pub fn mark_failure(&mut self, error: String) {
@@ -157,6 +170,34 @@ impl ConnectionStatus {
         self.consecutive_failures += 1;
         self.last_error = Some(error);
         self.last_update = Instant::now();
+        // Classify the error into a compact state chip. The error
+        // messages the SSH client produces carry the chip label as
+        // the prefix — parse it out rather than re-deriving.
+        let chip = if self
+            .last_error
+            .as_deref()
+            .unwrap_or("")
+            .starts_with("auth-failed")
+        {
+            "auth-failed"
+        } else if self
+            .last_error
+            .as_deref()
+            .unwrap_or("")
+            .starts_with("timeout")
+        {
+            "timeout"
+        } else if self
+            .last_error
+            .as_deref()
+            .unwrap_or("")
+            .starts_with("host-key-rejected")
+        {
+            "host-key-rejected"
+        } else {
+            "disconnected"
+        };
+        self.connection_state = Some(chip.to_string());
     }
 
     #[allow(dead_code)]
@@ -869,6 +910,23 @@ impl SortCriteria {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn connection_status_tracks_ssh_chips() {
+        // mark_failure with the SSH client's canonical error-label
+        // prefixes should classify into the corresponding chip tag.
+        let mut cs = ConnectionStatus::new("u@h:22".to_string(), "ssh://u@h".to_string());
+        cs.mark_failure("auth-failed: SSH authentication failed".into());
+        assert_eq!(cs.connection_state.as_deref(), Some("auth-failed"));
+        cs.mark_failure("timeout: SSH connect timeout after 10s".into());
+        assert_eq!(cs.connection_state.as_deref(), Some("timeout"));
+        cs.mark_failure("host-key-rejected: host key not trusted".into());
+        assert_eq!(cs.connection_state.as_deref(), Some("host-key-rejected"));
+        cs.mark_failure("other: stuff".into());
+        assert_eq!(cs.connection_state.as_deref(), Some("disconnected"));
+        cs.mark_success();
+        assert_eq!(cs.connection_state.as_deref(), Some("connected"));
+    }
 
     #[test]
     fn test_is_local_mode() {
