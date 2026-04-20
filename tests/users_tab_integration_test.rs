@@ -130,6 +130,7 @@ fn five_node_three_user_cluster_round_trips_through_exporter_and_aggregator() {
                 })
                 .collect(),
             processes: parsed.process_info,
+            is_connected: true,
         });
     }
 
@@ -192,6 +193,7 @@ fn sorting_users_is_stable_across_keys() {
                 start_time_seconds: 0,
             },
         ],
+        is_connected: true,
     }]);
     let mut sorted = result.users;
     sort_users(&mut sorted, UserSortKey::Memory);
@@ -230,6 +232,7 @@ fn replay_frame_flows_through_users_tab() {
             power_watts: 400.0,
         }],
         processes: vec![row],
+        is_connected: true,
     }]);
     assert_eq!(result.users.len(), 1);
     let u = &result.users[0];

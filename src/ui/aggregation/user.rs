@@ -54,15 +54,27 @@ pub struct GpuForAggregation {
 
 /// Per-host view passed into [`aggregate_users`].
 ///
-/// A host is considered "reporting process data" if its `processes`
-/// slice is non-empty; hosts that deliberately opt out of `--processes`
-/// contribute to the denominator of the partial-coverage chip but not
-/// to the Users table itself.
+/// A host is considered "reporting process data" if **either** its
+/// `processes` slice is non-empty **or** it is currently `connected`.
+/// The connected-but-silent case is how an *idle* host with
+/// `--processes` enabled shows up: the API exporter legitimately emits
+/// zero rows when nothing is running on the GPUs, and we must not flag
+/// that as "not reporting" — otherwise the partial-coverage chip
+/// scares operators on a cluster that is working exactly as intended.
+///
+/// Hosts that deliberately opt out of `--processes` (or that are
+/// disconnected) contribute to the denominator of the partial-coverage
+/// chip but not to the numerator.
 #[derive(Clone, Debug)]
 pub struct HostSnapshot {
     pub host: String,
     pub gpus: Vec<GpuForAggregation>,
     pub processes: Vec<ParsedProcessRow>,
+    /// Whether the remote scraper currently considers this host
+    /// connected.  `true` on local-mode hosts (there's nothing to
+    /// disconnect from).  Consumed by [`aggregate_users`] when
+    /// computing `reporting_hosts`.
+    pub is_connected: bool,
 }
 
 /// Per-host breakdown the drill-down view renders when the operator
@@ -215,7 +227,13 @@ pub fn aggregate_users(snapshots: &[HostSnapshot]) -> UserAggregationResult {
     let mut user_scratch: HashMap<String, UserScratch> = HashMap::new();
     let mut reporting_hosts: HashSet<&str> = HashSet::new();
     for snap in snapshots {
-        if !snap.processes.is_empty() {
+        // A host counts as "reporting" when it produced process rows
+        // **or** when it is connected (and thus capable of producing
+        // rows — an empty list on a connected host just means the GPUs
+        // are idle, which is very different from "the remote scraper
+        // has lost contact" and must not trigger the partial-coverage
+        // warning).
+        if !snap.processes.is_empty() || snap.is_connected {
             reporting_hosts.insert(snap.host.as_str());
         }
         for p in &snap.processes {
@@ -533,19 +551,45 @@ mod tests {
         assert!(!result.is_partial());
     }
 
+    fn snap(
+        host: &str,
+        gpus: Vec<GpuForAggregation>,
+        processes: Vec<ParsedProcessRow>,
+    ) -> HostSnapshot {
+        HostSnapshot {
+            host: host.to_string(),
+            gpus,
+            processes,
+            is_connected: true,
+        }
+    }
+
+    fn snap_disconnected(
+        host: &str,
+        gpus: Vec<GpuForAggregation>,
+        processes: Vec<ParsedProcessRow>,
+    ) -> HostSnapshot {
+        HostSnapshot {
+            host: host.to_string(),
+            gpus,
+            processes,
+            is_connected: false,
+        }
+    }
+
     #[test]
     fn same_pid_on_two_hosts_counts_as_two_processes() {
         let snapshots = vec![
-            HostSnapshot {
-                host: "a".into(),
-                gpus: vec![gpu("a", 0, 100.0)],
-                processes: vec![row(42, "alice", 0, 1000, 100, "train")],
-            },
-            HostSnapshot {
-                host: "b".into(),
-                gpus: vec![gpu("b", 0, 100.0)],
-                processes: vec![row(42, "alice", 0, 2000, 200, "train")],
-            },
+            snap(
+                "a",
+                vec![gpu("a", 0, 100.0)],
+                vec![row(42, "alice", 0, 1000, 100, "train")],
+            ),
+            snap(
+                "b",
+                vec![gpu("b", 0, 100.0)],
+                vec![row(42, "alice", 0, 2000, 200, "train")],
+            ),
         ];
         let result = aggregate_users(&snapshots);
         assert_eq!(result.users.len(), 1);
@@ -559,11 +603,11 @@ mod tests {
 
     #[test]
     fn root_is_marked_as_system_user() {
-        let snapshots = vec![HostSnapshot {
-            host: "h".into(),
-            gpus: vec![gpu("h", 0, 50.0)],
-            processes: vec![row(1, "root", 0, 0, 10, "containerd-shim")],
-        }];
+        let snapshots = vec![snap(
+            "h",
+            vec![gpu("h", 0, 50.0)],
+            vec![row(1, "root", 0, 0, 10, "containerd-shim")],
+        )];
         let result = aggregate_users(&snapshots);
         assert_eq!(result.users.len(), 1);
         assert!(result.users[0].is_system);
@@ -580,19 +624,19 @@ mod tests {
     #[test]
     fn user_spanning_multiple_gpus_accumulates_correctly() {
         let snapshots = vec![
-            HostSnapshot {
-                host: "h1".into(),
-                gpus: vec![gpu("h1", 0, 200.0), gpu("h1", 1, 300.0)],
-                processes: vec![
+            snap(
+                "h1",
+                vec![gpu("h1", 0, 200.0), gpu("h1", 1, 300.0)],
+                vec![
                     row(100, "bob", 0, 1_000, 50, "a"),
                     row(100, "bob", 1, 2_000, 50, "a"),
                 ],
-            },
-            HostSnapshot {
-                host: "h2".into(),
-                gpus: vec![gpu("h2", 0, 400.0)],
-                processes: vec![row(200, "bob", 0, 5_000, 100, "b")],
-            },
+            ),
+            snap(
+                "h2",
+                vec![gpu("h2", 0, 400.0)],
+                vec![row(200, "bob", 0, 5_000, 100, "b")],
+            ),
         ];
         let result = aggregate_users(&snapshots);
         assert_eq!(result.users.len(), 1);
@@ -605,52 +649,79 @@ mod tests {
 
     #[test]
     fn oldest_start_time_wins_longest() {
-        let snapshots = vec![HostSnapshot {
-            host: "h".into(),
-            gpus: vec![gpu("h", 0, 10.0)],
-            processes: vec![
+        let snapshots = vec![snap(
+            "h",
+            vec![gpu("h", 0, 10.0)],
+            vec![
                 row(1, "alice", 0, 10, 500, "a"),
                 row(2, "alice", 0, 20, 1_500_000, "b"),
                 row(3, "alice", 0, 30, 100, "c"),
             ],
-        }];
+        )];
         let result = aggregate_users(&snapshots);
         assert_eq!(result.users[0].longest_seconds, 1_500_000);
     }
 
     #[test]
     fn top_command_is_the_owner_of_the_largest_vram_row() {
-        let snapshots = vec![HostSnapshot {
-            host: "h".into(),
-            gpus: vec![gpu("h", 0, 10.0)],
-            processes: vec![
+        let snapshots = vec![snap(
+            "h",
+            vec![gpu("h", 0, 10.0)],
+            vec![
                 row(1, "alice", 0, 1_000, 0, "small"),
                 row(2, "alice", 0, 9_000, 0, "big"),
                 row(3, "alice", 0, 5_000, 0, "medium"),
             ],
-        }];
+        )];
         let result = aggregate_users(&snapshots);
         assert_eq!(result.users[0].top_command, "big");
     }
 
     #[test]
     fn partial_coverage_is_detected() {
-        // Two hosts; only one reported process rows.
+        // Two hosts; only one reported process rows. The silent host
+        // is explicitly disconnected so the new "connected =
+        // reporting" rule from the partial-chip fix does not rescue
+        // it; partial coverage must still trigger.
         let snapshots = vec![
-            HostSnapshot {
-                host: "a".into(),
-                gpus: vec![gpu("a", 0, 100.0)],
-                processes: vec![row(1, "alice", 0, 10, 0, "x")],
-            },
-            HostSnapshot {
-                host: "b".into(),
-                gpus: vec![gpu("b", 0, 100.0)],
-                processes: vec![],
-            },
+            snap(
+                "a",
+                vec![gpu("a", 0, 100.0)],
+                vec![row(1, "alice", 0, 10, 0, "x")],
+            ),
+            snap_disconnected("b", vec![gpu("b", 0, 100.0)], vec![]),
         ];
         let result = aggregate_users(&snapshots);
         assert!(result.is_partial());
         assert_eq!(result.reporting_hosts, 1);
+        assert_eq!(result.total_hosts, 2);
+    }
+
+    /// Regression for F4 in PR #199: a connected host with
+    /// `--processes` enabled but no running GPU workload legitimately
+    /// emits zero process rows. The partial-coverage chip must **not**
+    /// fire on the basis that such a host appears "silent" — its
+    /// connection is live, and the operator has configured the scrape
+    /// exactly as intended. Only genuinely-disconnected (or
+    /// scrape-less) hosts should count against the numerator.
+    #[test]
+    fn idle_connected_host_is_not_flagged_as_partial() {
+        let snapshots = vec![
+            snap(
+                "a",
+                vec![gpu("a", 0, 100.0)],
+                vec![row(1, "alice", 0, 10, 0, "x")],
+            ),
+            // Host `b` is connected but idle: no processes, yet the
+            // scraper is alive. This is the false-positive case.
+            snap("b", vec![gpu("b", 0, 100.0)], vec![]),
+        ];
+        let result = aggregate_users(&snapshots);
+        assert!(
+            !result.is_partial(),
+            "idle-but-connected host must not trigger the partial chip"
+        );
+        assert_eq!(result.reporting_hosts, 2);
         assert_eq!(result.total_hosts, 2);
     }
 
@@ -659,11 +730,11 @@ mod tests {
         // A GPU reports negative power (malformed sensor).  The
         // aggregator must clamp at zero rather than propagate the bad
         // value.
-        let snapshots = vec![HostSnapshot {
-            host: "h".into(),
-            gpus: vec![gpu("h", 0, -50.0)],
-            processes: vec![row(1, "alice", 0, 1000, 0, "x")],
-        }];
+        let snapshots = vec![snap(
+            "h",
+            vec![gpu("h", 0, -50.0)],
+            vec![row(1, "alice", 0, 1000, 0, "x")],
+        )];
         let result = aggregate_users(&snapshots);
         assert_eq!(result.users[0].power_watts, 0.0);
     }
@@ -672,14 +743,14 @@ mod tests {
     fn power_approximation_weights_by_vram_share() {
         // Two users share a single GPU 70/30; the 400 W GPU power
         // should split ~280/120.
-        let snapshots = vec![HostSnapshot {
-            host: "h".into(),
-            gpus: vec![gpu("h", 0, 400.0)],
-            processes: vec![
+        let snapshots = vec![snap(
+            "h",
+            vec![gpu("h", 0, 400.0)],
+            vec![
                 row(1, "alice", 0, 7_000, 0, "a"),
                 row(2, "bob", 0, 3_000, 0, "b"),
             ],
-        }];
+        )];
         let result = aggregate_users(&snapshots);
         let alice = result.users.iter().find(|u| u.user == "alice").unwrap();
         let bob = result.users.iter().find(|u| u.user == "bob").unwrap();
@@ -696,11 +767,11 @@ mod tests {
 
     #[test]
     fn missing_user_label_becomes_unattributed() {
-        let snapshots = vec![HostSnapshot {
-            host: "h".into(),
-            gpus: vec![gpu("h", 0, 100.0)],
-            processes: vec![row(1, "", 0, 100, 0, "x")],
-        }];
+        let snapshots = vec![snap(
+            "h",
+            vec![gpu("h", 0, 100.0)],
+            vec![row(1, "", 0, 100, 0, "x")],
+        )];
         let result = aggregate_users(&snapshots);
         assert_eq!(result.users.len(), 1);
         assert_eq!(result.users[0].user, UNATTRIBUTED_USER);
@@ -712,19 +783,19 @@ mod tests {
         // number (within f64 rounding).  If this ever breaks the
         // drill-down will disagree with the main table, so guard it.
         let snapshots = vec![
-            HostSnapshot {
-                host: "h1".into(),
-                gpus: vec![gpu("h1", 0, 200.0), gpu("h1", 1, 300.0)],
-                processes: vec![
+            snap(
+                "h1",
+                vec![gpu("h1", 0, 200.0), gpu("h1", 1, 300.0)],
+                vec![
                     row(1, "alice", 0, 1_000, 0, "a"),
                     row(1, "alice", 1, 3_000, 0, "a"),
                 ],
-            },
-            HostSnapshot {
-                host: "h2".into(),
-                gpus: vec![gpu("h2", 0, 400.0)],
-                processes: vec![row(2, "alice", 0, 5_000, 0, "b")],
-            },
+            ),
+            snap(
+                "h2",
+                vec![gpu("h2", 0, 400.0)],
+                vec![row(2, "alice", 0, 5_000, 0, "b")],
+            ),
         ];
         let result = aggregate_users(&snapshots);
         let u = &result.users[0];
@@ -816,6 +887,7 @@ mod tests {
                 host,
                 gpus,
                 processes: procs,
+                is_connected: true,
             });
         }
         let start = std::time::Instant::now();
@@ -874,6 +946,7 @@ mod tests {
                 host,
                 gpus,
                 processes: procs,
+                is_connected: true,
             });
         }
         let start = std::time::Instant::now();

@@ -1651,7 +1651,11 @@ mod tests {
             cpu_pct_tenths: 0,
             start_time_seconds: 10,
         }];
-        state.mark_data_changed();
+        // Simulate a collector push so the aggregation cache picks up
+        // the new process data; UI-only `mark_data_changed` would leave
+        // the collector version untouched and keep the stale empty
+        // aggregation around.
+        state.mark_collector_data_changed();
         // Force the aggregation cache to warm.
         let _ = state.users_aggregation();
 
@@ -1699,6 +1703,246 @@ mod tests {
         );
     }
 
+    /// Regression guard for F1 in PR #199: a second `Enter` on the
+    /// per-host table must set `drill_host` AND the renderer must draw
+    /// the per-(user, host) process list for that pair. The previous
+    /// implementation set `drill_host` correctly but never rendered
+    /// the second-level view, so the issue-#189 spec
+    /// ("Enter again drills to the full process list for that user on
+    ///  the selected node") silently misfired.
+    ///
+    /// ESC peels back one level at a time: first clears `drill_host`
+    /// (returns to per-host table), then clears `drill_user` (returns
+    /// to top table).
+    #[tokio::test]
+    async fn users_tab_enter_twice_drills_into_per_host_processes() {
+        use crate::network::metrics_parser::ParsedProcessRow;
+
+        let mut state = state_with_users_tab();
+        // Two distinct hosts so the per-host table has a row to drill
+        // into; two PIDs per host so the per-process view has
+        // something to show.
+        for (host, pid, user, cmd, vram) in [
+            ("host-0", 100u32, "alice", "train.py --eval", 1_000u64),
+            ("host-0", 101, "alice", "tensorboard", 500),
+            ("host-1", 200, "alice", "infer.py", 2_000),
+        ] {
+            state.remote_process_info.push(ParsedProcessRow {
+                host: host.into(),
+                pid,
+                user: user.into(),
+                command: cmd.into(),
+                name: cmd.into(),
+                gpu_index: 0,
+                gpu_uuid: format!("GPU-{host}"),
+                gpu_memory_bytes: vram,
+                cpu_pct_tenths: 0,
+                start_time_seconds: 60,
+            });
+        }
+        state.mark_collector_data_changed();
+        let _ = state.users_aggregation();
+
+        // First Enter: drill into alice.
+        handle_key_event(key(KeyCode::Enter), &mut state, &args()).await;
+        assert_eq!(state.users_tab_state.drill_user.as_deref(), Some("alice"));
+        assert!(state.users_tab_state.drill_host.is_none());
+
+        // Second Enter: drill into the currently-selected host (row 0
+        // in the per-host table is `host-0` because the per-host list
+        // is sorted alphabetically in `UserScratch::finalize`).
+        handle_key_event(key(KeyCode::Enter), &mut state, &args()).await;
+        assert_eq!(
+            state.users_tab_state.drill_host.as_deref(),
+            Some("host-0"),
+            "second Enter must set drill_host to the selected per-host row"
+        );
+
+        // Render at the second-level: the renderer must emit rows
+        // filtered to (alice, host-0) — so both commands show up and
+        // `host-1` / alice's process there does NOT.
+        let mut buffer: Vec<u8> = Vec::new();
+        let agg = state.users_aggregation().clone();
+        let result = crate::ui::renderers::user_renderer::render_users_tab(
+            &mut buffer,
+            &agg,
+            &state.users_tab_state,
+            &state.remote_process_info,
+            120,
+            24,
+        );
+        let output = String::from_utf8_lossy(&buffer);
+        assert!(
+            output.contains("per-process view"),
+            "expected per-process banner, got:\n{output}"
+        );
+        assert!(
+            output.contains("train.py"),
+            "expected alice's train.py on host-0, got:\n{output}"
+        );
+        assert!(
+            output.contains("tensorboard"),
+            "expected alice's tensorboard on host-0, got:\n{output}"
+        );
+        assert!(
+            !output.contains("infer.py"),
+            "alice's host-1 process must NOT leak into the host-0 drill-down: {output}"
+        );
+        assert_eq!(result.visible_rows, 2, "two rows on host-0 for alice");
+
+        // First ESC: clear drill_host, return to per-host table.
+        handle_key_event(key(KeyCode::Esc), &mut state, &args()).await;
+        assert!(
+            state.users_tab_state.drill_host.is_none(),
+            "first ESC clears drill_host"
+        );
+        assert_eq!(
+            state.users_tab_state.drill_user.as_deref(),
+            Some("alice"),
+            "first ESC keeps drill_user so the per-host table is shown"
+        );
+
+        // Second ESC: clear drill_user, return to the top table.
+        handle_key_event(key(KeyCode::Esc), &mut state, &args()).await;
+        assert!(state.users_tab_state.drill_user.is_none());
+    }
+
+    /// Regression guard for F3 in PR #199: UI-only state changes
+    /// (sort, filter-sys toggle, drill-down nav) must NOT invalidate
+    /// the cluster-wide user aggregation cache. Before the split
+    /// between `data_version` and `collector_data_version`, every
+    /// Users-tab sort keypress re-ran `aggregate_users` on the full
+    /// cluster.
+    #[tokio::test]
+    async fn users_tab_sort_keypress_does_not_invalidate_aggregation_cache() {
+        use crate::network::metrics_parser::ParsedProcessRow;
+
+        let mut state = state_with_users_tab();
+        for (pid, user) in [(1u32, "alice"), (2, "bob")] {
+            state.remote_process_info.push(ParsedProcessRow {
+                host: "host-0".into(),
+                pid,
+                user: user.into(),
+                command: "x".into(),
+                name: "x".into(),
+                gpu_index: 0,
+                gpu_uuid: "GPU-0".into(),
+                gpu_memory_bytes: 1024,
+                cpu_pct_tenths: 0,
+                start_time_seconds: 10,
+            });
+        }
+        state.mark_collector_data_changed();
+        // Warm the cache.
+        let _ = state.users_aggregation();
+        let cached_version_before = state.users_aggregation_cache.data_version;
+
+        // A full sweep of Users-tab UI hotkeys — these all route
+        // through `mark_data_changed`, which must NOT bump
+        // `collector_data_version`.
+        for key_char in ['m', 'u', 'p', 'n', 't', 'f'] {
+            handle_key_event(key(KeyCode::Char(key_char)), &mut state, &args()).await;
+        }
+
+        // Cache key is still on the same collector version...
+        assert_eq!(
+            state.users_aggregation_cache.data_version, cached_version_before,
+            "sort / filter keypresses bumped the collector data version"
+        );
+
+        // ...and a subsequent aggregation call finds the cached result
+        // (the function returns without rebuilding — we can't observe
+        // that directly without instrumentation, so we assert the
+        // invariant on the cache key which `users_aggregation` updates
+        // only on a rebuild).
+        let _ = state.users_aggregation();
+        assert_eq!(
+            state.users_aggregation_cache.data_version, cached_version_before,
+            "aggregate_users ran a second time on cached data"
+        );
+    }
+
+    /// Regression guard for F5 in PR #199: a replayed local recording
+    /// emits GPUs whose `detail["index"]` label is missing (local
+    /// readers never populate it). The aggregation must fall back to
+    /// the GPU's positional order within its host so every card stays
+    /// distinguishable on the per-host drill-down — before this fix,
+    /// all 8 GPUs of a recorded single-host session collapsed onto
+    /// `gpu_index = 0`.
+    #[tokio::test]
+    async fn users_aggregation_assigns_positional_gpu_index_when_detail_missing() {
+        use crate::device::GpuInfo;
+        use crate::network::metrics_parser::ParsedProcessRow;
+
+        let mut state = AppState::new();
+        state.is_local_mode = true;
+        // Eight GPUs on a single host, none with `detail["index"]`.
+        for i in 0..8u32 {
+            state.gpu_info.push(GpuInfo {
+                uuid: format!("gpu-{i}"),
+                time: String::new(),
+                name: format!("GPU {i}"),
+                device_type: "GPU".to_string(),
+                host_id: "replay-host".into(),
+                hostname: "replay-host".into(),
+                instance: String::new(),
+                utilization: 0.0,
+                ane_utilization: 0.0,
+                dla_utilization: None,
+                tensorcore_utilization: None,
+                temperature: 0,
+                used_memory: 0,
+                total_memory: 16_384,
+                frequency: 0,
+                power_consumption: 100.0,
+                gpu_core_count: None,
+                temperature_threshold_slowdown: None,
+                temperature_threshold_shutdown: None,
+                temperature_threshold_max_operating: None,
+                temperature_threshold_acoustic: None,
+                performance_state: None,
+                numa_node_id: None,
+                gsp_firmware_mode: None,
+                gsp_firmware_version: None,
+                nvlink_remote_devices: Vec::new(),
+                gpm_metrics: None,
+                // Empty detail map -- replicates the local-mode replay
+                // path that F5 identifies as broken.
+                detail: std::collections::HashMap::new(),
+            });
+        }
+        // One process per GPU so the aggregation touches every (host,
+        // gpu_index) pair.
+        for i in 0..8u32 {
+            state.remote_process_info.push(ParsedProcessRow {
+                host: "replay-host".into(),
+                pid: 1000 + i,
+                user: "alice".into(),
+                command: "train".into(),
+                name: "train".into(),
+                gpu_index: i,
+                gpu_uuid: format!("gpu-{i}"),
+                gpu_memory_bytes: 1_000_000_000,
+                cpu_pct_tenths: 0,
+                start_time_seconds: 10,
+            });
+        }
+        state.mark_collector_data_changed();
+        let agg = state.users_aggregation();
+        let alice = agg.users.iter().find(|u| u.user == "alice").unwrap();
+        // Alice has touched 8 distinct (host, gpu_index) pairs — not
+        // collapsed onto one.
+        assert_eq!(
+            alice.gpu_count, 8,
+            "expected 8 distinct GPUs, got {} — positional fallback is broken",
+            alice.gpu_count
+        );
+        // Per-host breakdown shows the full index set 0..=7.
+        let per_host = &alice.per_host[0];
+        let indices: Vec<u32> = per_host.gpu_indices.iter().copied().collect();
+        assert_eq!(indices, (0..8).collect::<Vec<u32>>());
+    }
+
     #[tokio::test]
     async fn users_tab_up_down_moves_row_cursor() {
         let mut state = state_with_users_tab();
@@ -1719,7 +1963,9 @@ mod tests {
                     start_time_seconds: 10,
                 });
         }
-        state.mark_data_changed();
+        // Simulate a collector push so the aggregation cache picks up
+        // the new process data.
+        state.mark_collector_data_changed();
         let _ = state.users_aggregation();
 
         assert_eq!(state.users_tab_state.selected_row, 0);

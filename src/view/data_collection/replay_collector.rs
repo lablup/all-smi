@@ -312,7 +312,7 @@ async fn apply_frame_to_state(
         state.current_tab = 0;
     }
 
-    state.mark_data_changed();
+    state.mark_collector_data_changed();
 }
 
 async fn clear_pending_seek(app_state: Arc<Mutex<AppState>>) {

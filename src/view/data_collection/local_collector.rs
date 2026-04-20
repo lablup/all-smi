@@ -732,8 +732,9 @@ impl DataCollectionStrategy for LocalCollector {
         state.vgpu_info = data.vgpu_info;
         state.mig_info = data.mig_info;
 
-        // Mark data as changed to trigger UI update
-        state.mark_data_changed();
+        // Mark data as changed to trigger UI update AND invalidate
+        // collector-keyed caches (e.g. Users-tab aggregation).
+        state.mark_collector_data_changed();
 
         // Update notifications
         Self::update_notifications(&mut state);

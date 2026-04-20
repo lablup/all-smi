@@ -207,16 +207,21 @@ impl Default for UsersTabState {
     }
 }
 
-/// Memoised aggregation result keyed against `AppState::data_version`.
+/// Memoised aggregation result keyed against
+/// [`AppState::collector_data_version`].
 ///
 /// The top-level table + drill-down derive from the same pure
-/// [`UserAggregationResult`]; caching by `data_version` means typing a
-/// sort hotkey does not re-group the 5 000-row cluster — it just
-/// re-sorts an already-computed vector.
+/// [`UserAggregationResult`]; caching by *collector* version means
+/// typing a sort / filter / drill hotkey — all of which bump the
+/// broader `data_version` counter so the render loop wakes up — does
+/// NOT re-group the 5 000-row cluster.  Only a real data push from a
+/// collector (which calls [`AppState::mark_collector_data_changed`])
+/// invalidates this cache.
 #[derive(Clone, Debug, Default)]
 pub struct UsersAggregationCache {
-    /// Data version the cached result was built against.  `None` on
-    /// cold startup before any aggregation has been performed.
+    /// Collector data version the cached result was built against.
+    /// `None` on cold startup before any aggregation has been
+    /// performed.
     pub data_version: Option<u64>,
     pub result: UserAggregationResult,
 }
@@ -275,8 +280,20 @@ pub struct AppState {
     pub is_local_mode: bool,
     // Runtime environment (container/VM) information
     pub runtime_environment: RuntimeEnvironment,
-    /// Version counter that increments when data changes, used to detect if re-render is needed
+    /// Version counter that increments whenever anything affecting the
+    /// rendered frame changes (UI-only toggles *and* data arrival). The
+    /// UI loop keys its dirty detection off this counter.
     pub data_version: u64,
+    /// Version counter that increments only when collectors push new
+    /// data into the app state (local / remote / replay). UI-only
+    /// toggles (sort, drill-down, filter) do NOT bump this counter, so
+    /// caches keyed on `collector_data_version` survive a sort/filter
+    /// keypress and only rebuild when the underlying dataset changes.
+    ///
+    /// Separating the two counters avoids the cache-thrash regression
+    /// where typing a Users-tab sort hotkey re-ran the whole cluster-
+    /// wide aggregation on every keystroke.
+    pub collector_data_version: u64,
     /// Filter to show only GPU processes (processes with used_memory > 0)
     pub gpu_filter_enabled: bool,
     /// Actual number of visible process rows in the last rendered frame.
@@ -424,6 +441,7 @@ impl AppState {
             is_local_mode: true, // Default to local mode
             runtime_environment: RuntimeEnvironment::default(),
             data_version: 0,
+            collector_data_version: 0,
             gpu_filter_enabled: false, // GPU filter disabled by default
             visible_process_rows: 0,
             filter_query: None,
@@ -470,20 +488,60 @@ impl AppState {
         }
     }
 
-    /// Increment the data version to signal that data has changed
+    /// Increment the UI-dirty counter so the render loop wakes up on
+    /// the next tick. Use this for purely-presentation changes (sort
+    /// toggles, drill-down navigation, filter edits, etc.) that do
+    /// **not** introduce new data — those must use
+    /// [`Self::mark_collector_data_changed`] so derived caches (e.g.
+    /// the Users-tab aggregation) are invalidated.
     pub fn mark_data_changed(&mut self) {
         self.data_version = self.data_version.wrapping_add(1);
+    }
+
+    /// Increment *both* version counters: the UI dirtiness counter so
+    /// the render loop wakes up, and [`Self::collector_data_version`]
+    /// so caches keyed on the collector version (notably
+    /// [`Self::users_aggregation_cache`]) invalidate.
+    ///
+    /// Collectors call this after replacing `gpu_info` /
+    /// `remote_process_info` / etc. Event handlers must NOT call this
+    /// — UI-only state changes should route through
+    /// [`Self::mark_data_changed`] so typing a sort key does not force
+    /// a full cluster-wide re-aggregation.
+    pub fn mark_collector_data_changed(&mut self) {
+        self.data_version = self.data_version.wrapping_add(1);
+        self.collector_data_version = self.collector_data_version.wrapping_add(1);
     }
 
     /// Return the cached user aggregation, rebuilding it when the
     /// snapshot version has advanced.  Keeps Users-tab keypresses from
     /// re-grouping the cluster.
+    ///
+    /// The cache is keyed on
+    /// [`Self::collector_data_version`] (not [`Self::data_version`]):
+    /// a UI-only event like a sort toggle bumps `data_version` but
+    /// leaves `collector_data_version` alone, so typing `m`/`u`/`p`
+    /// etc. re-uses the aggregation rather than re-grouping 5 000 rows.
     pub fn users_aggregation(&mut self) -> &UserAggregationResult {
         use crate::ui::aggregation::user::{GpuForAggregation, HostSnapshot, aggregate_users};
 
-        if self.users_aggregation_cache.data_version == Some(self.data_version) {
+        if self.users_aggregation_cache.data_version == Some(self.collector_data_version) {
             return &self.users_aggregation_cache.result;
         }
+
+        // Resolve the set of connected hosts up front.  The remote
+        // connection_status map is keyed by `host_id`; local-mode hosts
+        // never populate it, so we treat local mode as "always
+        // connected" (is_local_mode short-circuit further down).
+        let is_host_connected = |host: &str| -> bool {
+            if self.is_local_mode {
+                return true;
+            }
+            self.connection_status
+                .get(host)
+                .map(|cs| cs.is_connected)
+                .unwrap_or(false)
+        };
 
         // Group GPUs + processes by host.  `remote_process_info` drives
         // the host set; a host with GPUs but no processes still shows
@@ -493,6 +551,17 @@ impl AppState {
         let mut per_host: std::collections::BTreeMap<String, HostSnapshot> =
             std::collections::BTreeMap::new();
 
+        // Track the count of GPUs inserted per host so the positional
+        // fallback for `gpu_index` produces distinct indices when
+        // `detail["index"]` is missing.  Local-mode readers don't
+        // populate the `index` detail key, and before this fallback a
+        // recorded-local session would collapse every GPU's index to
+        // 0 on the Users tab (all per-host breakdowns then aliased
+        // onto `gpu_index = 0` regardless of how many physical cards
+        // the host has).
+        let mut gpu_position_by_host: std::collections::HashMap<String, u32> =
+            std::collections::HashMap::new();
+
         for gpu in &self.gpu_info {
             let host = gpu.host_id.clone();
             let entry = per_host
@@ -501,12 +570,22 @@ impl AppState {
                     host: host.clone(),
                     gpus: Vec::new(),
                     processes: Vec::new(),
+                    is_connected: is_host_connected(&host),
                 });
             let gpu_index = gpu
                 .detail
                 .get("index")
                 .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
+                .unwrap_or_else(|| {
+                    // Local-mode readers (and a few remote paths) may
+                    // not emit `detail["index"]`.  Fall back to the
+                    // positional index within this host so successive
+                    // GPUs stay distinguishable on the drill-down.
+                    let slot = gpu_position_by_host.entry(host.clone()).or_insert(0);
+                    let value = *slot;
+                    *slot = slot.saturating_add(1);
+                    value
+                });
             entry.gpus.push(GpuForAggregation {
                 host: host.clone(),
                 gpu_index,
@@ -515,12 +594,15 @@ impl AppState {
         }
 
         for row in &self.remote_process_info {
+            let host = row.host.clone();
+            let is_connected = is_host_connected(&host);
             let entry = per_host
-                .entry(row.host.clone())
+                .entry(host.clone())
                 .or_insert_with(|| HostSnapshot {
-                    host: row.host.clone(),
+                    host,
                     gpus: Vec::new(),
                     processes: Vec::new(),
+                    is_connected,
                 });
             entry.processes.push(row.clone());
         }
@@ -529,12 +611,14 @@ impl AppState {
         // partial-coverage is computed across every node the operator
         // added, not just those with live GPUs.
         for host in &self.known_hosts {
+            let is_connected = is_host_connected(host);
             per_host
                 .entry(host.clone())
                 .or_insert_with(|| HostSnapshot {
                     host: host.clone(),
                     gpus: Vec::new(),
                     processes: Vec::new(),
+                    is_connected,
                 });
         }
 
@@ -542,7 +626,7 @@ impl AppState {
         let result = aggregate_users(&snapshots);
 
         self.users_aggregation_cache = UsersAggregationCache {
-            data_version: Some(self.data_version),
+            data_version: Some(self.collector_data_version),
             result,
         };
         &self.users_aggregation_cache.result

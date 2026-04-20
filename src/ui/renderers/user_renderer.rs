@@ -27,6 +27,7 @@ use crossterm::{
 };
 
 use crate::app_state::UsersTabState;
+use crate::network::metrics_parser::ParsedProcessRow;
 use crate::ui::aggregation::user::{
     UNATTRIBUTED_DISPLAY, UNATTRIBUTED_USER, UserAggregate, UserAggregationResult, UserSortKey,
     format_longest, sort_users,
@@ -68,24 +69,49 @@ pub struct UsersRenderResult {
 /// Render the top-level Users table (or the drill-down view when the
 /// operator has hit `Enter`).  Returns the number of rows currently
 /// visible so callers can bound keyboard navigation.
+///
+/// `remote_process_info` is only consulted when the operator has
+/// drilled past the per-host table into the per-process view
+/// (second `Enter` → `drill_user.is_some()` *and* `drill_host.is_some()`).
+/// Filtering happens here, in the renderer, because it is cheap for a
+/// single-user-single-host subset and keeps the aggregation side
+/// unaware of the UI drill-down state.
 pub fn render_users_tab<W: Write>(
     stdout: &mut W,
     aggregation: &UserAggregationResult,
     tab_state: &UsersTabState,
+    remote_process_info: &[ParsedProcessRow],
     cols: u16,
     rows_available: u16,
 ) -> UsersRenderResult {
-    // Drill-down takes precedence when a user is selected.
+    // Drill-down takes precedence when a user is selected. Two levels:
+    //   1. `drill_user = Some`, `drill_host = None` → per-host table
+    //   2. `drill_user = Some`, `drill_host = Some` → per-process list
+    //      on `(drill_user, drill_host)` — the second-level view
+    //      required by the issue #189 spec ("Enter again drills to the
+    //      full process list for that user on the selected node").
     if let Some(user_name) = &tab_state.drill_user
         && let Some(user) = aggregation.users.iter().find(|u| u.user == *user_name)
     {
+        if let Some(host) = &tab_state.drill_host {
+            return render_drill_processes(
+                stdout,
+                user_name,
+                host,
+                user,
+                remote_process_info,
+                tab_state,
+                cols,
+                rows_available,
+            );
+        }
         return render_drill_down(stdout, user, tab_state, cols, rows_available);
     }
 
     // ------------------------------------------------------------------
     // Filter + sort the view.  This is only a vector copy — the pure
     // aggregation in `AppState::users_aggregation` is already cached by
-    // data_version.
+    // collector_data_version.
     // ------------------------------------------------------------------
     let mut rows: Vec<UserAggregate> = aggregation
         .users
@@ -108,8 +134,12 @@ pub fn render_users_tab<W: Write>(
     // ------------------------------------------------------------------
     // Body
     // ------------------------------------------------------------------
+    // Summary line (1) + optional partial chip (0/1) + optional export
+    // toast (0/1) + header row (1) = between 2 and 4 rows above the
+    // body. Compute dynamically so the body never eats into the
+    // footer when every optional chip is hidden.
     let footer_rows: u16 = 2; // "Showing..." + in-tab hints
-    let banner_rows: u16 = 3; // 2 banner lines + header + separator, approximated
+    let banner_rows = compute_banner_rows(aggregation, tab_state);
     let body_budget = rows_available
         .saturating_sub(footer_rows)
         .saturating_sub(banner_rows) as usize;
@@ -132,6 +162,30 @@ pub fn render_users_tab<W: Write>(
     render_footer(stdout, rows.len(), visible_rows, tab_state, cols as usize);
 
     UsersRenderResult { visible_rows }
+}
+
+/// Compute the exact height of the header area above the body so the
+/// body budget matches what `render_banner` will actually print.
+///
+/// Always includes:
+/// - 1 row for the summary line (`Users: N | Reporting nodes: …`).
+/// - 1 row for the column header (`USER  NODES  GPUs …`).
+///
+/// Conditionally includes:
+/// - 1 row for the partial-coverage chip (when `aggregation.is_partial()`).
+/// - 1 row for the export-toast line (when either
+///   `last_export_path` or `last_export_error` is populated).
+///
+/// Returns 2 when no optional chips are shown, 4 when both are shown.
+fn compute_banner_rows(aggregation: &UserAggregationResult, tab_state: &UsersTabState) -> u16 {
+    let mut rows = 2u16; // summary + column header
+    if aggregation.is_partial() {
+        rows += 1;
+    }
+    if tab_state.last_export_path.is_some() || tab_state.last_export_error.is_some() {
+        rows += 1;
+    }
+    rows
 }
 
 // ---------------------------------------------------------------------
@@ -464,6 +518,186 @@ fn render_drill_down<W: Write>(
         }
         queue!(stdout, Print("\r\n")).unwrap();
     }
+
+    UsersRenderResult { visible_rows }
+}
+
+// ---------------------------------------------------------------------
+// Second-level drill-down: full process list on (user, host)
+// ---------------------------------------------------------------------
+
+/// Fixed column widths for the per-process list that the second `Enter`
+/// opens on the Users tab.  We roll our own layout here because the
+/// in-tab hotkeys (`u`/`m`/`p`/…) collide with the process renderer's
+/// global sort bindings and because our row source is
+/// [`ParsedProcessRow`] (remote wire format), not [`crate::device::ProcessInfo`].
+const PROC_PID: usize = 7;
+const PROC_GPU: usize = 5;
+const PROC_VRAM: usize = 10;
+const PROC_CPU: usize = 6;
+const PROC_START: usize = 11;
+
+/// Render the full list of processes the given `user` owns on the
+/// given `host`.  Reached by pressing `Enter` a second time on the
+/// Users tab (first Enter drills a user → per-host, second Enter
+/// drills a host → per-process).  ESC in the event handler clears
+/// `drill_host` first, returning to the per-host view rendered by
+/// [`render_drill_down`]; a second ESC clears `drill_user`.
+///
+/// The row source is the raw `remote_process_info` slice rather than
+/// anything derived — the aggregation is already collapsed per-user,
+/// so the per-row PID / command / start-time / VRAM data is only
+/// available on the wire rows.  We filter by `(host, user)` inline
+/// because the set is small (one user on one host) and repeating the
+/// filter on every frame is measurably cheaper than materialising an
+/// index during aggregation.
+#[allow(clippy::too_many_arguments)]
+fn render_drill_processes<W: Write>(
+    stdout: &mut W,
+    user_name: &str,
+    host: &str,
+    user: &UserAggregate,
+    remote_process_info: &[ParsedProcessRow],
+    tab_state: &UsersTabState,
+    cols: u16,
+    rows_available: u16,
+) -> UsersRenderResult {
+    let cols_usize = cols as usize;
+
+    // Banner #1 — user/host identity line so the operator knows where
+    // they landed.  Mirrors the colour scheme of the per-host banner.
+    let display_user = if user_name == UNATTRIBUTED_USER {
+        UNATTRIBUTED_DISPLAY.to_string()
+    } else {
+        user_name.to_string()
+    };
+    let banner = format!(" User: {display_user}  |  Host: {host}  |  per-process view");
+    print_colored_text(
+        stdout,
+        &pad_to_width(&banner, cols_usize),
+        Color::Black,
+        Some(Color::Cyan),
+        None,
+    );
+    queue!(stdout, Print("\r\n")).unwrap();
+
+    // Pull the per-host breakdown for this host so the subheader can
+    // show totals without re-filtering the raw rows.
+    let per_host = user.per_host.iter().find(|p| p.host == host);
+    let sub = match per_host {
+        Some(ph) => format!(
+            "  ESC returns to per-host view  |  {pids} PIDs  |  VRAM {vram}  |  POWER* {power}",
+            pids = ph.pid_count,
+            vram = format_bytes(ph.vram_bytes),
+            power = format_power(ph.power_watts),
+        ),
+        None => "  ESC returns to per-host view  |  (no rows for this host)".to_string(),
+    };
+    print_colored_text(
+        stdout,
+        &pad_to_width(&sub, cols_usize),
+        Color::DarkGrey,
+        None,
+        None,
+    );
+    queue!(stdout, Print("\r\n")).unwrap();
+
+    // Column header.
+    let fixed = PROC_PID + PROC_GPU + PROC_VRAM + PROC_CPU + PROC_START;
+    let command_w = cols_usize.saturating_sub(fixed + 5).max(COMMAND_MIN);
+    let pid_w = PROC_PID;
+    let gpu_w = PROC_GPU;
+    let vram_w = PROC_VRAM;
+    let cpu_w = PROC_CPU;
+    let start_w = PROC_START;
+    let cmd_w = command_w;
+    let header = format!(
+        "{pid:>pid_w$} {gpu:>gpu_w$} {vram:>vram_w$} {cpu:>cpu_w$} {start:>start_w$} {cmd:<cmd_w$}",
+        pid = "PID",
+        gpu = "GPU",
+        vram = "VRAM",
+        cpu = "CPU%",
+        start = "START(s)",
+        cmd = "COMMAND",
+    );
+    let header_trunc: String = header.chars().take(cols_usize).collect();
+    print_colored_text(
+        stdout,
+        &pad_to_width(&header_trunc, cols_usize),
+        Color::Black,
+        Some(Color::White),
+        None,
+    );
+    queue!(stdout, Print("\r\n")).unwrap();
+
+    // Filter the wire rows down to this (host, user) pair. Matching
+    // the `UNATTRIBUTED_USER` sentinel goes through an explicit
+    // branch because the wire rows carry the empty string for
+    // missing users, not the display sentinel.
+    let mut rows: Vec<&ParsedProcessRow> = remote_process_info
+        .iter()
+        .filter(|row| {
+            if row.host != host {
+                return false;
+            }
+            if user_name == UNATTRIBUTED_USER {
+                row.user.is_empty()
+            } else {
+                row.user == user_name
+            }
+        })
+        .collect();
+    // Stable ordering: descending VRAM (biggest hog first), tie-break
+    // on PID so successive renders don't flip rows.
+    rows.sort_by(|a, b| {
+        b.gpu_memory_bytes
+            .cmp(&a.gpu_memory_bytes)
+            .then_with(|| a.pid.cmp(&b.pid))
+    });
+
+    // Body budget: subtract the 3 rows we already printed (banner,
+    // sub, header).  Keep at least one row even on very short
+    // terminals so the operator sees something.
+    let budget = rows_available.saturating_sub(3) as usize;
+    let body_budget = budget.max(1);
+    let visible_rows = rows.len().min(body_budget);
+
+    if rows.is_empty() {
+        let msg = "  (no process rows for this user on this host)";
+        print_colored_text(stdout, msg, Color::DarkGrey, None, None);
+        queue!(stdout, Print("\r\n")).unwrap();
+        return UsersRenderResult { visible_rows: 0 };
+    }
+
+    for row in rows.iter().take(visible_rows) {
+        let pid = row.pid;
+        let gpu = row.gpu_index;
+        let vram = format_bytes(row.gpu_memory_bytes);
+        // `cpu_pct_tenths` = 125 means 12.5 %.
+        let cpu = format!("{:.1}", (row.cpu_pct_tenths as f64) / 10.0);
+        let start = if row.start_time_seconds == 0 {
+            "—".to_string()
+        } else {
+            format_longest(row.start_time_seconds)
+        };
+        // Prefer full command line, fall back to short name; keeps the
+        // column non-empty for kernel threads that only expose `name`.
+        let cmd_src = if !row.command.is_empty() {
+            row.command.as_str()
+        } else {
+            row.name.as_str()
+        };
+        let cmd = truncate_str(cmd_src, command_w);
+
+        let line = format!(
+            "{pid:>pid_w$} {gpu:>gpu_w$} {vram:>vram_w$} {cpu:>cpu_w$} {start:>start_w$} {cmd:<cmd_w$}",
+        );
+        let line_trunc: String = line.chars().take(cols_usize).collect();
+        print_colored_text(stdout, &line_trunc, Color::White, None, None);
+        queue!(stdout, Print("\r\n")).unwrap();
+    }
+
+    let _ = tab_state; // reserved for future per-row selection
 
     UsersRenderResult { visible_rows }
 }

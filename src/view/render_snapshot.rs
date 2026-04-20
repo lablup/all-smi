@@ -128,6 +128,10 @@ pub struct RenderSnapshot {
 
     // Data version for change detection
     pub data_version: u64,
+    /// Collector-only data version. Keys the Users-tab aggregation
+    /// cache so UI-only state changes (sort/filter/drill) do not
+    /// invalidate it.
+    pub collector_data_version: u64,
 
     // Filter state (issue #186)
     pub filter_query: Option<FilterExpr>,
@@ -237,6 +241,7 @@ impl RenderSnapshot {
 
             // Data version
             data_version: state.data_version,
+            collector_data_version: state.collector_data_version,
 
             // Filter state (issue #186)
             filter_query: state.filter_query.clone(),
@@ -339,6 +344,7 @@ impl RenderSnapshot {
 
         // Data version
         state.data_version = self.data_version;
+        state.collector_data_version = self.collector_data_version;
 
         // Filter + alerter state (issue #186)
         state.filter_query = self.filter_query.clone();
@@ -359,7 +365,7 @@ impl RenderSnapshot {
         state.remote_process_info = self.remote_process_info.clone();
         state.users_tab_state = self.users_tab_state.clone();
         state.users_aggregation_cache = crate::app_state::UsersAggregationCache {
-            data_version: Some(self.data_version),
+            data_version: Some(self.collector_data_version),
             result: self.users_aggregation.clone(),
         };
 

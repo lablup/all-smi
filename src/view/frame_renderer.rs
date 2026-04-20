@@ -235,6 +235,7 @@ impl FrameRenderer {
                 &mut buffer,
                 &snapshot.users_aggregation,
                 &snapshot.users_tab_state,
+                &snapshot.remote_process_info,
                 cols,
                 avail,
             );
