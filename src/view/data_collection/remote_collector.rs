@@ -152,16 +152,18 @@ impl RemoteCollector {
     }
 
     fn update_remote_tabs(state: &mut AppState) {
-        // Tab layout (issue #189): [All, Users, <host1>, <host2>, ...]
+        // Tab layout (issues #189, #190):
+        //   [All, Users, Topology, <host1>, <host2>, ...]
         //
-        // Users tab sits immediately after "All" so cluster-level tabs
-        // cluster together at the left edge of the row.  Inserting
-        // between adjusts the indices but the subsequent `current_tab`
-        // snap-back guards against the previous index being out of
-        // range after tabs shrink (e.g. all hosts disconnected).
+        // Cluster-level tabs cluster together at the left edge of the
+        // row. Inserting them there adjusts the indices but the
+        // subsequent `current_tab` snap-back guards against the previous
+        // index being out of range after tabs shrink (e.g. all hosts
+        // disconnected).
         let mut tabs = vec![
             "All".to_string(),
             crate::ui::tabs::USERS_TAB_NAME.to_string(),
+            crate::ui::tabs::TOPOLOGY_TAB_NAME.to_string(),
         ];
         tabs.extend(state.known_hosts.clone());
 

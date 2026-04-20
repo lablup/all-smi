@@ -187,6 +187,7 @@ fn render_shortcuts_section(
         ),
         ("  A", "Toggle alert history panel", "shortcut"),
         ("  V", "Jump to cluster-wide Users tab (remote)", "shortcut"),
+        ("  T", "Jump to Topology tab (remote/replay)", "shortcut"),
         ("  Q", "Exit application", "shortcut"),
         ("  ESC", "Close help / clear filter / exit", "shortcut"),
         ("", "", ""),
@@ -223,6 +224,18 @@ fn render_shortcuts_section(
             ),
             ("  f", "Toggle system-account filter (uid<1000)", "shortcut"),
             ("  e", "Export visible table to CSV", "shortcut"),
+        ]);
+
+        // Topology tab keybindings (issue #190).  Only visible when the
+        // tab is available in the tab strip, i.e. remote / replay mode.
+        left_column.extend(vec![
+            ("", "", ""),
+            ("Topology tab (T):", "", "header"),
+            (
+                "  M",
+                "Toggle between graph and matrix render modes",
+                "shortcut",
+            ),
         ]);
     }
 

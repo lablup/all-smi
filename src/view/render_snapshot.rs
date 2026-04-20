@@ -34,6 +34,7 @@ use crate::ui::aggregation::user::UserAggregationResult;
 use crate::ui::alerts::{AlertTransition, Alerter};
 use crate::ui::filter_dsl::Expr as FilterExpr;
 use crate::ui::notification::NotificationManager;
+use crate::ui::topology::TopologyViewMode;
 use crate::utils::RuntimeEnvironment;
 
 /// Pre-computed rendering decisions captured from `AppState` under lock.
@@ -160,6 +161,10 @@ pub struct RenderSnapshot {
     /// lock is held.  Cloning the result (small: one vector per user)
     /// keeps the render path lock-free.
     pub users_aggregation: UserAggregationResult,
+
+    // Topology tab (issue #190)
+    /// Render mode selected by the Topology tab's `M` toggle.
+    pub topology_view_mode: TopologyViewMode,
 }
 
 impl RenderSnapshot {
@@ -264,6 +269,9 @@ impl RenderSnapshot {
             remote_process_info: state.remote_process_info.clone(),
             users_tab_state: state.users_tab_state.clone(),
             users_aggregation,
+
+            // Topology tab (issue #190)
+            topology_view_mode: state.topology_view_mode,
         }
     }
 
@@ -368,6 +376,9 @@ impl RenderSnapshot {
             data_version: Some(self.collector_data_version),
             result: self.users_aggregation.clone(),
         };
+
+        // Topology tab (issue #190)
+        state.topology_view_mode = self.topology_view_mode;
 
         state
     }

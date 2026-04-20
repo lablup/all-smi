@@ -476,6 +476,46 @@ Mock clusters can exercise the tab without real hosts by setting
 rotation of users and commands through the `all_smi_process_*` metric
 families.
 
+### Topology View (`T`)
+
+Remote and replay `view` modes add a **Topology** tab that visualises the
+selected host's intra-node GPU interconnect: NvLink connections
+(GPU↔GPU, GPU↔NvSwitch), NUMA affinity, and PCIe lanes. Press `T` to
+jump to the tab (it sits right after `Users`); use `Tab`/`Shift-Tab` or
+the arrow keys to cycle between hosts while the Topology tab is active.
+
+Two render modes are available; press `M` to toggle between them:
+
+- **Graph mode** (default) — ASCII layout showing NUMA zones as boxes
+  with GPUs inside and NvLink / NvSwitch edges drawn between them.
+  NUMA boxes stack side-by-side on wide terminals and fall back to
+  vertical stacking on narrower ones.
+- **Matrix mode** — `nvidia-smi topo -m`-equivalent table with CPU
+  affinity and NUMA columns. Uses the same vocabulary: `X`=self,
+  `NVn`=NvLink Gen-n, `NSW`=NvSwitch, `PXB`=PCIe bridge, `NODE`=same
+  NUMA, `SYS`=across NUMA.
+
+**Graceful degradation.** The tab is designed to produce useful output
+on every platform:
+
+- Hosts without NvLink render only NUMA + PCIe groupings.
+- Non-NVIDIA hosts omit the `NVn`/`SYS` vocabulary and show NUMA groups
+  only.
+- Hosts without NUMA topology render a single synthetic `NUMA ?` box.
+- When the terminal is narrower than 100 columns the graph renderer
+  drops to matrix mode automatically so the content never overflows on
+  80-column sessions.
+
+**Bandwidth hints.** When the exporter provides a per-link bandwidth
+(`bandwidth_mb_s` label on `all_smi_nvlink_remote_device_type`), the
+matrix derives the NVn generation from it (e.g. 50 GB/s → `NV5`).
+Without the hint the renderer falls back to a generic `NV` label so no
+hallucinated generation reaches the operator.
+
+Mock clusters can exercise the tab by setting `ALL_SMI_MOCK_TOPOLOGY=1`.
+Every synthetic NVIDIA node then emits a DGX-like 8-GPU topology: two
+NUMA zones, full 7-link GPU-to-GPU mesh, and one switch link per GPU.
+
 ### Filtering & Alerts
 
 Press `/` in any tab to open the filter query bar and hide/dim GPUs that do not

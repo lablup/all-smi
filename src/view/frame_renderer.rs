@@ -243,6 +243,23 @@ impl FrameRenderer {
             return (buffer.get_buffer().to_string(), 0);
         }
 
+        // Topology tab (issue #190): similar short-circuit — owns the
+        // body of the frame, emits its own header, and skips the normal
+        // GPU / chassis / device pipeline.
+        if is_topology_tab_selected(snapshot) {
+            let target_host = topology_target_host(snapshot);
+            crate::ui::renderers::topology_renderer::render_topology_tab(
+                &mut buffer,
+                &snapshot.gpu_info,
+                &target_host,
+                snapshot.topology_view_mode,
+                cols,
+                rows,
+            );
+            print_function_keys(&mut buffer, cols, rows, &view_state, is_remote);
+            return (buffer.get_buffer().to_string(), 0);
+        }
+
         // Render chassis information (node-level metrics)
         Self::render_chassis_section(&mut buffer, snapshot, width, cache);
 
@@ -828,6 +845,46 @@ fn is_users_tab_selected(snapshot: &RenderSnapshot) -> bool {
         .get(snapshot.current_tab)
         .map(|t| t == crate::ui::tabs::USERS_TAB_NAME)
         .unwrap_or(false)
+}
+
+/// True when the snapshot's current tab is the per-host Topology tab
+/// (issue #190).
+fn is_topology_tab_selected(snapshot: &RenderSnapshot) -> bool {
+    snapshot
+        .tabs
+        .get(snapshot.current_tab)
+        .map(|t| t == crate::ui::tabs::TOPOLOGY_TAB_NAME)
+        .unwrap_or(false)
+}
+
+/// Pick the host to display in the Topology tab.
+///
+/// When the operator last pointed at a specific host tab (e.g. "node-03"),
+/// we stash its name in `tabs[state.current_tab]` while they navigate.
+/// The Topology tab itself has no host, so we have to derive one:
+///
+/// * In local mode the lone known host (or empty string ⇒ "(local)") is
+///   returned.
+/// * In remote mode we look at the operator's previously-selected host
+///   tab, falling back to the first host tab if none was selected.
+fn topology_target_host(snapshot: &RenderSnapshot) -> String {
+    if snapshot.is_local_mode {
+        return snapshot
+            .gpu_info
+            .first()
+            .map(|g| g.host_id.clone())
+            .unwrap_or_default();
+    }
+    // Remote mode: first host-shaped tab after the reserved entries.
+    for tab in &snapshot.tabs {
+        if tab != "All"
+            && tab != crate::ui::tabs::USERS_TAB_NAME
+            && tab != crate::ui::tabs::TOPOLOGY_TAB_NAME
+        {
+            return tab.clone();
+        }
+    }
+    String::new()
 }
 
 /// Locate the [`crate::device::VgpuHostInfo`] record matching a given GPU row.

@@ -1339,26 +1339,32 @@ mod tests {
             NvLinkRemoteDevice {
                 link_index: 0,
                 remote_type: NvLinkRemoteType::Gpu,
+                bandwidth_mb_s: None,
             },
             NvLinkRemoteDevice {
                 link_index: 1,
                 remote_type: NvLinkRemoteType::Gpu,
+                bandwidth_mb_s: None,
             },
             NvLinkRemoteDevice {
                 link_index: 2,
                 remote_type: NvLinkRemoteType::Gpu,
+                bandwidth_mb_s: None,
             },
             NvLinkRemoteDevice {
                 link_index: 3,
                 remote_type: NvLinkRemoteType::Gpu,
+                bandwidth_mb_s: None,
             },
             NvLinkRemoteDevice {
                 link_index: 4,
                 remote_type: NvLinkRemoteType::Gpu,
+                bandwidth_mb_s: None,
             },
             NvLinkRemoteDevice {
                 link_index: 5,
                 remote_type: NvLinkRemoteType::Switch,
+                bandwidth_mb_s: None,
             },
         ];
         let mut buf: Vec<u8> = Vec::new();
@@ -1439,18 +1445,22 @@ mod tests {
             NvLinkRemoteDevice {
                 link_index: 0,
                 remote_type: NvLinkRemoteType::Gpu,
+                bandwidth_mb_s: None,
             },
             NvLinkRemoteDevice {
                 link_index: 1,
                 remote_type: NvLinkRemoteType::Switch,
+                bandwidth_mb_s: None,
             },
             NvLinkRemoteDevice {
                 link_index: 2,
                 remote_type: NvLinkRemoteType::IbmNpu,
+                bandwidth_mb_s: None,
             },
             NvLinkRemoteDevice {
                 link_index: 3,
                 remote_type: NvLinkRemoteType::Unknown,
+                bandwidth_mb_s: None,
             },
         ];
         assert_eq!(count_nvlink_remote_types(&links), (1, 1, 1, 1));

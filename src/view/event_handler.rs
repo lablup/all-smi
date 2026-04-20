@@ -25,7 +25,7 @@ use crate::record::replay::parse_timecode;
 use crate::ui::aggregation::user::{UserSortKey, sort_users};
 use crate::ui::filter_dsl::{apply as apply_filter, parse as parse_filter};
 use crate::ui::layout::LayoutCalculator;
-use crate::ui::tabs::users_tab_index;
+use crate::ui::tabs::{topology_tab_index, users_tab_index};
 
 /// Upper bound on the filter input buffer size (bytes).
 ///
@@ -59,8 +59,12 @@ pub async fn handle_key_event(key_event: KeyEvent, state: &mut AppState, args: &
     //    global GPU-sort bindings (`u` sort, `m` sort, `p` sort, `f`
     //    GPU-filter toggle).  They still fall through to replay / normal
     //    keys for navigation (arrows, `/`, `q`, `h`, `A`, `1`).
-    // 4. Normal keys: quit, help, alerts, arrows.
-    // 5. Replay-mode keys (SPACE/`]`/`[`/`+`/`-`/`j`/`k`/`g`/`L`) are
+    // 4. Topology-tab keys (issue #190) when the Topology tab is active:
+    //    `M` toggles the graph/matrix mode. Must come BEFORE the global
+    //    ladder so the Topology's `M` wins over the process-sort `m`.
+    // 5. Normal keys: quit, help, alerts, arrows. Includes `T` which
+    //    jumps to the Topology tab regardless of what tab is current.
+    // 6. Replay-mode keys (SPACE/`]`/`[`/`+`/`-`/`j`/`k`/`g`/`L`) are
     //    routed BEFORE `handle_navigation_keys` so the sort-by-GpuMem
     //    `g` binding doesn't shadow the timecode editor.
     if state.filter_input_mode == FilterInputMode::Editing {
@@ -80,6 +84,18 @@ pub async fn handle_key_event(key_event: KeyEvent, state: &mut AppState, args: &
         && !state.loading
         && !state.show_help
         && handle_users_tab_keys(key_event, state)
+    {
+        return false;
+    }
+
+    // Topology tab (issue #190): when active, `M` toggles the
+    // graph/matrix mode. Checked after Users-tab keys (per the mode-
+    // precedence ladder above) but BEFORE the global `match` so the
+    // Topology's `M` never collides with the global sort-by-memory `m`.
+    if crate::ui::tabs::is_topology_tab_active(state)
+        && !state.loading
+        && !state.show_help
+        && handle_topology_tab_keys(key_event, state)
     {
         return false;
     }
@@ -114,6 +130,18 @@ pub async fn handle_key_event(key_event: KeyEvent, state: &mut AppState, args: &
             // no-op when the tab doesn't exist (local mode, replays
             // before the first frame has seeded tabs).
             if let Some(idx) = users_tab_index(&state.tabs) {
+                state.current_tab = idx;
+                state.gpu_scroll_offset = 0;
+                state.storage_scroll_offset = 0;
+                state.mark_data_changed();
+            }
+            false
+        }
+        KeyCode::Char('T') => {
+            // Jump to the per-host Topology tab (issue #190). Silent
+            // no-op when the tab is not present (local mode before the
+            // first data frame populates it).
+            if let Some(idx) = topology_tab_index(&state.tabs) {
                 state.current_tab = idx;
                 state.gpu_scroll_offset = 0;
                 state.storage_scroll_offset = 0;
@@ -356,6 +384,36 @@ fn change_users_sort(state: &mut AppState, key: UserSortKey) {
         state.users_tab_state.selected_row = 0;
         state.mark_data_changed();
     }
+}
+
+/// Handle keys owned by the per-host Topology tab (issue #190).
+///
+/// Returns `true` when the key was consumed so the caller stops
+/// dispatching.  The tab currently owns a single key:
+///
+/// * `M` — toggle between graph and matrix render modes.
+///
+/// `Tab` / `Shift-Tab` / arrow navigation is intentionally **not** owned
+/// by the topology tab so the operator can still move between hosts
+/// without leaving the Topology view (per the issue spec: "Remote mode:
+/// defaults to showing selected host's topology; `Tab`/`Shift-Tab`
+/// cycles nodes").
+fn handle_topology_tab_keys(key_event: KeyEvent, state: &mut AppState) -> bool {
+    let KeyEvent {
+        code, modifiers, ..
+    } = key_event;
+    if modifiers.contains(KeyModifiers::CONTROL) || modifiers.contains(KeyModifiers::ALT) {
+        return false;
+    }
+    // Accept both `m` and `M` to minimise muscle-memory friction: the
+    // issue spec uses uppercase `M` but operators may hit it without
+    // Shift on systems where the caps-lock LED is off.
+    if matches!(code, KeyCode::Char('M') | KeyCode::Char('m')) {
+        state.topology_view_mode = state.topology_view_mode.toggled();
+        state.mark_data_changed();
+        return true;
+    }
+    false
 }
 
 /// Drill into the currently-highlighted user, or the highlighted host

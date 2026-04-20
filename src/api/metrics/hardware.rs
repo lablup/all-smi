@@ -156,6 +156,11 @@ impl<'a> HardwareMetricExporter<'a> {
 
     fn export_nvlink_remote_device_type(&self, builder: &mut MetricBuilder, rows: &[Row<'a>]) {
         let mut emitted_any = false;
+        // Buffer for the optional `bandwidth_mb_s` label (issue #190). The
+        // string lives on the stack frame as an `Option<String>` per row/link
+        // because `labels` borrows a `&str`. Old exporters omit the label
+        // entirely so remote scrapers parsing pre-#190 output continue to
+        // deserialise cleanly (handled by `.unwrap_or(None)` in the parser).
         for row in rows {
             for link in &row.gpu.nvlink_remote_devices {
                 if !emitted_any {
@@ -164,22 +169,41 @@ impl<'a> HardwareMetricExporter<'a> {
                             "all_smi_nvlink_remote_device_type",
                             "NvLink remote endpoint classification per active link. Value is \
                              always 1; classification is carried in the `remote_type` label \
-                             (gpu / switch / ibmnpu / unknown).",
+                             (gpu / switch / ibmnpu / unknown). Optional `bandwidth_mb_s` label \
+                             carries the per-link bandwidth hint used by the topology tab's \
+                             NVn classifier (omitted when the driver does not report it).",
                         )
                         .type_("all_smi_nvlink_remote_device_type", "gauge");
                     emitted_any = true;
                 }
                 let link_idx_str = link.link_index.to_string();
+                let bandwidth_str = link.bandwidth_mb_s.map(|v| v.to_string());
                 let base = Self::base_labels(row);
-                let labels = [
-                    base[0],
-                    base[1],
-                    base[2],
-                    base[3],
-                    ("link_index", link_idx_str.as_str()),
-                    ("remote_type", link.remote_type.as_label()),
-                ];
-                builder.metric("all_smi_nvlink_remote_device_type", &labels, 1);
+                match bandwidth_str {
+                    Some(ref bw) => {
+                        let labels = [
+                            base[0],
+                            base[1],
+                            base[2],
+                            base[3],
+                            ("link_index", link_idx_str.as_str()),
+                            ("remote_type", link.remote_type.as_label()),
+                            ("bandwidth_mb_s", bw.as_str()),
+                        ];
+                        builder.metric("all_smi_nvlink_remote_device_type", &labels, 1);
+                    }
+                    None => {
+                        let labels = [
+                            base[0],
+                            base[1],
+                            base[2],
+                            base[3],
+                            ("link_index", link_idx_str.as_str()),
+                            ("remote_type", link.remote_type.as_label()),
+                        ];
+                        builder.metric("all_smi_nvlink_remote_device_type", &labels, 1);
+                    }
+                }
             }
         }
     }
@@ -301,10 +325,12 @@ mod tests {
                 NvLinkRemoteDevice {
                     link_index: 0,
                     remote_type: NvLinkRemoteType::Gpu,
+                    bandwidth_mb_s: Some(400_000),
                 },
                 NvLinkRemoteDevice {
                     link_index: 1,
                     remote_type: NvLinkRemoteType::Switch,
+                    bandwidth_mb_s: None,
                 },
             ],
             gpm_metrics: Some(GpmMetrics {

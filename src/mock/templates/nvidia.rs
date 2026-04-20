@@ -132,6 +132,19 @@ impl NvidiaMockGenerator {
             gpus,
         );
 
+        // Optional DGX-like topology — gated by
+        // `ALL_SMI_MOCK_TOPOLOGY` (issue #190). Emits NUMA + NvLink
+        // rows that drive the Topology tab. Kept separate from
+        // `ALL_SMI_MOCK_HARDWARE_DETAILS` so operators can enable
+        // topology without importing every extended NVML gauge the
+        // hardware-details flag turns on.
+        crate::mock::templates::topology::maybe_add_topology_template(
+            &mut template,
+            &self.gpu_name,
+            &self.instance_name,
+            gpus,
+        );
+
         template
     }
 

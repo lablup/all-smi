@@ -163,10 +163,13 @@ pub async fn run_replay_mode(args: &ViewArgs) {
     }
     if !header_hosts.is_empty() {
         // Users tab sits right after "All" (issue #189) so the
-        // cluster-wide tabs live together at the left edge.
+        // cluster-wide tabs live together at the left edge.  Topology
+        // (issue #190) follows Users so the three cluster-wide tabs
+        // share the same prefix.
         let mut tabs = vec![
             "All".to_string(),
             crate::ui::tabs::USERS_TAB_NAME.to_string(),
+            crate::ui::tabs::TOPOLOGY_TAB_NAME.to_string(),
         ];
         tabs.extend(header_hosts);
         initial_state.tabs = tabs;

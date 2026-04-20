@@ -298,6 +298,7 @@ async fn apply_frame_to_state(
     let mut tabs = vec![
         "All".to_string(),
         crate::ui::tabs::USERS_TAB_NAME.to_string(),
+        crate::ui::tabs::TOPOLOGY_TAB_NAME.to_string(),
     ];
     tabs.extend(host_ids);
 
