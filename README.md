@@ -111,6 +111,15 @@ all-smi view --hostfile hosts.csv
 
 # API mode (expose metrics server)
 all-smi api --port 9090
+
+# One-shot JSON/CSV/Prometheus dump for scripts
+all-smi snapshot
+
+# Capture a stream to disk for later replay
+all-smi record --output trace.ndjson.zst --duration 1h
+
+# Replay a captured stream in the TUI
+all-smi view --replay trace.ndjson.zst
 ```
 
 ### Local Mode (Monitor Local Hardware)
@@ -532,6 +541,70 @@ all-smi snapshot --format csv --include gpu --query utilization \
 | `--interval`      | `0`                               | Seconds between samples (only if `--samples > 1`). |
 | `--timeout-ms`    | `5000`                            | Per-reader timeout in milliseconds.              |
 | `--output` / `-o` | stdout                            | Write to this path (`-` also means stdout). On Unix: created with mode `0600` (owner-only), symlinks refused, atomic write via sibling `.tmp` + rename. |
+
+### Recording & Replay
+
+The `record` subcommand captures a live metric stream to disk as NDJSON, and
+`view --replay <file>` plays it back through the same TUI the operator would
+have seen live. Intended for post-hoc incident investigation without a
+Prometheus retention store — operators can rewind to the moment throughput
+cratered and see the exact GPU/CPU/memory/chassis state at that tick.
+
+Each captured frame uses the same JSON shape as `snapshot --format json`
+(same serializer), plus an optional header frame and sparse index frames
+every 1000 data frames to enable fast seeking.
+
+```bash
+# Capture 30 seconds of local hardware state to a zstd-compressed file.
+all-smi record --output incident.ndjson.zst --duration 30s --interval 1
+
+# Record until SIGTERM; rotate at 100MB per segment, keep last 10 files.
+all-smi record --output trace.ndjson.zst --max-size 100M --max-files 10
+
+# Record remote cluster scrapes (same HTTP path as `view`).
+all-smi record --source remote \
+  --hosts http://gpu-node1:9090 http://gpu-node2:9090 \
+  --output cluster.ndjson.gz --compress gzip --duration 1h
+
+# Replay a captured file — identical TUI to the live view.
+all-smi view --replay incident.ndjson.zst
+
+# Start playback at 14:32 (HH:MM:SS) and loop.
+all-smi view --replay incident.ndjson.zst --start 00:14:32 --loop
+
+# Replay at 4x speed.
+all-smi view --replay incident.ndjson.zst --speed 4.0
+```
+
+**Replay-mode keybindings** (active only with `--replay`):
+
+| Key          | Action                                               |
+|--------------|------------------------------------------------------|
+| `SPACE`      | Play / pause                                         |
+| `]` / `[`    | Step one frame forward / back (auto-pauses)          |
+| `+` / `-`    | Cycle speed through `0.25, 0.5, 1.0, 2.0, 4.0, 8.0`  |
+| `j` / `k`    | Seek -10s / +10s                                     |
+| `g`          | Open timecode editor (`HH:MM:SS` then Enter)         |
+| `L`          | Toggle loop playback                                 |
+| `q` / `Esc`  | Exit replay                                          |
+
+The status bar shows `REPLAY | HH:MM:SS | frame N / M | Xx | playing/paused`.
+Filter-edit mode (`/`) still takes precedence over replay keys, so the
+operator can filter the visible GPUs mid-playback.
+
+**`record` options summary**
+
+| Flag              | Default                           | Description                                      |
+|-------------------|-----------------------------------|--------------------------------------------------|
+| `--output` / `-o` | `all-smi-record.ndjson.zst`       | Output path. Extension picks the codec.          |
+| `--interval` / `-i` | `3`                             | Seconds between frames.                          |
+| `--duration`      | `0` (= record until SIGTERM)      | Accepts `30s`, `5m`, `1h`, `1d`, or bare seconds. |
+| `--source`        | `local`                           | `local` (hardware readers) or `remote` (HTTP scrape). |
+| `--hosts` / `--hostfile` | (none)                     | Required when `--source=remote`.                 |
+| `--include`       | `gpu,cpu,memory,chassis`          | Comma-separated sections (plus `process`).       |
+| `--max-size`      | `100M`                            | Rotation threshold per segment (`1K`, `10M`, `2G`). `0` disables rotation. |
+| `--max-files`     | `10`                              | Max segments on disk (active + rotated).         |
+| `--compress`      | auto (from extension)             | `zstd` / `gzip` / `none`.                        |
 
 ### Quick Start with Make Commands
 

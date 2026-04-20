@@ -30,6 +30,8 @@
 //! device carries a non-finite number — flaky NVML drivers and TPU reader
 //! failures have both been observed to emit such values.
 
+use std::io::{self, Write};
+
 use anyhow::{Context, Result};
 use serde_json::Value;
 
@@ -46,6 +48,35 @@ fn snapshots_to_sanitized_value(snapshots: &[Snapshot]) -> Result<Value> {
     };
     sanitize_json_floats(&mut value);
     Ok(value)
+}
+
+/// Write a single snapshot as one compact JSON line (newline-terminated).
+///
+/// This is the shared writer used by both:
+///
+/// * the `record` subcommand, which writes one frame per collection cycle
+///   (NDJSON) so that `view --replay` can later reconstruct the same
+///   `RenderSnapshot` the operator would have seen live, and
+/// * future consumers (e.g., the SSE streaming endpoint from issue #193)
+///   that need the identical per-frame shape.
+///
+/// The output is compact (no pretty-printing) and has non-finite `f64`
+/// numbers replaced with `null`, matching the rules the batch renderer
+/// applies. Appends exactly one `'\n'` so the file is a valid NDJSON
+/// stream that can be `tail -f`'d.
+///
+/// Errors from the writer surface as `io::Error`; serialization failures
+/// (extremely rare — would require a custom `Serialize` impl to fail) are
+/// reported as `io::Error::other`.
+pub fn write_frame_json<W: Write>(w: &mut W, snapshot: &Snapshot) -> io::Result<()> {
+    let mut value = serde_json::to_value(snapshot)
+        .map_err(|e| io::Error::other(format!("failed to serialize snapshot frame: {e}")))?;
+    sanitize_json_floats(&mut value);
+    let line = serde_json::to_string(&value)
+        .map_err(|e| io::Error::other(format!("failed to serialize snapshot frame: {e}")))?;
+    w.write_all(line.as_bytes())?;
+    w.write_all(b"\n")?;
+    Ok(())
 }
 
 /// Render a slice of snapshots to JSON.

@@ -21,6 +21,7 @@ mod device;
 mod parsing;
 mod metrics;
 mod network;
+mod record;
 mod snapshot;
 mod storage;
 mod ui;
@@ -243,7 +244,36 @@ async fn run_command(cli: Cli) {
                 }
             }
         }
+        Some(Commands::Record(args)) => {
+            // Record mode shares the snapshot collector stack, so like
+            // `snapshot` it runs without sudo and without initializing the
+            // macOS native metrics manager — hardware readers that need
+            // those privileges degrade gracefully into the error list.
+            let opts = match record::RecorderOptions::from_args(&args) {
+                Ok(o) => o,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    std::process::exit(2);
+                }
+            };
+            match record::run(opts).await {
+                Ok(()) => std::process::exit(0),
+                Err(e) => {
+                    eprintln!("error: {e:#}");
+                    std::process::exit(1);
+                }
+            }
+        }
         Some(Commands::View(mut args)) => {
+            // Replay mode bypasses the remote scrape path entirely — it
+            // reads frames from disk and pushes them into the same
+            // AppState the live view renders. Hardware, sudo, and host
+            // discovery are all irrelevant in this branch.
+            if args.replay.is_some() {
+                view::run_replay_mode(&args).await;
+                return;
+            }
+
             // Remote mode - no sudo required
 
             // Check if we're in Backend.AI environment and no hosts/hostfile provided

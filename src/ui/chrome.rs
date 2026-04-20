@@ -112,16 +112,24 @@ pub fn print_function_keys<W: Write>(
     // Move to bottom of screen
     queue!(stdout, cursor::MoveTo(0, rows - 1)).unwrap();
 
-    // Filter bar takes precedence over the hotkey strip.
+    // Precedence on the status bar:
     //
-    // When the operator is editing the filter buffer or a committed
-    // filter is currently active, show `Filter: <buffer>_  [matched X of Y]`
-    // in place of the usual keys. ESC/Enter/Ctrl-R restore normal
-    // rendering. Inline parse errors appear in red after the buffer.
+    // 1. Filter bar (issue #186) — operator is editing or a filter is
+    //    committed.
+    // 2. Replay status bar (issue #187) — `view --replay` is active.
+    //
+    // Filter edit mode still wins: the operator needs an escape hatch to
+    // drop the filter even while replaying. The status bar never shows
+    // both at once — replay metadata is cheap to re-read the moment the
+    // filter clears.
     if state.filter_input_mode == crate::app_state::FilterInputMode::Editing
         || state.filter_query.is_some()
     {
         print_filter_bar(stdout, cols, state);
+        return;
+    }
+    if state.replay.is_some() {
+        print_replay_bar(stdout, cols, state);
         return;
     }
 
@@ -237,6 +245,108 @@ pub fn print_function_keys<W: Write>(
             None,
         );
     }
+}
+
+/// Render the replay status bar. Active when `view --replay` is running.
+/// Layout follows the issue spec:
+///
+/// ```text
+/// REPLAY | 00:12:34 / 01:00:00 | 2.0x | paused   [SPACE:play  ]:step  g:seek  L:loop]
+/// ```
+///
+/// When the `g` timecode editor is open, the center of the bar is
+/// replaced with `Seek: HH:MM:SS_` and any parse error is appended in
+/// red. The status bar is never drawn while the filter bar is active
+/// (that mode wins in `print_function_keys`).
+fn print_replay_bar<W: Write>(stdout: &mut W, cols: u16, state: &AppState) {
+    let Some(replay) = state.replay.as_ref() else {
+        return;
+    };
+
+    // Left chip: always "REPLAY" on a contrasting color.
+    print_colored_text(stdout, "REPLAY", Color::Black, Some(Color::Yellow), None);
+    print_colored_text(stdout, " ", Color::White, None, None);
+
+    // Timecode input mode: render a focused editor instead of the
+    // normal metadata strip. Tells the operator exactly what they are
+    // typing and surfaces parse errors inline.
+    if replay.timecode_input_mode {
+        let mut bar = String::from("Seek: ");
+        bar.push_str(&replay.timecode_buffer);
+        bar.push('_');
+        let error_str = replay.timecode_error.clone();
+        let error_budget = error_str
+            .as_ref()
+            .map(|e| display_width(e) + 2)
+            .unwrap_or(0);
+        let budget = (cols as usize).saturating_sub(7 /* "REPLAY " */ + error_budget);
+        let truncated = if display_width(&bar) > budget {
+            truncate_to_width(&bar, budget).into_owned()
+        } else {
+            bar
+        };
+        print_colored_text(stdout, &truncated, Color::Yellow, None, None);
+        let mut used = 7 + display_width(&truncated);
+        if let Some(err) = error_str {
+            print_colored_text(stdout, "  ", Color::White, None, None);
+            print_colored_text(stdout, &err, Color::Red, None, None);
+            used += 2 + display_width(&err);
+        }
+        fill_remaining(stdout, cols, used);
+        return;
+    }
+
+    // Metadata chips.
+    let elapsed = format_hms(replay.elapsed.as_secs());
+    // Total time is harder to compute precisely until EOF; show the
+    // frame-count and total-frames instead, which are always exact.
+    let total_frames = if replay.at_eof {
+        replay.total_frames.to_string()
+    } else {
+        format!("{}+", replay.total_frames)
+    };
+    let state_str = if replay.timecode_input_mode {
+        "seeking"
+    } else if replay.paused {
+        "paused"
+    } else if replay.at_eof {
+        "end"
+    } else {
+        "playing"
+    };
+    let loop_str = if replay.replay_loop { " (loop)" } else { "" };
+    let meta = format!(
+        "{elapsed} | frame {} / {total_frames} | {:.2}x | {state_str}{loop_str}",
+        replay.current_seq + 1,
+        replay.speed
+    );
+    let hotkeys = "[SPACE:play  ]/[:step  +/-:speed  j/k:±10s  g:seek  L:loop]";
+
+    let body = format!("{meta}   {hotkeys}");
+    let budget = (cols as usize).saturating_sub(7);
+    let truncated = if display_width(&body) > budget {
+        truncate_to_width(&body, budget).into_owned()
+    } else {
+        body
+    };
+    print_colored_text(stdout, &truncated, Color::Cyan, None, None);
+    fill_remaining(stdout, cols, 7 + display_width(&truncated));
+}
+
+/// Fill the remainder of the row with spaces so leftover text from a
+/// previous frame cannot bleed through.
+fn fill_remaining<W: Write>(stdout: &mut W, cols: u16, used: usize) {
+    let remaining = (cols as usize).saturating_sub(used);
+    if remaining > 0 {
+        print_colored_text(stdout, &" ".repeat(remaining), Color::White, None, None);
+    }
+}
+
+fn format_hms(total_seconds: u64) -> String {
+    let h = total_seconds / 3600;
+    let m = (total_seconds / 60) % 60;
+    let s = total_seconds % 60;
+    format!("{h:02}:{m:02}:{s:02}")
 }
 
 /// Render the filter bar. Active when the operator is editing a query or

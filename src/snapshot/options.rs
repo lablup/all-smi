@@ -127,24 +127,29 @@ pub struct SnapshotError {
 /// does not implement `Debug`, and adding it to that type is out of scope
 /// for this feature. Tests and logs needing a human rendering should serialize
 /// to JSON instead via [`serde_json::to_string_pretty`].
-#[derive(Clone, Serialize)]
+///
+/// `Deserialize` is derived so the `view --replay` subcommand (issue #187)
+/// can reconstruct snapshots from the NDJSON recording stream produced by
+/// `all-smi record`. All section fields use `#[serde(default)]` so frames
+/// that omit a section (per the "absent key" serializer rule) still parse.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Snapshot {
     pub schema: u32,
     pub timestamp: String,
     pub hostname: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gpus: Option<Vec<GpuInfo>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cpus: Option<Vec<CpuInfo>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory: Option<Vec<MemoryInfo>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chassis: Option<Vec<ChassisInfo>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub processes: Option<Vec<ProcessInfo>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub storage: Option<Vec<StorageInfo>>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub errors: Vec<SnapshotError>,
 }
 

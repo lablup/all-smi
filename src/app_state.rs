@@ -46,6 +46,71 @@ pub const FILTER_RECENT_MAX: usize = 5;
 /// buffer. Fixed by the issue's acceptance criteria.
 pub const ALERT_HISTORY_MAX: usize = 50;
 
+/// Playback control block for `view --replay` (issue #187).
+///
+/// Separate struct so live-mode callers can treat `AppState::replay` as a
+/// simple `Option<ReplayState>`: when it is `None` replay keybindings are
+/// inert and the status bar draws the usual hotkey strip. When `Some`,
+/// the event handler accepts SPACE/`[`/`]`/`+`/`-`/`j`/`k`/`g`/`L` and
+/// the ReplayDriver thread consumes the `pending_seek`/`pending_step`
+/// commands it stashes here.
+#[derive(Clone, Debug)]
+pub struct ReplayState {
+    pub paused: bool,
+    pub speed: f32,
+    /// Sequence number of the currently-displayed data frame (0-based).
+    pub current_seq: u64,
+    /// Total data frames materialized so far. Lower bound until EOF.
+    pub total_frames: u64,
+    /// Elapsed time from frame 0 to the currently-displayed frame.
+    pub elapsed: Duration,
+    /// Whether the end of the stream has been reached.
+    pub at_eof: bool,
+    /// Whether the `L` loop toggle is active.
+    pub replay_loop: bool,
+    /// Absolute seek requested by the event handler (from frame 0).
+    /// Consumed by the ReplayDriver on its next tick.
+    pub pending_seek: Option<Duration>,
+    /// Relative step requested by `]` / `[`. `+1` = one frame forward,
+    /// `-1` = one frame back.
+    pub pending_step: Option<i32>,
+    /// Whether the `g <HH:MM:SS> Enter` timecode editor is open.
+    pub timecode_input_mode: bool,
+    /// Partial timecode buffer while the editor is open.
+    pub timecode_buffer: String,
+    /// Parse error shown inline in the status bar when the editor commits
+    /// an invalid timecode.
+    pub timecode_error: Option<String>,
+}
+
+impl ReplayState {
+    /// Discrete speed ladder for the `+` / `-` controls.
+    pub const SPEED_LADDER: &'static [f32] = &[0.25, 0.5, 1.0, 2.0, 4.0, 8.0];
+
+    /// Cycle speed up (`+`) or down (`-`) through the ladder. Picks the
+    /// nearest-then-next step so off-ladder starting speeds still
+    /// progress.
+    pub fn cycle_speed(&mut self, up: bool) {
+        let current = self.speed;
+        // Find current index (nearest match).
+        let mut best_idx = 0usize;
+        let mut best_delta = f32::INFINITY;
+        for (i, s) in Self::SPEED_LADDER.iter().enumerate() {
+            let d = (s - current).abs();
+            if d < best_delta {
+                best_delta = d;
+                best_idx = i;
+            }
+        }
+        let new_idx = if up {
+            (best_idx + 1).min(Self::SPEED_LADDER.len() - 1)
+        } else {
+            best_idx.saturating_sub(1)
+        };
+        self.speed = Self::SPEED_LADDER[new_idx];
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ConnectionStatus {
     pub host_id: String, // This is the server address key (e.g., "localhost:10001")
@@ -191,6 +256,12 @@ pub struct AppState {
     /// When true, render the alert history panel instead of the main
     /// device area.
     pub alert_panel_open: bool,
+    /// Playback state for `view --replay`. `None` in live modes. When
+    /// `Some`, the event handler routes replay-mode keys (SPACE, `]`/`[`,
+    /// `+`/`-`, `j`/`k`, `g`, `L`) to the embedded [`ReplayState`] and
+    /// the status bar draws the `REPLAY | ts/total | speed | state`
+    /// indicator instead of the normal hotkey strip.
+    pub replay: Option<ReplayState>,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -298,6 +369,7 @@ impl AppState {
             alerter: Alerter::new(AlertConfig::default()),
             alert_history: VecDeque::with_capacity(ALERT_HISTORY_MAX),
             alert_panel_open: false,
+            replay: None,
         }
     }
 
