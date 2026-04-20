@@ -403,12 +403,74 @@ async fn run_command(cli: Cli, settings: Settings) {
                 args.interval = settings.view.interval_secs;
             }
 
+            // SSH-transport config-file overrides (issue #194). CLI
+            // flags always win; the config file fills in unset values.
+            if args.ssh.is_none() && !settings.view.ssh.is_empty() {
+                args.ssh = Some(settings.view.ssh.join(","));
+            }
+            if args.ssh_hostfile.is_none() {
+                args.ssh_hostfile = settings
+                    .view
+                    .ssh_hostfile
+                    .as_ref()
+                    .map(std::path::PathBuf::from);
+            }
+            if args.ssh_key.is_none() {
+                args.ssh_key = settings.view.ssh_key.as_ref().map(std::path::PathBuf::from);
+            }
+            if args.ssh_config.is_none() {
+                args.ssh_config = settings
+                    .view
+                    .ssh_config
+                    .as_ref()
+                    .map(std::path::PathBuf::from);
+            }
+            if args.ssh_known_hosts.is_none() {
+                args.ssh_known_hosts = settings
+                    .view
+                    .ssh_known_hosts
+                    .as_ref()
+                    .map(std::path::PathBuf::from);
+            }
+            // `ssh_strict_host_key` carries a clap default of "yes".
+            // Override only when the config file explicitly set it AND
+            // the CLI value is still the compiled default.
+            if args.ssh_strict_host_key == "yes"
+                && let Some(v) = settings.view.ssh_strict_host_key.as_ref()
+            {
+                args.ssh_strict_host_key = v.clone();
+            }
+            // `ssh_timeout_secs` defaults to 10 from clap; apply config
+            // only when operator did not change it on the CLI.
+            if args.ssh_timeout_secs == 10
+                && let Some(v) = settings.view.ssh_timeout_secs
+            {
+                args.ssh_timeout_secs = v;
+            }
+            if args.ssh_fallback.is_none() {
+                args.ssh_fallback = settings.view.ssh_fallback.clone();
+            }
+            if args.ssh_concurrency == 32
+                && let Some(v) = settings.view.ssh_concurrency
+            {
+                args.ssh_concurrency = v;
+            }
+
             // Replay mode bypasses the remote scrape path entirely — it
             // reads frames from disk and pushes them into the same
             // AppState the live view renders. Hardware, sudo, and host
             // discovery are all irrelevant in this branch.
             if args.replay.is_some() {
                 view::run_replay_mode(&args, &settings).await;
+                return;
+            }
+
+            // SSH mode (issue #194): if any --ssh* flag is set we
+            // dispatch to the agentless transport instead of the HTTP
+            // remote scraper. --ssh and --ssh-hostfile are merged
+            // inside run_ssh_mode.
+            if args.ssh.is_some() || args.ssh_hostfile.is_some() {
+                view::run_ssh_mode(&args, &settings).await;
                 return;
             }
 
@@ -464,17 +526,7 @@ async fn run_command(cli: Cli, settings: Settings) {
             // in `config.toml` and stop typing the subcommand.
             match settings.general.default_mode.as_str() {
                 "view" => {
-                    let view_args = cli::ViewArgs {
-                        hosts: None,
-                        hostfile: None,
-                        interval: None,
-                        alert_temp: None,
-                        alert_util_low_mins: None,
-                        replay: None,
-                        speed: 1.0,
-                        start: None,
-                        replay_loop: false,
-                    };
+                    let view_args = cli::ViewArgs::empty();
                     // Re-enter the View arm with synthetic args. A
                     // cleaner factoring is a shared helper, but the
                     // existing handler is only reachable through this

@@ -365,6 +365,23 @@ fn render_terminal_section(line_idx: usize, width: usize) -> String {
             "command",
         ),
         ("", "", ""),
+        ("Agentless SSH:", "", "header"),
+        (
+            "  all-smi view --ssh user@dgx-01,user@dgx-02",
+            "Connect over SSH (no agent install)",
+            "command",
+        ),
+        (
+            "  all-smi view --ssh-hostfile hosts-ssh.txt",
+            "SSH targets from a hostfile",
+            "command",
+        ),
+        (
+            "  --ssh-fallback nvidia-smi,rocm-smi",
+            "Fallback probes when all-smi not present",
+            "command",
+        ),
+        ("", "", ""),
         ("API Server Mode:", "", "header"),
         (
             "  all-smi api --port 9090",

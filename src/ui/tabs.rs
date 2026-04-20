@@ -99,14 +99,26 @@ pub fn draw_tabs<W: Write>(stdout: &mut W, state: &AppState, cols: u16) {
 
     for (i, tab) in node_tabs {
         // Get display name (instance name) while keeping tab as the key
+        let connection_status = state.connection_status.get(tab);
         let display_name = if tab == "All" {
             tab.to_string()
-        } else if let Some(connection_status) = state.connection_status.get(tab) {
-            connection_status
-                .actual_hostname
-                .as_ref()
-                .unwrap_or(tab)
-                .clone()
+        } else if let Some(status) = connection_status {
+            // SSH mode tabs carry the `ssh://user@host` prefix in the
+            // host_id; when present we show that label verbatim so the
+            // operator immediately sees the transport. Issue #194.
+            if tab.contains('@') && !tab.starts_with("http") {
+                // SSH host_id: user@host:port. Strip the default port
+                // to keep the label compact. When we have a live
+                // transport chip, append it so the operator can see
+                // which command is feeding each tab at a glance.
+                let base = format_ssh_tab_label(tab);
+                match status.transport_chip.as_deref() {
+                    Some(chip) if !chip.is_empty() => format!("{base}·{chip}"),
+                    _ => base,
+                }
+            } else {
+                status.actual_hostname.as_ref().unwrap_or(tab).clone()
+            }
         } else {
             tab.to_string()
         };
@@ -168,6 +180,16 @@ fn render_tab_separator<W: Write>(stdout: &mut W, cols: u16) {
     queue!(stdout, Print("\r\n")).unwrap();
 }
 
+/// Format an SSH host-id (`user@host:port`) as a compact tab label.
+///
+/// Strips the `:22` suffix because SSH's default port is rarely
+/// interesting visually; everything else is preserved. Always prefixed
+/// with `ssh://` so the transport is obvious in the tab strip.
+pub fn format_ssh_tab_label(host_id: &str) -> String {
+    let without_default_port = host_id.strip_suffix(":22").unwrap_or(host_id);
+    format!("ssh://{without_default_port}")
+}
+
 #[allow(dead_code)]
 pub fn calculate_tab_visibility(state: &AppState, cols: u16) -> TabVisibility {
     let mut available_width = cols.saturating_sub(8);
@@ -189,7 +211,17 @@ pub fn calculate_tab_visibility(state: &AppState, cols: u16) -> TabVisibility {
         .skip(state.tab_scroll_offset)
     {
         // Get display name for width calculation
-        let display_name = if let Some(connection_status) = state.connection_status.get(tab) {
+        let display_name = if tab.contains('@') && !tab.starts_with("http") {
+            let base = format_ssh_tab_label(tab);
+            match state
+                .connection_status
+                .get(tab)
+                .and_then(|s| s.transport_chip.as_deref())
+            {
+                Some(chip) if !chip.is_empty() => format!("{base}·{chip}"),
+                _ => base,
+            }
+        } else if let Some(connection_status) = state.connection_status.get(tab) {
             connection_status
                 .actual_hostname
                 .as_ref()
@@ -256,5 +288,21 @@ mod tests {
 
         assert_eq!(visibility.first_visible, 1);
         assert!(visibility.has_more_left);
+    }
+
+    #[test]
+    fn ssh_tab_label_strips_default_port() {
+        assert_eq!(
+            format_ssh_tab_label("admin@dgx-01:22"),
+            "ssh://admin@dgx-01"
+        );
+    }
+
+    #[test]
+    fn ssh_tab_label_preserves_custom_port() {
+        assert_eq!(
+            format_ssh_tab_label("admin@dgx-01:2222"),
+            "ssh://admin@dgx-01:2222"
+        );
     }
 }

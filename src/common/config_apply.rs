@@ -86,6 +86,36 @@ fn apply_file_view(raw: &RawConfig, settings: &mut Settings) {
     if v.interval_secs.is_some() {
         settings.view.interval_secs = v.interval_secs;
     }
+    // Agentless SSH transport keys (issue #194). Each `.is_some()`
+    // guard lets the CLI layer distinguish "config set this" from
+    // "config left it unset".
+    if let Some(ssh) = &v.ssh {
+        settings.view.ssh = ssh.clone();
+    }
+    if v.ssh_hostfile.is_some() {
+        settings.view.ssh_hostfile = v.ssh_hostfile.clone();
+    }
+    if v.ssh_key.is_some() {
+        settings.view.ssh_key = v.ssh_key.clone();
+    }
+    if v.ssh_config.is_some() {
+        settings.view.ssh_config = v.ssh_config.clone();
+    }
+    if v.ssh_strict_host_key.is_some() {
+        settings.view.ssh_strict_host_key = v.ssh_strict_host_key.clone();
+    }
+    if v.ssh_timeout_secs.is_some() {
+        settings.view.ssh_timeout_secs = v.ssh_timeout_secs;
+    }
+    if v.ssh_fallback.is_some() {
+        settings.view.ssh_fallback = v.ssh_fallback.clone();
+    }
+    if v.ssh_known_hosts.is_some() {
+        settings.view.ssh_known_hosts = v.ssh_known_hosts.clone();
+    }
+    if v.ssh_concurrency.is_some() {
+        settings.view.ssh_concurrency = v.ssh_concurrency;
+    }
 }
 
 fn apply_file_api(raw: &RawConfig, settings: &mut Settings) {
