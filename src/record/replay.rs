@@ -40,6 +40,7 @@
 //! skipped so an operator who killed `record` mid-frame still gets the
 //! usable portion of the stream.
 
+use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
@@ -56,6 +57,35 @@ use crate::snapshot::Snapshot;
 /// memory footprint of replay for files of any size. The forward
 /// iterator is O(1); `prev()` on an uncached frame re-reads from disk.
 pub const FRAME_CACHE_MAX: usize = 1024;
+
+/// Upper bound on a single NDJSON line's uncompressed length. A hostile
+/// `.zst` file can decompress to a multi-GiB "line" with no newline; cap
+/// the input side so a 1 KiB fixture cannot OOM the replayer. Even a
+/// 1000-host chassis snapshot stays well under 3 MB, so 16 MiB gives
+/// comfortable headroom for realistic data while shutting down the
+/// decompression-bomb vector.
+pub const MAX_LINE_BYTES: usize = 16 * 1024 * 1024;
+
+/// Zstd frame-window ceiling used by the decoder. 2^27 bytes = 128 MiB.
+/// Streams declaring a larger window demand unreasonable decoder memory
+/// and are almost certainly malicious; the decoder rejects them up-front
+/// instead of attempting to honour the declared size.
+const ZSTD_WINDOW_LOG_MAX: u32 = 27;
+
+/// Maximum number of hosts we accept from a replay header before
+/// truncating. A legitimate header lists at most one entry per physical
+/// machine in the fleet being monitored; a hostile header might list
+/// hundreds of thousands to overwhelm the TUI's tab row. Truncate + warn
+/// on overflow; downstream consumers (e.g. `runner.rs`) apply their own
+/// belt-and-suspenders cap.
+pub const MAX_HEADER_HOSTS: usize = 1024;
+
+/// Per-tick ceiling on the number of rejected (malformed / empty) lines
+/// `read_next_data_frame` scans before it yields control back to the
+/// caller. A hostile file with millions of malformed lines would
+/// otherwise starve the tokio runtime for seconds while the driver tick
+/// spins synchronously looking for the next data frame.
+pub const SCAN_BUDGET_PER_TICK: usize = 1024;
 
 /// Errors surfaced by the replay pipeline.
 #[derive(Debug, thiserror::Error)]
@@ -74,6 +104,8 @@ pub enum ReplayError {
     Empty(PathBuf),
     #[error("replay: invalid timecode `{0}` — use HH:MM:SS, MM:SS, or seconds")]
     InvalidTimecode(String),
+    #[error("replay: frame sequence overflow at line {line}")]
+    SeqOverflow { line: u64 },
 }
 
 /// Header frame metadata (first line of a well-formed recording).
@@ -142,10 +174,11 @@ pub struct Replayer {
     path: PathBuf,
     header: Option<ReplayHeader>,
     reader: BufReader<Box<dyn Read + Send>>,
-    /// Ring buffer of the most-recently-read data frames. Actually a
-    /// `Vec` with eviction from the front; eviction is amortised O(1)
-    /// because we limit the cache to `FRAME_CACHE_MAX`.
-    cache: Vec<ReplayFrame>,
+    /// Ring buffer of the most-recently-read data frames. `VecDeque` gives
+    /// us O(1) `pop_front` for eviction instead of the O(N) `Vec::remove(0)`
+    /// it replaced — which mattered because the eviction fires on *every*
+    /// `next()` once the cache is saturated.
+    cache: VecDeque<ReplayFrame>,
     /// Index (within `cache`) of the frame currently being displayed.
     /// `None` until the first frame has been materialised.
     cursor: Option<usize>,
@@ -186,7 +219,7 @@ impl Replayer {
             path: path.to_path_buf(),
             header: None,
             reader,
-            cache: Vec::new(),
+            cache: VecDeque::new(),
             cursor: None,
             next_disk_seq: 0,
             eof: false,
@@ -214,10 +247,7 @@ impl Replayer {
                     self.header = Some(h);
                 }
                 ClassifiedLine::Index(seq) => {
-                    self.index_points.push(IndexPoint {
-                        seq,
-                        line: self.line_number,
-                    });
+                    self.record_index_point(seq);
                 }
                 ClassifiedLine::Data(snap) => {
                     let frame = ReplayFrame {
@@ -225,8 +255,13 @@ impl Replayer {
                         timestamp: parse_ts(&snap.timestamp),
                         snapshot: snap,
                     };
-                    self.next_disk_seq += 1;
-                    self.cache.push(frame);
+                    self.next_disk_seq =
+                        self.next_disk_seq
+                            .checked_add(1)
+                            .ok_or(ReplayError::SeqOverflow {
+                                line: self.line_number,
+                            })?;
+                    self.cache.push_back(frame);
                     self.cursor = Some(0);
                     return Ok(());
                 }
@@ -236,26 +271,108 @@ impl Replayer {
     }
 
     /// Read one line from the underlying reader, advancing the line
-    /// counter. Returns `Ok(None)` on EOF.
+    /// counter. Returns `Ok(None)` on EOF. Enforces [`MAX_LINE_BYTES`]
+    /// so a hostile decompressing stream cannot synthesize a line
+    /// larger than memory; an oversized line is logged and reported as
+    /// an empty `Ok(Some(""))` so the classifier treats it as "ignore"
+    /// and the rest of the file remains playable.
     fn read_line(&mut self) -> io::Result<Option<String>> {
         if self.eof {
             return Ok(None);
         }
-        let mut buf = String::new();
-        let n = self.reader.read_line(&mut buf)?;
-        if n == 0 {
+        let mut buf = Vec::new();
+        let mut oversized = false;
+        // Read bytes until newline or cap. We can't use
+        // `BufRead::read_line` directly because it has no upper bound;
+        // instead we feed `read_until` the cap as a byte budget.
+        loop {
+            let remaining = MAX_LINE_BYTES.saturating_sub(buf.len());
+            if remaining == 0 {
+                // Cap reached without seeing a newline. Drain the rest
+                // of the line so the next call is positioned on the
+                // following line, then report this one as unusable.
+                oversized = true;
+                let mut discard = Vec::new();
+                loop {
+                    discard.clear();
+                    let n = self.reader.read_until(b'\n', &mut discard)?;
+                    if n == 0 || discard.ends_with(b"\n") {
+                        break;
+                    }
+                }
+                break;
+            }
+            // Read up to the remaining budget into a scratch buffer, then
+            // append. `BufRead::read_until` has no length cap, so we
+            // bound it by limiting the source with `take`.
+            let chunk = {
+                let mut scratch = Vec::new();
+                let n = (&mut self.reader)
+                    .take(remaining as u64)
+                    .read_until(b'\n', &mut scratch)?;
+                if n == 0 {
+                    break;
+                }
+                scratch
+            };
+            let ends_with_newline = chunk.ends_with(b"\n");
+            buf.extend_from_slice(&chunk);
+            if ends_with_newline {
+                break;
+            }
+            // No newline yet and we haven't hit EOF on the source —
+            // loop to read more, bounded by the remaining budget.
+            if buf.len() >= MAX_LINE_BYTES {
+                // Belt-and-suspenders: the next iteration will drain.
+                continue;
+            }
+            // If `take` returned fewer bytes than requested without a
+            // newline, that implies EOF on the underlying source.
+            // Break so we don't spin.
+            if chunk.is_empty() {
+                break;
+            }
+        }
+        if buf.is_empty() && !oversized {
             self.eof = true;
             return Ok(None);
         }
         self.line_number += 1;
+        if oversized {
+            tracing::warn!(
+                path = %self.path.display(),
+                line = self.line_number,
+                cap = MAX_LINE_BYTES,
+                "replay: oversized NDJSON line, skipping"
+            );
+            // Return an empty string so `classify_line` hits the
+            // empty-line branch (→ Ignore).
+            return Ok(Some(String::new()));
+        }
         // Drop trailing newline.
-        if buf.ends_with('\n') {
+        if buf.ends_with(b"\n") {
             buf.pop();
-            if buf.ends_with('\r') {
+            if buf.ends_with(b"\r") {
                 buf.pop();
             }
         }
-        Ok(Some(buf))
+        // Convert to string lossily: any non-UTF-8 bytes become U+FFFD,
+        // which the JSON parser will then reject. The previous
+        // `read_line` implementation silently dropped non-UTF-8 reads;
+        // this one logs them the same way malformed JSON is logged.
+        let s = match String::from_utf8(buf) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(
+                    path = %self.path.display(),
+                    line = self.line_number,
+                    error = %e,
+                    "replay: non-UTF-8 NDJSON line, skipping"
+                );
+                String::new()
+            }
+        };
+        Ok(Some(s))
     }
 
     fn classify_line(&self, line: &str) -> Result<ClassifiedLine, ReplayError> {
@@ -288,9 +405,22 @@ impl Replayer {
         }
 
         if raw.header {
+            // Cap the hosts list at ingest time. A hostile header might
+            // list hundreds of thousands of entries to flood the TUI's
+            // tab row and the downstream caller's allocation budget.
+            let mut hosts = raw.hosts;
+            if hosts.len() > MAX_HEADER_HOSTS {
+                tracing::warn!(
+                    path = %self.path.display(),
+                    requested = hosts.len(),
+                    cap = MAX_HEADER_HOSTS,
+                    "replay: header hosts list exceeds cap, truncating"
+                );
+                hosts.truncate(MAX_HEADER_HOSTS);
+            }
             return Ok(ClassifiedLine::Header(ReplayHeader {
                 interval_ms: raw.interval_ms,
-                hosts: raw.hosts,
+                hosts,
                 all_smi_version: raw.all_smi_version,
             }));
         }
@@ -299,10 +429,35 @@ impl Replayer {
             struct IndexFrame {
                 seq: u64,
             }
-            let idx: IndexFrame = serde_json::from_str(trimmed).map_err(|_| {
-                // Malformed index is not fatal; treat as "ignore" instead.
-                ReplayError::Io(io::Error::other("malformed index frame"))
-            })?;
+            let idx: IndexFrame = match serde_json::from_str::<IndexFrame>(trimmed) {
+                Ok(v) => v,
+                Err(e) => {
+                    // Malformed index is not fatal; treat as "ignore"
+                    // so the rest of the stream is still playable.
+                    tracing::warn!(
+                        path = %self.path.display(),
+                        line = self.line_number,
+                        error = %e,
+                        "replay: ignoring malformed index frame"
+                    );
+                    return Ok(ClassifiedLine::Ignore);
+                }
+            };
+            // Reject implausible index sequence numbers. A hostile
+            // `seq = u64::MAX` would cause `next_disk_seq = seq + 1`
+            // to overflow (panic in debug, silent wrap in release).
+            // `seq == 0` is also invalid because the first data frame
+            // is seq=0 and an index frame is always written *after*
+            // its matching data frame.
+            if idx.seq == 0 || idx.seq >= u64::MAX / 2 {
+                tracing::warn!(
+                    path = %self.path.display(),
+                    line = self.line_number,
+                    seq = idx.seq,
+                    "replay: ignoring index frame with implausible seq"
+                );
+                return Ok(ClassifiedLine::Ignore);
+            }
             return Ok(ClassifiedLine::Index(idx.seq));
         }
 
@@ -438,14 +593,14 @@ impl Replayer {
     /// Duration from frame 0 to the currently-displayed frame.
     pub fn elapsed(&self) -> Option<Duration> {
         let cur = self.current()?;
-        let first = self.cache.first()?;
+        let first = self.cache.front()?;
         (cur.timestamp - first.timestamp).to_std().ok()
     }
 
     fn first_frame_timestamp(&mut self) -> Result<DateTime<Utc>, ReplayError> {
         // The first frame is always cached (priming guarantees that when
         // the file has any data). Rewind if the head has been evicted.
-        if let Some(first) = self.cache.first()
+        if let Some(first) = self.cache.front()
             && first.seq == 0
         {
             return Ok(first.timestamp);
@@ -482,9 +637,11 @@ impl Replayer {
         if nearest_line > 0 {
             // Skip `nearest_line` lines without classifying so we don't
             // accidentally re-populate the cache with header/index data.
+            // Apply MAX_LINE_BYTES here too: a hostile file could
+            // otherwise inflate a "skipped" line to GiB scale and OOM
+            // the replayer through the index fast-path.
             for _ in 0..nearest_line {
-                let mut buf = String::new();
-                let n = self.reader.read_line(&mut buf)?;
+                let n = skip_one_line_bounded(&mut self.reader)?;
                 if n == 0 {
                     self.eof = true;
                     break;
@@ -501,7 +658,7 @@ impl Replayer {
             // position in the recording, so the REPLAY status-bar
             // "frame N / M" display is correct after an index-frame
             // fast-path seek.
-            self.next_disk_seq = nearest_seq + 1;
+            self.next_disk_seq = nearest_seq.saturating_add(1);
         }
 
         // Now do a data-frame-aware scan until we reach target_seq.
@@ -511,7 +668,7 @@ impl Replayer {
             }
             let landed_seq = self
                 .cache
-                .last()
+                .back()
                 .map(|f| f.seq)
                 .unwrap_or(self.next_disk_seq.saturating_sub(1));
             if landed_seq >= target_seq {
@@ -528,6 +685,14 @@ impl Replayer {
     /// Read one more data frame from disk and push it onto the cache.
     /// Returns `Ok(true)` if a new frame was appended, `Ok(false)` on EOF.
     fn read_next_data_frame(&mut self) -> Result<bool, ReplayError> {
+        // A hostile file with millions of malformed lines would
+        // otherwise let this loop spin synchronously for many seconds,
+        // starving the async driver tick. Cap per-call rejections at
+        // `SCAN_BUDGET_PER_TICK`; when the budget is exhausted, return
+        // `Ok(false)` so the caller treats it as "no new frame this
+        // tick" and re-enters the loop on the next driver tick (which
+        // preserves pause/seek state).
+        let mut rejects_this_call: usize = 0;
         loop {
             let line = match self.read_line()? {
                 Some(s) => s,
@@ -540,12 +705,11 @@ impl Replayer {
                     if self.header.is_none() {
                         self.header = Some(h);
                     }
+                    rejects_this_call = rejects_this_call.saturating_add(1);
                 }
                 ClassifiedLine::Index(seq) => {
-                    self.index_points.push(IndexPoint {
-                        seq,
-                        line: self.line_number,
-                    });
+                    self.record_index_point(seq);
+                    rejects_this_call = rejects_this_call.saturating_add(1);
                 }
                 ClassifiedLine::Data(snap) => {
                     let frame = ReplayFrame {
@@ -553,13 +717,18 @@ impl Replayer {
                         timestamp: parse_ts(&snap.timestamp),
                         snapshot: snap,
                     };
-                    self.next_disk_seq += 1;
-                    self.cache.push(frame);
+                    self.next_disk_seq =
+                        self.next_disk_seq
+                            .checked_add(1)
+                            .ok_or(ReplayError::SeqOverflow {
+                                line: self.line_number,
+                            })?;
+                    self.cache.push_back(frame);
                     if self.cache.len() > FRAME_CACHE_MAX {
-                        // Ring-buffer eviction. O(N) because Vec::remove —
-                        // acceptable because N = FRAME_CACHE_MAX = 1024
-                        // and this happens at most once per `next()`.
-                        let evicted = self.cache.remove(0);
+                        // Ring-buffer eviction. `VecDeque::pop_front` is
+                        // O(1), unlike the previous `Vec::remove(0)`
+                        // which was O(N) per eviction.
+                        let evicted = self.cache.pop_front();
                         // Keep cursor pointing at the same absolute frame
                         // if possible.
                         if let Some(c) = self.cursor
@@ -571,9 +740,83 @@ impl Replayer {
                     }
                     return Ok(true);
                 }
-                ClassifiedLine::Ignore => {}
+                ClassifiedLine::Ignore => {
+                    rejects_this_call = rejects_this_call.saturating_add(1);
+                }
+            }
+            if rejects_this_call >= SCAN_BUDGET_PER_TICK {
+                // Budget exhausted: report "no new frame this tick" and
+                // let the caller come back around. This preserves the
+                // pause/seek state because the reader position and
+                // `next_disk_seq` are unchanged for the purposes of
+                // subsequent frames (any rejected lines have already
+                // been consumed from the stream).
+                tracing::debug!(
+                    path = %self.path.display(),
+                    line = self.line_number,
+                    rejects = rejects_this_call,
+                    "replay: scan budget exhausted, yielding to driver"
+                );
+                return Ok(false);
             }
         }
+    }
+
+    /// Record a sparse-index checkpoint, applying monotonicity and
+    /// line-ordering invariants that the record writer is contractually
+    /// supposed to uphold but which a hostile file can violate. We drop
+    /// the offending index without failing the whole replay — the
+    /// worst case is a slower fallback scan, not a crash.
+    fn record_index_point(&mut self, seq: u64) {
+        // The record writer emits index frames AFTER their matching data
+        // frame (see `record::write_data_frame`). By the time we
+        // classify the index, `next_disk_seq` has already been
+        // incremented past the matching data frame's seq, so the
+        // contract is `seq < next_disk_seq` (and in practice `seq ==
+        // next_disk_seq - 1`). A hostile file with `seq >=
+        // next_disk_seq` claims to point at a data frame we haven't
+        // read yet, which would poison the fast-path seek; drop it.
+        if seq >= self.next_disk_seq {
+            tracing::warn!(
+                path = %self.path.display(),
+                line = self.line_number,
+                seq,
+                next_disk_seq = self.next_disk_seq,
+                "replay: ignoring index frame pointing past observed data"
+            );
+            return;
+        }
+        // Monotonicity relative to prior index points: `rewind_and_seek_to`
+        // does a "nearest ≤ target" scan that assumes monotonically
+        // increasing `seq`. A non-monotonic entry breaks the scan.
+        if let Some(last) = self.index_points.last()
+            && seq <= last.seq
+        {
+            tracing::warn!(
+                path = %self.path.display(),
+                line = self.line_number,
+                seq,
+                prev_seq = last.seq,
+                "replay: ignoring non-monotonic index frame"
+            );
+            return;
+        }
+        // Line-ordering: index frames always sit on a line we have
+        // already counted (the current `line_number` is the line the
+        // classifier just handled). A `line == 0` would imply we
+        // haven't read any lines yet, which is structurally impossible.
+        if self.line_number == 0 {
+            tracing::warn!(
+                path = %self.path.display(),
+                seq,
+                "replay: ignoring index frame before any data frames"
+            );
+            return;
+        }
+        self.index_points.push(IndexPoint {
+            seq,
+            line: self.line_number,
+        });
     }
 }
 
@@ -602,11 +845,56 @@ fn open_reader(path: &Path) -> io::Result<BufReader<Box<dyn Read + Send>>> {
         .and_then(|e| e.to_str())
         .map(|s| s.to_ascii_lowercase());
     let boxed: Box<dyn Read + Send> = match ext.as_deref() {
-        Some("zst") => Box::new(ZstdDecoder::new(file)?),
+        Some("zst") => {
+            let mut dec = ZstdDecoder::new(file)?;
+            // Cap the declared window size at 2^27 (128 MiB). Hostile
+            // streams with a larger `window_log` force the decoder to
+            // allocate proportionally; capping at this value rejects the
+            // file with a clean error instead of attempting to honour an
+            // unreasonable memory request.
+            dec.window_log_max(ZSTD_WINDOW_LOG_MAX)?;
+            Box::new(dec)
+        }
         Some("gz") => Box::new(GzDecoder::new(file)),
         _ => Box::new(file),
     };
     Ok(BufReader::with_capacity(64 * 1024, boxed))
+}
+
+/// Consume one line from `reader`, bounded by [`MAX_LINE_BYTES`].
+/// Returns the number of bytes actually read (0 ⇒ EOF). If the line
+/// exceeds the cap we drain the remainder of the line so the reader is
+/// positioned on the following line on return.
+fn skip_one_line_bounded<R: BufRead>(reader: &mut R) -> io::Result<usize> {
+    let mut total: usize = 0;
+    loop {
+        let remaining = MAX_LINE_BYTES.saturating_sub(total);
+        if remaining == 0 {
+            // Over the cap: drain until newline or EOF.
+            let mut discard = Vec::new();
+            loop {
+                discard.clear();
+                let n = reader.read_until(b'\n', &mut discard)?;
+                total = total.saturating_add(n);
+                if n == 0 || discard.ends_with(b"\n") {
+                    return Ok(total);
+                }
+            }
+        }
+        let mut scratch = Vec::new();
+        let n = reader
+            .by_ref()
+            .take(remaining as u64)
+            .read_until(b'\n', &mut scratch)?;
+        total = total.saturating_add(n);
+        if n == 0 {
+            return Ok(total);
+        }
+        if scratch.ends_with(b"\n") {
+            return Ok(total);
+        }
+        // Keep looping — we haven't seen a newline but haven't hit EOF.
+    }
 }
 
 /// Parse `HH:MM:SS`, `MM:SS`, or bare seconds into a `Duration`.
@@ -892,5 +1180,200 @@ mod tests {
             eof_check.is_none() || eof_check.unwrap().seq == 1,
             "a truncated tail line must not materialize as a new frame"
         );
+    }
+
+    // ---------------------------------------------------------------------
+    // Hostile-input regression tests
+    // ---------------------------------------------------------------------
+
+    /// F2: an NDJSON file with a line longer than `MAX_LINE_BYTES` must
+    /// not OOM the replayer. The oversized line should be logged and
+    /// skipped, with subsequent well-formed frames still materialized.
+    #[test]
+    fn replayer_skips_oversized_line_without_oom() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("oversized.ndjson");
+        {
+            let mut f = File::create(&path).unwrap();
+            // First a legitimate data frame so priming succeeds.
+            writeln!(
+                f,
+                "{{\"schema\":1,\"timestamp\":\"2026-04-20T00:00:00Z\",\"hostname\":\"a\",\"gpus\":[]}}"
+            )
+            .unwrap();
+            // Oversized line: ~20 MiB of 'x' then a newline. No JSON
+            // structure — the reader must drain it without allocating
+            // the whole thing in one `String`.
+            let huge = vec![b'x'; 20 * 1024 * 1024];
+            f.write_all(&huge).unwrap();
+            f.write_all(b"\n").unwrap();
+            // Another legitimate data frame after the oversized one.
+            writeln!(
+                f,
+                "{{\"schema\":1,\"timestamp\":\"2026-04-20T00:00:01Z\",\"hostname\":\"a\",\"gpus\":[]}}"
+            )
+            .unwrap();
+        }
+        let mut r = Replayer::open(&path).unwrap();
+        assert_eq!(r.current().unwrap().seq, 0, "priming reads frame 0");
+        // The second call must skip the oversized line and land on
+        // the third-line data frame (absolute seq 1).
+        let next = r.next().unwrap().expect("post-oversized frame");
+        assert_eq!(next.seq, 1);
+    }
+
+    /// F3: a `.zst` file with `window_log = 28` (256 MiB window) must
+    /// be rejected by the decoder after we call `window_log_max(27)`.
+    #[test]
+    fn replayer_rejects_zstd_window_above_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("big-window.ndjson.zst");
+        {
+            let f = File::create(&path).unwrap();
+            // Build an encoder with a 28-bit window (256 MiB) — larger
+            // than the decoder cap of 27 (128 MiB). The zstd crate
+            // exposes this via the raw parameter API.
+            let mut enc = zstd::stream::write::Encoder::new(f, 3).unwrap();
+            enc.set_parameter(zstd::zstd_safe::CParameter::WindowLog(28))
+                .unwrap();
+            writeln!(
+                enc,
+                "{{\"schema\":1,\"timestamp\":\"2026-04-20T00:00:00Z\",\"hostname\":\"a\",\"gpus\":[]}}"
+            )
+            .unwrap();
+            enc.finish().unwrap();
+        }
+        // Opening is OK (the window limit is applied at configure-time
+        // on the decoder), but the first read must fail with an I/O
+        // error from zstd's "frame requires too much memory" branch.
+        let result = Replayer::open(&path);
+        match result {
+            Err(ReplayError::Open { .. }) | Err(ReplayError::Io(_)) => {
+                // Expected — either open() returned an Io mapped error,
+                // or priming surfaced the error on the first read.
+            }
+            Ok(mut r) => {
+                // If `open` succeeded, priming will have hit EOF
+                // silently with no frames (the decoder emitted nothing
+                // usable). Either way, current() must be `None`.
+                assert!(
+                    r.current().is_none(),
+                    "a file with window_log > cap must not materialize frames"
+                );
+                // Forward reads must also not succeed.
+                assert!(r.next().is_err() || r.next().unwrap().is_none());
+            }
+            Err(other) => panic!("expected Open/Io error, got {other:?}"),
+        }
+    }
+
+    /// F4: an index frame with `seq = u64::MAX` must be rejected by
+    /// the ingest-time check, not propagated into `index_points` where
+    /// it could overflow `next_disk_seq` on the fast path.
+    #[test]
+    fn replayer_rejects_index_frame_with_implausible_seq() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("overflow-idx.ndjson");
+        {
+            let mut f = File::create(&path).unwrap();
+            writeln!(
+                f,
+                "{{\"schema\":1,\"timestamp\":\"2026-04-20T00:00:00Z\",\"hostname\":\"a\",\"gpus\":[]}}"
+            )
+            .unwrap();
+            // Hostile index: seq at u64::MAX. The ingest cap
+            // `seq >= u64::MAX / 2` must fire before this reaches
+            // `record_index_point`.
+            writeln!(
+                f,
+                "{{\"schema\":1,\"index\":true,\"seq\":18446744073709551615,\"byte_offset\":0}}"
+            )
+            .unwrap();
+            writeln!(
+                f,
+                "{{\"schema\":1,\"timestamp\":\"2026-04-20T00:00:01Z\",\"hostname\":\"a\",\"gpus\":[]}}"
+            )
+            .unwrap();
+        }
+        let mut r = Replayer::open(&path).unwrap();
+        // Walk through — no panic, no crash.
+        while !r.at_eof() {
+            if r.next().unwrap().is_none() {
+                break;
+            }
+        }
+        assert_eq!(
+            r.index_points_seen(),
+            0,
+            "index frame with implausible seq must be rejected at ingest"
+        );
+    }
+
+    /// F5: a header with more than `MAX_HEADER_HOSTS` entries must be
+    /// truncated at ingest so downstream `tabs` allocation is bounded.
+    #[test]
+    fn replayer_truncates_oversized_header_hosts() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("many-hosts.ndjson");
+        {
+            let mut f = File::create(&path).unwrap();
+            // Build a header with 5000 hosts (far above the 1024 cap).
+            let hosts: Vec<String> = (0..5000).map(|i| format!("host-{i}")).collect();
+            let header = serde_json::json!({
+                "schema": 1,
+                "header": true,
+                "interval_ms": 1000,
+                "hosts": hosts,
+            });
+            writeln!(f, "{header}").unwrap();
+            writeln!(
+                f,
+                "{{\"schema\":1,\"timestamp\":\"2026-04-20T00:00:00Z\",\"hostname\":\"a\",\"gpus\":[]}}"
+            )
+            .unwrap();
+        }
+        let r = Replayer::open(&path).unwrap();
+        let header = r.header().expect("header parsed");
+        assert!(
+            header.hosts.len() <= MAX_HEADER_HOSTS,
+            "hosts len must be capped at MAX_HEADER_HOSTS, got {}",
+            header.hosts.len()
+        );
+        assert_eq!(header.hosts.len(), MAX_HEADER_HOSTS);
+    }
+
+    /// F4 cont'd: a data-frame count approaching `u64::MAX` must fail
+    /// via `SeqOverflow` rather than panic on `+= 1` overflow.
+    #[test]
+    fn replayer_next_disk_seq_overflow_is_surfaced() {
+        // Build a Replayer in-memory, then poke `next_disk_seq` to
+        // `u64::MAX - 1` so the next data-frame read triggers overflow.
+        // This test is a direct unit-level check because writing
+        // u64::MAX - 1 data frames would be impractical.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("seq-overflow.ndjson");
+        {
+            let mut f = File::create(&path).unwrap();
+            for i in 0..3 {
+                writeln!(
+                    f,
+                    "{{\"schema\":1,\"timestamp\":\"2026-04-20T00:00:{i:02}Z\",\"hostname\":\"a\",\"gpus\":[]}}"
+                )
+                .unwrap();
+            }
+        }
+        let mut r = Replayer::open(&path).unwrap();
+        // Force the counter to the brink. Priming consumed frame 0 so
+        // `next_disk_seq == 1`; we overwrite it directly to simulate a
+        // long-running stream.
+        r.next_disk_seq = u64::MAX;
+        // The next `next()` call tries to materialize a fresh frame and
+        // must surface a SeqOverflow error instead of panicking.
+        let err = r.next();
+        match err {
+            Err(ReplayError::SeqOverflow { .. }) => { /* expected */ }
+            Err(other) => panic!("expected SeqOverflow, got {other}"),
+            Ok(_) => panic!("expected SeqOverflow, got Ok"),
+        }
     }
 }

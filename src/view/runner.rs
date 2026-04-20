@@ -152,8 +152,15 @@ pub async fn run_replay_mode(args: &ViewArgs) {
         r.pending_seek = Some(d);
     }
     // Prime the tab list from the header's hosts so the tab row is
-    // populated even before the first data frame is materialized.
-    let header_hosts = driver.total_hosts();
+    // populated even before the first data frame is materialized. Apply
+    // a defensive cap mirroring `replay::MAX_HEADER_HOSTS` — the
+    // replayer already truncates at ingest, but belt-and-suspenders
+    // here ensures that even a direct caller constructing a `Replayer`
+    // via a future API cannot flood the tab row.
+    let mut header_hosts = driver.total_hosts();
+    if header_hosts.len() > crate::record::replay::MAX_HEADER_HOSTS {
+        header_hosts.truncate(crate::record::replay::MAX_HEADER_HOSTS);
+    }
     if !header_hosts.is_empty() {
         let mut tabs = vec!["All".to_string()];
         tabs.extend(header_hosts);

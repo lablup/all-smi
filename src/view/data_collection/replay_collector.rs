@@ -152,7 +152,17 @@ impl ReplayDriver {
                     .to_std()
                     .unwrap_or(Duration::ZERO);
                 let delta = next_offset.saturating_sub(current_offset);
-                let speed = control.speed.max(0.01);
+                // `Duration::from_secs_f32` panics on NaN or negative
+                // inputs, so normalise `speed` defensively: clamp into
+                // the documented [0.05, 16.0] playback range and fall
+                // back to 1.0 for NaN / +inf / -inf. A hostile
+                // construct-time speed (or a future config bug) can't
+                // take the replay driver down this way.
+                let mut speed = control.speed;
+                if !speed.is_finite() {
+                    speed = 1.0;
+                }
+                let speed = speed.clamp(0.05, 16.0);
                 let scaled_delta = Duration::from_secs_f32(delta.as_secs_f32() / speed);
                 let due_time = self.displayed_at + scaled_delta;
                 let due_now = Instant::now() >= due_time;
@@ -163,13 +173,21 @@ impl ReplayDriver {
         if !due {
             // Retreat back to the previously-displayed frame. prev()
             // here is O(1) because we stayed within the cache window
-            // the Replayer maintains.
+            // the Replayer maintains. On cache-boundary conditions or
+            // a hostile file that caused an unexpected cursor position,
+            // fall back to rendering whatever the replayer currently
+            // has instead of panicking via `debug_assert_eq!`. Losing
+            // a single-frame scheduling step is preferable to aborting
+            // the replay session.
             let _ = self.replayer.prev()?;
-            debug_assert_eq!(
-                self.replayer.current().map(|f| f.seq),
-                Some(prev_seq),
-                "replay cursor retreat landed on wrong frame"
-            );
+            let landed_seq = self.replayer.current().map(|f| f.seq);
+            if landed_seq != Some(prev_seq) {
+                tracing::warn!(
+                    expected = prev_seq,
+                    got = ?landed_seq,
+                    "replay cursor retreat landed on unexpected frame; proceeding"
+                );
+            }
             return Ok(());
         }
 

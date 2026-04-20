@@ -24,7 +24,7 @@
 //! encoder must implement `finish()`-style teardown; we keep the active
 //! segment as an enum and handle each variant's close path separately.
 
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
@@ -86,7 +86,7 @@ enum ActiveSegment {
 
 impl ActiveSegment {
     fn open(path: &Path, codec: Codec) -> io::Result<Self> {
-        let file = File::create(path)?;
+        let file = open_secure(path)?;
         let buf = BufWriter::with_capacity(64 * 1024, file);
         match codec {
             Codec::Plain => Ok(Self::Plain(buf)),
@@ -265,7 +265,34 @@ impl RotatingWriter {
         let rolled_path = rotated_path(&self.base, self.next_rollover_index);
         // Remove any pre-existing rotated file at the same name (shouldn't
         // happen under normal operation, but allow idempotent restarts).
-        let _ = fs::remove_file(&rolled_path);
+        // Before removing, refuse to unlink a symlink at that path — a
+        // co-tenant pre-planting a symlink to an unrelated file would
+        // otherwise cause us to delete the symlink's own target at the
+        // next rename step (rename happily follows symlinks on the
+        // destination side). `symlink_metadata` does NOT traverse the
+        // link, so we inspect the link itself.
+        match fs::symlink_metadata(&rolled_path) {
+            Ok(m) if m.file_type().is_symlink() => {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    format!(
+                        "refusing to rotate onto symlink at `{}`",
+                        rolled_path.display()
+                    ),
+                ));
+            }
+            Ok(_) => {
+                // Plain file or directory: remove only if a regular file.
+                // Leaving it alone and letting `fs::rename` fail is also
+                // acceptable, but `remove_file` matches historical
+                // behaviour for idempotent restarts.
+                let _ = fs::remove_file(&rolled_path);
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                // Normal case — nothing at the rotated path.
+            }
+            Err(e) => return Err(e),
+        }
         fs::rename(&self.base, &rolled_path)?;
         self.rotated_segments.push(rolled_path);
         self.next_rollover_index = self.next_rollover_index.saturating_add(1);
@@ -341,6 +368,53 @@ fn rotated_path(base: &Path, index: u32) -> PathBuf {
     };
     let new_name = format!("{stem}.{index:04}{suffix}");
     dir.join(new_name)
+}
+
+/// Open a recording file without following symlinks or clobbering an
+/// existing file.
+///
+/// Mirrors the `O_NOFOLLOW` + `0o600` hardening in
+/// `src/snapshot/mod.rs::write_output_atomic` (the atomic-snapshot fix
+/// from #185). The threat is a co-tenant pre-planting
+/// `/tmp/all-smi-record.ndjson.zst -> /etc/shadow` (or any attacker-chosen
+/// target): without `O_NOFOLLOW` the privileged operator's recorder would
+/// follow the symlink and open the attacker-chosen file for writing.
+///
+/// `create_new(true)` refuses to open an existing regular file, which is
+/// the right default here because rollover segments already receive
+/// unique names via `rotated_path`. The one call site that could collide
+/// with a pre-existing file — a recorder being re-run against the same
+/// `--output` path — surfaces an explicit `AlreadyExists` error, which
+/// is clearer than silently truncating whatever is already there.
+///
+/// On Windows we use `share_mode(0)` for exclusive access; NTFS symlink
+/// TOCTOU is handled with different mitigations (ACLs on the directory)
+/// which are out of scope for this helper and match the snapshot
+/// subcommand's treatment.
+fn open_secure(path: &Path) -> io::Result<File> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .mode(0o600)
+            .open(path)
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .share_mode(0)
+            .open(path)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        OpenOptions::new().write(true).create_new(true).open(path)
+    }
 }
 
 #[cfg(test)]
@@ -451,5 +525,97 @@ mod tests {
             files.len() <= 3,
             "max_files not respected, found: {files:?}"
         );
+    }
+
+    /// F1: `ActiveSegment::open` must refuse to follow a pre-planted
+    /// symlink. This is the canonical co-tenant attack:
+    /// `/tmp/all-smi-record.ndjson -> /etc/shadow` (or any file the
+    /// attacker wants the operator's recorder to clobber).
+    #[cfg(unix)]
+    #[test]
+    fn record_writer_refuses_preexisting_symlink() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target");
+        // Pre-create the target with content the attacker hopes survives
+        // the record run.
+        std::fs::write(&target, "do-not-clobber\n").unwrap();
+        let record_path = dir.path().join("rec.ndjson");
+        symlink(&target, &record_path).unwrap();
+
+        let result = RotatingWriter::new(&record_path, Codec::Plain, 0, 1);
+        assert!(
+            result.is_err(),
+            "open_secure must refuse to follow a symlink"
+        );
+        // Target file content must still be intact — the symlink must
+        // NOT have been followed through to writing.
+        let content = std::fs::read_to_string(&target).unwrap();
+        assert_eq!(content, "do-not-clobber\n");
+    }
+
+    /// F1 cont'd: `create_new(true)` must surface an error when the
+    /// file already exists. This catches operators re-running `record`
+    /// against the same path (a clear signal instead of silent
+    /// truncation) and blocks a race where an attacker pre-creates the
+    /// file as a regular file expecting to read its contents.
+    #[cfg(unix)]
+    #[test]
+    fn record_writer_refuses_preexisting_regular_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let record_path = dir.path().join("rec.ndjson");
+        std::fs::write(&record_path, "preexisting\n").unwrap();
+        let result = RotatingWriter::new(&record_path, Codec::Plain, 0, 1);
+        assert!(
+            result.is_err(),
+            "open_secure must refuse to clobber an existing regular file"
+        );
+    }
+
+    /// F1 cont'd: on Unix the recording file should be mode 0o600
+    /// (owner-only). Matches the hardening in `write_output_atomic`
+    /// from #185.
+    #[cfg(unix)]
+    #[test]
+    fn record_writer_sets_restrictive_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let record_path = dir.path().join("rec.ndjson");
+        let mut w = RotatingWriter::new(&record_path, Codec::Plain, 0, 1).unwrap();
+        w.write_line(b"{\"a\":1}\n").unwrap();
+        w.finish().unwrap();
+
+        let meta = std::fs::metadata(&record_path).unwrap();
+        let mode = meta.permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "recording file must be 0o600, got {mode:o}");
+    }
+
+    /// F1 cont'd: rollover must refuse to rename onto a pre-planted
+    /// symlink at the rotated path. The writer carries the path through
+    /// `remove_file` → `rename`; without the `symlink_metadata` check a
+    /// co-tenant could race a symlink into the rotation target to
+    /// unlink or clobber arbitrary files.
+    #[cfg(unix)]
+    #[test]
+    fn record_writer_rollover_refuses_symlink_target() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let record_path = dir.path().join("rec.ndjson");
+        // Tiny max_size to force rollover on first write.
+        let mut w = RotatingWriter::new(&record_path, Codec::Plain, 3, 3).unwrap();
+        // Pre-plant a symlink at the rotated path.
+        let rolled = rotated_path(&record_path, 1);
+        let decoy = dir.path().join("decoy");
+        std::fs::write(&decoy, "preserve-me\n").unwrap();
+        symlink(&decoy, &rolled).unwrap();
+
+        // Trigger rollover. The writer should refuse to rotate onto
+        // the symlink and return an error instead of silently
+        // unlinking the decoy.
+        let err = w.write_line(b"trigger\n").err();
+        assert!(err.is_some(), "rollover onto a symlink must raise an error");
+        // The decoy file must still exist with its original content.
+        let content = std::fs::read_to_string(&decoy).unwrap();
+        assert_eq!(content, "preserve-me\n");
     }
 }
