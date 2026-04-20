@@ -21,7 +21,9 @@
 
 use std::collections::HashMap;
 
-use crate::app_state::{AppState, ConnectionStatus, FilterInputMode, SortCriteria, SortDirection};
+use crate::app_state::{
+    AppState, ConnectionStatus, FilterInputMode, ReplayState, SortCriteria, SortDirection,
+};
 use crate::device::{
     ChassisInfo, CpuInfo, GpuInfo, MemoryInfo, MigGpuInfo, ProcessInfo, VgpuHostInfo,
 };
@@ -137,6 +139,9 @@ pub struct RenderSnapshot {
     pub alerter: Alerter,
     pub alert_history: Vec<AlertTransition>,
     pub alert_panel_open: bool,
+
+    // Replay state (issue #187)
+    pub replay: Option<ReplayState>,
 }
 
 impl RenderSnapshot {
@@ -228,6 +233,9 @@ impl RenderSnapshot {
             alerter: state.alerter.clone(),
             alert_history: state.alert_history.iter().cloned().collect(),
             alert_panel_open: state.alert_panel_open,
+
+            // Replay state (issue #187)
+            replay: state.replay.clone(),
         }
     }
 
@@ -320,6 +328,9 @@ impl RenderSnapshot {
         state.alerter = self.alerter.clone();
         state.alert_history = self.alert_history.iter().cloned().collect();
         state.alert_panel_open = self.alert_panel_open;
+
+        // Replay state (issue #187)
+        state.replay = self.replay.clone();
 
         state
     }

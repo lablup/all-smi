@@ -15,8 +15,10 @@
 pub mod aggregator;
 pub mod local_collector;
 pub mod remote_collector;
+pub mod replay_collector;
 pub mod strategy;
 
 pub use local_collector::LocalCollector;
 pub use remote_collector::RemoteCollectorBuilder;
+pub use replay_collector::{ReplayDriver, initial_replay_state};
 pub use strategy::{CollectionConfig, DataCollectionStrategy};

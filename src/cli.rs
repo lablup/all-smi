@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::path::PathBuf;
+
 use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Parser)]
@@ -35,6 +37,14 @@ pub enum Commands {
     /// Intended for scripting, CI probes, Slurm prolog/epilog hooks, and quick
     /// `jq`/`yq` piping. Does not start a long-running server.
     Snapshot(SnapshotArgs),
+    /// Record a live metric stream to an NDJSON file for later replay.
+    ///
+    /// Each collection cycle produces one JSON line whose shape matches the
+    /// `snapshot` subcommand (same serializer). Subsequent `all-smi view
+    /// --replay <file>` invocations reconstruct the exact TUI frames the
+    /// operator would have seen live, making post-hoc incident investigation
+    /// possible without a Prometheus retention store. See issue #187.
+    Record(RecordArgs),
 }
 
 #[derive(Parser)]
@@ -93,6 +103,31 @@ pub struct ViewArgs {
     /// which the alerter emits an `ok → warn` transition.
     #[arg(long)]
     pub alert_util_low_mins: Option<u32>,
+
+    // --- Replay mode (issue #187) --------------------------------------
+    /// Replay a recorded NDJSON stream instead of collecting live data.
+    ///
+    /// Accepts `.ndjson`, `.ndjson.zst`, `.ndjson.gz` — compression is
+    /// auto-detected from the file extension. In replay mode `--hosts`
+    /// and `--hostfile` are ignored; tabs and GPUs come entirely from the
+    /// recorded frames. See issue #187.
+    #[arg(long)]
+    pub replay: Option<PathBuf>,
+    /// Playback speed multiplier for `--replay`. Valid discrete values:
+    /// 0.25, 0.5, 1.0 (default), 2.0, 4.0, 8.0. Other values are accepted
+    /// at startup but the in-TUI `+`/`-` controls cycle through the
+    /// discrete ladder.
+    #[arg(long, default_value_t = 1.0)]
+    pub speed: f32,
+    /// Seek to the given timecode (`HH:MM:SS`, `MM:SS`, or bare seconds)
+    /// before starting playback.
+    #[arg(long)]
+    pub start: Option<String>,
+    /// Loop playback: when the last frame is reached, jump back to the
+    /// first frame and continue. Renamed from `loop` to avoid the Rust
+    /// keyword; the CLI surface remains `--loop`.
+    #[arg(long = "loop")]
+    pub replay_loop: bool,
 }
 
 /// Output format for the `snapshot` subcommand.
@@ -221,6 +256,128 @@ impl SnapshotIncludes {
     /// Returns `true` if no section was requested.
     pub fn is_empty(&self) -> bool {
         !(self.gpu || self.cpu || self.memory || self.chassis || self.process || self.storage)
+    }
+}
+
+/// Source of live data for the `record` subcommand.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, ValueEnum)]
+pub enum RecordSource {
+    /// Collect from the local hardware readers (default).
+    #[default]
+    Local,
+    /// Scrape remote `/metrics` endpoints — requires `--hosts` or
+    /// `--hostfile`. Uses the same HTTP path as `view`.
+    Remote,
+}
+
+impl std::fmt::Display for RecordSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Local => write!(f, "local"),
+            Self::Remote => write!(f, "remote"),
+        }
+    }
+}
+
+/// Explicit compression codec for `record --compress`.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, ValueEnum)]
+pub enum RecordCompression {
+    /// zstd — default on recent platforms, small + fast.
+    #[default]
+    Zstd,
+    /// gzip — universally available, slightly larger output.
+    Gzip,
+    /// No compression (pure NDJSON).
+    None,
+}
+
+impl std::fmt::Display for RecordCompression {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Zstd => write!(f, "zstd"),
+            Self::Gzip => write!(f, "gzip"),
+            Self::None => write!(f, "none"),
+        }
+    }
+}
+
+#[derive(Parser, Clone, Debug)]
+pub struct RecordArgs {
+    /// Output path for the NDJSON stream.
+    ///
+    /// Extension drives compression: `.ndjson.zst` → zstd,
+    /// `.ndjson.gz` → gzip, anything else → plain NDJSON. Use
+    /// `--compress` to override detection.
+    #[arg(long, short = 'o', default_value = "all-smi-record.ndjson.zst")]
+    pub output: PathBuf,
+
+    /// Interval in seconds between frames.
+    #[arg(long, short = 'i', default_value_t = 3)]
+    pub interval: u64,
+
+    /// How long to record. `0` (or negative via env overrides) means
+    /// record until `SIGTERM`/`SIGINT`. Accepts a bare integer (seconds)
+    /// or a suffixed form like `30s`, `5m`, `1h`, `1d`.
+    #[arg(long, default_value = "0")]
+    pub duration: String,
+
+    /// Live data source.
+    #[arg(long, value_enum, default_value_t = RecordSource::Local)]
+    pub source: RecordSource,
+
+    /// Remote hosts to scrape when `--source=remote`.
+    #[arg(long, num_args = 1..)]
+    pub hosts: Option<Vec<String>>,
+
+    /// File containing remote hosts (one per line) when `--source=remote`.
+    #[arg(long)]
+    pub hostfile: Option<String>,
+
+    /// Sections to include in each frame. Comma-separated.
+    /// Valid values: `gpu`, `cpu`, `memory`, `chassis`, `process`.
+    #[arg(long, value_delimiter = ',', default_value = "gpu,cpu,memory,chassis")]
+    pub include: Vec<String>,
+
+    /// Rotation threshold for the active segment. Accepts a size in bytes
+    /// (`1048576`) or with suffix (`1K`, `10M`, `2G`). `0` disables
+    /// rotation. Matches the issue spec: `--max-size 1K --max-files 3`
+    /// caps total on-disk footprint to three segments.
+    #[arg(long, default_value = "100M")]
+    pub max_size: String,
+
+    /// Maximum number of rotated segments to keep (including the active
+    /// one). Oldest segment is evicted when the limit is reached.
+    #[arg(long, default_value_t = 10)]
+    pub max_files: u32,
+
+    /// Override compression codec selected by file extension.
+    #[arg(long, value_enum)]
+    pub compress: Option<RecordCompression>,
+}
+
+impl RecordArgs {
+    /// Parse `--include` into a [`SnapshotIncludes`] flag set. Shares
+    /// exactly the same semantics as [`SnapshotArgs::includes`] so the
+    /// `record` and `snapshot` subcommands stay in sync.
+    pub fn includes(&self) -> Result<SnapshotIncludes, String> {
+        let mut set = SnapshotIncludes::default();
+        for raw in &self.include {
+            let name = raw.trim().to_ascii_lowercase();
+            match name.as_str() {
+                "" => continue,
+                "gpu" => set.gpu = true,
+                "cpu" => set.cpu = true,
+                "memory" => set.memory = true,
+                "chassis" => set.chassis = true,
+                "process" | "processes" => set.process = true,
+                other => {
+                    return Err(format!(
+                        "unknown --include section `{other}` (valid: gpu, cpu, memory, chassis, process)"
+                    ));
+                }
+            }
+        }
+        Ok(set)
     }
 }
 

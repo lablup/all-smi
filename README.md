@@ -111,6 +111,15 @@ all-smi view --hostfile hosts.csv
 
 # API mode (expose metrics server)
 all-smi api --port 9090
+
+# One-shot JSON/CSV/Prometheus dump for scripts
+all-smi snapshot
+
+# Capture a stream to disk for later replay
+all-smi record --output trace.ndjson.zst --duration 1h
+
+# Replay a captured stream in the TUI
+all-smi view --replay trace.ndjson.zst
 ```
 
 ### Local Mode (Monitor Local Hardware)
@@ -533,6 +542,91 @@ all-smi snapshot --format csv --include gpu --query utilization \
 | `--timeout-ms`    | `5000`                            | Per-reader timeout in milliseconds.              |
 | `--output` / `-o` | stdout                            | Write to this path (`-` also means stdout). On Unix: created with mode `0600` (owner-only), symlinks refused, atomic write via sibling `.tmp` + rename. |
 
+### Recording & Replay
+
+The `record` subcommand captures a live metric stream to disk as NDJSON, and
+`view --replay <file>` plays it back through the same TUI the operator would
+have seen live. Intended for post-hoc incident investigation without a
+Prometheus retention store — operators can rewind to the moment throughput
+cratered and see the exact GPU/CPU/memory/chassis state at that tick.
+
+Each captured frame uses the same JSON shape as `snapshot --format json`
+(same serializer), plus an optional header frame and sparse index frames
+every 1000 data frames to enable fast seeking.
+
+```bash
+# Capture 30 seconds of local hardware state to a zstd-compressed file.
+all-smi record --output incident.ndjson.zst --duration 30s --interval 1
+
+# Record until SIGTERM; rotate at 100MB per segment, keep last 10 files.
+all-smi record --output trace.ndjson.zst --max-size 100M --max-files 10
+
+# Record remote cluster scrapes (same HTTP path as `view`).
+all-smi record --source remote \
+  --hosts http://gpu-node1:9090 http://gpu-node2:9090 \
+  --output cluster.ndjson.gz --compress gzip --duration 1h
+
+# Replay a captured file — identical TUI to the live view.
+all-smi view --replay incident.ndjson.zst
+
+# Start playback at 14:32 (HH:MM:SS) and loop.
+all-smi view --replay incident.ndjson.zst --start 00:14:32 --loop
+
+# Replay at 4x speed.
+all-smi view --replay incident.ndjson.zst --speed 4.0
+```
+
+**Replay-mode keybindings** (active only with `--replay`):
+
+| Key          | Action                                               |
+|--------------|------------------------------------------------------|
+| `SPACE`      | Play / pause                                         |
+| `]` / `[`    | Step one frame forward / back (auto-pauses)          |
+| `+` / `-`    | Cycle speed through `0.25, 0.5, 1.0, 2.0, 4.0, 8.0`  |
+| `j` / `k`    | Seek -10s / +10s                                     |
+| `g`          | Open timecode editor (`HH:MM:SS` then Enter)         |
+| `L`          | Toggle loop playback                                 |
+| `q` / `Esc`  | Exit replay                                          |
+
+The status bar shows `REPLAY | HH:MM:SS | frame N / M | Xx | playing/paused`.
+Filter-edit mode (`/`) still takes precedence over replay keys, so the
+operator can filter the visible GPUs mid-playback.
+
+**`record` options summary**
+
+| Flag              | Default                           | Description                                      |
+|-------------------|-----------------------------------|--------------------------------------------------|
+| `--output` / `-o` | `all-smi-record.ndjson.zst`       | Output path. Extension picks the codec.          |
+| `--interval` / `-i` | `3`                             | Seconds between frames.                          |
+| `--duration`      | `0` (= record until SIGTERM)      | Accepts `30s`, `5m`, `1h`, `1d`, or bare seconds. |
+| `--source`        | `local`                           | `local` (hardware readers) or `remote` (HTTP scrape). |
+| `--hosts` / `--hostfile` | (none)                     | Required when `--source=remote`.                 |
+| `--include`       | `gpu,cpu,memory,chassis`          | Comma-separated sections (plus `process`).       |
+| `--max-size`      | `100M`                            | Rotation threshold per segment (`1K`, `10M`, `2G`). `0` disables rotation. |
+| `--max-files`     | `10`                              | Max segments on disk (active + rotated).         |
+| `--compress`      | auto (from extension)             | `zstd` / `gzip` / `none`.                        |
+
+**Security invariants**
+
+`record` and `view --replay` apply the following hardening that cannot be
+disabled:
+
+- **Writer — symlink refusal.** On Unix the output file is opened with
+  `O_NOFOLLOW` and mode `0600`. A pre-existing symlink at the target path
+  causes `record` to exit immediately rather than follow the link. The same
+  check applies when rolling over to a numbered segment: if a symlink is found
+  at the rollover path, the rotation is aborted.
+- **Replay — per-line size cap.** Each decompressed NDJSON line is limited to
+  16 MiB. A `.zst` or `.gz` file that expands a single line beyond this limit
+  (decompression-bomb attack) is treated as a corrupted line: it is skipped
+  with a warning and reading continues from the next line.
+- **Replay — zstd window ceiling.** The zstd decoder is configured with a
+  128 MiB window-log ceiling. A stream declaring a larger window is rejected
+  before decompression begins.
+- **Replay — hosts list cap.** A replay header advertising more than 1024 host
+  entries is truncated to 1024 at parse time so the TUI tab row cannot be
+  overwhelmed by a hostile recording.
+
 ### Quick Start with Make Commands
 
 For development and testing, you can use the provided Makefile:
@@ -702,7 +796,7 @@ See the [LICENSE](./LICENSE) file for details.
 ## Changelog
 
 ### Recent Updates
-- **v0.21.0 (upcoming):** **BREAKING**: Rename Prometheus GPU labels `index`→`gpu_index` and `uuid`→`gpu_uuid` across all NVIDIA-specific metrics (pcie, thermal thresholds, performance state, hardware details, vGPU, MIG); also rename `index`→`npu_index` and `uuid`→`npu_uuid` across all non-NVIDIA NPU exporters (Tenstorrent, Rebellions, Furiosa, Gaudi, Google TPU) and NPU mock templates; remote parser accepts both old and new label names for backward compatibility during migration. Add NVIDIA vGPU SR-IOV monitoring — per-vGPU utilization, framebuffer memory, scheduler state, and host mode exported as Prometheus metrics; TUI renders per-GPU vGPU sub-sections; remote parser reconstructs vGPU view from scraped metrics; mock server can simulate vGPU data via `ALL_SMI_MOCK_VGPU=1`. Add NVIDIA extended thermal monitoring — slowdown, shutdown, max-operating, and acoustic temperature thresholds exported as Prometheus metrics; TUI shows per-GPU thermal row with proximity highlighting (yellow within 5°C of slowdown, red within 2°C of shutdown); P-state (P0–P15) surfaced in TUI and metrics; all fields degrade gracefully to `None` on older drivers or non-NVIDIA hardware. Add NVIDIA MIG (Multi-Instance GPU) monitoring — per-GPU MIG mode status and per-MIG-instance SM utilization, memory bandwidth utilization, and framebuffer used/total bytes exported as Prometheus metrics; TUI renders MIG instances as nested rows under each parent GPU; remote parser reconstructs MIG view from scraped metrics; mock server can simulate MIG data via `ALL_SMI_MOCK_MIG=1`. Add NVIDIA extended hardware details — NUMA node ID, GSP firmware mode and version, NvLink remote endpoint classification per active link, and GPM SM occupancy and memory bandwidth utilization exported as Prometheus metrics; TUI shows compact HW row per GPU with NUMA node, GSP state, and NvLink count; all fields degrade gracefully to absent on older drivers, non-NVIDIA hardware, or hosts without NUMA topology. Add `snapshot` subcommand — one-shot JSON/CSV/Prometheus export to stdout or file without starting a long-running server, with multi-sample collection (`--samples`/`--interval`), `--query` dot-path column selection for CSV, symlink-safe atomic file writes (Unix `O_NOFOLLOW` + mode `0600`), blocking-pool cap, and NaN/Inf float sanitization.
+- **v0.21.0 (upcoming):** **BREAKING**: Rename Prometheus GPU labels `index`→`gpu_index` and `uuid`→`gpu_uuid` across all NVIDIA-specific metrics (pcie, thermal thresholds, performance state, hardware details, vGPU, MIG); also rename `index`→`npu_index` and `uuid`→`npu_uuid` across all non-NVIDIA NPU exporters (Tenstorrent, Rebellions, Furiosa, Gaudi, Google TPU) and NPU mock templates; remote parser accepts both old and new label names for backward compatibility during migration. Add NVIDIA vGPU SR-IOV monitoring — per-vGPU utilization, framebuffer memory, scheduler state, and host mode exported as Prometheus metrics; TUI renders per-GPU vGPU sub-sections; remote parser reconstructs vGPU view from scraped metrics; mock server can simulate vGPU data via `ALL_SMI_MOCK_VGPU=1`. Add NVIDIA extended thermal monitoring — slowdown, shutdown, max-operating, and acoustic temperature thresholds exported as Prometheus metrics; TUI shows per-GPU thermal row with proximity highlighting (yellow within 5°C of slowdown, red within 2°C of shutdown); P-state (P0–P15) surfaced in TUI and metrics; all fields degrade gracefully to `None` on older drivers or non-NVIDIA hardware. Add NVIDIA MIG (Multi-Instance GPU) monitoring — per-GPU MIG mode status and per-MIG-instance SM utilization, memory bandwidth utilization, and framebuffer used/total bytes exported as Prometheus metrics; TUI renders MIG instances as nested rows under each parent GPU; remote parser reconstructs MIG view from scraped metrics; mock server can simulate MIG data via `ALL_SMI_MOCK_MIG=1`. Add NVIDIA extended hardware details — NUMA node ID, GSP firmware mode and version, NvLink remote endpoint classification per active link, and GPM SM occupancy and memory bandwidth utilization exported as Prometheus metrics; TUI shows compact HW row per GPU with NUMA node, GSP state, and NvLink count; all fields degrade gracefully to absent on older drivers, non-NVIDIA hardware, or hosts without NUMA topology. Add `snapshot` subcommand — one-shot JSON/CSV/Prometheus export to stdout or file without starting a long-running server, with multi-sample collection (`--samples`/`--interval`), `--query` dot-path column selection for CSV, symlink-safe atomic file writes (Unix `O_NOFOLLOW` + mode `0600`), blocking-pool cap, and NaN/Inf float sanitization. Add `record` subcommand and `view --replay` — capture a live metric stream to a compressed NDJSON file (plain, gzip, zstd; rotating segments; local and remote sources) and play it back through the exact same TUI for post-hoc incident investigation; replay supports play/pause, per-frame stepping, speed cycling (0.25x–8x), ±10s seeks, timecode jumps, and loop mode; security hardening includes O_NOFOLLOW symlink refusal on the writer, 16 MiB per-line cap and 128 MiB zstd window ceiling on the reader, and bounded host-list and frame-cache limits; add interactive filter query bar (`/`) with DSL supporting field comparisons, range checks, and host-name pattern matching; add threshold alert history panel (`A`).
 - **v0.20.1 (2026/04/10):** Fix local header metric row jitter by using fixed-width formatted fields; auto-promote pre-release to release in CI
 - **v0.20.0 (2026/04/10):** Redesign local-mode TUI with Activity panel featuring braille sparklines, CPU per-core view, host summary bar, and per-node LED grid; add Apple M5 Pro/Max Super core (S-CPU) support
 - **v0.19.0 (2026/04/08):** Fix Apple Silicon SMC float decoding to restore real CPU/GPU die temperatures, cache platform detection to avoid per-frame system_profiler on macOS, and fix TIME+/Command column alignment in process list

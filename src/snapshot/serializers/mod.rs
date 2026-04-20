@@ -20,3 +20,8 @@
 pub mod csv;
 pub mod json;
 pub mod prometheus;
+
+// Re-export the shared per-frame JSON writer so the `record` subcommand
+// (issue #187) and any future consumer can produce NDJSON frames without
+// duplicating the sanitization logic.
+pub use json::write_frame_json;

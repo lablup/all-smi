@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::time::Duration;
+
 use crossterm::{
     event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind},
     terminal::size,
@@ -19,6 +21,7 @@ use crossterm::{
 
 use crate::app_state::{AppState, FilterInputMode, SortCriteria};
 use crate::cli::ViewArgs;
+use crate::record::replay::parse_timecode;
 use crate::ui::filter_dsl::{apply as apply_filter, parse as parse_filter};
 use crate::ui::layout::LayoutCalculator;
 
@@ -43,10 +46,21 @@ fn get_visible_process_rows(state: &AppState) -> usize {
 }
 
 pub async fn handle_key_event(key_event: KeyEvent, state: &mut AppState, args: &ViewArgs) -> bool {
-    // The filter bar is a modal input: while it's active we intercept
-    // every key so that hotkeys like `q`/`d`/`u` become literal text.
+    // Mode precedence (highest first) — do NOT reorder:
+    //
+    // 1. Filter-edit mode (`/`) intercepts everything so `q`/`d`/`u`
+    //    become literal text the operator can type into the query.
+    // 2. Replay timecode input (`g` → `HH:MM:SS`) intercepts everything
+    //    so the same keys become digits/colons, never hotkeys.
+    // 3. Normal keys: quit, help, alerts, arrows.
+    // 4. Replay-mode keys (SPACE/`]`/`[`/`+`/`-`/`j`/`k`/`g`/`L`) are
+    //    routed BEFORE `handle_navigation_keys` so the sort-by-GpuMem
+    //    `g` binding doesn't shadow the timecode editor.
     if state.filter_input_mode == FilterInputMode::Editing {
         return handle_filter_input(key_event, state);
+    }
+    if state.replay.as_ref().is_some_and(|r| r.timecode_input_mode) {
+        return handle_timecode_input(key_event, state);
     }
 
     match key_event.code {
@@ -91,7 +105,148 @@ pub async fn handle_key_event(key_event: KeyEvent, state: &mut AppState, args: &
             false
         }
         _ if !state.loading && !state.show_help => {
+            if state.replay.is_some() && handle_replay_keys(key_event, state) {
+                return false;
+            }
             handle_navigation_keys(key_event, state, args);
+            false
+        }
+        _ => false,
+    }
+}
+
+/// Dispatch replay-mode keys. Returns `true` if the key was consumed.
+/// Only active when `state.replay.is_some()`. Runs BEFORE
+/// `handle_navigation_keys` so `g` (timecode editor) wins over `g`
+/// (sort by GpuMemory).
+fn handle_replay_keys(key_event: KeyEvent, state: &mut AppState) -> bool {
+    let KeyEvent {
+        code, modifiers, ..
+    } = key_event;
+    if modifiers.contains(KeyModifiers::CONTROL) || modifiers.contains(KeyModifiers::ALT) {
+        return false;
+    }
+    let replay = match state.replay.as_mut() {
+        Some(r) => r,
+        None => return false,
+    };
+    match code {
+        KeyCode::Char(' ') => {
+            replay.paused = !replay.paused;
+            if replay.at_eof && !replay.paused {
+                // Un-pausing past EOF rewinds to frame 0 if loop is on;
+                // otherwise stays at EOF (user can then hit `[` to step
+                // back). Loop behavior matches the issue spec.
+                if replay.replay_loop {
+                    replay.pending_seek = Some(Duration::ZERO);
+                    replay.at_eof = false;
+                } else {
+                    replay.paused = true;
+                }
+            }
+            state.mark_data_changed();
+            true
+        }
+        KeyCode::Char(']') => {
+            replay.pending_step = Some(1);
+            replay.paused = true;
+            state.mark_data_changed();
+            true
+        }
+        KeyCode::Char('[') => {
+            replay.pending_step = Some(-1);
+            replay.paused = true;
+            state.mark_data_changed();
+            true
+        }
+        KeyCode::Char('+') | KeyCode::Char('=') => {
+            // `+` usually requires Shift on US layouts, so also accept `=`
+            // to avoid forcing the operator to hold Shift mid-playback.
+            replay.cycle_speed(true);
+            state.mark_data_changed();
+            true
+        }
+        KeyCode::Char('-') | KeyCode::Char('_') => {
+            replay.cycle_speed(false);
+            state.mark_data_changed();
+            true
+        }
+        KeyCode::Char('j') => {
+            seek_relative(replay, -10);
+            state.mark_data_changed();
+            true
+        }
+        KeyCode::Char('k') => {
+            seek_relative(replay, 10);
+            state.mark_data_changed();
+            true
+        }
+        KeyCode::Char('g') => {
+            replay.timecode_input_mode = true;
+            replay.timecode_buffer.clear();
+            replay.timecode_error = None;
+            state.mark_data_changed();
+            true
+        }
+        KeyCode::Char('L') => {
+            replay.replay_loop = !replay.replay_loop;
+            state.mark_data_changed();
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Nudge the seek target by `delta_secs` (positive = forward, negative =
+/// backward). Works by computing the new absolute offset from the
+/// currently-displayed elapsed time.
+fn seek_relative(replay: &mut crate::app_state::ReplayState, delta_secs: i64) {
+    let current = replay.elapsed.as_secs() as i64;
+    let new = (current + delta_secs).max(0) as u64;
+    replay.pending_seek = Some(Duration::from_secs(new));
+}
+
+/// Handle keys while the `g <HH:MM:SS>` timecode editor is open.
+/// Everything except `Esc`/`Enter`/digits/`:` is dropped so the buffer
+/// cannot accumulate garbage.
+fn handle_timecode_input(key_event: KeyEvent, state: &mut AppState) -> bool {
+    let KeyEvent { code, .. } = key_event;
+    let Some(replay) = state.replay.as_mut() else {
+        return false;
+    };
+    match code {
+        KeyCode::Esc => {
+            replay.timecode_input_mode = false;
+            replay.timecode_buffer.clear();
+            replay.timecode_error = None;
+            state.mark_data_changed();
+            false
+        }
+        KeyCode::Enter => {
+            match parse_timecode(&replay.timecode_buffer) {
+                Ok(d) => {
+                    replay.pending_seek = Some(d);
+                    replay.timecode_input_mode = false;
+                    replay.timecode_buffer.clear();
+                    replay.timecode_error = None;
+                }
+                Err(e) => {
+                    replay.timecode_error = Some(format!("{e}"));
+                }
+            }
+            state.mark_data_changed();
+            false
+        }
+        KeyCode::Backspace => {
+            replay.timecode_buffer.pop();
+            state.mark_data_changed();
+            false
+        }
+        KeyCode::Char(c) if c.is_ascii_digit() || c == ':' => {
+            if replay.timecode_buffer.len() < 16 {
+                replay.timecode_buffer.push(c);
+                state.mark_data_changed();
+            }
             false
         }
         _ => false,
@@ -370,7 +525,9 @@ fn handle_navigation_keys(key_event: KeyEvent, state: &mut AppState, args: &View
 }
 
 fn handle_up_arrow(state: &mut AppState, args: &ViewArgs) {
-    let is_remote = args.hosts.is_some() || args.hostfile.is_some();
+    // `args.replay` routes scrolling through the remote branch because the
+    // replay UI renders tabs + GPU columns (not the local process list).
+    let is_remote = args.hosts.is_some() || args.hostfile.is_some() || args.replay.is_some();
     if is_remote {
         // Unified scrolling for remote mode
         if state.gpu_scroll_offset > 0 {
@@ -391,7 +548,9 @@ fn handle_up_arrow(state: &mut AppState, args: &ViewArgs) {
 }
 
 fn handle_down_arrow(state: &mut AppState, args: &ViewArgs) {
-    let is_remote = args.hosts.is_some() || args.hostfile.is_some();
+    // `args.replay` routes scrolling through the remote branch because the
+    // replay UI renders tabs + GPU columns (not the local process list).
+    let is_remote = args.hosts.is_some() || args.hostfile.is_some() || args.replay.is_some();
     if is_remote {
         // Unified scrolling for remote mode
         let gpu_count = if state.current_tab == 0 {
@@ -436,7 +595,9 @@ fn handle_down_arrow(state: &mut AppState, args: &ViewArgs) {
 }
 
 fn handle_page_up(state: &mut AppState, args: &ViewArgs) {
-    let is_remote = args.hosts.is_some() || args.hostfile.is_some();
+    // `args.replay` routes scrolling through the remote branch because the
+    // replay UI renders tabs + GPU columns (not the local process list).
+    let is_remote = args.hosts.is_some() || args.hostfile.is_some() || args.replay.is_some();
     if is_remote {
         // Remote mode - page up through GPU list
         let (_cols, rows) = size().unwrap();
@@ -482,7 +643,9 @@ fn handle_page_up(state: &mut AppState, args: &ViewArgs) {
 }
 
 fn handle_page_down(state: &mut AppState, args: &ViewArgs) {
-    let is_remote = args.hosts.is_some() || args.hostfile.is_some();
+    // `args.replay` routes scrolling through the remote branch because the
+    // replay UI renders tabs + GPU columns (not the local process list).
+    let is_remote = args.hosts.is_some() || args.hostfile.is_some() || args.replay.is_some();
     if is_remote {
         // Remote mode - page down through GPU list
         let (_cols, rows) = size().unwrap();
@@ -668,6 +831,10 @@ mod tests {
             interval: None,
             alert_temp: None,
             alert_util_low_mins: None,
+            replay: None,
+            speed: 1.0,
+            start: None,
+            replay_loop: false,
         }
     }
 
@@ -799,6 +966,171 @@ mod tests {
         state.alert_panel_open = true;
         handle_key_event(key(KeyCode::Esc), &mut state, &args()).await;
         assert!(!state.alert_panel_open);
+    }
+
+    // -----------------------------------------------------------------------
+    // Replay mode (issue #187)
+    // -----------------------------------------------------------------------
+
+    fn replay_state() -> crate::app_state::ReplayState {
+        crate::app_state::ReplayState {
+            paused: false,
+            speed: 1.0,
+            current_seq: 0,
+            total_frames: 0,
+            elapsed: Duration::ZERO,
+            at_eof: false,
+            replay_loop: false,
+            pending_seek: None,
+            pending_step: None,
+            timecode_input_mode: false,
+            timecode_buffer: String::new(),
+            timecode_error: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn space_toggles_replay_pause() {
+        let mut state = AppState::new();
+        state.replay = Some(replay_state());
+        state.loading = false;
+        handle_key_event(key(KeyCode::Char(' ')), &mut state, &args()).await;
+        assert!(
+            state.replay.as_ref().unwrap().paused,
+            "SPACE should pause playback"
+        );
+        handle_key_event(key(KeyCode::Char(' ')), &mut state, &args()).await;
+        assert!(
+            !state.replay.as_ref().unwrap().paused,
+            "SPACE again should resume"
+        );
+    }
+
+    #[tokio::test]
+    async fn bracket_keys_step_frames() {
+        let mut state = AppState::new();
+        state.replay = Some(replay_state());
+        state.loading = false;
+
+        handle_key_event(key(KeyCode::Char(']')), &mut state, &args()).await;
+        let r = state.replay.as_ref().unwrap();
+        assert_eq!(r.pending_step, Some(1));
+        assert!(r.paused, "stepping must auto-pause");
+
+        handle_key_event(key(KeyCode::Char('[')), &mut state, &args()).await;
+        assert_eq!(state.replay.as_ref().unwrap().pending_step, Some(-1));
+    }
+
+    #[tokio::test]
+    async fn plus_minus_cycle_speed() {
+        let mut state = AppState::new();
+        let mut rs = replay_state();
+        rs.speed = 1.0;
+        state.replay = Some(rs);
+        state.loading = false;
+
+        handle_key_event(key(KeyCode::Char('+')), &mut state, &args()).await;
+        assert_eq!(state.replay.as_ref().unwrap().speed, 2.0);
+        handle_key_event(key(KeyCode::Char('-')), &mut state, &args()).await;
+        assert_eq!(state.replay.as_ref().unwrap().speed, 1.0);
+    }
+
+    #[tokio::test]
+    async fn j_k_seek_by_ten_seconds() {
+        let mut state = AppState::new();
+        let mut rs = replay_state();
+        rs.elapsed = Duration::from_secs(30);
+        state.replay = Some(rs);
+        state.loading = false;
+
+        handle_key_event(key(KeyCode::Char('k')), &mut state, &args()).await;
+        assert_eq!(
+            state.replay.as_ref().unwrap().pending_seek,
+            Some(Duration::from_secs(40))
+        );
+        handle_key_event(key(KeyCode::Char('j')), &mut state, &args()).await;
+        // j seeks backward from the same elapsed (30 - 10 = 20) because
+        // elapsed isn't updated until the driver applies the previous
+        // seek. This asserts the event-handler math uses the last known
+        // elapsed, which matches how the driver overwrites pending_seek.
+        assert_eq!(
+            state.replay.as_ref().unwrap().pending_seek,
+            Some(Duration::from_secs(20))
+        );
+    }
+
+    #[tokio::test]
+    async fn g_opens_timecode_editor() {
+        let mut state = AppState::new();
+        state.replay = Some(replay_state());
+        state.loading = false;
+
+        handle_key_event(key(KeyCode::Char('g')), &mut state, &args()).await;
+        assert!(
+            state.replay.as_ref().unwrap().timecode_input_mode,
+            "g should open the timecode editor"
+        );
+        // Typing digits + colon accumulates into the buffer.
+        for c in ['0', '0', ':', '1', '5'] {
+            handle_key_event(key(KeyCode::Char(c)), &mut state, &args()).await;
+        }
+        assert_eq!(state.replay.as_ref().unwrap().timecode_buffer, "00:15");
+        // Enter commits — pending_seek receives 15 seconds.
+        handle_key_event(key(KeyCode::Enter), &mut state, &args()).await;
+        let r = state.replay.as_ref().unwrap();
+        assert_eq!(r.pending_seek, Some(Duration::from_secs(15)));
+        assert!(!r.timecode_input_mode);
+    }
+
+    #[tokio::test]
+    async fn capital_l_toggles_loop() {
+        let mut state = AppState::new();
+        state.replay = Some(replay_state());
+        state.loading = false;
+
+        handle_key_event(key(KeyCode::Char('L')), &mut state, &args()).await;
+        assert!(state.replay.as_ref().unwrap().replay_loop);
+        handle_key_event(key(KeyCode::Char('L')), &mut state, &args()).await;
+        assert!(!state.replay.as_ref().unwrap().replay_loop);
+    }
+
+    #[tokio::test]
+    async fn replay_keys_inert_when_replay_is_none() {
+        // Regression guard: SPACE must not toggle anything when replay
+        // mode is not active. Its default binding outside replay is
+        // "no-op" — handle_navigation_keys receives it but does
+        // nothing. If a future change accidentally wires SPACE to
+        // pause, this test fails.
+        let mut state = AppState::new();
+        state.loading = false;
+        state.replay = None;
+        handle_key_event(key(KeyCode::Char(' ')), &mut state, &args()).await;
+        // Nothing to assert about replay state — just that we did not
+        // panic and did not create a replay control block out of thin
+        // air.
+        assert!(state.replay.is_none());
+    }
+
+    #[tokio::test]
+    async fn filter_mode_wins_over_replay_mode() {
+        // Regression guard for mode precedence: while the operator is
+        // editing a filter query, typing `]` must go into the buffer,
+        // NOT advance a replay frame.
+        let mut state = AppState::new();
+        state.replay = Some(replay_state());
+        state.loading = false;
+        handle_key_event(key(KeyCode::Char('/')), &mut state, &args()).await;
+        assert_eq!(state.filter_input_mode, FilterInputMode::Editing);
+        handle_key_event(key(KeyCode::Char(']')), &mut state, &args()).await;
+        assert!(
+            state.filter_buffer.contains(']'),
+            "`]` must be literal text while filter editor is open"
+        );
+        assert_eq!(
+            state.replay.as_ref().unwrap().pending_step,
+            None,
+            "filter mode must not leak keys into replay"
+        );
     }
 
     /// Regression guard: typing past `FILTER_BUFFER_MAX` (512 bytes) must be

@@ -21,6 +21,7 @@ mod device;
 mod parsing;
 mod metrics;
 mod network;
+mod record;
 mod snapshot;
 mod storage;
 mod ui;
@@ -113,40 +114,59 @@ fn main() {
 }
 
 async fn run_command(cli: Cli) {
-    // Set up signal handler for clean shutdown
-    tokio::spawn(async {
-        signal::ctrl_c().await.expect("Failed to listen for Ctrl+C");
-        #[cfg(target_os = "macos")]
-        {
-            // Cleanup native metrics manager on signal
-            shutdown_native_metrics_manager();
-        }
-        #[cfg(target_os = "linux")]
-        {
-            // Always cleanup hlsmi on signal
-            shutdown_hlsmi_manager();
-        }
-        std::process::exit(0);
-    });
+    // Signal-handling policy by subcommand:
+    //
+    // * `Record` installs its own SIGINT/SIGTERM handlers (see
+    //   `record::install_signal_handlers`) that set a cooperative stop
+    //   flag. The record loop polls that flag, finishes the in-flight
+    //   frame, and calls `RotatingWriter::finish()` to flush the zstd /
+    //   gzip trailer before returning. The unconditional
+    //   `std::process::exit(0)` handlers below would race with that
+    //   shutdown path and truncate the output file to zero bytes
+    //   (issue #187 acceptance: "SIGTERM during recording closes
+    //   cleanly with a complete final JSON line"). Skip them for
+    //   `Record` so the cooperative path wins.
+    //
+    // * Every other subcommand keeps the original behaviour — no device
+    //   manager does partial-state flushing, so an immediate exit on
+    //   signal is the desired shutdown semantics.
+    let is_record = matches!(cli.command, Some(Commands::Record(_)));
+    if !is_record {
+        // Set up signal handler for clean shutdown
+        tokio::spawn(async {
+            signal::ctrl_c().await.expect("Failed to listen for Ctrl+C");
+            #[cfg(target_os = "macos")]
+            {
+                // Cleanup native metrics manager on signal
+                shutdown_native_metrics_manager();
+            }
+            #[cfg(target_os = "linux")]
+            {
+                // Always cleanup hlsmi on signal
+                shutdown_hlsmi_manager();
+            }
+            std::process::exit(0);
+        });
 
-    // Also handle SIGTERM on Unix systems
-    #[cfg(unix)]
-    tokio::spawn(async {
-        let mut sigterm = signal::unix::signal(signal::unix::SignalKind::terminate())
-            .expect("Failed to listen for SIGTERM");
-        sigterm.recv().await;
-        #[cfg(target_os = "macos")]
-        {
-            // Cleanup native metrics manager on signal
-            shutdown_native_metrics_manager();
-        }
-        #[cfg(target_os = "linux")]
-        {
-            // Always cleanup hlsmi on signal
-            shutdown_hlsmi_manager();
-        }
-        std::process::exit(0);
-    });
+        // Also handle SIGTERM on Unix systems
+        #[cfg(unix)]
+        tokio::spawn(async {
+            let mut sigterm = signal::unix::signal(signal::unix::SignalKind::terminate())
+                .expect("Failed to listen for SIGTERM");
+            sigterm.recv().await;
+            #[cfg(target_os = "macos")]
+            {
+                // Cleanup native metrics manager on signal
+                shutdown_native_metrics_manager();
+            }
+            #[cfg(target_os = "linux")]
+            {
+                // Always cleanup hlsmi on signal
+                shutdown_hlsmi_manager();
+            }
+            std::process::exit(0);
+        });
+    }
 
     match cli.command {
         Some(Commands::Api(args)) => {
@@ -243,7 +263,36 @@ async fn run_command(cli: Cli) {
                 }
             }
         }
+        Some(Commands::Record(args)) => {
+            // Record mode shares the snapshot collector stack, so like
+            // `snapshot` it runs without sudo and without initializing the
+            // macOS native metrics manager — hardware readers that need
+            // those privileges degrade gracefully into the error list.
+            let opts = match record::RecorderOptions::from_args(&args) {
+                Ok(o) => o,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    std::process::exit(2);
+                }
+            };
+            match record::run(opts).await {
+                Ok(()) => std::process::exit(0),
+                Err(e) => {
+                    eprintln!("error: {e:#}");
+                    std::process::exit(1);
+                }
+            }
+        }
         Some(Commands::View(mut args)) => {
+            // Replay mode bypasses the remote scrape path entirely — it
+            // reads frames from disk and pushes them into the same
+            // AppState the live view renders. Hardware, sudo, and host
+            // discovery are all irrelevant in this branch.
+            if args.replay.is_some() {
+                view::run_replay_mode(&args).await;
+                return;
+            }
+
             // Remote mode - no sudo required
 
             // Check if we're in Backend.AI environment and no hosts/hostfile provided

@@ -203,6 +203,20 @@ fn render_shortcuts_section(
         ]);
     }
 
+    // Replay mode keybindings — only shown when replay is active.
+    if state.replay.is_some() {
+        left_column.extend(vec![
+            ("", "", ""),
+            ("Replay Controls (--replay):", "", "header"),
+            ("  SPACE", "Play / pause", "shortcut"),
+            ("  ] / [", "Step one frame forward / back", "shortcut"),
+            ("  + / -", "Cycle speed (0.25x–8x)", "shortcut"),
+            ("  j / k", "Seek -10s / +10s", "shortcut"),
+            ("  g", "Open timecode editor (HH:MM:SS)", "shortcut"),
+            ("  L", "Toggle loop playback", "shortcut"),
+        ]);
+    }
+
     left_column.extend(vec![
         ("", "", ""),
         ("Process View Columns:", "", "header"),

@@ -878,6 +878,10 @@ mod tests {
             interval: None,
             alert_temp: None,
             alert_util_low_mins: None,
+            replay: None,
+            speed: 1.0,
+            start: None,
+            replay_loop: false,
         }
     }
 
