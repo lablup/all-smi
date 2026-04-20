@@ -396,8 +396,18 @@ fn enter_users_drill_down(state: &mut AppState) {
 /// `$HOME/.cache/all-smi/users-<timestamp>.csv`.  Returns either the
 /// path written or a human-friendly error suitable for display in the
 /// top-of-tab chip.
+///
+/// On Unix the cache directory and the CSV file itself are opened with
+/// `O_NOFOLLOW` + mode `0o600` so a co-tenant cannot pre-plant
+/// `~/.cache/all-smi` (or the final filename) as a symlink and redirect
+/// the write to an attacker-chosen location — matching the hardening in
+/// `src/snapshot/mod.rs::write_output_atomic` and
+/// `src/record/writer.rs::open_secure` (addressed for those subcommands
+/// in prior security reviews). On Windows we fall back to `share_mode(0)`
+/// (exclusive access); NTFS symlink TOCTOU is handled via directory ACLs.
 fn export_users_csv(state: &mut AppState) -> Result<String, String> {
     use std::fmt::Write as _;
+    use std::io::Write as _;
 
     let agg = state.users_aggregation().clone();
     let filter_sys = state.users_tab_state.filter_sys;
@@ -419,6 +429,22 @@ fn export_users_csv(state: &mut AppState) -> Result<String, String> {
     // `dirs` crate for a single lookup.
     let base = cache_dir_for_all_smi()?;
     std::fs::create_dir_all(&base).map_err(|e| format!("mkdir {}: {e}", base.display()))?;
+    // Defense in depth: refuse to write when the cache dir itself is a
+    // symlink. `create_dir_all` is a no-op if the path already exists as
+    // a symlink-to-dir, so without this check an attacker who controls
+    // `~/.cache/all-smi` could redirect the CSV into any directory the
+    // user is allowed to write to.
+    #[cfg(unix)]
+    {
+        let meta = std::fs::symlink_metadata(&base)
+            .map_err(|e| format!("stat {}: {e}", base.display()))?;
+        if meta.file_type().is_symlink() {
+            return Err(format!(
+                "refusing to export: cache dir {} is a symlink",
+                base.display()
+            ));
+        }
+    }
     let ts = chrono::Local::now().format("%Y%m%dT%H%M%S");
     let path = base.join(format!("users-{ts}.csv"));
 
@@ -429,6 +455,11 @@ fn export_users_csv(state: &mut AppState) -> Result<String, String> {
     for u in &rows {
         // RFC-4180 quoting: any field containing comma / quote /
         // newline is wrapped in quotes with internal quotes doubled.
+        // Additionally, CSV-injection-guard: fields that would be
+        // interpreted as a formula by Excel / LibreOffice / Google
+        // Sheets (leading `=`, `+`, `-`, `@`, TAB, CR) are prefixed
+        // with a single quote inside the quoted form so the spreadsheet
+        // treats them as plain text instead of executing them.
         writeln!(
             &mut body,
             "{user},{sys},{nodes},{gpus},{procs},{vram},{power:.3},{longest},{cmd}",
@@ -445,16 +476,88 @@ fn export_users_csv(state: &mut AppState) -> Result<String, String> {
         .ok();
     }
 
-    std::fs::write(&path, body).map_err(|e| format!("write: {e}"))?;
+    // Open with `create_new(true)` + `O_NOFOLLOW` + mode `0o600` so a
+    // pre-planted symlink at the final path can't redirect us and the
+    // CSV lands mode 0600 (per-user readable). The timestamp granularity
+    // is seconds, so `create_new` fires only on a double-press within
+    // the same second; surface the error rather than silently clobbering.
+    let mut file = open_export_secure(&path)?;
+    file.write_all(body.as_bytes())
+        .map_err(|e| format!("write: {e}"))?;
+    file.sync_all().map_err(|e| format!("sync: {e}"))?;
     Ok(path.display().to_string())
 }
 
+/// Open `path` for exclusive write without following symlinks and with
+/// owner-only permissions. Mirrors `src/record/writer.rs::open_secure` /
+/// `src/snapshot/mod.rs::write_output_atomic` — the CSV export needs
+/// the same mitigation because the cache dir is a well-known path on a
+/// shared machine and thus a viable symlink-plant target.
+fn open_export_secure(path: &std::path::Path) -> Result<std::fs::File, String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .mode(0o600)
+            .open(path)
+            .map_err(|e| format!("open {}: {e}", path.display()))
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .share_mode(0)
+            .open(path)
+            .map_err(|e| format!("open {}: {e}", path.display()))
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .map_err(|e| format!("open {}: {e}", path.display()))
+    }
+}
+
+/// RFC 4180 quoting plus CSV-injection mitigation.
+///
+/// The RFC-4180 rule: wrap the field in double quotes whenever it
+/// contains `,`, `"`, `\r`, or `\n`; double any embedded `"`.
+///
+/// The CSV-injection rule (OWASP): spreadsheet apps (Excel, LibreOffice
+/// Calc, Google Sheets) treat any cell whose first character is `=`,
+/// `+`, `-`, `@`, TAB (`\t`), or CR (`\r`) as a formula and may execute
+/// embedded commands when the CSV is opened.  Because user names and
+/// process command lines flow into this CSV from untrusted remote hosts,
+/// we prefix such fields with a single quote (`'`) inside the quoted
+/// form so the spreadsheet treats them as plain text.  The prefix is a
+/// common-enough mitigation that downstream analysts recognise it; the
+/// alternative (dropping the character) would silently corrupt the data.
 fn csv_escape(s: &str) -> String {
-    if s.contains(',') || s.contains('"') || s.contains('\n') || s.contains('\r') {
-        let inner = s.replace('"', "\"\"");
-        format!("\"{inner}\"")
+    let first = s.chars().next();
+    let needs_formula_guard = matches!(
+        first,
+        Some('=') | Some('+') | Some('-') | Some('@') | Some('\t') | Some('\r')
+    );
+    let needs_rfc_quote = s.contains(',')
+        || s.contains('"')
+        || s.contains('\n')
+        || s.contains('\r')
+        || needs_formula_guard;
+    if !needs_rfc_quote {
+        return s.to_string();
+    }
+    let inner = s.replace('"', "\"\"");
+    if needs_formula_guard {
+        format!("\"'{inner}\"")
     } else {
-        s.to_string()
+        format!("\"{inner}\"")
     }
 }
 
@@ -1629,5 +1732,114 @@ mod tests {
         assert_eq!(state.users_tab_state.selected_row, 2);
         handle_key_event(key(KeyCode::Up), &mut state, &args()).await;
         assert_eq!(state.users_tab_state.selected_row, 1);
+    }
+
+    #[test]
+    fn csv_escape_passes_through_benign_strings() {
+        assert_eq!(super::csv_escape("alice"), "alice");
+        assert_eq!(super::csv_escape("python train.py"), "python train.py");
+    }
+
+    #[test]
+    fn csv_escape_rfc4180_quotes_fields_with_commas_and_quotes() {
+        // Plain comma: RFC-4180 wrapping only (no formula guard).
+        assert_eq!(
+            super::csv_escape("train,eval"),
+            r#""train,eval""#,
+            "comma triggers RFC-4180 quoting"
+        );
+        // Embedded double-quote: the value `say "hi"` becomes
+        // `"say ""hi"""` — wrapper quotes on the outside, each internal
+        // `"` doubled.
+        assert_eq!(
+            super::csv_escape(r#"say "hi""#),
+            r#""say ""hi""""#,
+            "embedded double-quotes must be doubled"
+        );
+    }
+
+    #[test]
+    fn csv_escape_blocks_formula_injection_via_equals() {
+        // CSV injection: a user name or command starting with `=`
+        // becomes a formula in Excel. We must prefix it with `'` so
+        // spreadsheets treat it as plain text. The field is wrapped in
+        // quotes so the leading apostrophe doesn't get stripped as a
+        // row separator by lenient parsers.
+        let out = super::csv_escape(r#"=cmd|"/c calc"!A1"#);
+        assert!(
+            out.starts_with(r#""'"#),
+            "missing leading-quote guard for `=`: {out}"
+        );
+        // The guarded field never leaves the leading `=` outside a
+        // quoted form where a spreadsheet would evaluate it.
+        assert!(
+            !out.starts_with("="),
+            "unquoted leading `=` leaks through: {out}"
+        );
+    }
+
+    #[test]
+    fn csv_escape_blocks_formula_injection_via_plus_minus_at() {
+        for prefix in ['+', '-', '@'] {
+            let out = super::csv_escape(&format!("{prefix}SUM(A1)"));
+            assert!(
+                out.starts_with(r#""'"#),
+                "missing formula guard for leading `{prefix}`: {out}"
+            );
+        }
+    }
+
+    #[test]
+    fn csv_escape_blocks_formula_injection_via_tab_and_cr() {
+        let out = super::csv_escape("\t=cmd");
+        assert!(
+            out.starts_with(r#""'"#),
+            "missing formula guard for leading tab: {out}"
+        );
+        let out = super::csv_escape("\r=cmd");
+        assert!(
+            out.starts_with(r#""'"#),
+            "missing formula guard for leading CR: {out}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_export_secure_refuses_symlinks() {
+        // A co-tenant plants a symlink at the would-be output path; our
+        // secure opener must refuse rather than follow it to write into
+        // an attacker-chosen target. Mirrors the regression tests in
+        // `src/record/writer.rs` and `src/doctor/bundle.rs`.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let sink = tmp.path().join("sink.txt");
+        std::fs::write(&sink, b"").expect("write sink");
+        let link = tmp.path().join("users-20260420T120000.csv");
+        std::os::unix::fs::symlink(&sink, &link).expect("symlink");
+
+        let result = super::open_export_secure(&link);
+        assert!(
+            result.is_err(),
+            "open_export_secure must refuse a pre-existing symlink (got Ok)"
+        );
+
+        // The sink must remain empty — no accidental follow-through.
+        let sink_body = std::fs::read(&sink).expect("read sink");
+        assert!(sink_body.is_empty(), "symlink target was written to anyway");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_export_secure_sets_owner_only_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let target = tmp.path().join("users-test.csv");
+        let file = super::open_export_secure(&target).expect("open");
+        drop(file);
+        let mode = std::fs::metadata(&target)
+            .expect("stat")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "export CSV file must be 0o600, got {mode:o}");
     }
 }

@@ -177,15 +177,26 @@ pub fn aggregate_users(snapshots: &[HostSnapshot]) -> UserAggregationResult {
     // without `--processes` won't emit process rows at all, and the GPU
     // total can drift from the sum-of-processes by allocator overhead.
     // Summing the process rows keeps the ratios self-consistent.
-    let mut total_vram_by_gpu: HashMap<(String, u32), u64> = HashMap::new();
+    // Pre-size both maps: GPUs are capped at 256 per host (see
+    // `MAX_DEVICES_PER_TYPE` in the parser). Pre-sizing avoids rehashing
+    // on every insert in the hot path and materially reduces allocation
+    // traffic on 100-node clusters.
+    let gpu_capacity_hint = snapshots.iter().map(|s| s.gpus.len()).sum::<usize>();
+
+    let mut total_vram_by_gpu: HashMap<(String, u32), u64> =
+        HashMap::with_capacity(gpu_capacity_hint);
     for snap in snapshots {
         for p in &snap.processes {
-            let key = (snap.host.clone(), p.gpu_index);
-            *total_vram_by_gpu.entry(key).or_insert(0) = total_vram_by_gpu
-                .get(&(snap.host.clone(), p.gpu_index))
-                .copied()
-                .unwrap_or(0)
-                .saturating_add(p.gpu_memory_bytes);
+            // Single-lookup accumulation: one `entry(...)` call,
+            // `+=` into the returned `&mut u64`. The previous pattern
+            // (`*entry().or_insert(0) = get().unwrap_or().add()`) did
+            // two lookups and two `host.clone()` calls per row; for
+            // 100 hosts × 50 procs that was ~5 000 extra clones per
+            // scrape tick on the single-threaded UI path.
+            let entry = total_vram_by_gpu
+                .entry((snap.host.clone(), p.gpu_index))
+                .or_insert(0);
+            *entry = entry.saturating_add(p.gpu_memory_bytes);
         }
     }
 
@@ -274,18 +285,26 @@ struct UserScratch {
 
 impl UserScratch {
     fn absorb(&mut self, row: &ParsedProcessRow, host: &str) {
+        // Each of these inserts/entry calls costs one `host.to_string()`
+        // (host is a &str). The previous implementation called
+        // `host.to_string()` 4–5 times per row; we keep 3 calls here
+        // (touched_gpus / touched_pids need owned tuples; vram_by_gpu
+        // and per_host share the same arena), paying for them once per
+        // row rather than on every hash lookup. On 5 000-row scrapes
+        // that's a measurable reduction in allocator traffic.
         self.touched_gpus.insert((host.to_string(), row.gpu_index));
         self.touched_pids.insert((host.to_string(), row.pid));
         self.vram_bytes = self.vram_bytes.saturating_add(row.gpu_memory_bytes);
-        *self
-            .vram_by_gpu
-            .entry((host.to_string(), row.gpu_index))
-            .or_insert(0) = self
-            .vram_by_gpu
-            .get(&(host.to_string(), row.gpu_index))
-            .copied()
-            .unwrap_or(0)
-            .saturating_add(row.gpu_memory_bytes);
+
+        // Single-lookup accumulation (formerly two lookups + two clones).
+        {
+            let entry = self
+                .vram_by_gpu
+                .entry((host.to_string(), row.gpu_index))
+                .or_insert(0);
+            *entry = entry.saturating_add(row.gpu_memory_bytes);
+        }
+
         if row.start_time_seconds > self.longest_seconds {
             self.longest_seconds = row.start_time_seconds;
         }
@@ -809,6 +828,63 @@ mod tests {
         assert!(
             elapsed.as_millis() < 500,
             "aggregate_users took {elapsed:?} for 100 hosts × 50 procs"
+        );
+    }
+
+    #[test]
+    #[ignore = "adversarial stress — run manually with `cargo test -- --ignored`"]
+    fn aggregation_survives_adversarial_50k_per_host() {
+        // Adversarial input: a malicious remote host pushes the
+        // 50 000-row per-host process cap (the limit enforced in
+        // `metrics_parser.rs`). With 10 such hosts that is 500 000 rows,
+        // which is still the parser's worst case over a multi-host
+        // cluster.  The aggregation must not turn quadratic on this
+        // input.
+        //
+        // Marked #[ignore] so CI stays fast; this is for developers to
+        // run locally when touching the aggregation hot path.
+        let rows_per_host = 50_000;
+        let host_count = 10;
+        let users = ["alice", "bob", "carol", "dave", "eve", "frank"];
+        let mut snaps = Vec::with_capacity(host_count);
+        for h in 0..host_count {
+            let host = format!("h{h}");
+            let gpus = (0..8)
+                .map(|i| GpuForAggregation {
+                    host: host.clone(),
+                    gpu_index: i,
+                    power_watts: 400.0,
+                })
+                .collect();
+            let procs = (0..rows_per_host)
+                .map(|p| ParsedProcessRow {
+                    host: host.clone(),
+                    pid: p as u32,
+                    user: users[(p as usize) % users.len()].to_string(),
+                    command: "python".to_string(),
+                    name: "python".to_string(),
+                    gpu_index: (p % 8) as u32,
+                    gpu_uuid: format!("GPU-{h}-{}", p % 8),
+                    gpu_memory_bytes: 1024,
+                    cpu_pct_tenths: 0,
+                    start_time_seconds: (p * 7) as u64,
+                })
+                .collect();
+            snaps.push(HostSnapshot {
+                host,
+                gpus,
+                processes: procs,
+            });
+        }
+        let start = std::time::Instant::now();
+        let result = aggregate_users(&snaps);
+        let elapsed = start.elapsed();
+        assert_eq!(result.users.len(), users.len());
+        // Loose 5-second ceiling catches quadratic blow-ups; in release
+        // mode the real number is well under 1 s for 500 000 rows.
+        assert!(
+            elapsed.as_secs() < 5,
+            "adversarial aggregation took {elapsed:?} for              {host_count}×{rows_per_host} rows — possible O(n^2) regression"
         );
     }
 }

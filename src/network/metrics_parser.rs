@@ -298,22 +298,50 @@ impl MetricsParser {
                 ..Default::default()
             });
 
+        // Tighter per-field caps than the generic 1024-byte label
+        // cap applied by `parse_labels`. These limits bound the total
+        // memory the accumulator can hold when a malicious remote host
+        // pushes the 50 000-row process cap with maximum-length labels:
+        // with 50 000 rows × 3 families × ~300 bytes of label content the
+        // accumulator ceiling is ~45 MB per host (vs ~150 MB at the
+        // generic 1024 cap, which would compound to several GB across
+        // 100 hosts). They also match the exporter-side caps in
+        // `src/api/metrics/process.rs` so our own output round-trips
+        // unchanged. Treat an incoming value longer than the cap as
+        // "take the prefix" (truncated at a UTF-8 boundary) — logging
+        // would be too noisy for a per-row hot path.
+        const MAX_COMMAND: usize = 256;
+        const MAX_NAME: usize = 128;
+        const MAX_USER: usize = 128;
+        const MAX_UUID: usize = 128;
+
+        fn utf8_truncate(s: &str, max_len: usize) -> String {
+            if s.len() <= max_len {
+                return s.to_string();
+            }
+            let mut boundary = max_len;
+            while boundary > 0 && !s.is_char_boundary(boundary) {
+                boundary -= 1;
+            }
+            s[..boundary].to_string()
+        }
+
         // Fill label-derived fields on first sighting. Subsequent lines
         // for the same (pid, gpu_index) overwrite only when the new
         // string is non-empty — this keeps a future exporter that
         // truncates labels on a per-metric basis from wiping a real
         // value with an empty string.
-        let overwrite = |dst: &mut String, src: Option<&String>| {
+        let overwrite_capped = |dst: &mut String, src: Option<&String>, cap: usize| {
             if let Some(v) = src
                 && !v.is_empty()
             {
-                *dst = v.clone();
+                *dst = utf8_truncate(v, cap);
             }
         };
-        overwrite(&mut row.user, labels.get("user"));
-        overwrite(&mut row.command, labels.get("command"));
-        overwrite(&mut row.name, labels.get("name"));
-        overwrite(&mut row.gpu_uuid, labels.get("device_uuid"));
+        overwrite_capped(&mut row.user, labels.get("user"), MAX_USER);
+        overwrite_capped(&mut row.command, labels.get("command"), MAX_COMMAND);
+        overwrite_capped(&mut row.name, labels.get("name"), MAX_NAME);
+        overwrite_capped(&mut row.gpu_uuid, labels.get("device_uuid"), MAX_UUID);
 
         match metric_name {
             "process_memory_used_bytes" => {
