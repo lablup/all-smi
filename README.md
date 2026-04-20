@@ -314,6 +314,8 @@ http://gpu-node3:9090
   - Mouse: Click column headers to sort (process view)
   - Sorting: 'd' (default), 'u' (utilization), 'g' (GPU memory), 'p' (PID), 'm' (memory), 'c' (CPU)
   - Filtering: 'f' (toggle GPU process filter - show only processes with GPU memory usage)
+  - Query filter: '/' (open query bar), 'Ctrl-R' (recall last query), 'ESC' (clear)
+  - Alerts: 'A' (toggle alert history panel)
   - Interface: '1'/'h' (help), 'q' (quit), ESC (close help)
 - **Visual Design:**
   - Color-coded status: Green (≤60%), Yellow (60-80%), Red (>80%)
@@ -321,6 +323,75 @@ http://gpu-node3:9090
   - Responsive layout adapting to terminal size
   - Double-buffered rendering for flicker-free display
 - **Help System:** Context-sensitive help with all keyboard shortcuts
+
+### Filtering & Alerts
+
+Press `/` in any tab to open the filter query bar and hide/dim GPUs that do not
+match a small DSL. The query compiles once and is evaluated per row per frame,
+so the filter stays active across refreshes and tab switches until you clear
+it with `ESC`.
+
+**Filter DSL**
+
+- Fields: `temp`, `util`, `mem_pct`, `mem_used`, `mem_total`, `power`, `user`,
+  `host`, `gpu_name`, `driver`, `index`, `uuid`, `pstate`, `numa`,
+  `device_type`.
+- Numeric operators: `>`, `>=`, `<`, `<=`, `==`, `!=`.
+- String operators: `==`, `!=`, `~=` (regex, size-bounded to 128 KiB).
+- Combine with `&` / `|` and parenthesise with `(...)`.
+- Unknown field names are a parse error; fields that a device does not expose
+  (e.g. `temp` on a CPU row) make the row *not match* so mixed views stay
+  readable.
+
+Examples:
+
+```text
+/                               # open the bar
+temp>85                         # GPUs over 85 °C
+util<5 & power>300              # idling but still drawing power
+host~=dgx                       # only dgx-* nodes
+user==alice | user==bob         # either user
+(temp>80 | util>90) & numa==0   # hot-or-busy GPUs on NUMA 0
+```
+
+Press `Enter` to commit, `Ctrl-R` to cycle the last five queries, and `ESC`
+to clear. Invalid queries surface an inline red `parse error: ... at col N`
+message without committing.
+
+**Threshold alerts**
+
+Alert thresholds live in the compiled defaults today (the config-file loader
+lands in a separate issue). Override them with CLI flags:
+
+```bash
+all-smi local --alert-temp 75 --alert-util-low-mins 10
+all-smi view --hosts http://n01:9090 --alert-temp 75
+```
+
+When a GPU crosses a threshold, all-smi emits:
+
+- A 5-second toast in the status bar.
+- A 2-second red border flash on the affected GPU card.
+- An entry in an in-memory ring buffer (last 50 transitions).
+
+Press `A` to toggle the alert history panel, `ESC` to close it. When the
+`[alerts] webhook_url` option is set, each transition is POSTed to the
+configured URL as `{timestamp, host, gpu_index, rule, from, to, value,
+threshold}` JSON with a 2-second timeout, fire-and-forget.
+
+**Security notes**
+
+- **Webhook SSRF protection**: HTTP redirects are disabled on the webhook
+  client. If the configured URL responds with a 3xx redirect the response
+  is logged and the redirect target is *not* followed. This prevents a
+  misconfigured or attacker-controlled endpoint from pivoting the client to
+  cloud-metadata services (e.g. `169.254.169.254`) or other internal-only
+  hosts. Operators should configure the exact destination URL directly.
+- **Filter query buffer cap**: The interactive filter bar accepts at most
+  512 characters. Input beyond that limit is silently discarded. This keeps
+  a bracketed-paste of large text from turning every keystroke into an
+  unbounded O(n) re-parse. The lexer independently rejects inputs exceeding
+  16 KiB as an additional safeguard for any programmatic caller.
 
 ### Development & Testing
 - **Mock Server:** Built-in mock server for testing and development

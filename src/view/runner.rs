@@ -18,6 +18,8 @@ use tokio::sync::{Mutex, Notify};
 
 use crate::app_state::AppState;
 use crate::cli::{LocalArgs, ViewArgs};
+use crate::common::config::AlertConfig;
+use crate::ui::alerts::Alerter;
 use crate::view::{
     data_collector::DataCollector, terminal_manager::TerminalManager, ui_loop::UiLoop,
 };
@@ -32,6 +34,13 @@ pub async fn run_local_mode(args: &LocalArgs) {
     // behind `!is_local_mode` (see src/view/frame_renderer.rs render_main).
     let mut initial_state = AppState::new();
     initial_state.is_local_mode = true;
+    // Apply CLI-supplied alert thresholds on top of the compiled defaults.
+    // When the companion config-file issue lands these will be overlaid by
+    // the TOML loader before this point; CLI flags then win per the
+    // standard clap override chain.
+    let alert_config =
+        AlertConfig::default().with_cli_overrides(args.alert_temp, args.alert_util_low_mins);
+    initial_state.alerter = Alerter::new(alert_config);
     let app_state = Arc::new(Mutex::new(initial_state));
     startup_profiler.checkpoint("AppState initialized");
 
@@ -55,6 +64,8 @@ pub async fn run_local_mode(args: &LocalArgs) {
         hosts: None,
         hostfile: None,
         interval: args.interval,
+        alert_temp: args.alert_temp,
+        alert_util_low_mins: args.alert_util_low_mins,
     };
     tokio::spawn(async move {
         data_collector.run_local_mode(view_args).await;
@@ -77,6 +88,8 @@ pub async fn run_local_mode(args: &LocalArgs) {
         hosts: None,
         hostfile: None,
         interval: args.interval,
+        alert_temp: args.alert_temp,
+        alert_util_low_mins: args.alert_util_low_mins,
     };
     if let Err(e) = ui_loop.run(&view_args).await {
         eprintln!("UI loop error: {e}");
@@ -93,6 +106,9 @@ pub async fn run_view_mode(args: &ViewArgs) {
     // (see src/view/frame_renderer.rs render_main).
     let mut initial_state = AppState::new();
     initial_state.is_local_mode = false;
+    let alert_config =
+        AlertConfig::default().with_cli_overrides(args.alert_temp, args.alert_util_low_mins);
+    initial_state.alerter = Alerter::new(alert_config);
     let app_state = Arc::new(Mutex::new(initial_state));
 
     // Create shared notification handle for collector -> UI wakeups

@@ -12,15 +12,39 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::common::config::AlertConfig;
 use crate::device::{
     ChassisInfo, CpuInfo, GpuInfo, MemoryInfo, MigGpuInfo, ProcessInfo, VgpuHostInfo,
 };
 use crate::storage::info::StorageInfo;
+use crate::ui::alerts::{AlertTransition, Alerter};
+use crate::ui::filter_dsl::Expr as FilterExpr;
 use crate::ui::notification::NotificationManager;
 use crate::utils::RuntimeEnvironment;
 use std::cmp::Ordering;
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
+
+/// Input mode for the `/` filter bar.
+///
+/// The UI loop routes keyboard events differently depending on this state:
+/// - `Idle`: normal navigation/quit keys.
+/// - `Editing`: every printable key goes into `filter_buffer`, most hotkeys
+///   become literal text (e.g. `q` does not quit), and `Enter`/`ESC`
+///   commit/clear the query.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum FilterInputMode {
+    #[default]
+    Idle,
+    Editing,
+}
+
+/// Maximum number of previous queries kept for `Ctrl-R` recall.
+pub const FILTER_RECENT_MAX: usize = 5;
+
+/// Maximum number of alert transitions retained in the in-memory ring
+/// buffer. Fixed by the issue's acceptance criteria.
+pub const ALERT_HISTORY_MAX: usize = 50;
 
 #[derive(Clone, Debug)]
 pub struct ConnectionStatus {
@@ -136,6 +160,37 @@ pub struct AppState {
     /// Actual number of visible process rows in the last rendered frame.
     /// Updated by the renderer so the event handler can scroll correctly.
     pub visible_process_rows: usize,
+    /// Compiled filter expression (issue #186). `None` means no filter is
+    /// active — all rows render at full strength.
+    pub filter_query: Option<FilterExpr>,
+    /// Current filter input. While [`FilterInputMode::Editing`] is active,
+    /// this holds the raw text the operator is typing; otherwise it
+    /// mirrors the committed query (or is empty).
+    pub filter_buffer: String,
+    /// Input mode for the filter bar. See [`FilterInputMode`].
+    pub filter_input_mode: FilterInputMode,
+    /// Most recent successful queries for `Ctrl-R` recall (newest first).
+    pub filter_recent: VecDeque<String>,
+    /// Index into [`Self::filter_recent`] selected by the most recent
+    /// `Ctrl-R` press. `None` while no recall cycle is in progress.
+    pub filter_recall_index: Option<usize>,
+    /// Inline parse error shown on the filter bar when the operator types
+    /// an invalid query. Cleared on next keystroke or ESC.
+    pub filter_error: Option<String>,
+    /// Counter for the live-preview matched-rows display.
+    pub filter_preview_count: Option<(usize, usize)>,
+    /// When true, non-matching rows are hidden rather than dimmed. Future
+    /// config-file toggle; defaults to "dim".
+    pub filter_hide_nonmatching: bool,
+    /// Threshold-alert state machine. Re-evaluated once per collection
+    /// tick inside the UI loop.
+    pub alerter: Alerter,
+    /// Ring buffer of the last [`ALERT_HISTORY_MAX`] transitions for the
+    /// `A` panel. Newest first.
+    pub alert_history: VecDeque<AlertTransition>,
+    /// When true, render the alert history panel instead of the main
+    /// device area.
+    pub alert_panel_open: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -232,6 +287,43 @@ impl AppState {
             data_version: 0,
             gpu_filter_enabled: false, // GPU filter disabled by default
             visible_process_rows: 0,
+            filter_query: None,
+            filter_buffer: String::new(),
+            filter_input_mode: FilterInputMode::Idle,
+            filter_recent: VecDeque::with_capacity(FILTER_RECENT_MAX),
+            filter_recall_index: None,
+            filter_error: None,
+            filter_preview_count: None,
+            filter_hide_nonmatching: false,
+            alerter: Alerter::new(AlertConfig::default()),
+            alert_history: VecDeque::with_capacity(ALERT_HISTORY_MAX),
+            alert_panel_open: false,
+        }
+    }
+
+    /// Helper used by the event handler: push a query onto the
+    /// most-recent list, dedupe against the previous entry, and cap at
+    /// [`FILTER_RECENT_MAX`].
+    pub fn push_recent_filter(&mut self, query: String) {
+        if query.trim().is_empty() {
+            return;
+        }
+        // Dedupe consecutive duplicates.
+        if self.filter_recent.front().map(|s| s.as_str()) == Some(query.as_str()) {
+            return;
+        }
+        self.filter_recent.push_front(query);
+        while self.filter_recent.len() > FILTER_RECENT_MAX {
+            self.filter_recent.pop_back();
+        }
+    }
+
+    /// Helper used by the event handler: append a transition to the ring
+    /// buffer while keeping its length at [`ALERT_HISTORY_MAX`].
+    pub fn push_alert_transition(&mut self, t: AlertTransition) {
+        self.alert_history.push_front(t);
+        while self.alert_history.len() > ALERT_HISTORY_MAX {
+            self.alert_history.pop_back();
         }
     }
 
@@ -437,6 +529,61 @@ mod tests {
         let state = AppState::new();
         // GPU filter should be disabled by default
         assert!(!state.gpu_filter_enabled);
+    }
+
+    #[test]
+    fn test_filter_state_defaults() {
+        let state = AppState::new();
+        assert!(state.filter_query.is_none());
+        assert_eq!(state.filter_input_mode, FilterInputMode::Idle);
+        assert!(state.filter_buffer.is_empty());
+        assert!(state.filter_recent.is_empty());
+        assert!(state.filter_error.is_none());
+        assert!(!state.alert_panel_open);
+    }
+
+    #[test]
+    fn test_push_recent_filter_deduplicates_consecutive() {
+        let mut state = AppState::new();
+        state.push_recent_filter("temp>80".to_string());
+        state.push_recent_filter("temp>80".to_string());
+        assert_eq!(state.filter_recent.len(), 1);
+    }
+
+    #[test]
+    fn test_push_recent_filter_caps_at_max() {
+        let mut state = AppState::new();
+        for i in 0..10 {
+            state.push_recent_filter(format!("temp>{i}"));
+        }
+        assert_eq!(state.filter_recent.len(), FILTER_RECENT_MAX);
+        // Newest first.
+        assert_eq!(state.filter_recent[0], "temp>9");
+    }
+
+    #[test]
+    fn test_push_alert_transition_caps_ring() {
+        use crate::ui::alerts::{AlertLevel, AlertTransition, RuleKind};
+        use chrono::Local;
+
+        let mut state = AppState::new();
+        for i in 0..60 {
+            state.push_alert_transition(AlertTransition {
+                timestamp: Local::now(),
+                host: format!("h{i}"),
+                gpu_index: Some(0),
+                rule: RuleKind::Temperature,
+                from: AlertLevel::Ok,
+                to: AlertLevel::Warn,
+                value: 85.0,
+                threshold: 80.0,
+                message: format!("msg{i}"),
+                card_key: format!("GPU-{i}"),
+            });
+        }
+        assert_eq!(state.alert_history.len(), ALERT_HISTORY_MAX);
+        // Newest is in front.
+        assert_eq!(state.alert_history[0].host, "h59");
     }
 
     #[test]

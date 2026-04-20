@@ -61,6 +61,44 @@ impl FrameRenderer {
         crate::ui::help::generate_help_popup_content(cols, rows, &view_state, is_remote)
     }
 
+    /// Render the alert history panel (`A` key). Lists the most recent
+    /// transitions newest-first with their timestamp, host, rule, and
+    /// transition.
+    pub fn render_alert_panel(snapshot: &RenderSnapshot, cols: u16, rows: u16) -> String {
+        let mut buffer = BufferWriter::new();
+        let width = cols as usize;
+        let title = "Alert History (press A or ESC to close)";
+        let header = format!(" {title:<width$}");
+        print_colored_text(
+            &mut buffer,
+            &header,
+            Color::Black,
+            Some(Color::Yellow),
+            None,
+        );
+        queue!(buffer, Print("\r\n")).unwrap();
+        if snapshot.alert_history.is_empty() {
+            let msg = "No alert transitions yet. Thresholds are configured — keep \
+                      monitoring.";
+            print_colored_text(&mut buffer, msg, Color::DarkGrey, None, None);
+            queue!(buffer, Print("\r\n")).unwrap();
+        } else {
+            let limit = (rows as usize).saturating_sub(3).max(1);
+            for t in snapshot.alert_history.iter().take(limit) {
+                let ts = t.timestamp.format("%H:%M:%S").to_string();
+                let line = format!("  {ts}  {msg}", msg = t.message);
+                let color = match t.to {
+                    crate::ui::alerts::AlertLevel::Crit => Color::Red,
+                    crate::ui::alerts::AlertLevel::Warn => Color::Yellow,
+                    crate::ui::alerts::AlertLevel::Ok => Color::Green,
+                };
+                print_colored_text(&mut buffer, &line, color, None, None);
+                queue!(buffer, Print("\r\n")).unwrap();
+            }
+        }
+        buffer.get_buffer().to_string()
+    }
+
     /// Render loading screen content from the snapshot.
     pub fn render_loading(
         snapshot: &RenderSnapshot,
@@ -282,28 +320,80 @@ impl FrameRenderer {
                 .copied()
                 .unwrap_or(0);
 
-            print_gpu_info(
-                buffer,
-                i,
-                gpu_info,
-                cols as usize,
-                device_name_scroll_offset,
-                hostname_scroll_offset,
-                !view_state.is_local_mode,
-            );
-
-            // If this GPU is vGPU-enabled, render the nested section directly
-            // beneath the GPU row. O(1) UUID lookup with hostname+gpu-name
-            // fallback for remote-mode data without UUID.
-            if let Some(vgpu_host) = lookup_vgpu_host(&vgpu_lookup, &snapshot.vgpu_info, gpu_info) {
-                print_vgpu_section(buffer, vgpu_host, cols as usize);
+            // Filter matching (issue #186). Non-matching rows are dimmed
+            // by default and hidden when `filter_hide_nonmatching` is on.
+            let matched = crate::ui::filter_dsl::apply(snapshot.filter_query.as_ref(), gpu_info);
+            if !matched && snapshot.filter_hide_nonmatching {
+                continue;
             }
 
-            // If this GPU has MIG mode enabled, render the nested MIG section
-            // directly beneath the GPU row using the same UUID-first matching
-            // strategy as the vGPU section above.
-            if let Some(mig_host) = lookup_mig_gpu(&mig_lookup, &snapshot.mig_info, gpu_info) {
-                print_mig_section(buffer, mig_host, cols as usize);
+            // Border-flash support: when this GPU has a pending alert
+            // flash we prefix/postfix the row with red marker characters.
+            // Alternating at ~1 Hz is driven by `frame_counter`.
+            let flashing = snapshot.alerter.is_flashing(gpu_info.uuid.as_str())
+                && (snapshot.frame_counter / 10).is_multiple_of(2);
+
+            if matched && !flashing {
+                // Fast path: no filter mismatch, no flash — emit directly.
+                print_gpu_info(
+                    buffer,
+                    i,
+                    gpu_info,
+                    cols as usize,
+                    device_name_scroll_offset,
+                    hostname_scroll_offset,
+                    !view_state.is_local_mode,
+                );
+                if let Some(vgpu_host) =
+                    lookup_vgpu_host(&vgpu_lookup, &snapshot.vgpu_info, gpu_info)
+                {
+                    print_vgpu_section(buffer, vgpu_host, cols as usize);
+                }
+                if let Some(mig_host) = lookup_mig_gpu(&mig_lookup, &snapshot.mig_info, gpu_info) {
+                    print_mig_section(buffer, mig_host, cols as usize);
+                }
+            } else {
+                // Render into a scratch buffer so we can post-process
+                // (dim for filter-mismatch, prefix for flash) before the
+                // bytes reach the main output.
+                let mut scratch = BufferWriter::new();
+                print_gpu_info(
+                    &mut scratch,
+                    i,
+                    gpu_info,
+                    cols as usize,
+                    device_name_scroll_offset,
+                    hostname_scroll_offset,
+                    !view_state.is_local_mode,
+                );
+                if let Some(vgpu_host) =
+                    lookup_vgpu_host(&vgpu_lookup, &snapshot.vgpu_info, gpu_info)
+                {
+                    print_vgpu_section(&mut scratch, vgpu_host, cols as usize);
+                }
+                if let Some(mig_host) = lookup_mig_gpu(&mig_lookup, &snapshot.mig_info, gpu_info) {
+                    print_mig_section(&mut scratch, mig_host, cols as usize);
+                }
+
+                let raw = scratch.get_buffer().to_string();
+                let processed = if !matched {
+                    crate::ui::renderers::dim::dim_ansi(&raw)
+                } else {
+                    raw
+                };
+
+                if flashing {
+                    // Cheap border marker: bright red `!` in the first
+                    // column of every line of the GPU block for 2 s.
+                    let marker = "\x1b[1;31m!\x1b[0m ";
+                    let with_marker = processed
+                        .split_inclusive('\n')
+                        .map(|line| format!("{marker}{line}"))
+                        .collect::<String>();
+                    write!(buffer, "{with_marker}").ok();
+                } else {
+                    write!(buffer, "{processed}").ok();
+                }
             }
         }
     }
@@ -649,7 +739,7 @@ impl FrameRenderer {
 
             // Use cached GPU-filtered process list when available, avoiding
             // a per-frame clone of the entire process vector.
-            let processes_to_display: Cow<'_, [ProcessInfo]> =
+            let base_processes: Cow<'_, [ProcessInfo]> =
                 if let Some(pl) = cache.and_then(|c| c.process_display_list()) {
                     match &pl.filtered {
                         Some(filtered) => Cow::Borrowed(filtered.as_slice()),
@@ -668,6 +758,24 @@ impl FrameRenderer {
                 } else {
                     Cow::Borrowed(&snapshot.process_info)
                 };
+
+            // Issue #186: also narrow by the interactive filter query. In
+            // hide-non-matching mode this removes non-matches; otherwise
+            // we leave the list as-is (process rows have far less real
+            // estate than GPU rows so dimming them is less useful).
+            let processes_to_display: Cow<'_, [ProcessInfo]> = if snapshot.filter_hide_nonmatching
+                && let Some(expr) = snapshot.filter_query.as_ref()
+            {
+                Cow::Owned(
+                    base_processes
+                        .iter()
+                        .filter(|p| crate::ui::filter_dsl::apply(Some(expr), *p))
+                        .cloned()
+                        .collect(),
+                )
+            } else {
+                base_processes
+            };
 
             print_process_info(
                 buffer,
@@ -768,6 +876,8 @@ mod tests {
             hosts: None,
             hostfile: None,
             interval: None,
+            alert_temp: None,
+            alert_util_low_mins: None,
         }
     }
 

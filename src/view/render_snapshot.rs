@@ -21,11 +21,13 @@
 
 use std::collections::HashMap;
 
-use crate::app_state::{AppState, ConnectionStatus, SortCriteria, SortDirection};
+use crate::app_state::{AppState, ConnectionStatus, FilterInputMode, SortCriteria, SortDirection};
 use crate::device::{
     ChassisInfo, CpuInfo, GpuInfo, MemoryInfo, MigGpuInfo, ProcessInfo, VgpuHostInfo,
 };
 use crate::storage::info::StorageInfo;
+use crate::ui::alerts::{AlertTransition, Alerter};
+use crate::ui::filter_dsl::Expr as FilterExpr;
 use crate::ui::notification::NotificationManager;
 use crate::utils::RuntimeEnvironment;
 
@@ -121,6 +123,20 @@ pub struct RenderSnapshot {
 
     // Data version for change detection
     pub data_version: u64,
+
+    // Filter state (issue #186)
+    pub filter_query: Option<FilterExpr>,
+    pub filter_buffer: String,
+    pub filter_input_mode: FilterInputMode,
+    pub filter_recent: Vec<String>,
+    pub filter_error: Option<String>,
+    pub filter_preview_count: Option<(usize, usize)>,
+    pub filter_hide_nonmatching: bool,
+
+    // Alerter state (issue #186)
+    pub alerter: Alerter,
+    pub alert_history: Vec<AlertTransition>,
+    pub alert_panel_open: bool,
 }
 
 impl RenderSnapshot {
@@ -198,6 +214,20 @@ impl RenderSnapshot {
 
             // Data version
             data_version: state.data_version,
+
+            // Filter state (issue #186)
+            filter_query: state.filter_query.clone(),
+            filter_buffer: state.filter_buffer.clone(),
+            filter_input_mode: state.filter_input_mode,
+            filter_recent: state.filter_recent.iter().cloned().collect(),
+            filter_error: state.filter_error.clone(),
+            filter_preview_count: state.filter_preview_count,
+            filter_hide_nonmatching: state.filter_hide_nonmatching,
+
+            // Alerter state (issue #186)
+            alerter: state.alerter.clone(),
+            alert_history: state.alert_history.iter().cloned().collect(),
+            alert_panel_open: state.alert_panel_open,
         }
     }
 
@@ -278,6 +308,18 @@ impl RenderSnapshot {
 
         // Data version
         state.data_version = self.data_version;
+
+        // Filter + alerter state (issue #186)
+        state.filter_query = self.filter_query.clone();
+        state.filter_buffer = self.filter_buffer.clone();
+        state.filter_input_mode = self.filter_input_mode;
+        state.filter_recent = self.filter_recent.iter().cloned().collect();
+        state.filter_error = self.filter_error.clone();
+        state.filter_preview_count = self.filter_preview_count;
+        state.filter_hide_nonmatching = self.filter_hide_nonmatching;
+        state.alerter = self.alerter.clone();
+        state.alert_history = self.alert_history.iter().cloned().collect();
+        state.alert_panel_open = self.alert_panel_open;
 
         state
     }

@@ -77,6 +77,83 @@ impl AppConfig {
     pub const LOW_THRESHOLD: f64 = 0.05;
 }
 
+/// Threshold alert configuration used by the TUI alerter.
+///
+/// The defaults mirror the example `[alerts]` section in the issue so that
+/// both local and remote modes produce useful transitions out of the box
+/// when no config file is present. When the companion config-file issue
+/// lands, a loader can overwrite these values from TOML; the CLI already
+/// exposes `--alert-temp` / `--alert-util-low-mins` overrides in the
+/// meantime.
+#[derive(Clone, Debug)]
+pub struct AlertConfig {
+    /// Temperature in Celsius at which GPUs move from `ok` to `warn`.
+    /// `0` disables the rule entirely.
+    pub temp_warn_c: u32,
+    /// Temperature in Celsius at which GPUs move from `warn` to `crit`.
+    /// `0` disables the rule entirely.
+    pub temp_crit_c: u32,
+    /// Utilization percentage at or below which the GPU is considered idle.
+    pub util_idle_pct: u32,
+    /// Minutes of sustained idle before we emit an `ok → warn` transition.
+    /// `0` disables the rule.
+    pub util_idle_warn_mins: u32,
+    /// Power consumption in Watts at which the GPU moves to `crit`. `0`
+    /// disables the rule.
+    pub power_crit_w: u32,
+    /// When true, a `\u{7}` bell is emitted on any `→ crit` transition.
+    pub bell_on_critical: bool,
+    /// Destination URL for fire-and-forget webhook POSTs. Empty disables
+    /// the feature.
+    pub webhook_url: String,
+    /// Hysteresis (in the rule's native unit, °C for temperature and W for
+    /// power) applied to every rule. A device currently in `crit` must
+    /// drop this many units below the `crit` threshold before moving out.
+    pub hysteresis_c: u32,
+    /// How long a card's border should flash after any transition.
+    pub flash_duration_secs: u64,
+}
+
+impl Default for AlertConfig {
+    fn default() -> Self {
+        Self {
+            temp_warn_c: 80,
+            temp_crit_c: 90,
+            util_idle_pct: 5,
+            util_idle_warn_mins: 15,
+            power_crit_w: 0,
+            bell_on_critical: false,
+            webhook_url: String::new(),
+            hysteresis_c: 2,
+            flash_duration_secs: 2,
+        }
+    }
+}
+
+impl AlertConfig {
+    /// Apply CLI overrides on top of the defaults. Each override is
+    /// `Some(_)` when the operator explicitly passed the flag.
+    pub fn with_cli_overrides(
+        mut self,
+        alert_temp: Option<u32>,
+        alert_util_low_mins: Option<u32>,
+    ) -> Self {
+        if let Some(t) = alert_temp {
+            // A single `--alert-temp` flag sets both thresholds, mirroring
+            // Slurm / Prom alert operators. `crit` stays 10 °C above warn
+            // unless the operator explicitly raises the crit-only value.
+            self.temp_warn_c = t;
+            if self.temp_crit_c < t + 5 {
+                self.temp_crit_c = t + 10;
+            }
+        }
+        if let Some(m) = alert_util_low_mins {
+            self.util_idle_warn_mins = m;
+        }
+        self
+    }
+}
+
 /// Environment-specific configuration
 #[allow(dead_code)] // Functions used across modules but clippy may not detect cross-module usage
 pub struct EnvConfig;
@@ -276,6 +353,38 @@ mod tests {
         assert_eq!(ThemeConfig::utilization_color(80.1), Color::Red);
         assert_eq!(ThemeConfig::utilization_color(90.0), Color::Red);
         assert_eq!(ThemeConfig::utilization_color(100.0), Color::Red);
+    }
+
+    #[test]
+    fn test_alert_config_defaults() {
+        let cfg = AlertConfig::default();
+        assert_eq!(cfg.temp_warn_c, 80);
+        assert_eq!(cfg.temp_crit_c, 90);
+        assert_eq!(cfg.util_idle_pct, 5);
+        assert_eq!(cfg.util_idle_warn_mins, 15);
+        assert_eq!(cfg.power_crit_w, 0);
+        assert!(!cfg.bell_on_critical);
+        assert!(cfg.webhook_url.is_empty());
+        assert_eq!(cfg.hysteresis_c, 2);
+        assert_eq!(cfg.flash_duration_secs, 2);
+    }
+
+    #[test]
+    fn test_alert_config_cli_overrides_apply() {
+        let cfg = AlertConfig::default().with_cli_overrides(Some(70), Some(30));
+        assert_eq!(cfg.temp_warn_c, 70);
+        // Auto-adjusted to keep crit above warn.
+        assert!(cfg.temp_crit_c > cfg.temp_warn_c);
+        assert_eq!(cfg.util_idle_warn_mins, 30);
+    }
+
+    #[test]
+    fn test_alert_config_cli_overrides_no_change_when_none() {
+        let original = AlertConfig::default();
+        let cfg = original.clone().with_cli_overrides(None, None);
+        assert_eq!(cfg.temp_warn_c, original.temp_warn_c);
+        assert_eq!(cfg.temp_crit_c, original.temp_crit_c);
+        assert_eq!(cfg.util_idle_warn_mins, original.util_idle_warn_mins);
     }
 
     #[test]

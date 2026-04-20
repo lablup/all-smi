@@ -46,6 +46,8 @@ pub struct UiLoop {
     previous_process_horizontal_scroll_offset: usize,
     previous_tab_scroll_offset: usize,
     previous_gpu_filter_enabled: bool,
+    previous_alert_panel_open: bool,
+    previous_filter_is_active: bool,
     /// Cached derived view data (sorted GPU lists, filtered host subsets, etc.)
     view_cache: ViewCache,
     /// Event coordinator for event-driven wakeups
@@ -83,6 +85,8 @@ impl UiLoop {
             previous_process_horizontal_scroll_offset: 0,
             previous_tab_scroll_offset: 0,
             previous_gpu_filter_enabled: false,
+            previous_alert_panel_open: false,
+            previous_filter_is_active: false,
             view_cache: ViewCache::new(),
             event_coordinator,
             #[cfg(target_os = "linux")]
@@ -192,10 +196,14 @@ impl UiLoop {
                     .set_animations_active(animations_needed);
 
                 // Check if we need to force clear due to mode change or tab change
+                let filter_is_active = state.filter_query.is_some()
+                    || state.filter_input_mode == crate::app_state::FilterInputMode::Editing;
                 let force_clear = state.show_help != self.previous_show_help
                     || state.loading != self.previous_loading
                     || state.current_tab != self.previous_tab
                     || state.gpu_filter_enabled != self.previous_gpu_filter_enabled
+                    || state.alert_panel_open != self.previous_alert_panel_open
+                    || filter_is_active != self.previous_filter_is_active
                     || self.resize_occurred;
 
                 // Check if data has changed
@@ -248,6 +256,8 @@ impl UiLoop {
                 self.previous_loading = state.loading;
                 self.previous_tab = state.current_tab;
                 self.previous_gpu_filter_enabled = state.gpu_filter_enabled;
+                self.previous_alert_panel_open = state.alert_panel_open;
+                self.previous_filter_is_active = filter_is_active;
                 self.last_rendered_data_version = state.data_version;
                 self.previous_gpu_scroll_offset = state.gpu_scroll_offset;
                 self.previous_storage_scroll_offset = state.storage_scroll_offset;
@@ -288,6 +298,8 @@ impl UiLoop {
             // Assemble frame content from the snapshot (no lock held)
             let (content, visible_process_rows) = if snapshot.show_help {
                 (FrameRenderer::render_help(&snapshot, args, cols, rows), 0)
+            } else if snapshot.alert_panel_open {
+                (FrameRenderer::render_alert_panel(&snapshot, cols, rows), 0)
             } else if snapshot.loading {
                 let is_remote = args.hosts.is_some() || args.hostfile.is_some();
                 (

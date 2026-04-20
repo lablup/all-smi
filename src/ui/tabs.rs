@@ -181,63 +181,17 @@ pub struct TabVisibility {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::{HashMap, VecDeque};
 
     fn create_test_state() -> AppState {
-        AppState {
-            gpu_info: Vec::new(),
-            cpu_info: Vec::new(),
-            memory_info: Vec::new(),
-            process_info: Vec::new(),
-            chassis_info: Vec::new(),
-            vgpu_info: Vec::new(),
-            mig_info: Vec::new(),
-            selected_process_index: 0,
-            start_index: 0,
-            sort_criteria: crate::app_state::SortCriteria::Default,
-            sort_direction: crate::app_state::SortDirection::Descending,
-            loading: false,
-            startup_status_lines: Vec::new(),
-            tabs: vec![
-                "All".to_string(),
-                "host1".to_string(),
-                "host2".to_string(),
-                "host3".to_string(),
-            ],
-            current_tab: 0,
-            gpu_scroll_offset: 0,
-            storage_scroll_offset: 0,
-            tab_scroll_offset: 0,
-            process_horizontal_scroll_offset: 0,
-            device_name_scroll_offsets: HashMap::new(),
-            host_id_scroll_offsets: HashMap::new(),
-            cpu_name_scroll_offsets: HashMap::new(),
-            frame_counter: 0,
-            storage_info: Vec::new(),
-            show_help: false,
-            utilization_history: VecDeque::new(),
-            memory_history: VecDeque::new(),
-            temperature_history: VecDeque::new(),
-            package_power_history: VecDeque::new(),
-            ane_power_history: VecDeque::new(),
-            cpu_utilization_history: VecDeque::new(),
-            system_memory_history: VecDeque::new(),
-            cpu_temperature_history: VecDeque::new(),
-            notifications: crate::ui::notification::NotificationManager::new(),
-            nvml_notification_shown: false,
-            #[cfg(target_os = "linux")]
-            tenstorrent_notification_shown: false,
-            #[cfg(target_os = "linux")]
-            tpu_notification_shown: false,
-            connection_status: HashMap::new(),
-            known_hosts: Vec::new(),
-            hostname_to_host_id: HashMap::new(),
-            is_local_mode: false, // Test state assumes remote mode
-            runtime_environment: crate::utils::RuntimeEnvironment::default(),
-            data_version: 0,
-            gpu_filter_enabled: false,
-            visible_process_rows: 0,
-        }
+        let mut state = AppState::new();
+        state.tabs = vec![
+            "All".to_string(),
+            "host1".to_string(),
+            "host2".to_string(),
+            "host3".to_string(),
+        ];
+        state.is_local_mode = false; // Test state assumes remote mode
+        state
     }
 
     #[test]

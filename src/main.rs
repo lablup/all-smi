@@ -322,7 +322,12 @@ async fn run_command(cli: Cli) {
                     });
                 }
 
-                view::run_local_mode(&LocalArgs { interval: None }).await;
+                view::run_local_mode(&LocalArgs {
+                    interval: None,
+                    alert_temp: None,
+                    alert_util_low_mins: None,
+                })
+                .await;
 
                 // Cleanup after local mode exits
                 #[cfg(target_os = "macos")]
