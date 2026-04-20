@@ -193,9 +193,20 @@ fn check_http(ctx: &CheckCtx) -> CheckResult {
             None => format!("http://{host}:{port}/metrics"),
         };
         let outcome = rt.block_on(async {
+            // Redirects are disabled: the diagnostic should probe the
+            // user-supplied URL itself, not whatever it redirects to.
+            // This also closes the SSRF foot-gun where a
+            // user-supplied URL that resolves to a benign host can
+            // redirect the probe towards an internal endpoint (for
+            // example, a cloud metadata service on 169.254.169.254).
+            // Doctor is opt-in and the user controls the URL list, but
+            // a strict `Policy::none()` limits the attack surface when
+            // a support bundle is produced from a CI job that accepts
+            // user-supplied endpoints.
             let client = reqwest::Client::builder()
                 .timeout(Duration::from_millis(1_500))
                 .connect_timeout(Duration::from_millis(750))
+                .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .map_err(|e| e.to_string())?;
             let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;

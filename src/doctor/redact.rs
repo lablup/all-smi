@@ -63,20 +63,33 @@ fn mac_re() -> &'static Regex {
 fn kptr_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
-        // Matches 16-char hex kernel addresses commonly emitted by dmesg
-        // when kptr_restrict is on (e.g. "ffff8abc12345678"). Limited to
-        // addresses with the `ffff` prefix so we don't scrub unrelated
-        // hex sequences.
-        Regex::new(r"\bffff[0-9a-f]{12}\b").expect("kptr regex must compile")
+        // Match kernel address shapes dmesg emits when `kptr_restrict`
+        // is loose. Two alternatives:
+        //
+        // 1. Canonical high-half 64-bit kernel addresses (x86_64 / arm64
+        //    `ffff...` / `ffffffff...`). 13+ leading `f` hex digits.
+        // 2. Generic `0x`-prefixed addresses of 8 to 16 hex digits —
+        //    covers 32-bit kernels, module load addresses, paravirt
+        //    pointers, and KASAN shadow offsets.
+        //
+        // A bare 8-16 hex digit run without the `0x` prefix would catch
+        // too many unrelated sequences (version strings, checksums), so
+        // the generic branch intentionally requires the `0x` anchor.
+        Regex::new(r"(?i)\bf{4,}[0-9a-f]{8,12}\b|\b0x[0-9a-fA-F]{8,16}\b")
+            .expect("kptr regex must compile")
     })
 }
 
 fn username_token(name: &str) -> Regex {
-    Regex::new(&format!(r"\b{}\b", regex::escape(name))).expect("username regex must compile")
+    // Case-insensitive matches the same rationale as hostname_token —
+    // log lines and `/etc/passwd` commentary vary on case.
+    Regex::new(&format!(r"(?i)\b{}\b", regex::escape(name))).expect("username regex must compile")
 }
 
 fn hostname_token(name: &str) -> Regex {
-    Regex::new(&format!(r"\b{}\b", regex::escape(name))).expect("hostname regex must compile")
+    // Case-insensitive so tool output that uppercases (Windows `uname`,
+    // macOS `scutil`, BIOS strings) still triggers the scrubbing.
+    Regex::new(&format!(r"(?i)\b{}\b", regex::escape(name))).expect("hostname regex must compile")
 }
 
 /// Options controlling what [`scrub`] replaces.
@@ -226,5 +239,66 @@ mod tests {
         let opts = RedactOptions::passthrough();
         let input = "host alice 10.0.0.1";
         assert_eq!(scrub(input, &opts), input);
+    }
+
+    #[test]
+    fn scrub_hostname_is_case_insensitive() {
+        let opts = RedactOptions {
+            hostname: Some("myserver".to_string()),
+            username: None,
+            ..RedactOptions::default()
+        };
+        let got = scrub("visit MYSERVER or MyServer now", &opts);
+        assert!(got.contains(REDACT_HOST));
+        assert!(!got.contains("MYSERVER"));
+        assert!(!got.contains("MyServer"));
+    }
+
+    #[test]
+    fn scrub_username_is_case_insensitive() {
+        let opts = RedactOptions {
+            hostname: None,
+            username: Some("alice".to_string()),
+            ..RedactOptions::default()
+        };
+        let got = scrub("ALICE logged in", &opts);
+        assert!(got.contains(REDACT_USER));
+        assert!(!got.contains("ALICE"));
+    }
+
+    #[test]
+    fn scrub_kernel_pointer_canonical() {
+        let opts = RedactOptions {
+            hostname: None,
+            username: None,
+            ..RedactOptions::default()
+        };
+        let got = scrub("fault at ffff8abc12345678 (oops)", &opts);
+        assert!(got.contains(REDACT_KPTR));
+    }
+
+    #[test]
+    fn scrub_kernel_pointer_0x_prefixed() {
+        let opts = RedactOptions {
+            hostname: None,
+            username: None,
+            ..RedactOptions::default()
+        };
+        let got = scrub("module loaded at 0xffffffffc08a0000 (end)", &opts);
+        assert!(got.contains(REDACT_KPTR));
+    }
+
+    #[test]
+    fn scrub_kernel_pointer_leaves_version_strings_alone() {
+        // A kernel version like `5.15.0-89` should not be partially
+        // redacted by the kptr regex. The 0x-prefixed alt requires an
+        // 8-char minimum so bare `0xab12cd` should also be untouched.
+        let opts = RedactOptions {
+            hostname: None,
+            username: None,
+            ..RedactOptions::default()
+        };
+        let got = scrub("kernel 5.15.0-89-generic", &opts);
+        assert!(!got.contains(REDACT_KPTR));
     }
 }
