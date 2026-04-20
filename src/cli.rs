@@ -62,6 +62,15 @@ pub struct LocalArgs {
     /// The interval in seconds at which to update the GPU information.
     #[arg(short, long)]
     pub interval: Option<u64>,
+    /// Temperature in Celsius at which GPUs trigger a `warn` alert.
+    /// The matching `crit` threshold is auto-set 10°C higher unless an
+    /// explicit config file overrides it.
+    #[arg(long)]
+    pub alert_temp: Option<u32>,
+    /// Minutes of sustained idle utilization (below `util_idle_pct`) after
+    /// which the alerter emits an `ok → warn` transition.
+    #[arg(long)]
+    pub alert_util_low_mins: Option<u32>,
 }
 
 #[derive(Parser, Clone)]
@@ -75,6 +84,15 @@ pub struct ViewArgs {
     /// The interval in seconds at which to update the GPU information. If not specified, uses adaptive interval based on node count.
     #[arg(short, long)]
     pub interval: Option<u64>,
+    /// Temperature in Celsius at which GPUs trigger a `warn` alert.
+    /// The matching `crit` threshold is auto-set 10°C higher unless an
+    /// explicit config file overrides it.
+    #[arg(long)]
+    pub alert_temp: Option<u32>,
+    /// Minutes of sustained idle utilization (below `util_idle_pct`) after
+    /// which the alerter emits an `ok → warn` transition.
+    #[arg(long)]
+    pub alert_util_low_mins: Option<u32>,
 }
 
 /// Output format for the `snapshot` subcommand.

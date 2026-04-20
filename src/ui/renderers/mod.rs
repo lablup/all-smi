@@ -14,6 +14,7 @@
 
 pub mod chassis_renderer;
 pub mod cpu_renderer;
+pub(crate) mod dim;
 pub mod gpu_renderer;
 pub mod memory_renderer;
 pub mod mig_renderer;

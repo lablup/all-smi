@@ -14,11 +14,14 @@
 
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::{Mutex, Notify, mpsc};
 
 use crate::app_state::AppState;
 use crate::cli::ViewArgs;
-use crate::common::config::EnvConfig;
+use crate::common::config::{AppConfig, EnvConfig};
+use crate::network::webhook::{enqueue as enqueue_webhook, spawn_webhook_worker};
+use crate::ui::alerts::WebhookPayload;
+use crate::ui::notification::NotificationType;
 
 // Re-export for backward compatibility
 pub use super::data_collection::{
@@ -29,6 +32,9 @@ pub struct DataCollector {
     app_state: Arc<Mutex<AppState>>,
     /// Optional notification handle to wake the UI loop when data changes.
     data_notify: Option<Arc<Notify>>,
+    /// Bounded webhook sender spun up lazily on first transition so that
+    /// tests and no-webhook installs pay zero cost.
+    webhook_tx: std::sync::OnceLock<mpsc::Sender<WebhookPayload>>,
 }
 
 impl DataCollector {
@@ -37,6 +43,7 @@ impl DataCollector {
         Self {
             app_state,
             data_notify: None,
+            webhook_tx: std::sync::OnceLock::new(),
         }
     }
 
@@ -45,6 +52,7 @@ impl DataCollector {
         Self {
             app_state,
             data_notify: Some(notify),
+            webhook_tx: std::sync::OnceLock::new(),
         }
     }
 
@@ -53,6 +61,72 @@ impl DataCollector {
         if let Some(ref notify) = self.data_notify {
             notify.notify_one();
         }
+    }
+
+    /// Run the threshold alerter over the latest GPU snapshot.
+    ///
+    /// This is the bridge between the collector and the alert subsystem
+    /// introduced in issue #186. Each transition is:
+    /// 1. Pushed onto [`AppState::alert_history`] for the `A` panel.
+    /// 2. Converted to a toast notification.
+    /// 3. Optionally serialised and enqueued for the async webhook worker.
+    /// 4. Audibly announced with a terminal bell when
+    ///    [`AlertConfig::bell_on_critical`] is set and the transition
+    ///    lands on `crit`.
+    async fn evaluate_alerts(&self) {
+        let transitions;
+        let webhook_url;
+        let bell_on_critical;
+        {
+            let mut state = self.app_state.lock().await;
+            bell_on_critical = state.alerter.config().bell_on_critical;
+            webhook_url = state.alerter.config().webhook_url.clone();
+
+            let snapshot = state.gpu_info.clone();
+            transitions = state.alerter.evaluate(&snapshot);
+            for t in &transitions {
+                let notification_type = match t.to {
+                    crate::ui::alerts::AlertLevel::Crit => NotificationType::Error,
+                    crate::ui::alerts::AlertLevel::Warn => NotificationType::Warning,
+                    crate::ui::alerts::AlertLevel::Ok => NotificationType::Status,
+                };
+                let _ = state.notifications.show_with_duration(
+                    t.message.clone(),
+                    notification_type,
+                    AppConfig::NOTIFICATION_DURATION_SECS,
+                );
+                state.push_alert_transition(t.clone());
+            }
+        }
+
+        if transitions.is_empty() {
+            return;
+        }
+
+        if bell_on_critical
+            && transitions
+                .iter()
+                .any(|t| t.to == crate::ui::alerts::AlertLevel::Crit)
+        {
+            // Audible bell. Stdout is line-buffered under ratatui so a
+            // separate write + flush is the simplest way to ring.
+            use std::io::Write;
+            let mut out = std::io::stdout();
+            let _ = out.write_all(b"\x07");
+            let _ = out.flush();
+        }
+
+        if !webhook_url.is_empty() {
+            let tx = self
+                .webhook_tx
+                .get_or_init(|| spawn_webhook_worker(webhook_url.clone()));
+            for t in &transitions {
+                let payload = WebhookPayload::from(t);
+                enqueue_webhook(tx, payload);
+            }
+        }
+
+        self.notify_ui();
     }
 
     pub async fn run_local_mode(&self, args: ViewArgs) {
@@ -105,6 +179,10 @@ impl DataCollector {
                 .update_state(self.app_state.clone(), data, &config)
                 .await;
             self.notify_ui();
+            // Run the threshold alerter against the freshly updated
+            // gpu_info so transitions arrive on the same tick as the data
+            // that produced them.
+            self.evaluate_alerts().await;
 
             if first_iteration {
                 first_iteration = false;
@@ -222,6 +300,7 @@ impl DataCollector {
                         .update_state(self.app_state.clone(), data, &config)
                         .await;
                     self.notify_ui();
+                    self.evaluate_alerts().await;
                 }
                 Err(e) => {
                     eprintln!("Error collecting remote data: {e}");

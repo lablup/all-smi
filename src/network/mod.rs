@@ -14,5 +14,6 @@
 
 pub mod client;
 pub mod metrics_parser;
+pub mod webhook;
 
 pub use client::NetworkClient;

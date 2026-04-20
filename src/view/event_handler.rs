@@ -13,12 +13,13 @@
 // limitations under the License.
 
 use crossterm::{
-    event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind},
+    event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind},
     terminal::size,
 };
 
-use crate::app_state::{AppState, SortCriteria};
+use crate::app_state::{AppState, FilterInputMode, SortCriteria};
 use crate::cli::ViewArgs;
+use crate::ui::filter_dsl::{apply as apply_filter, parse as parse_filter};
 use crate::ui::layout::LayoutCalculator;
 
 /// Get the actual number of visible process rows from the last rendered frame.
@@ -34,16 +35,37 @@ fn get_visible_process_rows(state: &AppState) -> usize {
 }
 
 pub async fn handle_key_event(key_event: KeyEvent, state: &mut AppState, args: &ViewArgs) -> bool {
+    // The filter bar is a modal input: while it's active we intercept
+    // every key so that hotkeys like `q`/`d`/`u` become literal text.
+    if state.filter_input_mode == FilterInputMode::Editing {
+        return handle_filter_input(key_event, state);
+    }
+
     match key_event.code {
         KeyCode::Esc => {
-            if state.show_help {
+            if state.alert_panel_open {
+                state.alert_panel_open = false;
+                false
+            } else if state.show_help {
                 state.show_help = false;
+                false
+            } else if state.filter_query.is_some() {
+                // ESC outside filter-input mode clears the committed query.
+                clear_filter(state);
                 false
             } else {
                 true // Exit
             }
         }
         KeyCode::Char('q') => true, // Exit
+        KeyCode::Char('/') => {
+            enter_filter_edit(state);
+            false
+        }
+        KeyCode::Char('A') => {
+            state.alert_panel_open = !state.alert_panel_open;
+            false
+        }
         KeyCode::Char('1') | KeyCode::Char('h') => {
             state.show_help = !state.show_help;
             false
@@ -61,7 +83,166 @@ pub async fn handle_key_event(key_event: KeyEvent, state: &mut AppState, args: &
             false
         }
         _ if !state.loading && !state.show_help => {
-            handle_navigation_keys(key_event.code, state, args);
+            handle_navigation_keys(key_event, state, args);
+            false
+        }
+        _ => false,
+    }
+}
+
+/// Enter the filter bar: stash prior filter text in the buffer so the
+/// operator can edit, not restart.
+fn enter_filter_edit(state: &mut AppState) {
+    // If a filter is committed, prefill with the original query so the
+    // operator can tweak it rather than retyping.
+    state.filter_input_mode = FilterInputMode::Editing;
+    if state.filter_buffer.is_empty()
+        && let Some(first) = state.filter_recent.front()
+    {
+        state.filter_buffer.clone_from(first);
+    }
+    state.filter_error = None;
+    state.filter_recall_index = None;
+    update_filter_preview(state);
+}
+
+/// Clear the committed filter and any active edit state.
+fn clear_filter(state: &mut AppState) {
+    state.filter_query = None;
+    state.filter_buffer.clear();
+    state.filter_error = None;
+    state.filter_input_mode = FilterInputMode::Idle;
+    state.filter_preview_count = None;
+    state.filter_recall_index = None;
+    state.mark_data_changed();
+}
+
+/// Recompute the live preview count using the current buffer.
+fn update_filter_preview(state: &mut AppState) {
+    if state.filter_buffer.trim().is_empty() {
+        state.filter_preview_count = None;
+        state.filter_error = None;
+        return;
+    }
+    match parse_filter(&state.filter_buffer) {
+        Ok(Some(expr)) => {
+            let total = state.gpu_info.len();
+            let matched = state
+                .gpu_info
+                .iter()
+                .filter(|g| apply_filter(Some(&expr), *g))
+                .count();
+            state.filter_preview_count = Some((matched, total));
+            state.filter_error = None;
+        }
+        Ok(None) => {
+            state.filter_preview_count = None;
+            state.filter_error = None;
+        }
+        Err(e) => {
+            state.filter_preview_count = None;
+            state.filter_error = Some(format!("parse error: {} at col {}", e.msg, e.col));
+        }
+    }
+}
+
+/// Commit the current buffer as the active filter. Returns true when the
+/// commit succeeded (the buffer parsed cleanly).
+fn commit_filter(state: &mut AppState) -> bool {
+    let input = state.filter_buffer.trim().to_string();
+    if input.is_empty() {
+        // Empty commit clears the filter.
+        clear_filter(state);
+        return true;
+    }
+    match parse_filter(&input) {
+        Ok(Some(expr)) => {
+            state.filter_query = Some(expr);
+            state.push_recent_filter(input.clone());
+            state.filter_input_mode = FilterInputMode::Idle;
+            state.filter_error = None;
+            state.filter_recall_index = None;
+            update_filter_preview(state);
+            state.mark_data_changed();
+            true
+        }
+        Ok(None) => {
+            clear_filter(state);
+            true
+        }
+        Err(e) => {
+            state.filter_error = Some(format!("parse error: {} at col {}", e.msg, e.col));
+            false
+        }
+    }
+}
+
+/// Handle a single key while in filter-edit mode.
+fn handle_filter_input(key_event: KeyEvent, state: &mut AppState) -> bool {
+    let KeyEvent {
+        code, modifiers, ..
+    } = key_event;
+
+    match code {
+        KeyCode::Esc => {
+            // Abort the edit without changing the committed query.
+            state.filter_input_mode = FilterInputMode::Idle;
+            state.filter_error = None;
+            state.filter_recall_index = None;
+            // Restore the buffer to the committed query so the operator
+            // sees consistent state on re-entry.
+            state.filter_buffer = if let Some(q) = state.filter_recent.front() {
+                q.clone()
+            } else {
+                String::new()
+            };
+            if state.filter_query.is_none() {
+                state.filter_buffer.clear();
+            }
+            false
+        }
+        KeyCode::Enter => {
+            let _committed = commit_filter(state);
+            false
+        }
+        KeyCode::Backspace => {
+            state.filter_buffer.pop();
+            state.filter_recall_index = None;
+            update_filter_preview(state);
+            false
+        }
+        KeyCode::Char(c) if modifiers.contains(KeyModifiers::CONTROL) && c == 'r' => {
+            // Cycle through the most-recent queue. Each press picks the
+            // next older entry; wrapping past the end clears the buffer.
+            let len = state.filter_recent.len();
+            if len == 0 {
+                return false;
+            }
+            let next = match state.filter_recall_index {
+                Some(i) => (i + 1) % len,
+                None => 0,
+            };
+            state.filter_recall_index = Some(next);
+            state.filter_buffer = state.filter_recent[next].clone();
+            update_filter_preview(state);
+            false
+        }
+        KeyCode::Char(c) if modifiers.contains(KeyModifiers::CONTROL) && c == 'u' => {
+            // Emacs convention: Ctrl-U clears the entire line.
+            state.filter_buffer.clear();
+            state.filter_recall_index = None;
+            update_filter_preview(state);
+            false
+        }
+        KeyCode::Char(c) => {
+            // Do not treat modifier+char as literal characters unless the
+            // modifier is Shift alone.
+            if modifiers.contains(KeyModifiers::CONTROL) || modifiers.contains(KeyModifiers::ALT) {
+                return false;
+            }
+            state.filter_buffer.push(c);
+            state.filter_recall_index = None;
+            update_filter_preview(state);
             false
         }
         _ => false,
@@ -148,8 +329,8 @@ fn handle_right_arrow(state: &mut AppState) {
     }
 }
 
-fn handle_navigation_keys(key_code: KeyCode, state: &mut AppState, args: &ViewArgs) {
-    match key_code {
+fn handle_navigation_keys(key_event: KeyEvent, state: &mut AppState, args: &ViewArgs) {
+    match key_event.code {
         KeyCode::Up => handle_up_arrow(state, args),
         KeyCode::Down => handle_down_arrow(state, args),
         KeyCode::PageUp => handle_page_up(state, args),
@@ -449,5 +630,159 @@ fn handle_process_header_click(x: u16, y: u16, state: &mut AppState) {
                 _ => crate::app_state::SortDirection::Descending,
             };
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::{KeyEvent, KeyModifiers};
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn key_with_mods(code: KeyCode, mods: KeyModifiers) -> KeyEvent {
+        KeyEvent::new(code, mods)
+    }
+
+    fn args() -> ViewArgs {
+        ViewArgs {
+            hosts: None,
+            hostfile: None,
+            interval: None,
+            alert_temp: None,
+            alert_util_low_mins: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn slash_enters_filter_edit_mode() {
+        let mut state = AppState::new();
+        handle_key_event(key(KeyCode::Char('/')), &mut state, &args()).await;
+        assert_eq!(state.filter_input_mode, FilterInputMode::Editing);
+    }
+
+    #[tokio::test]
+    async fn typing_in_filter_mode_appends_to_buffer() {
+        let mut state = AppState::new();
+        handle_key_event(key(KeyCode::Char('/')), &mut state, &args()).await;
+        for c in ['t', 'e', 'm', 'p', '>', '8', '5'] {
+            handle_key_event(key(KeyCode::Char(c)), &mut state, &args()).await;
+        }
+        assert_eq!(state.filter_buffer, "temp>85");
+    }
+
+    #[tokio::test]
+    async fn enter_commits_valid_filter() {
+        let mut state = AppState::new();
+        handle_key_event(key(KeyCode::Char('/')), &mut state, &args()).await;
+        for c in "temp>85".chars() {
+            handle_key_event(key(KeyCode::Char(c)), &mut state, &args()).await;
+        }
+        handle_key_event(key(KeyCode::Enter), &mut state, &args()).await;
+        assert_eq!(state.filter_input_mode, FilterInputMode::Idle);
+        assert!(state.filter_query.is_some());
+        assert_eq!(state.filter_recent.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn enter_with_invalid_filter_does_not_commit() {
+        let mut state = AppState::new();
+        handle_key_event(key(KeyCode::Char('/')), &mut state, &args()).await;
+        for c in "temp>>".chars() {
+            handle_key_event(key(KeyCode::Char(c)), &mut state, &args()).await;
+        }
+        handle_key_event(key(KeyCode::Enter), &mut state, &args()).await;
+        // Still in edit mode because the commit failed.
+        assert_eq!(state.filter_input_mode, FilterInputMode::Editing);
+        assert!(state.filter_query.is_none());
+        assert!(state.filter_error.is_some());
+    }
+
+    #[tokio::test]
+    async fn escape_aborts_edit_without_committing() {
+        let mut state = AppState::new();
+        handle_key_event(key(KeyCode::Char('/')), &mut state, &args()).await;
+        for c in "abc".chars() {
+            handle_key_event(key(KeyCode::Char(c)), &mut state, &args()).await;
+        }
+        handle_key_event(key(KeyCode::Esc), &mut state, &args()).await;
+        assert_eq!(state.filter_input_mode, FilterInputMode::Idle);
+        assert!(state.filter_query.is_none());
+    }
+
+    #[tokio::test]
+    async fn q_does_not_quit_in_filter_mode() {
+        let mut state = AppState::new();
+        handle_key_event(key(KeyCode::Char('/')), &mut state, &args()).await;
+        let quit = handle_key_event(key(KeyCode::Char('q')), &mut state, &args()).await;
+        assert!(!quit, "`q` must not exit while the filter bar is active");
+        assert!(
+            state.filter_buffer.contains('q'),
+            "`q` must be treated as literal text"
+        );
+    }
+
+    #[tokio::test]
+    async fn escape_outside_edit_clears_committed_filter() {
+        let mut state = AppState::new();
+        // Commit a filter.
+        handle_key_event(key(KeyCode::Char('/')), &mut state, &args()).await;
+        for c in "temp>80".chars() {
+            handle_key_event(key(KeyCode::Char(c)), &mut state, &args()).await;
+        }
+        handle_key_event(key(KeyCode::Enter), &mut state, &args()).await;
+        assert!(state.filter_query.is_some());
+        // ESC in idle mode clears it.
+        handle_key_event(key(KeyCode::Esc), &mut state, &args()).await;
+        assert!(state.filter_query.is_none());
+    }
+
+    #[tokio::test]
+    async fn backspace_shrinks_buffer() {
+        let mut state = AppState::new();
+        handle_key_event(key(KeyCode::Char('/')), &mut state, &args()).await;
+        for c in "abc".chars() {
+            handle_key_event(key(KeyCode::Char(c)), &mut state, &args()).await;
+        }
+        handle_key_event(key(KeyCode::Backspace), &mut state, &args()).await;
+        assert_eq!(state.filter_buffer, "ab");
+    }
+
+    #[tokio::test]
+    async fn ctrl_r_recalls_last_query() {
+        let mut state = AppState::new();
+        state.push_recent_filter("temp>85".to_string());
+        state.push_recent_filter("util<5".to_string());
+
+        handle_key_event(key(KeyCode::Char('/')), &mut state, &args()).await;
+        // Clear any prefill so we exercise ctrl-r from empty.
+        state.filter_buffer.clear();
+        handle_key_event(
+            key_with_mods(KeyCode::Char('r'), KeyModifiers::CONTROL),
+            &mut state,
+            &args(),
+        )
+        .await;
+        // Newest first.
+        assert_eq!(state.filter_buffer, "util<5");
+    }
+
+    #[tokio::test]
+    async fn capital_a_toggles_alert_panel() {
+        let mut state = AppState::new();
+        handle_key_event(key(KeyCode::Char('A')), &mut state, &args()).await;
+        assert!(state.alert_panel_open);
+        handle_key_event(key(KeyCode::Char('A')), &mut state, &args()).await;
+        assert!(!state.alert_panel_open);
+    }
+
+    #[tokio::test]
+    async fn esc_closes_alert_panel_when_open() {
+        let mut state = AppState::new();
+        state.alert_panel_open = true;
+        handle_key_event(key(KeyCode::Esc), &mut state, &args()).await;
+        assert!(!state.alert_panel_open);
     }
 }

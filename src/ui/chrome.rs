@@ -112,6 +112,19 @@ pub fn print_function_keys<W: Write>(
     // Move to bottom of screen
     queue!(stdout, cursor::MoveTo(0, rows - 1)).unwrap();
 
+    // Filter bar takes precedence over the hotkey strip.
+    //
+    // When the operator is editing the filter buffer or a committed
+    // filter is currently active, show `Filter: <buffer>_  [matched X of Y]`
+    // in place of the usual keys. ESC/Enter/Ctrl-R restore normal
+    // rendering. Inline parse errors appear in red after the buffer.
+    if state.filter_input_mode == crate::app_state::FilterInputMode::Editing
+        || state.filter_query.is_some()
+    {
+        print_filter_bar(stdout, cols, state);
+        return;
+    }
+
     // Get current sorting indicator
     let sort_indicator = match state.sort_criteria {
         crate::app_state::SortCriteria::Default => "Sort:Default",
@@ -223,5 +236,46 @@ pub fn print_function_keys<W: Write>(
             None,
             None,
         );
+    }
+}
+
+/// Render the filter bar. Active when the operator is editing a query or
+/// has committed one. `_` is appended to the buffer to indicate the cursor
+/// while editing. Inline errors are shown in red after the buffer.
+fn print_filter_bar<W: Write>(stdout: &mut W, cols: u16, state: &AppState) {
+    let editing = state.filter_input_mode == crate::app_state::FilterInputMode::Editing;
+    let mut bar = String::new();
+    bar.push_str("Filter: ");
+    bar.push_str(&state.filter_buffer);
+    if editing {
+        bar.push('_');
+    }
+    if let Some((matched, total)) = state.filter_preview_count {
+        bar.push_str(&format!(" [matched {matched} of {total}]"));
+    }
+    let error = state.filter_error.clone();
+
+    // Truncate to terminal width so an overlong query doesn't wrap.
+    let room = cols as usize;
+    let error_budget = error.as_ref().map(|e| display_width(e) + 2).unwrap_or(0);
+    let bar_budget = room.saturating_sub(error_budget);
+    let truncated_bar = if display_width(&bar) > bar_budget {
+        truncate_to_width(&bar, bar_budget).into_owned()
+    } else {
+        bar
+    };
+
+    // Cyan for the bar, red for any trailing error.
+    let bar_color = if editing { Color::Yellow } else { Color::Cyan };
+    print_colored_text(stdout, &truncated_bar, bar_color, None, None);
+    let mut used = display_width(&truncated_bar);
+    if let Some(err) = error {
+        print_colored_text(stdout, "  ", Color::White, None, None);
+        print_colored_text(stdout, &err, Color::Red, None, None);
+        used += 2 + display_width(&err);
+    }
+    let remaining = (cols as usize).saturating_sub(used);
+    if remaining > 0 {
+        print_colored_text(stdout, &" ".repeat(remaining), Color::White, None, None);
     }
 }

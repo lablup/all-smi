@@ -13,11 +13,13 @@
 // limitations under the License.
 
 pub mod activity_panel;
+pub mod alerts;
 pub mod braille;
 pub mod buffer;
 pub mod chrome;
 pub mod constants;
 pub mod dashboard;
+pub mod filter_dsl;
 pub mod gpu_sparkline_panel;
 pub mod help;
 pub mod layout;
