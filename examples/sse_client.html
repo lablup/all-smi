@@ -182,6 +182,17 @@
     return `${n.toFixed(1)} ${units[i]}`;
   }
 
+  function addCell(row, text, cls) {
+    // Build every cell with textContent so snapshot fields cannot inject
+    // HTML into the demo page. Protects operators who point this client
+    // at a host whose reader returns crafted GPU names (hostile mock,
+    // compromised upstream, or a renamed device via driver tooling).
+    const td = document.createElement("td");
+    if (cls) td.className = cls;
+    td.textContent = text;
+    row.appendChild(td);
+  }
+
   function renderGpus(gpus) {
     gpuBody.innerHTML = "";
     if (!Array.isArray(gpus)) return;
@@ -189,14 +200,12 @@
       const tr = document.createElement("tr");
       const used  = g.used_memory  ?? g.memory?.used  ?? NaN;
       const total = g.total_memory ?? g.memory?.total ?? NaN;
-      tr.innerHTML = `
-        <td class="num">${idx}</td>
-        <td>${g.name ?? "—"}</td>
-        <td class="num">${(g.utilization ?? "—")}</td>
-        <td class="num">${fmtBytes(used)} / ${fmtBytes(total)}</td>
-        <td class="num">${(g.temperature ?? "—")}</td>
-        <td class="num">${(g.power_consumption ?? "—")}</td>
-      `;
+      addCell(tr, String(idx), "num");
+      addCell(tr, g.name ?? "—");
+      addCell(tr, String(g.utilization ?? "—"), "num");
+      addCell(tr, `${fmtBytes(used)} / ${fmtBytes(total)}`, "num");
+      addCell(tr, String(g.temperature ?? "—"), "num");
+      addCell(tr, String(g.power_consumption ?? "—"), "num");
       gpuBody.appendChild(tr);
     });
   }

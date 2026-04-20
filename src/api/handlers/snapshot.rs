@@ -31,6 +31,9 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::api::frame_bus::FrameBus;
+use crate::api::metrics::process::{
+    MAX_COMMAND_LABEL_LEN, MAX_NAME_LABEL_LEN, MAX_USER_LABEL_LEN, ProcessMetricExporter,
+};
 use crate::cli::SnapshotIncludes;
 use crate::snapshot::{
     DefaultSnapshotCollector, SNAPSHOT_SCHEMA_VERSION, Snapshot, collect_once, sanitize_json_floats,
@@ -63,7 +66,7 @@ pub async fn snapshot_handler(
         Some("1") | Some("true") | Some("yes")
     );
 
-    let snapshot = match resolve_snapshot(&bus).await {
+    let snapshot = match resolve_snapshot(&bus, &filter).await {
         Ok(s) => s,
         Err(err) => {
             tracing::warn!("/snapshot: fresh collect failed: {err}");
@@ -84,18 +87,25 @@ pub async fn snapshot_handler(
         }
     };
 
-    let mut headers = HeaderMap::new();
+    let mut headers = no_cache_headers();
     headers.insert(
         header::CONTENT_TYPE,
         HeaderValue::from_static("application/json"),
     );
-    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-    // Mirror the /events advice so operators putting all-smi behind a
-    // cachey reverse proxy still get the newest frame even on repeated
-    // hits.
-    headers.insert("X-Accel-Buffering", HeaderValue::from_static("no"));
 
     (StatusCode::OK, headers, body).into_response()
+}
+
+/// Common no-cache header set shared between the success and error
+/// responses. Without them a reverse proxy can silently cache a transient
+/// `/snapshot` failure and keep serving the stale error to subsequent
+/// clients — the SSE spec already bans this on `/events` and we mirror it
+/// here for symmetry (issue #193).
+fn no_cache_headers() -> HeaderMap {
+    let mut h = HeaderMap::new();
+    h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    h.insert("X-Accel-Buffering", HeaderValue::from_static("no"));
+    h
 }
 
 fn error_response(status: StatusCode, message: &str) -> Response {
@@ -103,18 +113,19 @@ fn error_response(status: StatusCode, message: &str) -> Response {
         "schema": SNAPSHOT_SCHEMA_VERSION,
         "error": message,
     }));
-    (status, body).into_response()
+    (status, no_cache_headers(), body).into_response()
 }
 
 /// Resolve the frame served to the caller.
 ///
 /// Reads the last published frame from the bus. If that frame is older
 /// than `2 × collection_interval` (or no frame has been published yet),
-/// a fresh collection is performed synchronously with the default
-/// includes. Fresh collections never race the background task because
-/// `DefaultSnapshotCollector::new()` builds its own reader set each
-/// call.
-async fn resolve_snapshot(bus: &FrameBus) -> Result<Arc<Snapshot>, String> {
+/// a fresh collection is performed synchronously honouring the caller's
+/// `?include=` filter so the stale-fallback path is observationally
+/// indistinguishable from the cached path (issue #193). Fresh collections
+/// never race the background task because `DefaultSnapshotCollector::new()`
+/// builds its own reader set each call.
+async fn resolve_snapshot(bus: &FrameBus, filter: &SectionFilter) -> Result<Arc<Snapshot>, String> {
     let interval = bus.collection_interval();
     let stale_after = interval.saturating_mul(2);
     if let Some(frame) = bus.latest().await
@@ -123,19 +134,41 @@ async fn resolve_snapshot(bus: &FrameBus) -> Result<Arc<Snapshot>, String> {
         return Ok(frame.snapshot);
     }
 
-    // Fall back to a fresh collection. The `all-includes` set gives the
-    // client the complete payload; the handler filters later per the
-    // request.
-    let all_includes = SnapshotIncludes {
-        gpu: true,
-        cpu: true,
-        memory: true,
-        chassis: true,
-        process: false,
-        storage: false,
+    // Serialise fresh collects with a single-flight lock. A burst of
+    // `/snapshot` requests against a freshly-started server, or against
+    // a server whose collection loop has stalled, would otherwise each
+    // spawn their own `DefaultSnapshotCollector` and saturate the Tokio
+    // blocking pool — an amplification attack on an otherwise cheap
+    // HTTP endpoint. Holding the lock while we re-check `latest()`
+    // means a winning collector's output is observed by every queued
+    // caller without any of them issuing their own hardware read.
+    let _guard = bus.lock_fresh_collect().await;
+
+    // Re-check `latest()` under the lock: another task may have
+    // refreshed the frame while we were queued, or the background
+    // collection loop may have published a cycle concurrently.
+    if let Some(frame) = bus.latest().await
+        && frame.published_at.elapsed() <= stale_after
+    {
+        return Ok(frame.snapshot);
+    }
+
+    // Fall back to a fresh collection. Map the caller-visible
+    // `SectionFilter` onto the collector-level `SnapshotIncludes` so the
+    // response carries exactly the sections the client asked for — the
+    // cached path does the same via the always-collected background
+    // frame, so matching behaviour here keeps the two paths
+    // observationally identical.
+    let includes = SnapshotIncludes {
+        gpu: filter.gpu,
+        cpu: filter.cpu,
+        memory: filter.memory,
+        chassis: filter.chassis,
+        process: filter.process,
+        storage: filter.storage,
     };
     let collector = Arc::new(DefaultSnapshotCollector::new());
-    let snap = collect_once(collector, &all_includes, FRESH_COLLECT_TIMEOUT).await;
+    let snap = collect_once(collector, &includes, FRESH_COLLECT_TIMEOUT).await;
     Ok(Arc::new(snap))
 }
 
@@ -248,6 +281,14 @@ pub fn filter_snapshot_value(snapshot: &Snapshot, filter: &SectionFilter) -> Val
     let mut value = serde_json::to_value(snapshot).unwrap_or(Value::Null);
     sanitize_json_floats(&mut value);
     if let Value::Object(ref mut map) = value {
+        // Apply the same per-field byte caps the Prometheus exporter uses
+        // for process labels (`api::metrics::process`). Without this the
+        // JSON/SSE path would broadcast full argv strings — a privacy
+        // leak (DB URLs, API tokens) and a response-size amplification
+        // vector that is already mitigated on the `/metrics` surface.
+        if let Some(Value::Array(procs)) = map.get_mut("processes") {
+            truncate_process_labels_in_place(procs);
+        }
         for section in ["gpus", "cpus", "memory", "chassis", "processes", "storage"] {
             if !filter.allows(section) {
                 map.remove(section);
@@ -255,6 +296,31 @@ pub fn filter_snapshot_value(snapshot: &Snapshot, filter: &SectionFilter) -> Val
         }
     }
     value
+}
+
+/// Apply `MAX_COMMAND_LABEL_LEN` / `MAX_NAME_LABEL_LEN` /
+/// `MAX_USER_LABEL_LEN` to the `command`, `process_name`, and `user`
+/// fields of a serialized `ProcessInfo` array. Mirrors the Prometheus
+/// exporter's truncation so the same privacy + amplification guarantees
+/// apply to the JSON/SSE surfaces. Every other field (PIDs, memory
+/// counters, timings) is left untouched.
+fn truncate_process_labels_in_place(procs: &mut [Value]) {
+    for proc in procs.iter_mut() {
+        if let Value::Object(ref mut fields) = *proc {
+            truncate_string_field(fields, "command", MAX_COMMAND_LABEL_LEN);
+            truncate_string_field(fields, "process_name", MAX_NAME_LABEL_LEN);
+            truncate_string_field(fields, "user", MAX_USER_LABEL_LEN);
+        }
+    }
+}
+
+fn truncate_string_field(fields: &mut serde_json::Map<String, Value>, key: &str, max_len: usize) {
+    if let Some(Value::String(s)) = fields.get(key) {
+        let truncated = ProcessMetricExporter::truncate_for_label(s, max_len);
+        if let std::borrow::Cow::Owned(new_value) = truncated {
+            fields.insert(key.to_string(), Value::String(new_value));
+        }
+    }
 }
 
 #[cfg(test)]
@@ -349,5 +415,185 @@ mod tests {
         let value = filter_snapshot_value(&snap, &filter);
         assert!(value["errors"].is_array());
         assert_eq!(value["errors"].as_array().unwrap().len(), 1);
+    }
+
+    /// Regression for the security review of #193: a process with a 4
+    /// KiB command line must not appear verbatim in the JSON body. The
+    /// Prometheus exporter already caps these labels (see
+    /// `api::metrics::process`); the JSON/SSE surface must inherit the
+    /// same guarantee so an attacker cannot exfiltrate secrets embedded
+    /// in argv through the cross-origin SSE stream.
+    #[test]
+    fn filter_truncates_long_process_command_line() {
+        use crate::device::ProcessInfo;
+
+        let long_cmd = "python ".to_string() + &"A".repeat(4096);
+        let proc = ProcessInfo {
+            device_id: 0,
+            device_uuid: "uuid-0".to_string(),
+            pid: 42,
+            process_name: "python".to_string(),
+            used_memory: 0,
+            cpu_percent: 0.0,
+            memory_percent: 0.0,
+            memory_rss: 0,
+            memory_vms: 0,
+            user: "alice".to_string(),
+            state: "R".to_string(),
+            start_time: "00:00:00".to_string(),
+            cpu_time: 0,
+            command: long_cmd.clone(),
+            ppid: 1,
+            threads: 1,
+            uses_gpu: true,
+            priority: 0,
+            nice_value: 0,
+            gpu_utilization: 0.0,
+        };
+        let mut snap = sample_snapshot();
+        snap.processes = Some(vec![proc]);
+        // The include must request `process`; the default HTTP filter
+        // drops the processes section entirely.
+        let filter = parse_include(Some("gpu,cpu,memory,chassis,process"));
+        let value = filter_snapshot_value(&snap, &filter);
+        let procs = value["processes"].as_array().expect("processes array");
+        assert_eq!(procs.len(), 1);
+        let rendered_command = procs[0]["command"].as_str().expect("command string");
+        assert!(
+            rendered_command.len() < long_cmd.len(),
+            "command must be truncated; got {} bytes",
+            rendered_command.len()
+        );
+        assert!(
+            rendered_command.contains("bytes truncated"),
+            "truncation marker missing: {rendered_command}"
+        );
+        assert!(
+            !rendered_command.contains(&"A".repeat(4096)),
+            "full argv must not leak verbatim"
+        );
+    }
+
+    /// Regression: a `process_name` longer than `MAX_NAME_LABEL_LEN`
+    /// must also be truncated. Name fields can grow on Windows (long
+    /// service paths) and through Linux namespaces.
+    #[test]
+    fn filter_truncates_long_process_name() {
+        use crate::device::ProcessInfo;
+
+        let long_name = "N".repeat(512);
+        let proc = ProcessInfo {
+            device_id: 0,
+            device_uuid: String::new(),
+            pid: 1,
+            process_name: long_name.clone(),
+            used_memory: 0,
+            cpu_percent: 0.0,
+            memory_percent: 0.0,
+            memory_rss: 0,
+            memory_vms: 0,
+            user: "root".to_string(),
+            state: "S".to_string(),
+            start_time: "00:00:00".to_string(),
+            cpu_time: 0,
+            command: String::new(),
+            ppid: 1,
+            threads: 1,
+            uses_gpu: false,
+            priority: 0,
+            nice_value: 0,
+            gpu_utilization: 0.0,
+        };
+        let mut snap = sample_snapshot();
+        snap.processes = Some(vec![proc]);
+        let filter = parse_include(Some("gpu,cpu,memory,chassis,process"));
+        let value = filter_snapshot_value(&snap, &filter);
+        let rendered = value["processes"][0]["process_name"]
+            .as_str()
+            .expect("process_name string");
+        assert!(rendered.len() < long_name.len());
+        assert!(rendered.contains("bytes truncated"));
+    }
+
+    /// Regression: a `user` field longer than `MAX_USER_LABEL_LEN` must
+    /// also be truncated. Long LDAP DNs and Windows SIDs can overflow
+    /// this on enterprise clusters.
+    #[test]
+    fn filter_truncates_long_user_field() {
+        use crate::device::ProcessInfo;
+
+        let long_user = "U".repeat(512);
+        let proc = ProcessInfo {
+            device_id: 0,
+            device_uuid: String::new(),
+            pid: 1,
+            process_name: "p".to_string(),
+            used_memory: 0,
+            cpu_percent: 0.0,
+            memory_percent: 0.0,
+            memory_rss: 0,
+            memory_vms: 0,
+            user: long_user.clone(),
+            state: "S".to_string(),
+            start_time: "00:00:00".to_string(),
+            cpu_time: 0,
+            command: String::new(),
+            ppid: 1,
+            threads: 1,
+            uses_gpu: false,
+            priority: 0,
+            nice_value: 0,
+            gpu_utilization: 0.0,
+        };
+        let mut snap = sample_snapshot();
+        snap.processes = Some(vec![proc]);
+        let filter = parse_include(Some("gpu,cpu,memory,chassis,process"));
+        let value = filter_snapshot_value(&snap, &filter);
+        let rendered = value["processes"][0]["user"].as_str().expect("user string");
+        assert!(rendered.len() < long_user.len());
+        assert!(rendered.contains("bytes truncated"));
+    }
+
+    /// Short process fields must round-trip unchanged so normal
+    /// operators still see the full executable name and argv.
+    #[test]
+    fn filter_leaves_short_process_fields_intact() {
+        use crate::device::ProcessInfo;
+
+        let proc = ProcessInfo {
+            device_id: 0,
+            device_uuid: "uuid".to_string(),
+            pid: 1,
+            process_name: "python".to_string(),
+            used_memory: 0,
+            cpu_percent: 0.0,
+            memory_percent: 0.0,
+            memory_rss: 0,
+            memory_vms: 0,
+            user: "alice".to_string(),
+            state: "R".to_string(),
+            start_time: "00:00:00".to_string(),
+            cpu_time: 0,
+            command: "python train.py".to_string(),
+            ppid: 1,
+            threads: 1,
+            uses_gpu: true,
+            priority: 0,
+            nice_value: 0,
+            gpu_utilization: 0.0,
+        };
+        let mut snap = sample_snapshot();
+        snap.processes = Some(vec![proc]);
+        let filter = parse_include(Some("gpu,cpu,memory,chassis,process"));
+        let value = filter_snapshot_value(&snap, &filter);
+        assert_eq!(
+            value["processes"][0]["command"].as_str(),
+            Some("python train.py")
+        );
+        assert_eq!(value["processes"][0]["user"].as_str(), Some("alice"));
+        assert_eq!(
+            value["processes"][0]["process_name"].as_str(),
+            Some("python")
+        );
     }
 }

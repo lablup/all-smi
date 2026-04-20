@@ -83,6 +83,16 @@ struct Inner {
     /// `?throttle=N` against this so clients cannot ask for updates
     /// faster than the server actually produces them.
     collection_interval: Duration,
+    /// Single-flight lock serializing the `/snapshot` fresh-collect
+    /// fallback path. Without this, a burst of `/snapshot` requests
+    /// against a freshly-started server (no cached frame yet) or a
+    /// stalled collector (cached frame older than `2 * interval`) would
+    /// each spawn their own `DefaultSnapshotCollector` and saturate the
+    /// Tokio blocking pool in parallel. Serializing fresh collects means
+    /// at most one is in flight at a time; late-arriving requests block
+    /// briefly, then see the newly cached frame without doing their own
+    /// hardware read. See `api::handlers::snapshot::resolve_snapshot`.
+    fresh_collect_lock: tokio::sync::Mutex<()>,
 }
 
 /// A published frame together with the wall-clock instant at which it was
@@ -106,6 +116,7 @@ impl FrameBus {
                 latest: tokio::sync::RwLock::new(None),
                 next_seq: AtomicU64::new(1),
                 collection_interval,
+                fresh_collect_lock: tokio::sync::Mutex::new(()),
             }),
         }
     }
@@ -157,6 +168,18 @@ impl FrameBus {
     /// `/snapshot` staleness threshold.
     pub fn collection_interval(&self) -> Duration {
         self.inner.collection_interval
+    }
+
+    /// Acquire the single-flight lock for a `/snapshot` fresh collect.
+    ///
+    /// Returns a guard; while held, any other task attempting to acquire
+    /// the same guard will wait. The lock is not held across the
+    /// collection itself in the caller — callers should acquire, re-read
+    /// [`Self::latest`] (it may have been refreshed while waiting), and
+    /// only perform the collection if the frame is still stale. See
+    /// `api::handlers::snapshot::resolve_snapshot` for the usage pattern.
+    pub async fn lock_fresh_collect(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.inner.fresh_collect_lock.lock().await
     }
 
     /// The next sequence number that would be assigned. Exposed so tests
@@ -218,5 +241,37 @@ mod tests {
         assert_eq!(bus.subscriber_count(), 1);
         drop(rx);
         assert_eq!(bus.subscriber_count(), 0);
+    }
+
+    /// Regression for the security review of #193: the fresh-collect
+    /// lock must serialize concurrent `/snapshot` callers so a burst
+    /// cannot saturate the Tokio blocking pool. We cannot easily assert
+    /// "only one collect ran" without touching hardware, but we can
+    /// observe that a task holding the guard blocks a second caller
+    /// until the guard drops.
+    #[tokio::test]
+    async fn fresh_collect_lock_serializes_callers() {
+        let bus = FrameBus::new(Duration::from_secs(3));
+        let guard = bus.lock_fresh_collect().await;
+
+        // Spawn a second acquirer and race it with a short sleep. If the
+        // lock is serializing correctly, the spawned task will not
+        // resolve until we drop `guard` below.
+        let bus2 = bus.clone();
+        let handle = tokio::spawn(async move {
+            let _g = bus2.lock_fresh_collect().await;
+        });
+
+        // Give the second task a moment to try to acquire.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(
+            !handle.is_finished(),
+            "second lock_fresh_collect caller should block while first guard is held"
+        );
+
+        drop(guard);
+        handle
+            .await
+            .expect("second caller must complete once the guard is released");
     }
 }

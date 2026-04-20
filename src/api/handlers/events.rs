@@ -24,8 +24,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::extract::{Query, State};
-use axum::http::{HeaderMap, HeaderValue, header};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::IntoResponse;
+use axum::response::Response;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use futures_util::Stream;
 use futures_util::stream::unfold;
@@ -49,6 +50,39 @@ pub const DEFAULT_HEARTBEAT_SECS: u64 = 30;
 /// from triggering. 24 h feels like a generous ceiling for both.
 pub const MAX_INTERVAL_SECS: u64 = 86_400;
 
+/// Default cap on the number of concurrent SSE subscribers. 256 fits the
+/// expected operator profile (≤ 10 dashboards + a handful of
+/// CLI `curl -N` tails + headroom). Clients beyond the cap are rejected
+/// with `503 Service Unavailable` so a misbehaving caller (leaked
+/// `EventSource` in a hot-reload loop, deliberate `while true; do curl`)
+/// cannot exhaust file descriptors, broadcast-channel slots, or
+/// per-connection tokio tasks.
+///
+/// Operators who legitimately fan out to more subscribers can raise the
+/// cap via `ALL_SMI_API_MAX_SSE_SUBSCRIBERS`.
+pub const DEFAULT_MAX_SSE_SUBSCRIBERS: usize = 256;
+
+/// Read the SSE subscriber cap from the environment, falling back to
+/// [`DEFAULT_MAX_SSE_SUBSCRIBERS`]. A parse failure logs a warning and
+/// keeps the default so misconfiguration never disables the cap
+/// silently; setting the value to `0` explicitly disables the cap.
+fn configured_max_subscribers() -> usize {
+    match std::env::var("ALL_SMI_API_MAX_SSE_SUBSCRIBERS") {
+        Ok(v) => match v.trim().parse::<usize>() {
+            Ok(n) => n,
+            Err(e) => {
+                tracing::warn!(
+                    value = %v,
+                    error = %e,
+                    "ALL_SMI_API_MAX_SSE_SUBSCRIBERS is not a valid usize;                      falling back to default"
+                );
+                DEFAULT_MAX_SSE_SUBSCRIBERS
+            }
+        },
+        Err(_) => DEFAULT_MAX_SSE_SUBSCRIBERS,
+    }
+}
+
 #[derive(Debug, Default, Deserialize)]
 pub struct EventsQuery {
     /// Comma-separated section filter, same grammar as the `/snapshot`
@@ -71,17 +105,60 @@ pub async fn events_handler(
     State(bus): State<FrameBus>,
     Query(params): Query<EventsQuery>,
     headers: HeaderMap,
-) -> impl IntoResponse {
+) -> Response {
     let filter = parse_include(params.include.as_deref());
     let throttle = resolve_throttle(params.throttle, bus.collection_interval());
     let heartbeat = resolve_heartbeat(params.heartbeat);
 
+    // Cap concurrent SSE subscribers to protect the server from FD /
+    // memory exhaustion via a misbehaving or malicious client. Using
+    // `subscriber_count()` has a benign race (one call may read before
+    // another subscriber registers) — that is acceptable because the
+    // cap is a soft defence rather than a hard invariant, and because
+    // the producer is non-blocking regardless of subscriber count.
+    let cap = configured_max_subscribers();
+    if cap > 0 && bus.subscriber_count() >= cap {
+        tracing::warn!(
+            current_subscribers = bus.subscriber_count(),
+            cap,
+            "rejecting SSE subscription: subscriber cap reached. Tune              ALL_SMI_API_MAX_SSE_SUBSCRIBERS or 0 to disable the cap."
+        );
+        let body = serde_json::json!({
+            "error": "subscriber_cap_exceeded",
+            "message": format!(
+                "SSE subscriber cap {cap} reached; retry later or tune                  ALL_SMI_API_MAX_SSE_SUBSCRIBERS"
+            ),
+        })
+        .to_string();
+        let mut resp = (StatusCode::SERVICE_UNAVAILABLE, body).into_response();
+        resp.headers_mut().insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        );
+        resp.headers_mut()
+            .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+        // `Retry-After` helps well-behaved clients (including browsers
+        // following the `EventSource` reconnection algorithm) back off
+        // instead of spamming the server while we are already at capacity.
+        resp.headers_mut()
+            .insert(header::RETRY_AFTER, HeaderValue::from_static("5"));
+        return resp;
+    }
+
     // `Last-Event-ID` is logged but never used for replay. Including it in
     // the debug trace helps operators match up a reconnect with the
-    // preceding disconnect when chasing flaky-network bugs.
+    // preceding disconnect when chasing flaky-network bugs. Truncate the
+    // logged value so an attacker cannot inflate log lines with a
+    // giant header.
     if let Some(id) = headers.get("last-event-id").and_then(|v| v.to_str().ok()) {
+        const MAX_LOGGED_ID: usize = 256;
+        let mut boundary = id.len().min(MAX_LOGGED_ID);
+        while boundary > 0 && !id.is_char_boundary(boundary) {
+            boundary -= 1;
+        }
         tracing::debug!(
-            client_last_event_id = %id,
+            client_last_event_id = %&id[..boundary],
+            truncated = id.len() > boundary,
             "SSE client reconnected; history replay not supported, resuming with next live frame"
         );
     }
@@ -96,13 +173,18 @@ pub async fn events_handler(
     let mut extra = HeaderMap::new();
     extra.insert("X-Accel-Buffering", HeaderValue::from_static("no"));
     extra.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-    (extra, sse)
+    (extra, sse).into_response()
 }
 
 fn resolve_throttle(user: Option<u64>, collection_interval: Duration) -> Duration {
-    let secs = user
-        .unwrap_or(0)
-        .clamp(collection_interval.as_secs(), MAX_INTERVAL_SECS);
+    let floor = collection_interval.as_secs();
+    // `u64::clamp(lo, hi)` panics when `lo > hi`. A misconfigured
+    // `--interval` above `MAX_INTERVAL_SECS` (24 h) would otherwise
+    // panic every events handler invocation. Saturate the floor at
+    // `MAX_INTERVAL_SECS` so the invariant holds without disrupting
+    // the normal "floor == collection interval" behaviour.
+    let effective_floor = floor.min(MAX_INTERVAL_SECS);
+    let secs = user.unwrap_or(0).clamp(effective_floor, MAX_INTERVAL_SECS);
     // When the user either omitted `throttle` or asked for `0`, the
     // `.clamp(collection_interval, ...)` above already yields the
     // collection interval — keeping the SSE cadence aligned with the
@@ -268,6 +350,32 @@ mod tests {
     fn resolve_heartbeat_accepts_custom_value() {
         let d = resolve_heartbeat(Some(10));
         assert_eq!(d, Duration::from_secs(10));
+    }
+
+    /// Regression for the security review of #193: `u64::clamp(lo, hi)`
+    /// panics when `lo > hi`. A misconfigured collection interval above
+    /// `MAX_INTERVAL_SECS` used to crash every `/events` handler call;
+    /// the handler must now cap the floor instead of panicking.
+    #[test]
+    fn resolve_throttle_does_not_panic_when_collection_interval_exceeds_max() {
+        let huge = Duration::from_secs(MAX_INTERVAL_SECS + 3600);
+        let d = resolve_throttle(Some(60), huge);
+        // When the floor would otherwise exceed the ceiling, the helper
+        // saturates at `MAX_INTERVAL_SECS`. The concrete value is a
+        // secondary concern — not panicking is the hard requirement.
+        assert!(d <= Duration::from_secs(MAX_INTERVAL_SECS));
+    }
+
+    /// Same regression without a user value: even the default path must
+    /// survive a misconfigured interval without panicking.
+    #[test]
+    fn resolve_throttle_handles_none_with_oversize_interval() {
+        let huge = Duration::from_secs(MAX_INTERVAL_SECS * 2);
+        let d = resolve_throttle(None, huge);
+        // The caller asked to align with the collection cadence; we
+        // simply must not panic. Returning the saturated ceiling is the
+        // documented degraded behaviour.
+        assert!(d <= Duration::from_secs(MAX_INTERVAL_SECS));
     }
 
     #[tokio::test]

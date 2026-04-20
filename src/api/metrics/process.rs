@@ -29,17 +29,17 @@ use crate::device::ProcessInfo;
 /// args) without broadcasting full argv to every Prometheus consumer.
 /// Operators who need the full line can `ps(1)` the PID locally; the
 /// Users tab only needs enough to disambiguate workloads.
-const MAX_COMMAND_LABEL_LEN: usize = 256;
+pub const MAX_COMMAND_LABEL_LEN: usize = 256;
 
 /// Same cap for `name` — bounded by Linux's 15-char `comm` in practice
 /// but we guard against future platforms that might return longer names.
-const MAX_NAME_LABEL_LEN: usize = 128;
+pub const MAX_NAME_LABEL_LEN: usize = 128;
 
 /// Same cap for `user` — Unix usernames are POSIX-limited to 32 bytes
 /// but other platforms (Windows SIDs, long LDAP DNs) can be longer.
 /// 128 bytes keeps the label useful without becoming an amplification
 /// vector.
-const MAX_USER_LABEL_LEN: usize = 128;
+pub const MAX_USER_LABEL_LEN: usize = 128;
 
 pub struct ProcessMetricExporter<'a> {
     pub process_info: &'a [ProcessInfo],
@@ -52,7 +52,7 @@ impl<'a> ProcessMetricExporter<'a> {
     /// that the string was clipped and how much was dropped; this
     /// matters for the Users tab where the top-command column is the
     /// only hint operators get about what the workload is doing.
-    fn truncate_for_label(value: &str, max_len: usize) -> std::borrow::Cow<'_, str> {
+    pub fn truncate_for_label(value: &str, max_len: usize) -> std::borrow::Cow<'_, str> {
         if value.len() <= max_len {
             return std::borrow::Cow::Borrowed(value);
         }

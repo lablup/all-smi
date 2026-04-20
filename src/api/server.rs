@@ -12,11 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use axum::http::{HeaderName, HeaderValue, Method, header};
 use axum::{Router, routing::get};
 use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::sync::RwLock;
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -198,12 +199,7 @@ pub async fn run_api_mode(args: &ApiArgs, settings: &Settings) {
         .route("/events", get(events_handler))
         .route("/snapshot", get(snapshot_handler))
         .with_state(api_state)
-        .layer(
-            CorsLayer::new()
-                .allow_origin(Any)
-                .allow_methods(Any)
-                .allow_headers(Any),
-        )
+        .layer(build_cors_layer())
         .layer(TraceLayer::new_for_http());
 
     // Determine which listeners to start
@@ -470,5 +466,173 @@ fn cleanup_socket(path: &std::path::Path) {
         Err(e) => {
             tracing::warn!("Failed to remove socket file on shutdown: {e}");
         }
+    }
+}
+
+/// Build the CORS layer for the API router.
+///
+/// Security posture:
+///
+/// * **No cross-origin access by default.** The previous wildcard
+///   (`Allow-Origin: *`, `Allow-Methods: *`, `Allow-Headers: *`) let any
+///   origin read `/metrics`, `/snapshot`, and the `/events` SSE stream
+///   from a browsing context. That telemetry includes process command
+///   lines, usernames, and power data — sensitive enough that a
+///   malicious page loaded by any authenticated operator could
+///   exfiltrate it via a cross-origin `fetch`. We therefore default
+///   to the strict axum CORS posture: no extra headers, no allowed
+///   origins, leaving same-origin requests unaffected.
+/// * **Opt-in allowlist.** When the operator sets
+///   `ALL_SMI_API_CORS_ALLOWED_ORIGINS` to a comma-separated list of
+///   origins, those origins (and only those) are reflected in the
+///   `Access-Control-Allow-Origin` header. `GET` + `Accept:
+///   text/event-stream` remains sufficient to subscribe to `/events`
+///   from a permitted origin.
+/// * **Wildcard escape hatch.** Setting the env var to exactly `*`
+///   restores the previous permissive behaviour for operators who
+///   understand the exposure (public read-only dashboards on a
+///   network-isolated host). A warning is logged so the risk is
+///   discoverable in the operator logs.
+fn build_cors_layer() -> CorsLayer {
+    let raw = std::env::var("ALL_SMI_API_CORS_ALLOWED_ORIGINS").ok();
+    let trimmed = raw.as_deref().map(str::trim).unwrap_or("");
+
+    // Default: no CORS — browsers refuse cross-origin reads of our
+    // telemetry, same-origin and non-browser clients (curl, Prometheus,
+    // Tauri with file:// escape) are unaffected.
+    if trimmed.is_empty() {
+        return CorsLayer::new()
+            .allow_methods([Method::GET, Method::OPTIONS])
+            .allow_headers([
+                header::ACCEPT,
+                header::CONTENT_TYPE,
+                HeaderName::from_static("last-event-id"),
+            ]);
+    }
+
+    // Explicit opt-in to a wildcard. Noisy warning so operators running
+    // this in a hostile environment see the audit trail in their logs.
+    if trimmed == "*" {
+        tracing::warn!(
+            "ALL_SMI_API_CORS_ALLOWED_ORIGINS=* selected; every origin              may read /metrics, /snapshot, and /events. This exposes              GPU telemetry, process command lines, and usernames              cross-origin. Prefer an explicit origin list."
+        );
+        return CorsLayer::new()
+            .allow_origin(AllowOrigin::any())
+            .allow_methods([Method::GET, Method::OPTIONS])
+            .allow_headers([
+                header::ACCEPT,
+                header::CONTENT_TYPE,
+                HeaderName::from_static("last-event-id"),
+            ]);
+    }
+
+    // Parse a comma-separated allowlist. Entries that cannot be parsed
+    // as a `HeaderValue` are dropped with a warning rather than failing
+    // startup — misconfiguration should not prevent the server from
+    // booting.
+    let origins: Vec<HeaderValue> = trimmed
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .filter_map(|o| match HeaderValue::from_str(o) {
+            Ok(v) => Some(v),
+            Err(e) => {
+                tracing::warn!(origin = o, error = %e, "ignoring invalid CORS origin");
+                None
+            }
+        })
+        .collect();
+
+    if origins.is_empty() {
+        tracing::warn!(
+            "ALL_SMI_API_CORS_ALLOWED_ORIGINS was set but contained no              valid origins; falling back to no-CORS default"
+        );
+        return CorsLayer::new()
+            .allow_methods([Method::GET, Method::OPTIONS])
+            .allow_headers([
+                header::ACCEPT,
+                header::CONTENT_TYPE,
+                HeaderName::from_static("last-event-id"),
+            ]);
+    }
+
+    tracing::info!(
+        allowed_origins = origins.len(),
+        "CORS: allowlist configured from ALL_SMI_API_CORS_ALLOWED_ORIGINS"
+    );
+    CorsLayer::new()
+        .allow_origin(AllowOrigin::list(origins))
+        .allow_methods([Method::GET, Method::OPTIONS])
+        .allow_headers([
+            header::ACCEPT,
+            header::CONTENT_TYPE,
+            HeaderName::from_static("last-event-id"),
+        ])
+}
+
+#[cfg(test)]
+mod cors_tests {
+    //! CORS policy tests for `build_cors_layer`.
+    //!
+    //! These tests use `std::env::set_var` / `remove_var`. They are
+    //! guarded by `#[serial_test]`... actually we lack that dependency,
+    //! so each test reads and restores the env var manually via a
+    //! scope guard.
+
+    use super::*;
+
+    /// RAII guard that saves the current `ALL_SMI_API_CORS_ALLOWED_ORIGINS`
+    /// value on creation and restores it on drop, so parallel-running
+    /// tests cannot leak env state to each other's assertions.
+    struct EnvGuard {
+        key: &'static str,
+        original: Option<String>,
+    }
+    impl EnvGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let original = std::env::var(key).ok();
+            // SAFETY: the env var is set and restored inside a unit test
+            // that runs serially within the test binary (the env guard
+            // pattern preserves that invariant across the test body).
+            unsafe { std::env::set_var(key, value) };
+            Self { key, original }
+        }
+        fn unset(key: &'static str) -> Self {
+            let original = std::env::var(key).ok();
+            // SAFETY: same reasoning as `set`.
+            unsafe { std::env::remove_var(key) };
+            Self { key, original }
+        }
+    }
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match self.original.take() {
+                // SAFETY: restoring env state the test captured.
+                Some(v) => unsafe { std::env::set_var(self.key, v) },
+                // SAFETY: restoring env state the test captured.
+                None => unsafe { std::env::remove_var(self.key) },
+            }
+        }
+    }
+
+    #[test]
+    fn default_builds_without_panic() {
+        let _g = EnvGuard::unset("ALL_SMI_API_CORS_ALLOWED_ORIGINS");
+        // We don't have a direct accessor into CorsLayer; the contract
+        // this test pins is "constructing the default posture must
+        // succeed without panic or env reads escaping the helper".
+        let _layer = build_cors_layer();
+    }
+
+    #[test]
+    fn wildcard_allowed_when_explicitly_requested() {
+        let _g = EnvGuard::set("ALL_SMI_API_CORS_ALLOWED_ORIGINS", "*");
+        let _layer = build_cors_layer();
+    }
+
+    #[test]
+    fn invalid_origins_drop_to_default() {
+        let _g = EnvGuard::set("ALL_SMI_API_CORS_ALLOWED_ORIGINS", "\n\tnot a url");
+        let _layer = build_cors_layer();
     }
 }

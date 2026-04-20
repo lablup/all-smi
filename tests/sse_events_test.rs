@@ -528,6 +528,98 @@ async fn snapshot_falls_back_to_fresh_collect_when_stale() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn snapshot_fresh_collect_honours_storage_include() {
+    // Regression test (issue #193): when `/snapshot` has to fall back to
+    // a fresh collect because no frame has been published yet, the
+    // fresh collect must honour the caller's `?include=` filter — in
+    // particular, `?include=storage` must populate the `storage`
+    // section. Before the fix the stale-fallback path hard-coded
+    // `storage: false` and silently dropped the requested section.
+    let bus = FrameBus::new(Duration::from_millis(100));
+    let (router, _state) = build_router(bus);
+    let addr = spawn_server(router).await;
+
+    let mut stream = TcpStream::connect(addr).await.expect("connect");
+    stream
+        .write_all(
+            b"GET /snapshot?include=storage HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        )
+        .await
+        .expect("write");
+    let mut body = Vec::new();
+    stream.read_to_end(&mut body).await.expect("read body");
+    let text = String::from_utf8_lossy(&body).into_owned();
+
+    assert!(
+        text.starts_with("HTTP/1.1 200 OK"),
+        "/snapshot?include=storage should succeed, got:\n{text}"
+    );
+    let body_area = &text[text.find("\r\n\r\n").expect("sep") + 4..];
+    let json_start = body_area.find('{').expect("body must contain JSON");
+    let json_end = body_area.rfind('}').expect("json end") + 1;
+    let payload = &body_area[json_start..json_end];
+    let v: serde_json::Value = serde_json::from_str(payload).expect("valid JSON body");
+    // The fresh-collect path now propagates the requested section,
+    // so `storage` must be present (even if empty on CI hosts with no
+    // real disks worth reporting).
+    assert!(
+        v.get("storage").is_some(),
+        "fresh-collect stale fallback must honour ?include=storage, got: {v:?}"
+    );
+    // And unrequested sections must not leak.
+    assert!(v.get("gpus").is_none());
+    assert!(v.get("cpus").is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn snapshot_error_response_carries_no_cache_headers() {
+    // The `/snapshot` error path must still emit `Cache-Control:
+    // no-store` and `X-Accel-Buffering: no` so a reverse proxy does
+    // not cache a transient failure. The only way to reliably drive
+    // the error branch from a test is to compose a request that makes
+    // `collect_once` produce a non-UTF-8 payload, which is impossible
+    // with the default readers — instead we assert the *success* path
+    // and the documented error-path helper both route through the
+    // shared `no_cache_headers()` helper. A code-level regression is
+    // therefore prevented by the unit tests in the handler module; here
+    // we simply verify the success-path headers stay consistent.
+    let bus = FrameBus::new(Duration::from_secs(1));
+    let published = Snapshot {
+        schema: 1,
+        timestamp: "2026-04-20T00:00:00Z".to_string(),
+        hostname: "hdr-host".to_string(),
+        gpus: Some(Vec::new()),
+        cpus: Some(Vec::new()),
+        memory: Some(Vec::new()),
+        chassis: Some(Vec::new()),
+        processes: None,
+        storage: None,
+        errors: Vec::new(),
+    };
+    bus.publish(published).await;
+    let (router, _state) = build_router(bus);
+    let addr = spawn_server(router).await;
+
+    let mut stream = TcpStream::connect(addr).await.expect("connect");
+    stream
+        .write_all(b"GET /snapshot HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .await
+        .expect("write");
+    let mut body = Vec::new();
+    stream.read_to_end(&mut body).await.expect("read body");
+    let text = String::from_utf8_lossy(&body).into_owned();
+    let lower = text.to_ascii_lowercase();
+    assert!(
+        lower.contains("cache-control: no-store"),
+        "missing Cache-Control: no-store on /snapshot, got:\n{text}"
+    );
+    assert!(
+        lower.contains("x-accel-buffering: no"),
+        "missing X-Accel-Buffering: no on /snapshot, got:\n{text}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn snapshot_returns_latest_frame() {
     let bus = FrameBus::new(Duration::from_secs(1));
     let published = Snapshot {

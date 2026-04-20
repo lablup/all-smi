@@ -150,6 +150,26 @@ turned off for the SSE route.
   `EventSource` demo.
 - `curl -N http://localhost:9090/events` — raw inspection.
 
+### Security knobs
+
+| Env var | Default | Effect |
+|---------|---------|--------|
+| `ALL_SMI_API_CORS_ALLOWED_ORIGINS` | (empty → **no CORS**) | Comma-separated list of origins permitted to read `/metrics`, `/snapshot`, and `/events` cross-origin. Set to `*` to revert to the pre-0.21 wildcard; a warning is logged in that case. |
+| `ALL_SMI_API_MAX_SSE_SUBSCRIBERS` | `256` | Cap on concurrent `/events` subscribers. Extra clients get `503 Service Unavailable` with `Retry-After: 5`. Set to `0` to disable the cap. |
+
+The default CORS posture blocks cross-origin browser reads of the live
+telemetry stream. That includes process command lines (when
+`--processes` is enabled), usernames, GPU utilization, and power
+consumption — keep the allowlist narrow.
+
+**Process label truncation.** `command`, `process_name`, and `user`
+fields are truncated at 256 / 128 / 128 bytes respectively on all
+output surfaces (Prometheus `/metrics`, JSON `/snapshot`, and SSE
+`/events`). Longer strings are emitted with a trailing
+`...(N bytes truncated)` marker. This caps scrape-response
+amplification and limits the blast radius of secrets that happen to
+live in argv.
+
 ## Available Metrics
 
 ### GPU Metrics (All Platforms)
