@@ -80,26 +80,11 @@ pub const MAX_REPLAY_RECORDS: usize = 1_000_000;
 /// high-cardinality activity before the first compaction kicks in.
 pub const WAL_MAX_BYTES: u64 = 16 * 1024 * 1024;
 
-/// Expand a leading `~` in `path` to the user's home directory.
-///
-/// Returns `path` unchanged if it does not start with `~`, or if
-/// `$HOME` is unset.
-pub fn expand_tilde(path: &Path) -> PathBuf {
-    let s = match path.to_str() {
-        Some(s) => s,
-        None => return path.to_path_buf(),
-    };
-    if let Some(rest) = s.strip_prefix("~/") {
-        if let Ok(home) = std::env::var("HOME") {
-            return PathBuf::from(home).join(rest);
-        }
-    } else if s == "~"
-        && let Ok(home) = std::env::var("HOME")
-    {
-        return PathBuf::from(home);
-    }
-    path.to_path_buf()
-}
+// Tilde expansion is shared through `crate::common::paths::expand_tilde`
+// — the formerly-duplicated helper that lived here is now a pass-through
+// import so every settings-consuming callsite uses the same
+// implementation.
+use crate::common::paths::expand_tilde;
 
 /// Replay the WAL at `path`, if it exists.
 ///

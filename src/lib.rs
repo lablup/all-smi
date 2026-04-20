@@ -125,6 +125,12 @@ pub mod app_state;
 #[cfg(feature = "cli")]
 pub mod cli;
 
+/// Config subcommand argument types (issue #192). Kept separate so
+/// [`cli`] stays under the 500-line soft limit; re-exported from `cli`
+/// for ergonomic downstream `use crate::cli::...` call sites.
+#[cfg(feature = "cli")]
+pub mod cli_config;
+
 /// Self-diagnosis and support-bundle subcommand (issue #188).
 ///
 /// Exposed under `cli` because the orchestrator depends on tokio + clap
@@ -181,4 +187,22 @@ pub mod utils;
 pub mod common {
     /// Configuration management.
     pub mod config;
+    /// File-level merge helpers for the TOML config (issue #192).
+    #[cfg(feature = "cli")]
+    pub mod config_apply;
+    /// Environment-variable overlay for the TOML config (issue #192).
+    #[cfg(feature = "cli")]
+    pub mod config_env;
+    /// TOML configuration file loader (issue #192).
+    #[cfg(feature = "cli")]
+    pub mod config_file;
+    /// On-disk schema types for the TOML configuration file.
+    #[cfg(feature = "cli")]
+    pub mod config_schema;
+    /// Platform-aware configuration path resolution.
+    #[cfg(feature = "cli")]
+    pub mod paths;
+    /// Shared secure file-write helper (O_NOFOLLOW + 0o600).
+    #[cfg(feature = "cli")]
+    pub mod secure_write;
 }

@@ -310,11 +310,16 @@ impl RemoteCollectorBuilder {
     pub fn load_hosts_from_file(mut self, file_path: &str) -> Result<Self, std::io::Error> {
         use std::path::Path;
 
-        // Sanitize and validate file path
-        let path = Path::new(file_path);
+        // Expand a leading `~/` before canonicalizing. Without this
+        // step a config value like `hostfile = "~/.config/all-smi/hosts"`
+        // would be passed verbatim to `canonicalize()`, which never
+        // performs tilde expansion itself and returns `NotFound`.
+        // Uses the shared helper so every path-consuming site applies
+        // the same expansion rules.
+        let expanded = crate::common::paths::expand_tilde(Path::new(file_path));
 
         // Resolve to absolute path and check it exists
-        let canonical_path = path.canonicalize().map_err(|e| {
+        let canonical_path = expanded.canonicalize().map_err(|e| {
             std::io::Error::new(
                 std::io::ErrorKind::NotFound,
                 format!("Invalid hostfile path: {e}"),

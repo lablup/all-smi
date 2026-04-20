@@ -251,6 +251,34 @@ The project enforces these Clippy lints (see `Cargo.toml`):
 - `module_inception`: Avoid module naming confusion
 - `bool_comparison`: Use idiomatic boolean checks
 
+## Configuration Architecture
+
+Issue #192 introduced TOML config file support. The runtime configuration flows through three layers:
+
+1. **Compiled defaults** — constants in `src/common/config.rs` and the `Default` impls on each `Settings` sub-struct in `src/common/config_file.rs`.
+2. **TOML file + env overrides** — merged by `config_file::load(path)` into a `Settings` struct. Env vars follow `ALL_SMI_<SECTION>_<KEY>` canonical naming; legacy aliases (`ALL_SMI_ENERGY_PRICE`, `ALL_SMI_ALERT_TEMP`, etc.) remain supported for backward compatibility.
+3. **CLI overrides** — applied in `src/main.rs` after the runtime starts. Every existing CLI field is now `Option<T>`; `None` means "fall through to `Settings`". This preserves the pre-existing flag surface while letting config operators omit them.
+
+Key files:
+
+| File | Purpose |
+|------|---------|
+| `src/common/config_file.rs` | Schema + loader. Produces `Settings` from file + env. |
+| `src/common/config_file_tests.rs` | Unit tests (in a sibling file so the implementation stays under the 500-line soft cap). |
+| `src/common/paths.rs` | Platform-aware config directory resolution and `~` expansion. |
+| `src/common/secure_write.rs` | Shared `O_NOFOLLOW` + `0o600` writer, reused by `config init`, snapshot, and record. |
+| `src/config_cmd/` | Runtime glue for the `config init/print/validate` subcommands. |
+| `tests/config_file_integration_test.rs` | Full precedence / backward-compat integration tests. |
+
+When adding a new subcommand option that should be config-file-driven:
+
+1. Add the field to the appropriate section in `src/common/config_file.rs` (both the `*Section` deserializer and the merged `*Settings` runtime struct).
+2. Add the default in `impl Default for Settings`.
+3. Plumb the env-var override in `apply_env` (canonical name `ALL_SMI_<SECTION>_<KEY>`).
+4. Update `src/config_cmd/render.rs` to include the field in `print` output.
+5. Update `src/config_cmd/example.rs` (the commented example written by `config init`).
+6. In `src/main.rs` apply the fallback: `args.field.or(settings.section.field)`.
+
 ## Mock Server Development
 
 The mock server simulates GPU environments for testing:

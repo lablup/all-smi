@@ -16,9 +16,22 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand, ValueEnum};
 
+// Config subcommand argument types live in a sibling module so the main
+// CLI file stays within the 500-line soft limit.
+pub use crate::cli_config::{
+    ConfigAction, ConfigArgs, ConfigPrintArgs, ConfigPrintFormat, ConfigValidateArgs,
+};
+
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
 pub struct Cli {
+    /// Override the default TOML config file path. When omitted the loader
+    /// probes the platform-appropriate locations (see `all-smi config init`
+    /// for the canonical path). When given, a missing or malformed file
+    /// produces a hard error; no silent fallback.
+    #[arg(long, global = true, value_name = "PATH")]
+    pub config: Option<PathBuf>,
+
     #[command(subcommand)]
     pub command: Option<Commands>,
 }
@@ -54,19 +67,37 @@ pub enum Commands {
     /// connectivity. Every check is read-only and bounded by a hard 3-second
     /// timeout. See issue #188.
     Doctor(DoctorArgs),
+    /// Inspect, initialise, or validate the TOML configuration file
+    /// (issue #192). See `all-smi config --help` for subcommands.
+    Config(ConfigArgs),
 }
 
-#[derive(Parser)]
+#[derive(Parser, Clone)]
 pub struct ApiArgs {
     /// The port to listen on for the API server. Use 0 to disable TCP listener.
-    #[arg(short, long, default_value_t = 9090)]
-    pub port: u16,
+    ///
+    /// When omitted, value is taken from the config file, the
+    /// `ALL_SMI_API_PORT` env var, or the compiled default (9090).
+    #[arg(short, long)]
+    pub port: Option<u16>,
     /// The interval in seconds at which to update the GPU information.
-    #[arg(short, long, default_value_t = 3)]
-    pub interval: u64,
+    ///
+    /// When omitted, value is taken from the config file, the
+    /// `ALL_SMI_API_INTERVAL_SECS` env var, or the compiled default (3).
+    #[arg(short, long)]
+    pub interval: Option<u64>,
     /// Include the process list in the API output.
-    #[arg(long)]
-    pub processes: bool,
+    ///
+    /// Use `--processes` or `--processes=true` to force-enable,
+    /// `--processes=false` to force-disable. When omitted, value is
+    /// taken from the config file or the `ALL_SMI_API_PROCESSES` env
+    /// var. Modelled as `Option<bool>` (not `bool`) so the CLI can
+    /// express the third state "no explicit override" — without this
+    /// an operator could not turn the flag OFF from the CLI when the
+    /// config file already set `processes = true`, since a bare
+    /// `--processes` flag has no natural "disable" spelling.
+    #[arg(long, num_args = 0..=1, default_missing_value = "true")]
+    pub processes: Option<bool>,
     /// Unix domain socket path for local IPC (Unix only).
     /// When specified without a value, uses platform default:
     /// - Linux: /var/run/all-smi.sock (fallback to /tmp/all-smi.sock if no permission)

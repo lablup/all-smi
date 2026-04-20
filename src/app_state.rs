@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use crate::common::config::{AlertConfig, EnergyConfig};
+use crate::common::config_file::DisplaySettings;
 use crate::device::{
     ChassisInfo, CpuInfo, GpuInfo, MemoryInfo, MigGpuInfo, ProcessInfo, VgpuHostInfo,
 };
@@ -375,6 +376,13 @@ pub struct AppState {
     /// seeds the integrator's lifetime counter so Prometheus stays
     /// monotonic across restarts.
     pub energy_wal_replay: WalReplayIndex,
+    /// Resolved `[display]` config (color scheme / gauge style / LED
+    /// grid toggle) from the merged `Settings`. Renderers consult this
+    /// to decide whether to draw the LED grid, which glyph set the
+    /// gauge uses, and which palette to use. Defaults match the
+    /// `Settings::default()` values so renderers stay consistent with
+    /// pre-config-file behaviour when no config is loaded.
+    pub display_config: DisplaySettings,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -417,7 +425,19 @@ impl Default for AppState {
 
 impl AppState {
     pub fn new() -> Self {
-        let energy_config = EnergyConfig::default().with_env_overrides();
+        Self::with_energy_config(&EnergyConfig::default().with_env_overrides())
+    }
+
+    /// Construct an `AppState` whose [`EnergyAccountant`] is configured
+    /// from `energy_config`. The integrator's `gap_interpolate` window
+    /// is derived from `energy_config.gap_interpolate_seconds` so the
+    /// TOML-file value actually takes effect — without this
+    /// constructor, callers that overwrote `AppState::energy_config`
+    /// after `AppState::new()` left the integrator bound to the
+    /// compiled default window and the config key was silently
+    /// ignored.
+    pub fn with_energy_config(energy_config: &EnergyConfig) -> Self {
+        let energy_config = energy_config.clone();
         let energy = EnergyAccountant::new(std::time::Duration::from_secs(
             energy_config.gap_interpolate_seconds,
         ));
@@ -496,6 +516,11 @@ impl AppState {
             energy,
             energy_config,
             energy_wal_replay: WalReplayIndex::default(),
+            display_config: DisplaySettings {
+                color_scheme: "default".to_string(),
+                gauge_style: "blocks".to_string(),
+                show_led_grid: true,
+            },
         }
     }
 
