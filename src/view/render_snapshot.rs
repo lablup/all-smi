@@ -512,4 +512,39 @@ mod tests {
         assert_eq!(restored.data_version, 42);
         assert_eq!(restored.utilization_history.len(), 1);
     }
+
+    #[test]
+    fn test_snapshot_capture_preserves_topology_state() {
+        use crate::ui::topology::TopologyViewMode;
+        let mut state = AppState::new();
+        state.topology_view_mode = TopologyViewMode::Matrix;
+        state.topology_last_host_tab = Some("host2".to_string());
+
+        let snapshot = RenderSnapshot::capture(&mut state);
+
+        assert_eq!(snapshot.topology_view_mode, TopologyViewMode::Matrix);
+        assert_eq!(
+            snapshot.topology_last_host_tab.as_deref(),
+            Some("host2"),
+            "last_host_tab must survive the snapshot capture"
+        );
+    }
+
+    #[test]
+    fn test_topology_state_roundtrips_through_as_app_state() {
+        use crate::ui::topology::TopologyViewMode;
+        let mut state = AppState::new();
+        state.topology_view_mode = TopologyViewMode::Matrix;
+        state.topology_last_host_tab = Some("host3".to_string());
+
+        let snapshot = RenderSnapshot::capture(&mut state);
+        let restored = snapshot.as_app_state();
+
+        assert_eq!(restored.topology_view_mode, TopologyViewMode::Matrix);
+        assert_eq!(
+            restored.topology_last_host_tab.as_deref(),
+            Some("host3"),
+            "topology state must survive the snapshot round-trip"
+        );
+    }
 }

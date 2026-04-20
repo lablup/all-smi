@@ -2171,4 +2171,152 @@ mod tests {
             & 0o777;
         assert_eq!(mode, 0o600, "export CSV file must be 0o600, got {mode:o}");
     }
+
+    // -----------------------------------------------------------------------
+    // Topology tab key handlers (issue #190)
+    // -----------------------------------------------------------------------
+
+    /// Build a minimal remote-mode state with the standard tab strip:
+    /// `[All, Users, Topology, host1, host2]`.
+    fn make_topology_state() -> AppState {
+        let mut state = AppState::new();
+        state.is_local_mode = false;
+        state.loading = false;
+        state.tabs = vec![
+            "All".to_string(),
+            crate::ui::tabs::USERS_TAB_NAME.to_string(),
+            crate::ui::tabs::TOPOLOGY_TAB_NAME.to_string(),
+            "host1".to_string(),
+            "host2".to_string(),
+        ];
+        // Start on host1 so the T hotkey has something to remember.
+        state.current_tab = 3;
+        state
+    }
+
+    #[tokio::test]
+    async fn t_key_jumps_to_topology_tab_and_remembers_host() {
+        let mut state = make_topology_state();
+        // current_tab == 3 == "host1"; pressing T should stash "host1"
+        // and move current_tab to the Topology index (2).
+        handle_key_event(key(KeyCode::Char('T')), &mut state, &args()).await;
+        let topo_idx = crate::ui::tabs::topology_tab_index(&state.tabs).unwrap();
+        assert_eq!(state.current_tab, topo_idx);
+        assert_eq!(
+            state.topology_last_host_tab.as_deref(),
+            Some("host1"),
+            "T must stash the previously-active host tab"
+        );
+    }
+
+    #[tokio::test]
+    async fn t_key_is_noop_when_topology_tab_absent() {
+        // In local mode the Topology tab is not inserted into the strip.
+        let mut state = AppState::new();
+        state.is_local_mode = true;
+        state.tabs = vec!["All".to_string()];
+        state.current_tab = 0;
+        let was_tab = state.current_tab;
+        handle_key_event(key(KeyCode::Char('T')), &mut state, &args()).await;
+        assert_eq!(
+            state.current_tab, was_tab,
+            "T must be a silent no-op when no Topology tab exists"
+        );
+    }
+
+    #[test]
+    fn remember_current_host_tab_skips_reserved_tabs() {
+        let mut state = make_topology_state();
+        // When the current tab is "All" (index 0), nothing should be stashed.
+        state.current_tab = 0;
+        super::remember_current_host_tab(&mut state);
+        assert!(
+            state.topology_last_host_tab.is_none(),
+            "All tab must not be stashed"
+        );
+
+        // When the current tab is Users (index 1), nothing should be stashed.
+        state.current_tab = 1;
+        super::remember_current_host_tab(&mut state);
+        assert!(
+            state.topology_last_host_tab.is_none(),
+            "Users tab must not be stashed"
+        );
+
+        // When the current tab is Topology itself (index 2), nothing should be
+        // stashed — the renderer's fallback handles the self-reference case.
+        state.current_tab = 2;
+        super::remember_current_host_tab(&mut state);
+        assert!(
+            state.topology_last_host_tab.is_none(),
+            "Topology tab must not be stashed"
+        );
+    }
+
+    #[test]
+    fn remember_current_host_tab_stashes_host_tab() {
+        let mut state = make_topology_state();
+        state.current_tab = 4; // "host2"
+        super::remember_current_host_tab(&mut state);
+        assert_eq!(
+            state.topology_last_host_tab.as_deref(),
+            Some("host2"),
+            "host tab must be stashed"
+        );
+    }
+
+    #[tokio::test]
+    async fn m_key_toggles_topology_view_mode_when_topology_active() {
+        let mut state = make_topology_state();
+        // Jump to the Topology tab first so the mode-specific handler fires.
+        let topo_idx = crate::ui::tabs::topology_tab_index(&state.tabs).unwrap();
+        state.current_tab = topo_idx;
+        assert_eq!(
+            state.topology_view_mode,
+            crate::ui::topology::TopologyViewMode::Graph
+        );
+        // Uppercase M (as documented in the help overlay).
+        handle_key_event(key(KeyCode::Char('M')), &mut state, &args()).await;
+        assert_eq!(
+            state.topology_view_mode,
+            crate::ui::topology::TopologyViewMode::Matrix,
+            "first M must switch to matrix"
+        );
+        // Second press cycles back to graph.
+        handle_key_event(key(KeyCode::Char('M')), &mut state, &args()).await;
+        assert_eq!(
+            state.topology_view_mode,
+            crate::ui::topology::TopologyViewMode::Graph,
+            "second M must cycle back to graph"
+        );
+    }
+
+    #[tokio::test]
+    async fn lowercase_m_also_toggles_topology_view_mode() {
+        // The handler accepts both 'm' and 'M' to reduce muscle-memory
+        // friction (operators may not use Shift).
+        let mut state = make_topology_state();
+        let topo_idx = crate::ui::tabs::topology_tab_index(&state.tabs).unwrap();
+        state.current_tab = topo_idx;
+        handle_key_event(key(KeyCode::Char('m')), &mut state, &args()).await;
+        assert_eq!(
+            state.topology_view_mode,
+            crate::ui::topology::TopologyViewMode::Matrix,
+            "lowercase m must toggle topology mode when Topology tab is active"
+        );
+    }
+
+    #[tokio::test]
+    async fn m_key_does_not_toggle_topology_mode_outside_topology_tab() {
+        // 'm' outside the Topology tab hits the global GPU-sort-by-memory
+        // binding instead; topology_view_mode must not change.
+        let mut state = make_topology_state();
+        state.current_tab = 3; // "host1" — not the Topology tab
+        handle_key_event(key(KeyCode::Char('M')), &mut state, &args()).await;
+        assert_eq!(
+            state.topology_view_mode,
+            crate::ui::topology::TopologyViewMode::Graph,
+            "M outside the Topology tab must not toggle topology_view_mode"
+        );
+    }
 }
