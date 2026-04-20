@@ -606,6 +606,12 @@ Security notes:
   does not interpolate remote input into shell commands.
 - `--ssh-strict-host-key=no` logs a prominent TUI warning so a
   misconfiguration is obvious to the operator.
+- `known_hosts` writes use `O_NOFOLLOW` and reject a pre-existing
+  symlink at the target path; an attacker who controls the directory
+  cannot redirect host-key lines into an arbitrary file (e.g.
+  `~/.bashrc`). If persistence fails, accepted keys are kept in an
+  in-process cache so a subsequent connection in the same run can still
+  detect a key change.
 
 ### Interactive UI
 - **Enhanced Controls:**
