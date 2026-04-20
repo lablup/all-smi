@@ -208,7 +208,7 @@ mod tests {
     #[test]
     fn policy_rejects_unknown_token() {
         let e = SshFallbackPolicy::from_cli(Some("gpumonitor")).unwrap_err();
-        matches!(e, SshFallbackPolicyError::Unknown(_));
+        assert!(matches!(e, SshFallbackPolicyError::Unknown(_)));
     }
 
     #[test]
@@ -224,6 +224,6 @@ mod tests {
     #[test]
     fn strict_host_key_rejects_unknown() {
         let e = StrictHostKey::from_cli("sometimes").unwrap_err();
-        matches!(e, StrictHostKeyError::Unknown(_));
+        assert!(matches!(e, StrictHostKeyError::Unknown(_)));
     }
 }

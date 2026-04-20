@@ -40,6 +40,11 @@ pub enum SshTargetError {
     MissingUser(String),
     #[error("invalid SSH target `{0}`: missing host after `user@`")]
     MissingHost(String),
+    #[error(
+        "invalid SSH target `{input}`: host `{host}` contains unsupported characters \
+         (allowed: letters, digits, `-`, `.`, `:`, `_`)"
+    )]
+    InvalidHostChars { input: String, host: String },
     #[error("invalid SSH target `{input}`: port `{port}` is not a valid u16")]
     InvalidPort { input: String, port: String },
     #[error("hostfile I/O error at {path}: {source}")]
@@ -54,6 +59,18 @@ pub enum SshTargetError {
         actual: u64,
         limit: u64,
     },
+}
+
+/// Whether a raw host string contains only characters we expect in a
+/// DNS name, IPv4 literal, bracketed IPv6 body, or an explicit
+/// underscore form that some legacy DNS zones still allow. Rejecting
+/// anything else keeps shell-metacharacter-looking inputs (e.g.
+/// `user@;whoami`) out of logs and tab labels, even though russh goes
+/// through `getaddrinfo` and not a shell.
+fn valid_host_chars(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii() && (c.is_alphanumeric() || matches!(c, '-' | '.' | ':' | '_')))
 }
 
 /// A single remote SSH target parsed from the CLI or hostfile.
@@ -117,6 +134,12 @@ pub fn parse_ssh_target(raw: &str) -> Result<SshTarget, SshTargetError> {
         let host = stripped[..close].to_string();
         let tail = &stripped[close + 1..];
         let port = parse_port_suffix(tail, input)?;
+        if !valid_host_chars(&host) {
+            return Err(SshTargetError::InvalidHostChars {
+                input: input.to_string(),
+                host,
+            });
+        }
         return Ok(SshTarget { user, host, port });
     }
 
@@ -137,12 +160,24 @@ pub fn parse_ssh_target(raw: &str) -> Result<SshTarget, SshTargetError> {
         if host_part.is_empty() {
             return Err(SshTargetError::MissingHost(input.to_string()));
         }
+        if !valid_host_chars(host_part) {
+            return Err(SshTargetError::InvalidHostChars {
+                input: input.to_string(),
+                host: host_part.to_string(),
+            });
+        }
         Ok(SshTarget {
             user,
             host: host_part.to_string(),
             port,
         })
     } else {
+        if !valid_host_chars(rest) {
+            return Err(SshTargetError::InvalidHostChars {
+                input: input.to_string(),
+                host: rest.to_string(),
+            });
+        }
         Ok(SshTarget {
             user,
             host: rest.to_string(),
@@ -262,25 +297,25 @@ mod tests {
     #[test]
     fn rejects_missing_user() {
         let e = parse_ssh_target("dgx-01").unwrap_err();
-        matches!(e, SshTargetError::MissingUser(_));
+        assert!(matches!(e, SshTargetError::MissingUser(_)));
     }
 
     #[test]
     fn rejects_empty_user() {
         let e = parse_ssh_target("@dgx-01").unwrap_err();
-        matches!(e, SshTargetError::MissingUser(_));
+        assert!(matches!(e, SshTargetError::MissingUser(_)));
     }
 
     #[test]
     fn rejects_missing_host() {
         let e = parse_ssh_target("user@").unwrap_err();
-        matches!(e, SshTargetError::MissingHost(_));
+        assert!(matches!(e, SshTargetError::MissingHost(_)));
     }
 
     #[test]
     fn rejects_bad_port() {
         let e = parse_ssh_target("user@host:not-a-number").unwrap_err();
-        matches!(e, SshTargetError::InvalidPort { .. });
+        assert!(matches!(e, SshTargetError::InvalidPort { .. }));
     }
 
     #[test]
@@ -288,10 +323,54 @@ mod tests {
         // `user@fd00::1` is ambiguous (is `1` a port or a hostname
         // fragment?). OpenSSH rejects this form; so do we.
         let e = parse_ssh_target("user@fd00::1").unwrap_err();
-        matches!(
+        assert!(matches!(
             e,
             SshTargetError::MissingHost(_) | SshTargetError::InvalidPort { .. }
-        );
+        ));
+    }
+
+    #[test]
+    fn rejects_host_with_shell_metacharacters() {
+        // M6 regression: injected characters like `;` or `$` must be
+        // rejected up front so they never land in logs / tab labels.
+        let e = parse_ssh_target("user@;whoami").unwrap_err();
+        assert!(matches!(e, SshTargetError::InvalidHostChars { .. }));
+
+        let e = parse_ssh_target("user@$(cat /etc/passwd)").unwrap_err();
+        assert!(matches!(e, SshTargetError::InvalidHostChars { .. }));
+
+        let e = parse_ssh_target("user@host name").unwrap_err();
+        assert!(matches!(e, SshTargetError::InvalidHostChars { .. }));
+
+        let e = parse_ssh_target("user@ho|st").unwrap_err();
+        assert!(matches!(e, SshTargetError::InvalidHostChars { .. }));
+    }
+
+    #[test]
+    fn rejects_ipv6_body_with_invalid_chars() {
+        // The bracketed IPv6 body goes through the same charset
+        // check so injection via `user@[::1$(evil)]` cannot slip in.
+        let e = parse_ssh_target("user@[::1;payload]").unwrap_err();
+        assert!(matches!(e, SshTargetError::InvalidHostChars { .. }));
+    }
+
+    #[test]
+    fn accepts_legitimate_hostnames_and_ips() {
+        // Make sure the charset check isn't too tight for common
+        // real-world inputs: DNS names, IPv4 literals, underscore
+        // hostnames (legacy), plain bracketed IPv6.
+        assert!(parse_ssh_target("user@host-1.example.com").is_ok());
+        assert!(parse_ssh_target("user@10.0.0.1").is_ok());
+        assert!(parse_ssh_target("user@under_score_host").is_ok());
+        assert!(parse_ssh_target("user@[fd00::1]").is_ok());
+        // Zone-ID separator `%` is intentionally rejected: SSH clients
+        // rarely need link-local addressing and allowing `%` widens
+        // the attack surface (URL-encoded injection). Operators who
+        // need zone IDs can file a follow-up issue.
+        assert!(matches!(
+            parse_ssh_target("user@[fe80::1%eth0]").unwrap_err(),
+            SshTargetError::InvalidHostChars { .. }
+        ));
     }
 
     #[test]

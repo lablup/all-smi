@@ -42,13 +42,21 @@ use crate::device::GpuInfo;
 /// documented in issue #194.
 pub const NVIDIA_SMI_COMMAND: &str = "nvidia-smi --query-gpu=index,uuid,name,driver_version,utilization.gpu,memory.used,memory.total,temperature.gpu,clocks.current.graphics,power.draw --format=csv,noheader,nounits";
 
+/// Number of columns [`parse_nvidia_smi_csv`] expects per row. Enforced
+/// as an exact match so a malicious or broken remote cannot silently
+/// misalign field-to-metric mapping by emitting a truncated row.
+pub const EXPECTED_COLUMN_COUNT: usize = 10;
+
 /// Errors surfaced by [`parse_nvidia_smi_csv`]. Every error variant
 /// carries the raw offending line so the caller (the SSH strategy) can
 /// log it against the host that produced it without re-stitching the
 /// original input.
 #[derive(Debug, thiserror::Error)]
 pub enum NvidiaSmiParseError {
-    #[error("unexpected column count (want >= 7, got {got}) in line: {line}")]
+    #[error(
+        "unexpected column count (want {expected}, got {got}) in line: {line}",
+        expected = EXPECTED_COLUMN_COUNT
+    )]
     ColumnCount { got: usize, line: String },
 }
 
@@ -114,8 +122,13 @@ fn parse_row(
     // Columns: 0=index, 1=uuid, 2=name, 3=driver_version,
     // 4=util.gpu, 5=mem.used, 6=mem.total, 7=temp.gpu,
     // 8=clocks.graphics, 9=power.draw
+    //
+    // Require EXACTLY the expected number of columns. A permissive
+    // ">= N" check would let a malicious remote emit a shortened row
+    // that silently aliases later metrics onto earlier columns (e.g.
+    // making temperature-like values appear as power draw).
     let cols: Vec<&str> = line.split(',').map(|s| s.trim()).collect();
-    if cols.len() < 7 {
+    if cols.len() != EXPECTED_COLUMN_COUNT {
         return Err(NvidiaSmiParseError::ColumnCount {
             got: cols.len(),
             line: line.to_string(),
@@ -315,13 +328,52 @@ mod tests {
     }
 
     #[test]
-    fn fewer_than_seven_columns_is_error() {
-        // A row with fewer than 7 columns cannot be meaningfully
+    fn fewer_than_expected_columns_is_error() {
+        // A row with fewer than 10 columns cannot be meaningfully
         // rendered — callers must see the error surface.
         let csv = "0, GPU-a, only three\n";
         let err = parse_nvidia_smi_csv(csv, "u@h", "h", "t").unwrap_err();
         match err {
             NvidiaSmiParseError::ColumnCount { got, .. } => assert_eq!(got, 3),
+        }
+    }
+
+    #[test]
+    fn seven_column_row_is_rejected_not_misaligned() {
+        // Defense-in-depth for the case where a remote (malicious or
+        // buggy) emits a short row that would otherwise silently
+        // alias later fields onto earlier columns. We now require
+        // EXACTLY 10 columns.
+        let csv = "0, GPU-a, N1, drv, 1, 2, 3\n";
+        let err = parse_nvidia_smi_csv(csv, "u@h", "h", "t").unwrap_err();
+        match err {
+            NvidiaSmiParseError::ColumnCount { got, .. } => assert_eq!(got, 7),
+        }
+    }
+
+    #[test]
+    fn nine_column_row_is_rejected() {
+        // A 9-column row is the subtle case: previously accepted by
+        // the `>= 7` guard; now rejected so metrics cannot drift.
+        let csv = "0, GPU-a, N1, 1.0, 10, 20, 30, 40, 50\n";
+        let err = parse_nvidia_smi_csv(csv, "u@h", "h", "t").unwrap_err();
+        match err {
+            NvidiaSmiParseError::ColumnCount { got, line } => {
+                assert_eq!(got, 9);
+                assert!(line.contains("GPU-a"));
+            }
+        }
+    }
+
+    #[test]
+    fn eleven_column_row_is_rejected() {
+        // More columns than expected is also suspicious — reject so
+        // attackers cannot append bogus data beyond the parser's
+        // schema.
+        let csv = "0, GPU-a, N1, 1.0, 10, 20, 30, 40, 50, 60, extra\n";
+        let err = parse_nvidia_smi_csv(csv, "u@h", "h", "t").unwrap_err();
+        match err {
+            NvidiaSmiParseError::ColumnCount { got, .. } => assert_eq!(got, 11),
         }
     }
 

@@ -361,13 +361,13 @@ mod tests {
     #[test]
     fn rejects_non_json_input() {
         let err = parse_rocm_smi_json("not-json", "u@h", "h", "t").unwrap_err();
-        matches!(err, RocmSmiParseError::Json(_));
+        assert!(matches!(err, RocmSmiParseError::Json(_)));
     }
 
     #[test]
     fn rejects_non_object_root() {
         let err = parse_rocm_smi_json("[]", "u@h", "h", "t").unwrap_err();
-        matches!(err, RocmSmiParseError::NotObject);
+        assert!(matches!(err, RocmSmiParseError::NotObject));
     }
 
     #[test]

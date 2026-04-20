@@ -46,7 +46,6 @@ use async_trait::async_trait;
 use russh::client::{self, Handle};
 use russh::keys::{PrivateKeyWithHashAlg, load_secret_key, ssh_key};
 use russh::{ChannelMsg, Disconnect};
-use tokio::sync::Mutex;
 
 use crate::network::ssh_target::SshTarget;
 use crate::network::ssh_transport::StrictHostKey;
@@ -167,12 +166,13 @@ impl Default for ConnectParams {
 }
 
 /// A long-lived SSH session against one remote. Cheap to clone because
-/// the underlying russh [`Handle`] is already an `Arc`-flavoured handle;
-/// we wrap it in [`Mutex`] so the view loop can safely re-use the
-/// session across ticks without serialising every caller.
+/// the underlying russh [`Handle`] is internally `Arc`-shared and
+/// thread-safe — no external lock is required. Multiple concurrent
+/// [`SshSession::exec`] calls on the same session multiplex onto
+/// independent SSH channels via russh's built-in channel machinery.
 #[derive(Clone)]
 pub struct SshSession {
-    inner: Arc<Mutex<Handle<RusshClient>>>,
+    inner: Arc<Handle<RusshClient>>,
     target: SshTarget,
 }
 
@@ -279,7 +279,7 @@ impl SshSession {
         }
 
         Ok(Self {
-            inner: Arc::new(Mutex::new(session)),
+            inner: Arc::new(session),
             target,
         })
     }
@@ -296,8 +296,11 @@ impl SshSession {
         timeout: Duration,
     ) -> Result<ExecOutput, SshClientError> {
         let run = async {
-            let handle = self.inner.lock().await;
-            let mut channel = handle
+            // russh's `client::Handle` is itself internally Arc-shared
+            // and Send + Sync; channel_open_session takes `&self` and
+            // is safe to call concurrently. No external lock needed.
+            let mut channel = self
+                .inner
                 .channel_open_session()
                 .await
                 .map_err(|e| map_russh_error(e, &self.target.host, self.target.port))?;
@@ -340,8 +343,8 @@ impl SshSession {
             }
 
             Ok(ExecOutput {
-                stdout: String::from_utf8_lossy(&stdout).into_owned(),
-                stderr: String::from_utf8_lossy(&stderr).into_owned(),
+                stdout: bytes_to_string_zero_copy(stdout),
+                stderr: bytes_to_string_zero_copy(stderr),
                 exit_status: exit_code,
             })
         };
@@ -357,8 +360,8 @@ impl SshSession {
     /// the time a caller reaches this code path.
     #[allow(dead_code)]
     pub async fn close(&self) {
-        let handle = self.inner.lock().await;
-        if let Err(e) = handle
+        if let Err(e) = self
+            .inner
             .disconnect(Disconnect::ByApplication, "view --ssh shutting down", "en")
             .await
         {
@@ -390,6 +393,17 @@ impl ExecOutput {
     /// True when `exit_status == Some(0)`.
     pub fn is_success(&self) -> bool {
         self.exit_status == Some(0)
+    }
+}
+
+/// Convert a byte buffer into a `String` without copying when the bytes
+/// are already valid UTF-8 (the common case for SSH stdout from
+/// `nvidia-smi` and friends). Only the rare pre-invalid-byte prefix
+/// triggers the lossy re-encode, and only for that non-UTF-8 tail.
+fn bytes_to_string_zero_copy(bytes: Vec<u8>) -> String {
+    match String::from_utf8(bytes) {
+        Ok(s) => s,
+        Err(e) => String::from_utf8_lossy(e.as_bytes()).into_owned(),
     }
 }
 
