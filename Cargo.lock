@@ -2426,9 +2426,9 @@ checksum = "09edd9e8b54e49e587e4f6295a7d29c3ea94d469cb40ab8ca70b288248a81db2"
 
 [[package]]
 name = "libamdgpu_top"
-version = "0.11.3"
+version = "0.11.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a3b5ef5a4117127f6e5b608426f067d124cde754b07127e1fd4199f22deb5041"
+checksum = "767e7df82c1bba462f6093a4b611ac59b33a768290cd8c7fdb32a5b8cb8ec013"
 dependencies = [
  "libdrm_amdgpu_sys",
  "nix 0.31.2",
@@ -2443,9 +2443,9 @@ checksum = "48f5d2a454e16a5ea0f4ced81bd44e4cfc7bd3a507b61887c99fd3538b28e4af"
 
 [[package]]
 name = "libdrm_amdgpu_sys"
-version = "0.8.12"
+version = "0.8.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f473858086180a3190991b49129a459b038494f1d4886c9a464d55b2fe1b3a21"
+checksum = "380c3cfe531e0237f58a16c75710b17eaa006614c6ab115efa921ac8b019c25b"
 dependencies = [
  "libc",
 ]
