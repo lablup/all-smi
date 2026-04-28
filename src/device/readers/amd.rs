@@ -553,7 +553,7 @@ impl GpuReader for AmdGpuReader {
 
             // Get fdinfo usage for all processes
             let mut fdinfo = FdInfoStat::default();
-            fdinfo.get_all_proc_usage(&proc_index);
+            fdinfo.update_proc_usage(&proc_index);
 
             // Collect process data
             for proc_usage in fdinfo.proc_usage {
