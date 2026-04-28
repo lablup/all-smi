@@ -71,7 +71,9 @@ libloading = "0.9"
 
 # AMD GPU support (glibc only, not compatible with musl static linking)
 [target.'cfg(all(target_os = "linux", not(target_env = "musl")))'.dependencies]
-libamdgpu_top = "0.11.3"
+# Pinned exactly: 0.11.4 renamed get_all_proc_usage → update_proc_usage in a
+# patch bump (issue #205). Re-evaluate when bumping.
+libamdgpu_top = "=0.11.4"
 
 [target.'cfg(target_env = "musl")'.dependencies]
 openssl = { version = "0.10.75", features = ["vendored"] }
