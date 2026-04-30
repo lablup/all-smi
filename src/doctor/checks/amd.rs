@@ -14,8 +14,10 @@
 
 //! `amd.*` checks — ROCm, libamdgpu_top, DRI access, musl-build gating.
 
+#[cfg(target_os = "linux")]
 use std::time::Duration;
 
+#[cfg(target_os = "linux")]
 use crate::doctor::exec::try_exec;
 use crate::doctor::types::{Check, CheckCtx, CheckResult, Severity};
 

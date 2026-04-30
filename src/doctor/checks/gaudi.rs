@@ -14,8 +14,10 @@
 
 //! `gaudi.*` checks — hl-smi presence, HL device nodes, driver version.
 
+#[cfg(target_os = "linux")]
 use std::time::Duration;
 
+#[cfg(target_os = "linux")]
 use crate::doctor::exec::{try_exec, which};
 use crate::doctor::types::{Check, CheckCtx, CheckResult, Severity};
 

@@ -16,8 +16,10 @@
 //! node access. Windows is a structural skip because the UNIX uid/gid
 //! model does not translate.
 
+#[cfg(target_os = "linux")]
 use std::time::Duration;
 
+#[cfg(target_os = "linux")]
 use crate::doctor::exec::try_exec;
 use crate::doctor::types::{Check, CheckCtx, CheckResult, Severity};
 

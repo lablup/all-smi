@@ -14,6 +14,7 @@
 
 //! `furiosa.*` checks — feature flag enabled, furiosa-smi binary.
 
+#[cfg(target_os = "linux")]
 use crate::doctor::exec::which;
 use crate::doctor::types::{Check, CheckCtx, CheckResult, Severity};
 
