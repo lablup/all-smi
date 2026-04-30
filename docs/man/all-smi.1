@@ -233,6 +233,54 @@ http://node002:9090
 https://node003:9443
 .fi
 .RE
+.SH ENERGY ACCOUNTING
+The Energy Session panel integrates instantaneous power draw over time
+to report cumulative energy consumption (kWh) and an optional cost
+estimate ($/kWh) for the current run. The session counter starts when
+the process launches and can be reset with the
+.B R
+key in the TUI; the underlying Prometheus
+.B all_smi_energy_joules_total
+counter is monotonic and is never reset.
+.PP
+Display behaviour is controlled via the
+.B [energy]
+section of the TOML config file (see
+.B all-smi config init
+for the canonical path) or the following environment variables, which
+take precedence over the file:
+.TP
+.B ALL_SMI_ENERGY_PRICE
+Electricity price per kWh as a decimal number (e.g.
+.IR 0.12 ).
+A non-positive or non-finite value silently hides the cost column instead
+of surfacing
+.IR $NaN .
+Default: 0.12.
+.TP
+.B ALL_SMI_ENERGY_CURRENCY
+Display-only currency code (e.g.
+.IR USD ", " KRW ", " EUR ).
+Default: USD.
+.TP
+.B ALL_SMI_ENERGY_NO_COST
+When set to any value, suppresses the monetary cost column. The kWh
+total and average power are still rendered.
+.TP
+.B ALL_SMI_ENERGY_WAL_PATH
+Path to the disk-backed write-ahead log used to persist the cumulative
+joules counter across restarts. Default:
+.IR ~/.cache/all-smi/energy-wal.bin .
+.TP
+.B ALL_SMI_ENERGY_NO_WAL
+When set to any value, disables the disk-backed WAL — counters are
+in-memory only. Useful for ephemeral hosts.
+.TP
+.B ALL_SMI_ENERGY_GAP_SECONDS
+Sample-gap threshold in seconds (range
+.IR [1,\ 3600] )
+above which the integrator switches from trapezoidal to hold-last
+integration. Default: 10.
 .SH ENVIRONMENT
 .TP
 .B RUST_LOG

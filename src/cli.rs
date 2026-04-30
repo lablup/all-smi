@@ -22,8 +22,22 @@ pub use crate::cli_config::{
     ConfigAction, ConfigArgs, ConfigPrintArgs, ConfigPrintFormat, ConfigValidateArgs,
 };
 
+const ENERGY_HELP: &str = "Energy Session (TUI):
+  Shows accumulated energy (kWh), avg power, and estimated cost since the
+  process started. Press R in the TUI to reset the session counter (the
+  Prometheus all_smi_energy_joules_total counter is unaffected).
+
+  Configure via [energy] in the TOML config (see `all-smi config init`)
+  or these environment variables (override the config file):
+    ALL_SMI_ENERGY_PRICE         $/kWh price (default 0.12; invalid hides cost)
+    ALL_SMI_ENERGY_CURRENCY      Display currency code (default USD)
+    ALL_SMI_ENERGY_NO_COST=1     Hide cost column; still show kWh
+    ALL_SMI_ENERGY_WAL_PATH      WAL file path (default ~/.cache/all-smi/energy-wal.bin)
+    ALL_SMI_ENERGY_NO_WAL=1      Disable disk WAL (in-memory counters only)
+    ALL_SMI_ENERGY_GAP_SECONDS   Gap threshold for trapezoid→hold-last (1..=3600, default 10)";
+
 #[derive(Parser)]
-#[command(author, version, about, long_about = None)]
+#[command(author, version, about, long_about = None, after_help = ENERGY_HELP)]
 pub struct Cli {
     /// Override the default TOML config file path. When omitted the loader
     /// probes the platform-appropriate locations (see `all-smi config init`

@@ -294,6 +294,28 @@ fn render_shortcuts_section(
             "membar",
         ),
         ("", "", ""),
+        ("Energy Session:", "", "header"),
+        (
+            "  Shows",
+            "kWh accumulated since session start, avg W, est. cost",
+            "legend",
+        ),
+        ("  R key", "Resets the kWh/cost session counter", "legend"),
+        (
+            "  Price",
+            "$/kWh from [energy] TOML or ALL_SMI_ENERGY_PRICE",
+            "legend",
+        ),
+        (
+            "  Currency",
+            "ALL_SMI_ENERGY_CURRENCY (default USD)",
+            "legend",
+        ),
+        (
+            "  Hide cost",
+            "ALL_SMI_ENERGY_NO_COST=1 (kWh still shown)",
+            "legend",
+        ),
         ("", "", ""),
         ("Current Status:", "", "header"),
     ];
