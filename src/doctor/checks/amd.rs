@@ -14,9 +14,6 @@
 
 //! `amd.*` checks — ROCm, libamdgpu_top, DRI access, musl-build gating.
 
-use std::time::Duration;
-
-use crate::doctor::exec::try_exec;
 use crate::doctor::types::{Check, CheckCtx, CheckResult, Severity};
 
 static CHECKS: &[&Check] = &[&ROCM_VERSION, &LIBAMDGPU_TOP_ABI, &DRI_PERMS, &MUSL_GATE];

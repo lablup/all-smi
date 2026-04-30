@@ -14,9 +14,6 @@
 
 //! `gaudi.*` checks — hl-smi presence, HL device nodes, driver version.
 
-use std::time::Duration;
-
-use crate::doctor::exec::{try_exec, which};
 use crate::doctor::types::{Check, CheckCtx, CheckResult, Severity};
 
 static CHECKS: &[&Check] = &[&HLSMI_BINARY, &DEVICE_NODES, &DRIVER];

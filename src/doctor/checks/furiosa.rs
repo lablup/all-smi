@@ -14,7 +14,6 @@
 
 //! `furiosa.*` checks — feature flag enabled, furiosa-smi binary.
 
-use crate::doctor::exec::which;
 use crate::doctor::types::{Check, CheckCtx, CheckResult, Severity};
 
 static CHECKS: &[&Check] = &[&FEATURE, &SMI];

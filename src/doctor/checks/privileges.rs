@@ -16,9 +16,6 @@
 //! node access. Windows is a structural skip because the UNIX uid/gid
 //! model does not translate.
 
-use std::time::Duration;
-
-use crate::doctor::exec::try_exec;
 use crate::doctor::types::{Check, CheckCtx, CheckResult, Severity};
 
 static CHECKS: &[&Check] = &[&USER, &ROOT, &VIDEO_RENDER, &DEV_DRI, &DEV_TENSTORRENT];
