@@ -1100,17 +1100,17 @@ operator can filter the visible GPUs mid-playback.
 
 **`record` options summary**
 
-| Flag              | Default                           | Description                                      |
-|-------------------|-----------------------------------|--------------------------------------------------|
-| `--output` / `-o` | `all-smi-record.ndjson.zst`       | Output path. Extension picks the codec.          |
-| `--interval` / `-i` | `3`                             | Seconds between frames.                          |
-| `--duration`      | `0` (= record until SIGTERM)      | Accepts `30s`, `5m`, `1h`, `1d`, or bare seconds. |
-| `--source`        | `local`                           | `local` (hardware readers) or `remote` (HTTP scrape). |
-| `--hosts` / `--hostfile` | (none)                     | Required when `--source=remote`.                 |
-| `--include`       | `gpu,cpu,memory,chassis`          | Comma-separated sections (plus `process`).       |
-| `--max-size`      | `100M`                            | Rotation threshold per segment (`1K`, `10M`, `2G`). `0` disables rotation. |
-| `--max-files`     | `10`                              | Max segments on disk (active + rotated).         |
-| `--compress`      | auto (from extension)             | `zstd` / `gzip` / `none`.                        |
+| Flag                     | Default                                              | Description                                                                |
+|--------------------------|------------------------------------------------------|----------------------------------------------------------------------------|
+| `--output` / `-o`        | `~/.cache/all-smi/records/all-smi-record.ndjson.zst` | Output path. Extension picks the codec.                                    |
+| `--interval` / `-i`      | `3`                                                  | Seconds between frames.                                                    |
+| `--duration`             | `0` (= record until SIGTERM)                         | Accepts `30s`, `5m`, `1h`, `1d`, or bare seconds.                          |
+| `--source`               | `local`                                              | `local` (hardware readers) or `remote` (HTTP scrape).                      |
+| `--hosts` / `--hostfile` | (none)                                               | Required when `--source=remote`.                                           |
+| `--include`              | `gpu,cpu,memory,chassis`                             | Comma-separated sections (plus `process`).                                 |
+| `--max-size`             | `100M`                                               | Rotation threshold per segment (`1K`, `10M`, `2G`). `0` disables rotation. |
+| `--max-files`            | `10`                                                 | Max segments on disk (active + rotated).                                   |
+| `--compress`             | auto (from extension)                                | `zstd` / `gzip` / `none`.                                                  |
 
 **Security invariants**
 
