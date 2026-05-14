@@ -311,26 +311,32 @@ pub fn print_gpu_info<W: Write>(
 
     print_colored_text(stdout, &temp_display, temp_color, None, None);
 
-    // Display GPU frequency
-    if info.frequency > 0 {
-        print_colored_text(stdout, " Freq:", Color::Magenta, None, None);
-        if info.frequency >= 1000 {
-            print_colored_text(
-                stdout,
-                &format!("{:.2}GHz", info.frequency as f64 / 1000.0),
-                Color::White,
-                None,
-                None,
-            );
-        } else {
-            print_colored_text(
-                stdout,
-                &format!("{}MHz", info.frequency),
-                Color::White,
-                None,
-                None,
-            );
-        }
+    // Display GPU frequency. Always render the label so the row layout stays
+    // stable across refreshes; substitute N/A when the value is missing, the
+    // same way Util/VRAM/Temp above handle their missing-data cases. Readers
+    // that statically report `frequency: 0` (Rebellions, Intel Gaudi, AMD via
+    // WMI, and any platform that genuinely lacks a frequency probe) will show
+    // ` Freq:     N/A` instead of letting the field — and every field after
+    // it — vanish for the duration of that sample.
+    print_colored_text(stdout, " Freq:", Color::Magenta, None, None);
+    if info.frequency == 0 {
+        print_colored_text(stdout, &format!("{:>7}", "N/A"), Color::White, None, None);
+    } else if info.frequency >= 1000 {
+        print_colored_text(
+            stdout,
+            &format!("{:.2}GHz", info.frequency as f64 / 1000.0),
+            Color::White,
+            None,
+            None,
+        );
+    } else {
+        print_colored_text(
+            stdout,
+            &format!("{}MHz", info.frequency),
+            Color::White,
+            None,
+            None,
+        );
     }
 
     print_colored_text(stdout, " Pwr:", Color::Red, None, None);

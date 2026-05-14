@@ -877,6 +877,15 @@ impl IOReportMetrics {
 
         let avg_freq = if active_residency > 0 {
             (weighted_freq / active_residency as f64) as u32
+        } else if !freq_table.is_empty() {
+            // The GPU is present (total_residency > 0) but spent the entire
+            // sampling window in IDLE/OFF/DOWN states. It is not running at
+            // 0 Hz — it is parked at its lowest P-state. Report the lowest
+            // entry of the IOKit pmgr frequency table (sorted ascending) so
+            // the renderer shows a truthful idle clock instead of letting
+            // the Freq field flicker between a real value and 0 every
+            // refresh cycle.
+            freq_table[0]
         } else {
             0
         };
@@ -891,6 +900,11 @@ impl IOReportMetrics {
         let mut total_residency: i64 = 0;
         let mut weighted_freq: i64 = 0;
         let mut active_residency: i64 = 0;
+        // Track the lowest parseable active-state frequency seen during the
+        // scan. Used as the idle fallback when the cluster is present
+        // (total_residency > 0) but spent the entire window in IDLE/OFF/DOWN
+        // states — that's its parked P-state, not 0 Hz.
+        let mut min_active_freq: Option<i64> = None;
 
         for (name, residency) in residencies {
             total_residency += residency;
@@ -905,6 +919,7 @@ impl IOReportMetrics {
             // Parse frequency from state name (e.g., "2064" for 2064 MHz)
             if let Ok(freq) = name.trim().parse::<i64>() {
                 weighted_freq += freq * residency;
+                min_active_freq = Some(min_active_freq.map_or(freq, |m| m.min(freq)));
             }
         }
 
@@ -915,7 +930,13 @@ impl IOReportMetrics {
         let avg_freq = if active_residency > 0 {
             (weighted_freq / active_residency) as u32
         } else {
-            0
+            // Cluster is present but parked at its lowest P-state for the
+            // entire window. Report the minimum active-state frequency we
+            // saw (the parked P-state) rather than masquerading as no data.
+            // This applies to both the GPU fallback path (no IOKit pmgr
+            // table available) and CPU clusters, which both call this
+            // helper via process_cpu_channel.
+            min_active_freq.unwrap_or(0) as u32
         };
 
         let residency_pct = (active_residency as f64 / total_residency as f64) * 100.0;
@@ -1017,5 +1038,68 @@ mod tests {
 
         // No frequency data available
         assert_eq!(freq, 0);
+    }
+
+    #[test]
+    fn test_calc_freq_from_residencies_all_idle() {
+        // Cluster is present and idle, but there are no parseable active
+        // state names available to fall back on. Expected: (0, 0.0) —
+        // truly no usable signal.
+        let residencies = vec![("IDLE".to_string(), 500)];
+
+        let (freq, residency) = IOReportMetrics::calc_freq_from_residencies(&residencies);
+
+        assert_eq!(freq, 0);
+        assert!((residency - 0.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn test_calc_freq_from_residencies_idle_with_known_states() {
+        // Cluster spent the whole window in IDLE, but the residency map
+        // still enumerates the (zero-residency) active P-states. The
+        // function should report the minimum parseable active frequency
+        // as the parked clock with 0% active residency, rather than 0 Hz.
+        let residencies = vec![
+            ("IDLE".to_string(), 500),
+            ("600".to_string(), 0),
+            ("1200".to_string(), 0),
+        ];
+
+        let (freq, residency) = IOReportMetrics::calc_freq_from_residencies(&residencies);
+
+        assert_eq!(freq, 600);
+        assert!((residency - 0.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn test_calc_gpu_freq_with_table_idle() {
+        // GPU is present (residency > 0) but every state is idle/off.
+        // With a non-empty IOKit pmgr freq_table, the function should
+        // return the lowest entry — the parked P-state — instead of 0.
+        let residencies = vec![("OFF".to_string(), 200), ("IDLE".to_string(), 800)];
+
+        let freq_table = [396, 720, 1398];
+
+        let (freq, residency) =
+            IOReportMetrics::calc_gpu_freq_with_table(&residencies, &freq_table);
+
+        assert_eq!(freq, 396);
+        assert!((residency - 0.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn test_calc_gpu_freq_with_table_empty_table_idle() {
+        // GPU is present but idle, and the IOKit pmgr table is empty so
+        // there is no idle-state P-state to fall back on. Expected:
+        // (0, 0.0). The renderer will substitute N/A.
+        let residencies = vec![("OFF".to_string(), 200), ("IDLE".to_string(), 800)];
+
+        let freq_table: [u32; 0] = [];
+
+        let (freq, residency) =
+            IOReportMetrics::calc_gpu_freq_with_table(&residencies, &freq_table);
+
+        assert_eq!(freq, 0);
+        assert!((residency - 0.0).abs() < 0.1);
     }
 }
