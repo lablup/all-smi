@@ -291,6 +291,28 @@ impl BarSegment {
     pub fn memory_cache(value: f64) -> Self {
         Self::new(value, Color::Yellow).with_label("cache")
     }
+
+    /// Swap-used segment in its idle color (Magenta).
+    ///
+    /// Use this when `swap_total_bytes > 0` but no swap is currently in
+    /// use; renderers should call [`Self::swap_used_active`] when
+    /// `swap_used_bytes > 0` to emphasize the pressure signal. Kept
+    /// public alongside `swap_used_active` so external renderers can
+    /// distinguish "swap configured" from "swap pressure" without
+    /// re-implementing the color choice.
+    #[allow(dead_code)]
+    pub fn swap_used(value: f64) -> Self {
+        Self::new(value, Color::Magenta).with_label("swap")
+    }
+
+    /// Swap-used segment in its emphasized color (Red).
+    ///
+    /// Renderers should switch to this variant whenever
+    /// `swap_used_bytes > 0` so that active swapping is visually
+    /// distinct from a host that merely has swap space configured.
+    pub fn swap_used_active(value: f64) -> Self {
+        Self::new(value, Color::Red).with_label("swap")
+    }
 }
 
 #[cfg(test)]

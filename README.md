@@ -454,8 +454,18 @@ Stable check IDs (greppable across versions):
 - **System Memory Tracking:**
   - Total, used, available, and free memory
   - Memory utilization percentage
-  - Swap space monitoring
   - Linux: Buffer and cache memory tracking
+- **Swap Space Monitoring:**
+  - A dedicated `Swap` bar is rendered directly under the `Mem` bar in the
+    TUI memory section whenever the host has swap configured
+    (`swap_total_bytes > 0`)
+  - Hosts without swap (`swap_total_bytes == 0`) automatically hide the
+    swap row so the layout stays compact — most relevant on Apple Silicon
+    before macOS' `dynamic_pager` allocates a swap file
+  - The swap bar segment is colored **red** when `swap_used_bytes > 0`
+    to flag active swapping at a glance — the primary signal needed for
+    AI inference workloads on Apple Silicon, where over-sized models
+    spill unified memory into swap and silently degrade throughput
 - **Visual Indicators:** Color-coded memory usage bars
 
 ### Process Monitoring

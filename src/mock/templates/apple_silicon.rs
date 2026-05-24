@@ -260,6 +260,37 @@ impl AppleSiliconMockGenerator {
             "all_smi_memory_pressure{{instance=\"{}\"}} {{{{MEM_PRESSURE}}}}\n",
             self.instance_name
         ));
+
+        // Swap metrics (issue #220 — demoable swap row).
+        // Emitted only when `swap_total_bytes > 0`, matching the real
+        // `MemoryMetricExporter::export_swap_metrics` guard at
+        // `src/api/metrics/memory.rs:76`. Apple Silicon's
+        // `dynamic_pager` may legitimately report 0 until a swap file
+        // exists; the mock seeds a non-zero value so the swap UI is
+        // always demoable, but the conditional is kept here so the
+        // mock stays faithful to the API contract.
+        if memory.swap_total_bytes > 0 {
+            template.push_str("# HELP all_smi_swap_total_bytes Total swap space in bytes\n");
+            template.push_str("# TYPE all_smi_swap_total_bytes gauge\n");
+            template.push_str(&format!(
+                "all_smi_swap_total_bytes{{instance=\"{}\"}} {}\n",
+                self.instance_name, memory.swap_total_bytes
+            ));
+
+            template.push_str("# HELP all_smi_swap_used_bytes Used swap space in bytes\n");
+            template.push_str("# TYPE all_smi_swap_used_bytes gauge\n");
+            template.push_str(&format!(
+                "all_smi_swap_used_bytes{{instance=\"{}\"}} {{{{SWAP_USED}}}}\n",
+                self.instance_name
+            ));
+
+            template.push_str("# HELP all_smi_swap_free_bytes Free swap space in bytes\n");
+            template.push_str("# TYPE all_smi_swap_free_bytes gauge\n");
+            template.push_str(&format!(
+                "all_smi_swap_free_bytes{{instance=\"{}\"}} {{{{SWAP_FREE}}}}\n",
+                self.instance_name
+            ));
+        }
     }
 
     /// Render dynamic values for Apple Silicon
@@ -352,6 +383,12 @@ impl AppleSiliconMockGenerator {
         let mem_pressure = (memory.used_bytes as f64 / memory.total_bytes as f64) * 100.0;
         response = response.replace("{{MEM_PRESSURE}}", &format!("{mem_pressure:.2}"));
 
+        // Swap metrics (issue #220). Only present in the template when
+        // `swap_total_bytes > 0`; the replace calls are no-ops otherwise.
+        response = response
+            .replace("{{SWAP_USED}}", &memory.swap_used_bytes.to_string())
+            .replace("{{SWAP_FREE}}", &memory.swap_free_bytes.to_string());
+
         // Replace Apple chassis metrics
         response = crate::mock::templates::common::render_apple_chassis_metrics(response, gpus);
 
@@ -406,6 +443,15 @@ impl MockGenerator for AppleSiliconMockGenerator {
             per_core_utilization: vec![],
         };
 
+        // Apple Silicon (macOS) manages swap dynamically via `dynamic_pager`,
+        // which creates a swap file the moment unified memory comes under
+        // pressure. Seed the mock with a realistic 4 GB swap file and a
+        // small but non-zero `swap_used` value so that:
+        //   1. The TUI's new swap row (issue #220) is demoable end-to-end
+        //      against `all-smi-mock-server` without needing real macOS.
+        //   2. The amber/red "active swap" emphasis path actually fires.
+        let swap_total: u64 = 4_294_967_296; // 4 GB
+        let swap_used = rng.random_range(256_000_000..1_500_000_000);
         let memory = MemoryMetrics {
             total_bytes: 68_719_476_736, // 64GB unified memory
             used_bytes: rng.random_range(10_000_000_000..60_000_000_000),
@@ -413,9 +459,9 @@ impl MockGenerator for AppleSiliconMockGenerator {
             free_bytes: rng.random_range(5_000_000_000..50_000_000_000),
             cached_bytes: rng.random_range(1_000_000_000..10_000_000_000),
             buffers_bytes: rng.random_range(100_000_000..1_000_000_000),
-            swap_total_bytes: 0,
-            swap_used_bytes: 0,
-            swap_free_bytes: 0,
+            swap_total_bytes: swap_total,
+            swap_used_bytes: swap_used,
+            swap_free_bytes: swap_total.saturating_sub(swap_used),
             utilization: rng.random_range(10.0..90.0),
         };
 

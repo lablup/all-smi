@@ -490,6 +490,36 @@ impl NvidiaMockGenerator {
             "all_smi_memory_total_bytes{{instance=\"{}\"}} {}\n",
             self.instance_name, memory.total_bytes
         ));
+
+        // Swap metrics (issue #220 — demoable swap row).
+        // Emitted only when `swap_total_bytes > 0`, matching the real
+        // `MemoryMetricExporter::export_swap_metrics` guard at
+        // `src/api/metrics/memory.rs:76`. Templates generated with
+        // zero swap therefore omit these series, preserving the
+        // exporter contract that swap series only appear on hosts
+        // with swap actually configured.
+        if memory.swap_total_bytes > 0 {
+            template.push_str("# HELP all_smi_swap_total_bytes Total swap space in bytes\n");
+            template.push_str("# TYPE all_smi_swap_total_bytes gauge\n");
+            template.push_str(&format!(
+                "all_smi_swap_total_bytes{{instance=\"{}\"}} {}\n",
+                self.instance_name, memory.swap_total_bytes
+            ));
+
+            template.push_str("# HELP all_smi_swap_used_bytes Used swap space in bytes\n");
+            template.push_str("# TYPE all_smi_swap_used_bytes gauge\n");
+            template.push_str(&format!(
+                "all_smi_swap_used_bytes{{instance=\"{}\"}} {{{{SWAP_USED}}}}\n",
+                self.instance_name
+            ));
+
+            template.push_str("# HELP all_smi_swap_free_bytes Free swap space in bytes\n");
+            template.push_str("# TYPE all_smi_swap_free_bytes gauge\n");
+            template.push_str(&format!(
+                "all_smi_swap_free_bytes{{instance=\"{}\"}} {{{{SWAP_FREE}}}}\n",
+                self.instance_name
+            ));
+        }
     }
 
     /// Render dynamic values for NVIDIA GPUs
@@ -549,6 +579,14 @@ impl NvidiaMockGenerator {
         response = response
             .replace("{{CPU_UTIL}}", &format!("{:.2}", cpu.utilization))
             .replace("{{MEM_USED}}", &memory.used_bytes.to_string());
+
+        // Swap metrics (issue #220). Placeholders are only present in
+        // the template when `swap_total_bytes > 0`; the replaces are
+        // no-ops otherwise so this stays safe for the zero-swap
+        // `generate_template` path.
+        response = response
+            .replace("{{SWAP_USED}}", &memory.swap_used_bytes.to_string())
+            .replace("{{SWAP_FREE}}", &memory.swap_free_bytes.to_string());
 
         // Replace chassis metrics
         response = crate::mock::templates::common::render_chassis_metrics(response, gpus);
@@ -612,6 +650,12 @@ impl MockGenerator for NvidiaMockGenerator {
             per_core_utilization: vec![],
         };
 
+        // Linux servers typically configure a swap partition or zram
+        // device alongside large physical RAM. Seed a realistic 32 GB
+        // swap area with a modest current usage so the TUI swap row
+        // (issue #220) renders end-to-end against the NVIDIA mock.
+        let swap_total: u64 = 34_359_738_368; // 32 GB
+        let swap_used = rng.random_range(0..8_000_000_000);
         let memory = MemoryMetrics {
             total_bytes: 1099511627776, // 1TB
             used_bytes: rng.random_range(10_000_000_000..500_000_000_000),
@@ -619,9 +663,9 @@ impl MockGenerator for NvidiaMockGenerator {
             free_bytes: rng.random_range(50_000_000_000..400_000_000_000),
             cached_bytes: rng.random_range(10_000_000_000..100_000_000_000),
             buffers_bytes: rng.random_range(1_000_000_000..10_000_000_000),
-            swap_total_bytes: 0,
-            swap_used_bytes: 0,
-            swap_free_bytes: 0,
+            swap_total_bytes: swap_total,
+            swap_used_bytes: swap_used,
+            swap_free_bytes: swap_total.saturating_sub(swap_used),
             utilization: rng.random_range(10.0..90.0),
         };
 
@@ -756,6 +800,87 @@ mod tests {
             swap_free_bytes: 0,
             utilization: 50.0,
         }
+    }
+
+    /// Memory fixture with a configured swap area, used by the
+    /// issue #220 swap-emission tests.
+    fn make_memory_metrics_with_swap() -> MemoryMetrics {
+        MemoryMetrics {
+            total_bytes: 1024,
+            used_bytes: 512,
+            available_bytes: 512,
+            free_bytes: 512,
+            cached_bytes: 0,
+            buffers_bytes: 0,
+            swap_total_bytes: 4_294_967_296,
+            swap_used_bytes: 536_870_912,
+            swap_free_bytes: 3_758_096_384,
+            utilization: 50.0,
+        }
+    }
+
+    // --- swap metrics (issue #220) ---
+
+    #[test]
+    fn mock_template_omits_swap_metrics_when_swap_total_is_zero() {
+        // Mirrors the real API exporter behaviour: when the host has
+        // no swap, `all_smi_swap_*` series are not emitted at all.
+        let gen_ = NvidiaMockGenerator::new(None, "mock-node".to_string());
+        let gpus = make_gpu_metrics();
+        let tpl = gen_.build_nvidia_template(&gpus, &make_cpu_metrics(), &make_memory_metrics());
+
+        for metric in &[
+            "all_smi_swap_total_bytes",
+            "all_smi_swap_used_bytes",
+            "all_smi_swap_free_bytes",
+        ] {
+            assert!(
+                !tpl.contains(metric),
+                "swap metric {metric:?} should be absent when swap_total_bytes == 0"
+            );
+        }
+    }
+
+    #[test]
+    fn mock_template_emits_swap_metrics_when_swap_total_is_nonzero() {
+        let gen_ = NvidiaMockGenerator::new(None, "mock-node".to_string());
+        let gpus = make_gpu_metrics();
+        let memory = make_memory_metrics_with_swap();
+        let tpl = gen_.build_nvidia_template(&gpus, &make_cpu_metrics(), &memory);
+
+        for metric in &[
+            "all_smi_swap_total_bytes",
+            "all_smi_swap_used_bytes",
+            "all_smi_swap_free_bytes",
+        ] {
+            assert!(
+                tpl.contains(metric),
+                "swap metric {metric:?} should be present when swap_total_bytes > 0"
+            );
+        }
+        // The total is a literal in the template; used/free are placeholders
+        // resolved by `render_nvidia_response`.
+        assert!(
+            tpl.contains("{{SWAP_USED}}") && tpl.contains("{{SWAP_FREE}}"),
+            "swap value placeholders missing from template"
+        );
+    }
+
+    #[test]
+    fn mock_render_resolves_swap_placeholders() {
+        let gen_ = NvidiaMockGenerator::new(None, "mock-node".to_string());
+        let gpus = make_gpu_metrics();
+        let memory = make_memory_metrics_with_swap();
+        let tpl = gen_.build_nvidia_template(&gpus, &make_cpu_metrics(), &memory);
+        let rendered = gen_.render_nvidia_response(&tpl, &gpus, &make_cpu_metrics(), &memory);
+
+        assert!(
+            !rendered.contains("{{SWAP_USED}}") && !rendered.contains("{{SWAP_FREE}}"),
+            "swap placeholders should be resolved after render; got:\n{rendered}"
+        );
+        // Used / free byte counts should appear verbatim in the rendered output.
+        assert!(rendered.contains(&memory.swap_used_bytes.to_string()));
+        assert!(rendered.contains(&memory.swap_free_bytes.to_string()));
     }
 
     // Process-global mutex that serialises every test in this module which

@@ -198,7 +198,12 @@ impl MetricsParser {
                             host,
                         );
                     }
-                } else if metric_name.starts_with("memory_") {
+                } else if metric_name.starts_with("memory_") || metric_name.starts_with("swap_") {
+                    // Swap metrics share the same per-host accumulator as
+                    // memory — they carry identical `instance`/`hostname`/`index`
+                    // labels and are conceptually a property of the host's
+                    // memory subsystem (issue #220). Routing them together
+                    // keeps the `MemoryInfo` row populated consistently.
                     if memory_info_map.len() < MAX_DEVICES_PER_TYPE {
                         self.process_memory_metrics(
                             &mut memory_info_map,
@@ -902,7 +907,15 @@ impl MetricsParser {
             "memory_available_bytes" => available_bytes as u64,
             "memory_buffers_bytes" => buffers_bytes as u64,
             "memory_cached_bytes" => cached_bytes as u64,
-            "memory_utilization" => utilization as f64
+            "memory_utilization" => utilization as f64,
+            // Swap metrics (issue #220). The API exporter only emits
+            // these series when `swap_total_bytes > 0`, so absent
+            // metrics leave the corresponding fields at their default
+            // zero — which is exactly what the renderer needs to
+            // decide whether to show the Swap row.
+            "swap_total_bytes" => swap_total_bytes as u64,
+            "swap_used_bytes" => swap_used_bytes as u64,
+            "swap_free_bytes" => swap_free_bytes as u64
         });
     }
 
@@ -1804,6 +1817,40 @@ all_smi_memory_utilization{instance="node-0058", hostname="node-0058", index="0"
         assert_eq!(memory.used_bytes, 68719476736);
         assert_eq!(memory.available_bytes, 68719476736);
         assert_eq!(memory.utilization, 50.0);
+        // Swap fields default to zero when the exporter omits them
+        // (the API guard at `src/api/metrics/memory.rs:76` skips swap
+        // series on hosts where `swap_total_bytes == 0`).
+        assert_eq!(memory.swap_total_bytes, 0);
+        assert_eq!(memory.swap_used_bytes, 0);
+        assert_eq!(memory.swap_free_bytes, 0);
+    }
+
+    #[test]
+    fn test_parse_swap_metrics() {
+        // Issue #220: swap series share the per-host memory accumulator.
+        // The parser routes `swap_*` lines into the same `MemoryInfo`
+        // row that the matching `memory_*` lines populate.
+        let parser = create_test_parser();
+        let re = create_test_regex();
+        let host = "127.0.0.1:10058";
+
+        let test_data = r#"
+all_smi_memory_total_bytes{instance="node-0058", hostname="node-0058", index="0"} 137438953472
+all_smi_memory_used_bytes{instance="node-0058", hostname="node-0058", index="0"} 68719476736
+all_smi_swap_total_bytes{instance="node-0058", hostname="node-0058", index="0"} 4294967296
+all_smi_swap_used_bytes{instance="node-0058", hostname="node-0058", index="0"} 536870912
+all_smi_swap_free_bytes{instance="node-0058", hostname="node-0058", index="0"} 3758096384
+"#;
+
+        let parsed = parser.parse_metrics(test_data, host, &re);
+
+        assert_eq!(parsed.memory_info.len(), 1);
+        let memory = &parsed.memory_info[0];
+        assert_eq!(memory.total_bytes, 137438953472);
+        assert_eq!(memory.used_bytes, 68719476736);
+        assert_eq!(memory.swap_total_bytes, 4294967296);
+        assert_eq!(memory.swap_used_bytes, 536870912);
+        assert_eq!(memory.swap_free_bytes, 3758096384);
     }
 
     #[test]

@@ -293,6 +293,11 @@ fn render_shortcuts_section(
             "[used/buffers/cache                    used%]",
             "membar",
         ),
+        (
+            "  Swap gauge:",
+            "[swap                                   GB] (red = active)",
+            "swapbar",
+        ),
         ("", "", ""),
         ("Energy Session:", "", "header"),
         (
@@ -478,6 +483,14 @@ fn format_shortcut_line(key: &str, desc: &str, style: &str, width: usize) -> Str
                 .replace("used", &"used".green().to_string())
                 .replace("buffers", &"buffers".blue().to_string())
                 .replace("cache", &"cache".yellow().to_string());
+            format!(" {key:<10} {colored_desc}")
+        }
+        "swapbar" => {
+            // Mirror "membar" styling for the swap row added in issue
+            // #220. The bar text is colored red to convey "active
+            // swapping = bad"; the parenthetical clarifier stays in
+            // the default text color so the legend remains readable.
+            let colored_desc = desc.replace("swap", &"swap".red().to_string());
             format!(" {key:<10} {colored_desc}")
         }
         _ => String::new(),
