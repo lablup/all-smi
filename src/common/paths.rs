@@ -164,6 +164,21 @@ pub fn discover_existing_config() -> Option<PathBuf> {
     candidate_config_paths().into_iter().find(|p| p.exists())
 }
 
+/// Path the implicit loader would treat as active for user-facing
+/// discovery: the first existing candidate if one is present, otherwise
+/// the platform-canonical default path where a new config would be
+/// created.
+///
+/// This keeps `all-smi --help` and `all-smi config path` aligned with
+/// [`crate::common::config_file::load`]. On macOS in particular, the
+/// loader accepts `~/.config/all-smi/config.toml` as a fallback; if that
+/// file exists while the Apple-canonical path does not, this function
+/// reports the fallback as active instead of incorrectly labelling the
+/// missing canonical path as the active one.
+pub fn active_config_path() -> Option<PathBuf> {
+    discover_existing_config().or_else(default_config_path)
+}
+
 /// Render a candidate config path together with an `(active)` or
 /// `(not found)` existence marker for display in `--help` and the
 /// `config path` subcommand. Both surfaces share this so the marker
@@ -255,6 +270,12 @@ mod tests {
             let paths = candidate_config_paths();
             assert!(!paths.is_empty());
         }
+    }
+
+    #[test]
+    fn active_config_path_matches_loader_resolution() {
+        let expected = discover_existing_config().or_else(default_config_path);
+        assert_eq!(active_config_path(), expected);
     }
 
     #[test]
