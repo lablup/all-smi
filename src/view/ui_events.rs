@@ -21,10 +21,32 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crossterm::event::{self, Event};
+use crossterm::event::{self, Event, KeyEventKind};
 use tokio::sync::{Notify, mpsc};
 
 use crate::common::config::AppConfig;
+
+/// Returns `true` if a key event of the given kind should be dispatched to the
+/// UI's key handler.
+///
+/// crossterm reports keyboard events differently per platform:
+///
+/// - On Unix terminals (without keyboard-enhancement flags, which all-smi does
+///   not enable), only [`KeyEventKind::Press`] events are delivered. Holding a
+///   key produces repeated `Press` events via the terminal's own auto-repeat.
+/// - On Windows, the console backend additionally delivers
+///   [`KeyEventKind::Release`] (and [`KeyEventKind::Repeat`]) events for every
+///   keystroke. Forwarding all of them causes toggle bindings (Help, alerts,
+///   topology mode, etc.) to fire twice and immediately undo themselves — the
+///   "flash" symptom reported in issue #212.
+///
+/// We accept only `Press` events. This is the safe default and a no-op on Unix.
+/// If held-key auto-repeat on Windows is ever desired, broaden this to accept
+/// `Repeat` as well; `Release` should remain filtered.
+#[inline]
+fn is_actionable_key_event(kind: KeyEventKind) -> bool {
+    matches!(kind, KeyEventKind::Press)
+}
 
 /// All possible reasons the UI loop should wake up and consider re-rendering.
 #[derive(Debug)]
@@ -115,6 +137,18 @@ impl UiEventCoordinator {
             match event::poll(Duration::from_millis(AppConfig::TERMINAL_READER_POLL_MS)) {
                 Ok(true) => match event::read() {
                     Ok(evt) => {
+                        // Windows delivers Press *and* Release (and Repeat) for
+                        // every keystroke; Unix terminals (without keyboard
+                        // enhancement flags, which all-smi does not enable)
+                        // deliver only Press. Forward Press-kind keys only so
+                        // toggle bindings (Help, alerts, topology mode, etc.)
+                        // don't fire twice and immediately undo themselves on
+                        // Windows. See issue #212.
+                        if let Event::Key(k) = &evt
+                            && !is_actionable_key_event(k.kind)
+                        {
+                            continue;
+                        }
                         // blocking_send is fine here -- we are in a blocking context
                         if tx.blocking_send(evt).is_err() {
                             // Receiver dropped, UI loop ended -- exit
@@ -211,7 +245,7 @@ impl UiEventCoordinator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
     use std::sync::Arc;
     use std::time::Duration;
     use tokio::sync::Notify;
@@ -431,6 +465,88 @@ mod tests {
         assert!(
             matches!(event, UiEvent::DataReady),
             "Expected DataReady, got {event:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // is_actionable_key_event: Windows press/release double-dispatch guard
+    // (regression test for issue #212).
+    // -----------------------------------------------------------------------
+
+    /// Build a key event with an explicit kind. `KeyEvent::new` defaults `kind`
+    /// to `Press`, so a `Release`/`Repeat` event must be constructed via the
+    /// fully-qualified constructor.
+    fn key_event_with_kind(kind: KeyEventKind) -> Event {
+        Event::Key(KeyEvent::new_with_kind_and_state(
+            KeyCode::Char('h'),
+            KeyModifiers::NONE,
+            kind,
+            KeyEventState::NONE,
+        ))
+    }
+
+    #[test]
+    fn test_is_actionable_key_event_accepts_press() {
+        assert!(is_actionable_key_event(KeyEventKind::Press));
+    }
+
+    #[test]
+    fn test_is_actionable_key_event_rejects_release() {
+        // The Windows-only double-dispatch that issue #212 fixes.
+        assert!(!is_actionable_key_event(KeyEventKind::Release));
+    }
+
+    #[test]
+    fn test_is_actionable_key_event_rejects_repeat() {
+        // Holding a key on Windows produces Repeat events; we treat the
+        // terminal's own auto-repeat (Press cadence) as the source of truth.
+        assert!(!is_actionable_key_event(KeyEventKind::Repeat));
+    }
+
+    /// The reader-loop filter must drop non-`Press` key events before they
+    /// reach the coordinator's channel. We mirror that filter here so the
+    /// regression is locked at the logic level (the reader loop reads from a
+    /// real terminal, which is unavailable in unit tests).
+    #[test]
+    fn test_reader_filter_drops_release_events() {
+        let release = key_event_with_kind(KeyEventKind::Release);
+        let should_forward = match &release {
+            Event::Key(k) => is_actionable_key_event(k.kind),
+            _ => true,
+        };
+        assert!(
+            !should_forward,
+            "Release key events must be filtered out (issue #212)"
+        );
+    }
+
+    /// Non-key events (mouse, resize, focus, paste) must pass through the
+    /// filter untouched — only `Event::Key` is gated by `KeyEventKind`.
+    #[test]
+    fn test_reader_filter_passes_non_key_events() {
+        let resize = Event::Resize(80, 24);
+        let should_forward = match &resize {
+            Event::Key(k) => is_actionable_key_event(k.kind),
+            _ => true,
+        };
+        assert!(
+            should_forward,
+            "Non-key events must not be filtered by the key-kind guard"
+        );
+    }
+
+    /// A normal `Press` event must still be forwarded — the filter must not
+    /// regress Unix behavior where every key event is already `Press`.
+    #[test]
+    fn test_reader_filter_passes_press_events() {
+        let press = key_event_with_kind(KeyEventKind::Press);
+        let should_forward = match &press {
+            Event::Key(k) => is_actionable_key_event(k.kind),
+            _ => true,
+        };
+        assert!(
+            should_forward,
+            "Press key events must be forwarded (Unix parity)"
         );
     }
 }
