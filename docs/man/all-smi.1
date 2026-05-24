@@ -45,6 +45,23 @@ Does not require sudo permissions.
 Run in API mode, exposing metrics in Prometheus format via HTTP endpoint.
 No sudo required on macOS (uses native APIs).
 .TP
+.B config \fISUBCOMMAND\fR
+Manage the optional TOML configuration file. Subcommands:
+.RS
+.IP \(bu 3
+.B init
+\(em write a commented example config to the platform-canonical path.
+.IP \(bu 3
+.B print
+\(em print the merged effective configuration (TOML or JSON).
+.IP \(bu 3
+.B validate
+\(em parse a config file and report errors (exit 0 valid, 2 invalid).
+.IP \(bu 3
+.B path
+\(em print the active config-file path and the candidate search order. Read-only; supports \fB--json\fR for scripts.
+.RE
+.TP
 .B help
 Display help information about all-smi or a specific command.
 .SH OPTIONS
@@ -233,6 +250,39 @@ http://node002:9090
 https://node003:9443
 .fi
 .RE
+.TP
+.I config.toml
+Optional TOML configuration file. Per-platform canonical paths:
+.RS
+.IP \(bu 3
+Linux: \fI$XDG_CONFIG_HOME/all-smi/config.toml\fR (fallback \fI~/.config/all-smi/config.toml\fR)
+.IP \(bu 3
+macOS: \fI~/Library/Application Support/all-smi/config.toml\fR (also accepts \fI~/.config/all-smi/config.toml\fR)
+.IP \(bu 3
+Windows: \fI%APPDATA%\\all-smi\\config.toml\fR
+.RE
+.RS
+The active path for the current user is printed by
+.B all-smi --help
+(under "Configuration file") and by
+.B all-smi config path
+(read-only; supports
+.B --json
+for scripts). Override the discovery with
+.B --config \fIPATH\fR\fR.
+A missing or malformed
+.B --config
+target is a hard error (exit 2); implicit discovery silently falls back
+to compiled defaults plus env vars when no candidate file exists.
+.RE
+.TP
+.I energy-wal.bin
+Disk-backed write-ahead log persisting the cumulative joules counter
+across restarts. Default: \fI~/.cache/all-smi/energy-wal.bin\fR.
+See
+.B ENERGY ACCOUNTING
+below for the \fBALL_SMI_ENERGY_WAL_PATH\fR / \fBALL_SMI_ENERGY_NO_WAL\fR
+overrides.
 .SH ENERGY ACCOUNTING
 The Energy Session panel integrates instantaneous power draw over time
 to report cumulative energy consumption (kWh) and an optional cost
@@ -245,10 +295,12 @@ counter is monotonic and is never reset.
 .PP
 Display behaviour is controlled via the
 .B [energy]
-section of the TOML config file (see
-.B all-smi config init
-for the canonical path) or the following environment variables, which
-take precedence over the file:
+section of the TOML config file (run
+.B all-smi config path
+to print the active location, or see
+.B FILES
+above) or the following environment variables, which take precedence
+over the file:
 .TP
 .B ALL_SMI_ENERGY_PRICE
 Electricity price per kWh as a decimal number (e.g.

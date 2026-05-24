@@ -168,7 +168,7 @@ http://gpu-node3:9090
 | macOS    | `~/Library/Application Support/all-smi/config.toml` (also accepts `~/.config/all-smi/config.toml`) |
 | Windows  | `%APPDATA%\all-smi\config.toml` |
 
-Pass `--config <PATH>` to any subcommand to override the discovery and force a specific file. A missing or malformed `--config` target is a hard error (exit 2); implicit discovery silently falls back to defaults when no candidate file exists.
+Pass `--config <PATH>` to any subcommand to override the discovery and force a specific file. A missing or malformed `--config` target is a hard error (exit 2); implicit discovery silently falls back to defaults when no candidate file exists. To print the active path for the current user without writing any file, run `all-smi config path` (also surfaced in `all-smi --help` under the "Configuration file" section).
 
 ### Precedence
 
@@ -179,6 +179,7 @@ Highest to lowest: **CLI flag > environment variable > config file > compiled de
 - `all-smi config init [--force]` writes a commented example config to the platform-canonical path. Refuses to overwrite without `--force`. The file is created with `O_NOFOLLOW` and mode `0o600` on Unix.
 - `all-smi config print [--format toml|json] [--show-secrets]` prints the fully merged effective configuration. `webhook_url` is redacted unless `--show-secrets` is passed.
 - `all-smi config validate [<path>] [--strict]` parses a config file and reports any errors (with line/column on parse failures). Exit 0 valid, 2 invalid. `--strict` rejects unknown keys.
+- `all-smi config path [--json]` prints the active config-file path with an `(active)` / `(not found)` marker, plus the candidate search order. Read-only — no file is created. The same active path is shown in `all-smi --help` under the "Configuration file" block.
 
 ### Reload
 
