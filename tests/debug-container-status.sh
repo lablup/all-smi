@@ -14,7 +14,7 @@ echo "1. Starting a simple test container..."
 docker run -d --name test-lifecycle \
     -v "$PROJECT_ROOT":/all-smi \
     -w /all-smi \
-    rust:1.88 \
+    rust:1.95 \
     /bin/bash -c "
         echo 'Container started successfully'
         echo 'Sleeping for 10 seconds...'
@@ -50,7 +50,7 @@ echo "6. Starting container with cargo build..."
 docker run -d --name test-build \
     -v "$PROJECT_ROOT":/all-smi \
     -w /all-smi \
-    rust:1.88 \
+    rust:1.95 \
     /bin/bash -c "
         echo 'Starting cargo build test'
         echo 'Checking environment:'

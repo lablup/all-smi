@@ -67,7 +67,7 @@ docker run -d --name all-smi-test-cpu-freq-cpuset \
     -v "$PROJECT_ROOT":/all-smi \
     -v "$CARGO_CACHE_DIR":/usr/local/cargo/registry \
     -w /all-smi \
-    rust:1.88 \
+    rust:1.95 \
     /bin/bash -c "
         echo '[Container] Starting at: ' \$(date)
         echo '[Container] Container ID: ' \$(hostname)
@@ -121,7 +121,7 @@ docker run -d --name all-smi-test-cpu-freq-quota \
     -v "$PROJECT_ROOT":/all-smi \
     -v "$CARGO_CACHE_DIR":/usr/local/cargo/registry \
     -w /all-smi \
-    rust:1.88 \
+    rust:1.95 \
     /bin/bash -c "
         echo '[Container] Starting at: ' \$(date)
         echo '[Container] Container ID: ' \$(hostname)

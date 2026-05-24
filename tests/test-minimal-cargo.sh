@@ -15,7 +15,7 @@ docker run --rm \
     --name test-minimal \
     -v "$PROJECT_ROOT":/all-smi \
     -w /all-smi \
-    rust:1.88 \
+    rust:1.95 \
     /bin/bash -c "
         echo 'Testing cargo version:'
         cargo --version
@@ -39,7 +39,7 @@ docker run --rm \
     --name test-strace \
     -v "$PROJECT_ROOT":/all-smi \
     -w /all-smi \
-    rust:1.88 \
+    rust:1.95 \
     /bin/bash -c "
         apt-get update -qq && apt-get install -y -qq strace
         echo 'Running cargo update with strace (last 50 lines):'

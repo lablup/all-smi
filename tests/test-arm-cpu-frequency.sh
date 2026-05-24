@@ -74,7 +74,7 @@ docker run -d --name all-smi-test-arm-freq-detection \
     -v "$PROJECT_ROOT":/all-smi \
     -v "$CARGO_CACHE_DIR":/usr/local/cargo/registry \
     -w /all-smi \
-    rust:1.88 \
+    rust:1.95 \
     /bin/bash -c "
         echo '[Container] Installing dependencies...'
         apt-get update -qq && apt-get install -y -qq pkg-config protobuf-compiler >/dev/null 2>&1

@@ -49,7 +49,7 @@ docker run --rm \
     -v "$PROJECT_ROOT":/all-smi \
     -v "/tmp/run-build-test.sh":/tmp/run-build-test.sh \
     -w /all-smi \
-    rust:1.88 \
+    rust:1.95 \
     /bin/bash -c "
         apt-get update && apt-get install -y pkg-config protobuf-compiler curl && 
         /tmp/run-build-test.sh

@@ -25,7 +25,7 @@ docker run -it --rm \
     -p 9090:9090 \
     -v "$PROJECT_ROOT":/all-smi \
     -w /all-smi \
-    rust:1.88 \
+    rust:1.95 \
     /bin/bash -c "
         echo '=== Starting debug container ==='
         echo 'Current directory:'

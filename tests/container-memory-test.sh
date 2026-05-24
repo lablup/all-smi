@@ -51,7 +51,7 @@ docker run -d --name all-smi-test-memory-allocation \
     -v /tmp/memory-eater.c:/tmp/memory-eater.c \
     -w /all-smi \
     -p 9999:9999 \
-    rust:1.88 \
+    rust:1.95 \
     /bin/bash -c "
         echo 'Installing dependencies...'
         apt-get update -qq && apt-get install -y -qq pkg-config protobuf-compiler gcc curl >/dev/null 2>&1

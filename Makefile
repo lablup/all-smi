@@ -42,7 +42,7 @@ docker-dev:
 		-v "$(PWD)":/all-smi \
 		-v "$(PWD)/tests/.cargo-cache":/usr/local/cargo/registry \
 		-w /all-smi \
-		rust:1.88 \
+		rust:1.95 \
 		/bin/bash -c "apt-get update && apt-get install -y pkg-config protobuf-compiler && \
 		bash"
 
@@ -53,7 +53,7 @@ docker-test-container-api:
 		-v "$(PWD)":/all-smi \
 		-v "$(PWD)/tests/.cargo-cache":/usr/local/cargo/registry \
 		-w /all-smi \
-		rust:1.88 \
+		rust:1.95 \
 		/bin/bash -c "apt-get update && apt-get install -y pkg-config protobuf-compiler && \
 		cargo build --release && \
 		./target/release/all-smi api --port 9090"
@@ -64,7 +64,7 @@ docker-test-container-view:
 		-v "$(PWD)":/all-smi \
 		-v "$(PWD)/tests/.cargo-cache":/usr/local/cargo/registry \
 		-w /all-smi \
-		rust:1.88 \
+		rust:1.95 \
 		/bin/bash -c "apt-get update && apt-get install -y pkg-config protobuf-compiler && \
 		cargo build --release && \
 		./target/release/all-smi local"

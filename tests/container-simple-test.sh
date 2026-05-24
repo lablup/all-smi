@@ -15,7 +15,7 @@ docker run --rm -it --name all-smi-test-simple-memory \
     -v "$PROJECT_ROOT":/all-smi \
     -v "$CARGO_CACHE_DIR":/usr/local/cargo/registry \
     -w /all-smi \
-    rust:1.88 \
+    rust:1.95 \
     /bin/bash -c "
         echo 'Installing dependencies...'
         apt-get update -qq && apt-get install -y -qq pkg-config protobuf-compiler >/dev/null 2>&1

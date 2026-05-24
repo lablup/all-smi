@@ -22,7 +22,7 @@ docker run -d --name all-smi-test-benchmark-api \
     -v "$CARGO_CACHE_DIR":/usr/local/cargo/registry \
     -w /all-smi \
     -p 9999:9999 \
-    rust:1.88 \
+    rust:1.95 \
     /bin/bash -c "
         echo 'Installing dependencies...'
         apt-get update -qq && apt-get install -y -qq pkg-config protobuf-compiler >/dev/null 2>&1
