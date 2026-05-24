@@ -341,6 +341,34 @@ fn oversized_config_file_rejected_cleanly() {
     }
 }
 
+/// A whitespace-only `energy.wal_path` or `record.output_dir` in the TOML
+/// must be treated as "not set" — storing the raw whitespace-only string
+/// would produce a nonsensical path like `"   /energy-wal.bin"`. The loader
+/// must trim and reject such values, leaving the field `None` so the platform
+/// cache helper fills it at resolve time. This matches the behaviour of the
+/// env-var layer (`apply_env_record` already calls `trim().is_empty()`).
+#[test]
+fn whitespace_only_wal_path_and_output_dir_treated_as_unset() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    clear_all_env();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    std::fs::write(
+        &path,
+        "[energy]\nwal_path = \"   \"\n[record]\noutput_dir = \"   \"\n",
+    )
+    .unwrap();
+    let outcome = config_file::load(Some(&path)).expect("must load");
+    assert_eq!(
+        outcome.settings.energy.wal_path, None,
+        "whitespace-only wal_path must be treated as unset (None)"
+    );
+    assert_eq!(
+        outcome.settings.record.output_dir, None,
+        "whitespace-only output_dir must be treated as unset (None)"
+    );
+}
+
 /// `~` expansion is done by per-feature consumers (energy WAL,
 /// hostfile, etc.) — the loader stores paths verbatim so downstream
 /// code can decide when to expand.
@@ -361,5 +389,9 @@ fn tilde_paths_stored_verbatim_by_loader() {
         Some("~/all-smi-hosts.csv"),
         "loader preserves leading tilde verbatim"
     );
-    assert_eq!(outcome.settings.energy.wal_path, "~/my-wal.bin");
+    assert_eq!(
+        outcome.settings.energy.wal_path.as_deref(),
+        Some("~/my-wal.bin"),
+        "loader preserves leading tilde verbatim"
+    );
 }

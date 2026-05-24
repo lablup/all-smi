@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#[cfg(feature = "cli")]
+pub mod cache_migration;
 pub mod config;
 #[cfg(feature = "cli")]
 pub mod config_apply;

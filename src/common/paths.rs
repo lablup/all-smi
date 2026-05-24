@@ -95,6 +95,29 @@ pub fn config_dir() -> Option<PathBuf> {
     dirs::config_dir().map(|d| d.join(APP_DIR_NAME))
 }
 
+/// Resolve the canonical cache directory for the current platform.
+///
+/// * Linux: `$XDG_CACHE_HOME/all-smi` when set, else `~/.cache/all-smi`.
+/// * macOS: `~/Library/Caches/all-smi`.
+/// * Windows: `%LOCALAPPDATA%\all-smi`.
+///
+/// Returns `None` when no home-like directory can be located. Callers
+/// must handle that — typically by falling back to a relative path or
+/// reporting an error.
+///
+/// All `all-smi` cache writers (record output, energy WAL, users CSV
+/// export) resolve their base directory through this helper so the
+/// layout is consistent across platforms and across consumers
+/// (issue #229).
+pub fn cache_dir() -> Option<PathBuf> {
+    // `dirs::cache_dir()` returns the right primary dir on every
+    // supported platform:
+    // - Linux: `$XDG_CACHE_HOME` or `~/.cache`
+    // - macOS: `~/Library/Caches`
+    // - Windows: `%LOCALAPPDATA%`
+    dirs::cache_dir().map(|d| d.join(APP_DIR_NAME))
+}
+
 /// The primary canonical config-file path for the current platform.
 /// Used by `config init` for the write target and by implicit load as
 /// the first candidate.
@@ -208,6 +231,13 @@ mod tests {
     #[test]
     fn config_dir_ends_with_app_name() {
         if let Some(dir) = config_dir() {
+            assert!(dir.ends_with(APP_DIR_NAME));
+        }
+    }
+
+    #[test]
+    fn cache_dir_ends_with_app_name() {
+        if let Some(dir) = cache_dir() {
             assert!(dir.ends_with(APP_DIR_NAME));
         }
     }

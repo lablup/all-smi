@@ -139,10 +139,21 @@ pub fn render_toml(settings: &Settings, show_secrets: bool) -> std::io::Result<S
     )
     .ok();
     writeln!(&mut out, "show_cost = {}", settings.energy.show_cost).ok();
+    // Render the operator-supplied override verbatim when present; when
+    // the field is `None` (issue #229: default = "use platform cache
+    // helper") render the resolved path so `config print` always shows
+    // exactly where the WAL lands. Falls back to an empty string in the
+    // unlikely event no home-like directory is resolvable.
+    let wal_path_rendered = match &settings.energy.wal_path {
+        Some(s) => s.clone(),
+        None => crate::metrics::energy_wal::resolve_wal_path(None)
+            .map(|p| p.display().to_string())
+            .unwrap_or_default(),
+    };
     writeln!(
         &mut out,
         "wal_path = \"{}\"",
-        escape_toml(&settings.energy.wal_path)
+        escape_toml(&wal_path_rendered)
     )
     .ok();
     writeln!(
@@ -176,10 +187,19 @@ pub fn render_toml(settings: &Settings, show_secrets: bool) -> std::io::Result<S
     writeln!(&mut out).ok();
 
     writeln!(&mut out, "[record]").ok();
+    // Render the operator-supplied override verbatim when present;
+    // otherwise render the resolved platform cache path so `config
+    // print` reflects exactly where recordings land (issue #229).
+    let output_dir_rendered = match &settings.record.output_dir {
+        Some(s) => s.clone(),
+        None => crate::common::paths::cache_dir()
+            .map(|d| d.join("records").display().to_string())
+            .unwrap_or_default(),
+    };
     writeln!(
         &mut out,
         "output_dir = \"{}\"",
-        escape_toml(&settings.record.output_dir)
+        escape_toml(&output_dir_rendered)
     )
     .ok();
     writeln!(
@@ -258,7 +278,16 @@ pub fn render_json(settings: &Settings, show_secrets: bool) -> std::io::Result<S
             "price_per_kwh": settings.energy.price_per_kwh,
             "currency": settings.energy.currency,
             "show_cost": settings.energy.show_cost,
-            "wal_path": settings.energy.wal_path,
+            // `wal_path` is `None` when the operator did not override
+            // the platform default (issue #229) — render the resolved
+            // on-disk path so JSON consumers see exactly where the WAL
+            // lands rather than a sentinel `null`.
+            "wal_path": match &settings.energy.wal_path {
+                Some(s) => s.clone(),
+                None => crate::metrics::energy_wal::resolve_wal_path(None)
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default(),
+            },
             "gap_interpolate_seconds": settings.energy.gap_interpolate_seconds,
             "wal_enabled": settings.energy.wal_enabled,
         },
@@ -268,7 +297,15 @@ pub fn render_json(settings: &Settings, show_secrets: bool) -> std::io::Result<S
             "show_led_grid": settings.display.show_led_grid,
         },
         "record": {
-            "output_dir": settings.record.output_dir,
+            // `output_dir` is `None` when the operator did not override
+            // the platform default (issue #229) — render the resolved
+            // on-disk path so JSON consumers see where recordings land.
+            "output_dir": match &settings.record.output_dir {
+                Some(s) => s.clone(),
+                None => crate::common::paths::cache_dir()
+                    .map(|d| d.join("records").display().to_string())
+                    .unwrap_or_default(),
+            },
             "compress": settings.record.compress,
         },
         "snapshot": {

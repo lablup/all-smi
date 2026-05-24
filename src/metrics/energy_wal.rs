@@ -43,8 +43,13 @@
 //!
 //! # Path hardening
 //!
-//! The WAL file lives in the user's cache directory (default
-//! `~/.cache/all-smi/energy-wal.bin`). On Unix it is opened with
+//! The WAL file lives in the platform cache directory (issue #229) —
+//! by default `<cache>/all-smi/energy-wal.bin` resolved via
+//! [`crate::common::paths::cache_dir`]: on Linux this is
+//! `$XDG_CACHE_HOME/all-smi/energy-wal.bin` (or
+//! `~/.cache/all-smi/energy-wal.bin` when `$XDG_CACHE_HOME` is unset),
+//! on macOS `~/Library/Caches/all-smi/energy-wal.bin`, on Windows
+//! `%LOCALAPPDATA%\all-smi\energy-wal.bin`. On Unix it is opened with
 //! `O_NOFOLLOW` and `0o600`, matching the hardening applied by
 //! `src/snapshot/mod.rs` and `src/record/writer.rs` (issue #185). On
 //! Windows we use `share_mode(0)`.
@@ -84,7 +89,28 @@ pub const WAL_MAX_BYTES: u64 = 16 * 1024 * 1024;
 // — the formerly-duplicated helper that lived here is now a pass-through
 // import so every settings-consuming callsite uses the same
 // implementation.
-use crate::common::paths::expand_tilde;
+use crate::common::paths::{cache_dir, expand_tilde};
+
+/// Resolve the on-disk WAL path from the merged energy config.
+///
+/// `configured` is the operator-supplied override from
+/// `energy.wal_path` (config file) or `ALL_SMI_ENERGY_WAL_PATH` (env).
+/// When `None` the helper falls back to the platform cache directory
+/// (via [`crate::common::paths::cache_dir`]) and appends
+/// `energy-wal.bin`. When that also returns `None` (no home-like dir
+/// available on bare CI shells / containers without `$HOME`) the helper
+/// returns `None` so callers can downgrade to in-memory-only counters
+/// instead of writing into the CWD.
+///
+/// Issue #229: this is the single resolver every WAL-consuming entry
+/// point goes through so the layout stays consistent with the record
+/// output and users-CSV consumers.
+pub fn resolve_wal_path(configured: Option<&str>) -> Option<PathBuf> {
+    if let Some(s) = configured.map(str::trim).filter(|s| !s.is_empty()) {
+        return Some(expand_tilde(Path::new(s)));
+    }
+    cache_dir().map(|d| d.join("energy-wal.bin"))
+}
 
 /// Replay the WAL at `path`, if it exists.
 ///
@@ -358,7 +384,7 @@ impl WalFlushHandle {
 #[cfg(feature = "cli")]
 pub fn spawn_wal_flush_task(
     shared_state: std::sync::Arc<tokio::sync::RwLock<crate::app_state::AppState>>,
-    wal_path: String,
+    wal_path: PathBuf,
     flush_interval: std::time::Duration,
 ) -> WalFlushHandle {
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
@@ -367,7 +393,8 @@ pub fn spawn_wal_flush_task(
             Ok(w) => w,
             Err(e) => {
                 tracing::warn!(
-                    "energy WAL: failed to open {wal_path} ({e}); counters are in-memory only"
+                    "energy WAL: failed to open {} ({e}); counters are in-memory only",
+                    wal_path.display()
                 );
                 return;
             }
@@ -405,7 +432,7 @@ pub fn spawn_wal_flush_task(
 #[cfg(feature = "cli")]
 async fn flush_cycle(
     writer: WalWriter,
-    wal_path: &str,
+    wal_path: &Path,
     shared_state: &std::sync::Arc<tokio::sync::RwLock<crate::app_state::AppState>>,
 ) -> WalWriter {
     // Snapshot the per-device deltas AND a point-in-time lifetime
@@ -423,7 +450,7 @@ async fn flush_cycle(
         (deltas, lifetime)
     };
 
-    let wal_path_owned = wal_path.to_string();
+    let wal_path_owned = wal_path.to_path_buf();
     let result = tokio::task::spawn_blocking(move || {
         let mut w = writer;
         for (key, joules) in deltas {
@@ -474,7 +501,7 @@ async fn flush_cycle(
                         "energy WAL: reopen after panic failed: {open_err}; subsequent flushes are no-ops until restart"
                     );
                     WalWriter {
-                        path: PathBuf::from(wal_path),
+                        path: wal_path.to_path_buf(),
                         writer: None,
                     }
                 }
@@ -492,10 +519,10 @@ async fn flush_cycle(
 /// error so the caller can keep using the old file.
 fn compact_wal(
     old_writer: WalWriter,
-    wal_path: &str,
+    wal_path: &Path,
     lifetime_snapshot: &[(EnergyKey, f64)],
 ) -> Result<WalWriter, (WalWriter, io::Error)> {
-    let resolved = expand_tilde(Path::new(wal_path));
+    let resolved = expand_tilde(wal_path);
     let tmp_path = {
         let mut tmp = resolved.clone();
         let fname = resolved
@@ -538,7 +565,7 @@ fn compact_wal(
                 "energy WAL: reopen after compaction failure also failed: {reopen_err}"
             );
             WalWriter {
-                path: PathBuf::from(wal_path),
+                path: wal_path.to_path_buf(),
                 writer: None,
             }
         });
@@ -551,7 +578,7 @@ fn compact_wal(
             tracing::error!("energy WAL: post-compaction reopen failed: {e}");
             Err((
                 WalWriter {
-                    path: PathBuf::from(wal_path),
+                    path: wal_path.to_path_buf(),
                     writer: None,
                 },
                 e,
@@ -879,8 +906,7 @@ mod tests {
         let writer = WalWriter::open(&path).unwrap();
         let live_key = EnergyKey::gpu("host-a", "uuid-0");
         let snapshot = vec![(live_key.clone(), 5_000.0)];
-        let new_writer =
-            compact_wal(writer, path.to_str().unwrap(), &snapshot).expect("compaction succeeds");
+        let new_writer = compact_wal(writer, &path, &snapshot).expect("compaction succeeds");
         drop(new_writer);
 
         // The rewritten file must contain exactly one record matching
@@ -967,7 +993,7 @@ mod tests {
         // shutdown-triggered flush runs during the test.
         let handle = crate::metrics::energy_wal::spawn_wal_flush_task(
             state.clone(),
-            wal_path.to_str().unwrap().to_string(),
+            wal_path.clone(),
             std::time::Duration::from_secs(3600),
         );
 

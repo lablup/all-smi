@@ -42,7 +42,7 @@ pub const ENERGY_HELP: &str = "Energy Session (TUI):
     ALL_SMI_ENERGY_PRICE         $/kWh price (default 0.12; invalid hides cost)
     ALL_SMI_ENERGY_CURRENCY      Display currency code (default USD)
     ALL_SMI_ENERGY_NO_COST=1     Hide cost column; still show kWh
-    ALL_SMI_ENERGY_WAL_PATH      WAL file path (default ~/.cache/all-smi/energy-wal.bin)
+    ALL_SMI_ENERGY_WAL_PATH      WAL file path (default <platform cache dir>/all-smi/energy-wal.bin)
     ALL_SMI_ENERGY_NO_WAL=1      Disable disk WAL (in-memory counters only)
     ALL_SMI_ENERGY_GAP_SECONDS   Gap threshold for trapezoid→hold-last (1..=3600, default 10)";
 
@@ -455,10 +455,13 @@ pub struct RecordArgs {
         short = 'o',
         long_help = "Output path for the NDJSON stream.\n\n\
             When omitted, the file lands under the `record.output_dir` config \
-            value (default `~/.cache/all-smi/records/`) with basename \
-            `all-smi-record.ndjson.zst`. If no config file is present, the \
-            file is written to the current working directory as \
-            `all-smi-record.ndjson.zst`.\n\n\
+            value (if set), otherwise under the platform cache directory's \
+            `all-smi/records/` subdirectory, with basename \
+            `all-smi-record.ndjson.zst`. The platform cache directory is \
+            `$XDG_CACHE_HOME` (or `~/.cache`) on Linux, `~/Library/Caches` on \
+            macOS, and `%LOCALAPPDATA%` on Windows. If no home-like directory \
+            is resolvable, the file is written to the current working \
+            directory as `all-smi-record.ndjson.zst`.\n\n\
             Extension drives compression: `.ndjson.zst` → zstd, \
             `.ndjson.gz` → gzip, anything else → plain NDJSON. Use \
             `--compress` to override detection."

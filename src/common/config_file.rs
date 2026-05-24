@@ -219,7 +219,12 @@ impl Default for DisplaySettings {
 
 #[derive(Debug, Clone)]
 pub struct RecordSettings {
-    pub output_dir: String,
+    /// Operator-supplied output directory for `all-smi record`. `None`
+    /// (the compiled default) means "use the platform cache helper" —
+    /// the resolver in [`crate::record::RecorderOptions`] joins
+    /// [`crate::common::paths::cache_dir`] with `"records"`. `Some(s)`
+    /// is honored verbatim after `expand_tilde`. Issue #229.
+    pub output_dir: Option<String>,
     pub compress: String,
 }
 
@@ -253,7 +258,7 @@ impl Default for Settings {
                 show_led_grid: true,
             },
             record: RecordSettings {
-                output_dir: "~/.cache/all-smi/records".to_string(),
+                output_dir: None,
                 compress: "zstd".to_string(),
             },
             snapshot: SnapshotSettings {
