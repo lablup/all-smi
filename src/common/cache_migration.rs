@@ -29,7 +29,7 @@
 //! * Never overwrite the destination — if a recordings directory or
 //!   WAL already exists at the new root, the old data is left in
 //!   place. Operators can rename or merge by hand.
-//! * Never follow a symlink at the source — the writer-side
+//! * Never follow a symlink at the legacy root or source entry — the writer-side
 //!   `O_NOFOLLOW` defences in `record/writer.rs`,
 //!   `view/event_handler.rs::open_export_secure`, and
 //!   `metrics/energy_wal.rs::open_secure_append` exist because the
@@ -60,13 +60,35 @@ pub fn migrate_legacy_cache_paths() {
     if old_root == new_root {
         return;
     }
-    if !old_root.exists() {
+    migrate_legacy_cache_root(&old_root, &new_root);
+}
+
+fn migrate_legacy_cache_root(old_root: &Path, new_root: &Path) {
+    let meta = match old_root.symlink_metadata() {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+        Err(e) => {
+            eprintln!(
+                "all-smi: could not inspect legacy cache {}: {e}",
+                old_root.display()
+            );
+            return;
+        }
+    };
+    if meta.file_type().is_symlink() {
+        eprintln!(
+            "all-smi: skipping cache migration of {} (is a symlink)",
+            old_root.display()
+        );
+        return;
+    }
+    if !meta.is_dir() {
         return;
     }
     // Best-effort: if the new root cannot be created we still try the
     // individual renames; either they succeed (the parent already
     // existed) or each `try_move` reports its own error.
-    let _ = std::fs::create_dir_all(&new_root);
+    let _ = std::fs::create_dir_all(new_root);
     for name in MIGRATION_TARGETS {
         try_move(&old_root.join(name), &new_root.join(name));
     }
@@ -85,9 +107,19 @@ const MIGRATION_TARGETS: &[&str] = &["records", "energy-wal.bin"];
 /// process-wide `$HOME` / `cache_dir()` state.
 pub(crate) fn try_move(src: &Path, dst: &Path) {
     // Never overwrite — losing data at the destination would be a
-    // worse outcome than not migrating at all.
-    if dst.exists() {
-        return;
+    // worse outcome than not migrating at all. Use `symlink_metadata`
+    // rather than `exists()` so a dangling destination symlink is still
+    // treated as occupied and preserved.
+    match dst.symlink_metadata() {
+        Ok(_) => return,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            eprintln!(
+                "all-smi: could not inspect cache migration destination {}: {e}",
+                dst.display()
+            );
+            return;
+        }
     }
     // Refuse to migrate a symlink at the source. An attacker who
     // pre-planted `~/.cache/all-smi/records -> /etc` would otherwise
@@ -215,5 +247,56 @@ mod tests {
         let resolved = std::fs::read_link(&link).unwrap();
         assert_eq!(resolved, real);
         assert!(real.exists(), "follow-through target untouched");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn migration_refuses_symlink_legacy_root() {
+        let root = tempdir();
+        let target = root.path().join("attacker-controlled");
+        std::fs::create_dir_all(target.join("records")).unwrap();
+        std::fs::write(target.join("records").join("a.ndjson.zst"), b"frame").unwrap();
+        std::fs::write(target.join("energy-wal.bin"), b"wal").unwrap();
+
+        let legacy_root = root.path().join("all-smi-link");
+        std::os::unix::fs::symlink(&target, &legacy_root).unwrap();
+        let new_root = root.path().join("new-cache");
+
+        migrate_legacy_cache_root(&legacy_root, &new_root);
+
+        assert!(
+            !new_root.exists(),
+            "migration must not create a destination from a symlinked legacy root"
+        );
+        assert!(
+            target.join("records").join("a.ndjson.zst").exists(),
+            "follow-through records target must remain untouched"
+        );
+        assert!(
+            target.join("energy-wal.bin").exists(),
+            "follow-through WAL target must remain untouched"
+        );
+        assert_eq!(std::fs::read_link(&legacy_root).unwrap(), target);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn try_move_preserves_dangling_destination_symlink() {
+        let root = tempdir();
+        let src = root.path().join("energy-wal.bin");
+        std::fs::write(&src, b"payload").unwrap();
+        let dst = root.path().join("new").join("energy-wal.bin");
+        std::fs::create_dir_all(dst.parent().unwrap()).unwrap();
+        let missing_target = root.path().join("missing-target");
+        std::os::unix::fs::symlink(&missing_target, &dst).unwrap();
+
+        try_move(&src, &dst);
+
+        assert!(src.exists(), "source must remain when destination exists");
+        assert_eq!(
+            std::fs::read_link(&dst).unwrap(),
+            missing_target,
+            "dangling destination symlink must not be overwritten"
+        );
     }
 }
