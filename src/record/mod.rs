@@ -628,4 +628,23 @@ mod tests {
         let opts = RecorderOptions::from_args_with_settings(&args, Some(&settings)).unwrap();
         assert_eq!(opts.output, explicit);
     }
+
+    /// No `-o`, config `output_dir` contains a tilde prefix: the resolver
+    /// must call `expand_tilde` so `~/my-records` resolves to the user's
+    /// home directory rather than a literal `~/my-records` path. The expected
+    /// value is computed by calling the same `expand_tilde` helper the
+    /// resolver uses, so the assertion is portable across environments where
+    /// `$HOME` may or may not be set.
+    #[test]
+    fn resolve_output_no_cli_with_tilde_config_dir() {
+        let args = record_args(None);
+        let settings = RecordSettings {
+            output_dir: "~/my-records".to_string(),
+            compress: "zstd".to_string(),
+        };
+        let opts = RecorderOptions::from_args_with_settings(&args, Some(&settings)).unwrap();
+        let expected = crate::common::paths::expand_tilde(std::path::Path::new("~/my-records"))
+            .join(DEFAULT_BASENAME);
+        assert_eq!(opts.output, expected);
+    }
 }
