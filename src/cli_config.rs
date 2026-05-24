@@ -37,6 +37,9 @@ pub struct ConfigArgs {
 ///   `--show-secrets` is set.
 /// - `config validate [<path>] [--strict]` parses the given (or default)
 ///   file and reports any errors, exiting 0 on valid and 2 on invalid.
+/// - `config path [--json]` (issue #213) prints the active config path
+///   plus the candidate search order, with no file writes — strictly
+///   read-only for discovery and scripting.
 #[derive(Subcommand, Clone, Debug)]
 pub enum ConfigAction {
     /// Write a commented example config.toml at the default location.
@@ -47,6 +50,10 @@ pub enum ConfigAction {
     /// Parse a config file and report any errors. Exit 0 on valid, 2
     /// on invalid.
     Validate(ConfigValidateArgs),
+    /// Print the active config-file path and the candidate search
+    /// order. Read-only — performs no file writes. Pass `--json` for
+    /// scripts. (Issue #213.)
+    Path(ConfigPathArgs),
 }
 
 #[derive(Args, Clone, Debug)]
@@ -93,4 +100,21 @@ pub struct ConfigValidateArgs {
     /// error, so the config remains forward-compatible.
     #[arg(long)]
     pub strict: bool,
+}
+
+/// Arguments for `all-smi config path` (issue #213).
+///
+/// Read-only discovery — the runner only reads `paths::*` helpers and
+/// `Path::exists()`, never writes to disk. Honours the global
+/// `--config <PATH>` override: when set, that path becomes the
+/// "active" line and the candidate-search list is suppressed (it would
+/// be misleading — discovery never runs when `--config` is explicit).
+#[derive(Args, Clone, Debug)]
+pub struct ConfigPathArgs {
+    /// Emit a machine-readable JSON object instead of the human-readable
+    /// text format. The schema is `{ active: string|null, exists: bool,
+    /// overridden: bool, search_order: [string] }` — `active` is `null`
+    /// only when no home directory can be resolved for this platform.
+    #[arg(long)]
+    pub json: bool,
 }

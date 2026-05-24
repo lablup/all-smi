@@ -32,7 +32,7 @@ mod utils;
 mod view;
 
 use api::run_api_mode;
-use clap::Parser;
+use clap::FromArgMatches;
 use cli::{Cli, Commands, LocalArgs};
 use common::config_file::{self, Settings, SocketSetting};
 use tokio::signal;
@@ -68,7 +68,17 @@ fn main() {
     #[cfg(target_os = "macos")]
     setup_panic_handler();
 
-    let cli = Cli::parse();
+    // Build the top-level command with the runtime-composed help
+    // blocks injected (issue #213). The "Configuration file" block has
+    // to resolve `$HOME` / `$XDG_CONFIG_HOME` / `%APPDATA%` at process
+    // start, which a static `#[command(after_help = ...)]` cannot do.
+    let matches = cli::build_command_with_runtime_help().get_matches();
+    let cli = match Cli::from_arg_matches(&matches) {
+        Ok(c) => c,
+        Err(e) => {
+            e.exit();
+        }
+    };
 
     // Handle the `config` subcommand synchronously — it never starts a
     // Tokio runtime and its I/O is purely local filesystem work.

@@ -141,6 +141,26 @@ pub fn discover_existing_config() -> Option<PathBuf> {
     candidate_config_paths().into_iter().find(|p| p.exists())
 }
 
+/// Render a candidate config path together with an `(active)` or
+/// `(not found)` existence marker for display in `--help` and the
+/// `config path` subcommand. Both surfaces share this so the marker
+/// vocabulary stays consistent.
+///
+/// * `Some(path)` whose target exists → `"<path>   (active)"`
+/// * `Some(path)` whose target is missing → `"<path>   (not found)"`
+/// * `None` (no resolvable home directory) → a clear inline message
+///   instead of an empty string, so operators on bare/CI shells
+///   immediately understand why no path was printed.
+pub fn format_path_with_existence(path: Option<&Path>) -> String {
+    match path {
+        Some(p) => {
+            let marker = if p.exists() { "active" } else { "not found" };
+            format!("{}   ({marker})", p.display())
+        }
+        None => "(no config path resolvable — set $HOME or $XDG_CONFIG_HOME)".to_string(),
+    }
+}
+
 /// Return the parent directory of `path`, creating intermediate
 /// directories when needed. Matches `fs::create_dir_all` semantics.
 pub fn ensure_parent_dir(path: &Path) -> std::io::Result<()> {
@@ -205,5 +225,36 @@ mod tests {
             let paths = candidate_config_paths();
             assert!(!paths.is_empty());
         }
+    }
+
+    #[test]
+    fn format_path_with_existence_marks_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("config.toml");
+        std::fs::write(&file, b"# stub").unwrap();
+        let rendered = format_path_with_existence(Some(&file));
+        assert!(
+            rendered.contains("(active)"),
+            "expected (active) marker, got: {rendered}"
+        );
+        assert!(rendered.contains(&file.display().to_string()));
+    }
+
+    #[test]
+    fn format_path_with_existence_marks_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let absent = dir.path().join("nope.toml");
+        let rendered = format_path_with_existence(Some(&absent));
+        assert!(
+            rendered.contains("(not found)"),
+            "expected (not found) marker, got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn format_path_with_existence_handles_none() {
+        let rendered = format_path_with_existence(None);
+        assert!(rendered.contains("no config path"));
+        assert!(rendered.contains("HOME"));
     }
 }

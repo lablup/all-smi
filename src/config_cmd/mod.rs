@@ -31,6 +31,7 @@ use crate::common::paths;
 use crate::common::secure_write;
 
 mod example;
+mod path;
 mod render;
 
 pub use example::EXAMPLE_TOML;
@@ -48,6 +49,10 @@ pub fn run(explicit_config_path: Option<&Path>, action: &ConfigAction) -> i32 {
         ConfigAction::Init(args) => run_init(explicit_config_path, args.force),
         ConfigAction::Print(args) => run_print(explicit_config_path, args),
         ConfigAction::Validate(args) => run_validate(explicit_config_path, args),
+        // `config path` is read-only and never writes to disk; it
+        // honours `--config <path>` by reporting that override as the
+        // active path. (Issue #213.)
+        ConfigAction::Path(args) => path::run_path(explicit_config_path, args),
     }
 }
 

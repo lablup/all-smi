@@ -14,21 +14,31 @@
 
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
+
+use crate::common::paths;
 
 // Config subcommand argument types live in a sibling module so the main
 // CLI file stays within the 500-line soft limit.
 pub use crate::cli_config::{
-    ConfigAction, ConfigArgs, ConfigPrintArgs, ConfigPrintFormat, ConfigValidateArgs,
+    ConfigAction, ConfigArgs, ConfigPathArgs, ConfigPrintArgs, ConfigPrintFormat,
+    ConfigValidateArgs,
 };
 
-const ENERGY_HELP: &str = "Energy Session (TUI):
+/// Energy Session help block — appended at the end of `--help`.
+///
+/// Public because `main.rs` composes it with the dynamic
+/// "Configuration file" block (which has to be built at runtime to print
+/// the resolved per-user config path) before injecting the combined
+/// string via `Command::after_help`. See [`build_command_with_runtime_help`].
+pub const ENERGY_HELP: &str = "Energy Session (TUI):
   Shows accumulated energy (kWh), avg power, and estimated cost since the
   process started. Press R in the TUI to reset the session counter (the
   Prometheus all_smi_energy_joules_total counter is unaffected).
 
-  Configure via [energy] in the TOML config (see `all-smi config init`)
-  or these environment variables (override the config file):
+  Configure via [energy] in the TOML config (see `all-smi config path`
+  for the active path) or these environment variables (override the
+  config file):
     ALL_SMI_ENERGY_PRICE         $/kWh price (default 0.12; invalid hides cost)
     ALL_SMI_ENERGY_CURRENCY      Display currency code (default USD)
     ALL_SMI_ENERGY_NO_COST=1     Hide cost column; still show kWh
@@ -37,12 +47,14 @@ const ENERGY_HELP: &str = "Energy Session (TUI):
     ALL_SMI_ENERGY_GAP_SECONDS   Gap threshold for trapezoid→hold-last (1..=3600, default 10)";
 
 #[derive(Parser)]
-#[command(author, version, about, long_about = None, after_help = ENERGY_HELP)]
+#[command(author, version, about, long_about = None)]
 pub struct Cli {
-    /// Override the default TOML config file path. When omitted the loader
-    /// probes the platform-appropriate locations (see `all-smi config init`
-    /// for the canonical path). When given, a missing or malformed file
-    /// produces a hard error; no silent fallback.
+    /// Override the default TOML config file path. When omitted, the loader
+    /// probes the platform-appropriate locations (run `all-smi config path`
+    /// to print the resolved location, or see the "Configuration file"
+    /// block at the bottom of this help text). A missing or malformed file
+    /// passed explicitly here is a hard error; implicit discovery silently
+    /// falls back to defaults.
     #[arg(long, global = true, value_name = "PATH")]
     pub config: Option<PathBuf>,
 
@@ -566,6 +578,46 @@ pub struct DoctorArgs {
     pub only: Vec<String>,
 }
 
+/// Render the runtime "Configuration file" help block. Resolved at
+/// invocation time because the canonical path embeds `$HOME` /
+/// `$XDG_CONFIG_HOME` / `%APPDATA%`, which are user-specific and not
+/// known at compile time. Issue #213.
+///
+/// Shape (intentionally short — `after_help` is shown for both `-h` and
+/// `--help`, so we keep it scannable):
+///
+/// ```text
+/// Configuration file:
+///   Optional TOML file. Precedence: CLI flags > env vars > config file > built-in defaults.
+///   Active path (this platform):
+///     <resolved-path>   (active | not found)
+///   Inspect:  all-smi config path   Init:  all-smi config init   Print merged:  all-smi config print
+///   Override path with --config <PATH>.
+/// ```
+pub fn config_help_block() -> String {
+    let resolved = paths::default_config_path();
+    let line = paths::format_path_with_existence(resolved.as_deref());
+    format!(
+        "Configuration file:\n  \
+        Optional TOML file. Precedence: CLI flags > env vars > config file > built-in defaults.\n  \
+        Active path (this platform):\n    \
+        {line}\n  \
+        Inspect:  all-smi config path   Init:  all-smi config init   Print merged:  all-smi config print\n  \
+        Override path with --config <PATH>."
+    )
+}
+
+/// Build the top-level [`clap::Command`] with the runtime-composed
+/// `after_help` text injected. Callers should parse via
+/// `Cli::from_arg_matches(&Self::build_command_with_runtime_help().get_matches())`
+/// rather than `Cli::parse()` so the dynamic Configuration file block
+/// reaches `--help` output.
+pub fn build_command_with_runtime_help() -> clap::Command {
+    let config_block = config_help_block();
+    let after = format!("{config_block}\n\n{ENERGY_HELP}");
+    Cli::command().after_help(after)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -631,5 +683,63 @@ mod tests {
         assert_eq!(SnapshotFormat::Json.to_string(), "json");
         assert_eq!(SnapshotFormat::Csv.to_string(), "csv");
         assert_eq!(SnapshotFormat::Prometheus.to_string(), "prometheus");
+    }
+
+    // ---- Issue #213: help output exposes the active config path. ----
+
+    /// The runtime-built command must surface the new "Configuration
+    /// file" block in `--help`, plus the existing Energy Session block.
+    /// Regression guard: nobody can drop the runtime `after_help`
+    /// injection without breaking this test.
+    #[test]
+    fn help_text_contains_config_and_energy_blocks() {
+        let mut cmd = build_command_with_runtime_help();
+        let help = cmd.render_help().to_string();
+        assert!(
+            help.contains("Configuration file:"),
+            "help must contain the Configuration file block, got:\n{help}"
+        );
+        assert!(
+            help.contains("Active path (this platform):"),
+            "help must label the active path, got:\n{help}"
+        );
+        assert!(
+            help.contains("all-smi config path"),
+            "help must point at `all-smi config path`, got:\n{help}"
+        );
+        assert!(
+            help.contains("Energy Session"),
+            "existing Energy Session block must still render, got:\n{help}"
+        );
+    }
+
+    /// The `--config` flag's own docstring must no longer redirect users
+    /// to a side-effecting command (`config init`); it points at the
+    /// read-only `config path` or the inline block.
+    #[test]
+    fn config_flag_help_no_longer_only_points_at_init() {
+        let mut cmd = build_command_with_runtime_help();
+        let help = cmd.render_help().to_string();
+        // The new wording mentions `config path` somewhere in the help
+        // surface (either in the flag doc or the Configuration block).
+        assert!(
+            help.contains("config path"),
+            "help should mention `config path`, got:\n{help}"
+        );
+    }
+
+    /// `config_help_block()` must annotate the resolved path with an
+    /// existence marker — either `(active)` when present or
+    /// `(not found)` when absent. Without a marker the user cannot
+    /// tell from `--help` whether the file is there.
+    #[test]
+    fn config_help_block_carries_existence_marker() {
+        let block = config_help_block();
+        assert!(
+            block.contains("(active)")
+                || block.contains("(not found)")
+                || block.contains("no config path"),
+            "config_help_block must carry an existence marker, got:\n{block}"
+        );
     }
 }
