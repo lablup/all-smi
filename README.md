@@ -47,11 +47,11 @@ The PPA provides automatic updates and is maintained for Ubuntu 22.04 (Jammy) an
 
 ### Option 3: Install via Debian Package
 
-For Debian and other Debian-based distributions, download the `.deb` package from the [releases page](https://github.com/inureyes/all-smi/releases):
+For Debian and other Debian-based distributions, download the `.deb` package from the [releases page](https://github.com/lablup/all-smi/releases):
 
 ```bash
 # Download the latest .deb package (replace VERSION with the actual version)
-wget https://github.com/inureyes/all-smi/releases/download/vVERSION/all-smi_VERSION_OS_ARCH.deb
+wget https://github.com/lablup/all-smi/releases/download/vVERSION/all-smi_VERSION_OS_ARCH.deb
 # Example: all-smi_0.7.0_ubuntu24.04.noble_amd64.deb
 
 # Install the package
@@ -63,9 +63,9 @@ sudo apt-get install -f
 
 ### Option 4: Download Pre-built Binary
 
-Download the latest release from the [GitHub releases page](https://github.com/inureyes/all-smi/releases):
+Download the latest release from the [GitHub releases page](https://github.com/lablup/all-smi/releases):
 
-1. Go to https://github.com/inureyes/all-smi/releases
+1. Go to https://github.com/lablup/all-smi/releases
 2. Download the appropriate binary for your platform
 3. Extract the archive and place the binary in your `$PATH`
 
@@ -97,6 +97,13 @@ See [Building from Source](DEVELOPERS.md#building-from-source) in the developer 
 
 ### Command Overview
 
+> **Note:** This README tracks the `main` branch. Subcommands tagged
+> **Availability: v0.21.0+** below (`snapshot`, `record`, `view --replay`,
+> `config`, `doctor`) are not present in the current published release
+> (v0.20.1) and will ship with v0.21.0. See the [Changelog](#changelog) for
+> what is in each release. To run the latest features today, build from
+> source ([Option 6](#option-6-build-from-source)).
+
 ```bash
 # Show help
 all-smi --help
@@ -112,13 +119,13 @@ all-smi view --hostfile hosts.csv
 # API mode (expose metrics server)
 all-smi api --port 9090
 
-# One-shot JSON/CSV/Prometheus dump for scripts
+# One-shot JSON/CSV/Prometheus dump for scripts (Availability: v0.21.0+)
 all-smi snapshot
 
-# Capture a stream to disk for later replay
+# Capture a stream to disk for later replay (Availability: v0.21.0+)
 all-smi record --output trace.ndjson.zst --duration 1h
 
-# Replay a captured stream in the TUI
+# Replay a captured stream in the TUI (Availability: v0.21.0+)
 all-smi view --replay trace.ndjson.zst
 ```
 
@@ -157,6 +164,13 @@ http://gpu-node3:9090
 ```
 
 ## Configuration
+
+> **Availability: v0.21.0+.** The `config` subcommand (`config init`, `config
+> print`, `config validate`) and the TOML config-file loader described below
+> are not present in v0.20.1; they are scheduled for v0.21.0. Environment
+> variables documented in the schema tables (e.g., `ALL_SMI_API_PORT`,
+> `ALL_SMI_ALERTS_TEMP_WARN_C`) continue to work in v0.20.1 where they were
+> already supported. To use `config` today, build from source.
 
 `all-smi` reads optional settings from a TOML config file. Every field has a compiled default, so a fresh install requires no file; operators only create one when they want persistent overrides (hostfile path, update interval, alert thresholds, `$/kWh`, etc.).
 
@@ -320,6 +334,9 @@ Older releases introduced environment variables with different naming. All alias
   - For best temperature monitoring on Windows, install and run LibreHardwareMonitor in the background
 
 ## Diagnostics
+
+> **Availability: v0.21.0+.** The `doctor` subcommand is not present in
+> v0.20.1; it is scheduled for v0.21.0. To run it today, build from source.
 
 The `all-smi doctor` subcommand runs a read-only suite of environment checks and
 prints a PASS/WARN/FAIL report covering platform, privileges, container
@@ -969,6 +986,9 @@ blocking collect rather than each spawning their own reader set.
 
 ### Scripting / CI (Snapshot Mode)
 
+> **Availability: v0.21.0+.** The `snapshot` subcommand is not present in
+> v0.20.1; it is scheduled for v0.21.0. To use it today, build from source.
+
 The `snapshot` subcommand emits a single, one-shot machine-readable dump of
 the current hardware state to stdout (or a file) and exits. It is designed
 for shell piping, CI probes, Slurm prolog/epilog hooks, and any tool that
@@ -1050,6 +1070,10 @@ all-smi snapshot --format csv --include gpu --query utilization \
 | `--output` / `-o` | stdout                            | Write to this path (`-` also means stdout). On Unix: created with mode `0600` (owner-only), symlinks refused, atomic write via sibling `.tmp` + rename. |
 
 ### Recording & Replay
+
+> **Availability: v0.21.0+.** The `record` subcommand and `view --replay` are
+> not present in v0.20.1; they are scheduled for v0.21.0. To use them today,
+> build from source.
 
 The `record` subcommand captures a live metric stream to disk as NDJSON, and
 `view --replay <file>` plays it back through the same TUI the operator would
