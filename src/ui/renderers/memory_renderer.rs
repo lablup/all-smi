@@ -263,6 +263,12 @@ mod tests {
         out
     }
 
+    fn foreground_sgr(color: Color) -> String {
+        let mut buf: Vec<u8> = Vec::new();
+        queue!(buf, crossterm::style::SetForegroundColor(color)).unwrap();
+        String::from_utf8(buf).unwrap()
+    }
+
     fn make_memory_info(hostname: &str) -> MemoryInfo {
         MemoryInfo {
             index: 0,
@@ -395,9 +401,10 @@ mod tests {
         let mut buf: Vec<u8> = Vec::new();
         print_memory_info(&mut buf, 0, &info, 120, 0, false);
         let raw = String::from_utf8_lossy(&buf);
+        let red_sgr = foreground_sgr(Color::Red);
         assert!(
-            raw.contains("\x1b[38;5;9m") || raw.contains("\x1b[31m"),
-            "Active swap row should be colored red; raw output did not contain a red SGR"
+            raw.contains(&red_sgr),
+            "Active swap row should be colored red; raw output did not contain {red_sgr:?}"
         );
     }
 

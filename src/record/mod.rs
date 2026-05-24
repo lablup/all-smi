@@ -100,6 +100,11 @@ impl RecorderOptions {
     /// * Final fallback: [`DEFAULT_BASENAME`] in the current working
     ///   directory (when no home-like directory is available — bare
     ///   CI shells, containers without `$HOME`).
+    ///
+    /// The CLI binary passes `Settings::default().record` when no
+    /// config file exists; its empty `output_dir` intentionally
+    /// delegates to the same platform cache tier, keeping `record
+    /// --help`, README text, and resolver behavior aligned.
     pub fn from_args_with_settings(
         args: &RecordArgs,
         settings: Option<&RecordSettings>,
@@ -608,6 +613,23 @@ mod tests {
         let args = record_args(None);
         let opts = RecorderOptions::from_args_with_settings(&args, None).unwrap();
         assert_eq!(opts.output, cache.join("records").join(DEFAULT_BASENAME));
+    }
+
+    /// No `-o` in the real CLI binary: main loads compiled defaults
+    /// into `Settings` even when no config file exists, so the
+    /// user-facing default still delegates to the platform cache helper.
+    /// This guards `record --help`, README, and resolver behaviour from
+    /// drifting apart again.
+    #[test]
+    fn resolve_output_no_cli_with_compiled_record_settings_uses_cache_dir() {
+        let args = record_args(None);
+        let settings = crate::common::config_file::Settings::default().record;
+        let opts = RecorderOptions::from_args_with_settings(&args, Some(&settings)).unwrap();
+        let expected = match crate::common::paths::cache_dir() {
+            Some(c) => c.join("records").join(DEFAULT_BASENAME),
+            None => PathBuf::from(DEFAULT_BASENAME),
+        };
+        assert_eq!(opts.output, expected);
     }
 
     /// No `-o`, config `output_dir` set: the default basename should be

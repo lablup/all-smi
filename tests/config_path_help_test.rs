@@ -23,6 +23,7 @@
 //! spawning a child process for each assertion.
 
 use all_smi::cli::{build_command_with_runtime_help, config_help_block};
+use all_smi::common::paths;
 
 /// `--help` must render the runtime-composed "Configuration file"
 /// block. Without this, a fresh user who reaches for `-h` has no way
@@ -75,6 +76,26 @@ fn help_active_path_carries_existence_marker() {
         has_marker,
         "config_help_block must carry an existence marker.\n--- block ---\n{block}"
     );
+}
+
+/// The help block must report the same active path the implicit loader
+/// would use: first existing candidate if present, otherwise the
+/// platform-canonical default. This matters on macOS, where the loader
+/// accepts `~/.config/all-smi/config.toml` as a fallback.
+#[test]
+fn help_active_path_uses_loader_resolution() {
+    let block = config_help_block();
+    match paths::active_config_path() {
+        Some(path) => assert!(
+            block.contains(&path.display().to_string()),
+            "help must contain loader-active path {}.\n--- block ---\n{block}",
+            path.display()
+        ),
+        None => assert!(
+            block.contains("no config path"),
+            "help must explain missing config path.\n--- block ---\n{block}"
+        ),
+    }
 }
 
 /// The `--config` flag's own help text must guide users toward a

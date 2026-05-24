@@ -606,7 +606,7 @@ pub struct DoctorArgs {
 ///   Override path with --config <PATH>.
 /// ```
 pub fn config_help_block() -> String {
-    let resolved = paths::default_config_path();
+    let resolved = paths::active_config_path();
     let line = paths::format_path_with_existence(resolved.as_deref());
     format!(
         "Configuration file:\n  \

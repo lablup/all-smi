@@ -71,7 +71,7 @@ fn write_text<W: Write>(out: &mut W, explicit: Option<&Path>) -> io::Result<()> 
         return Ok(());
     }
 
-    let active = paths::default_config_path();
+    let active = paths::active_config_path();
     writeln!(
         out,
         "{}",
@@ -107,7 +107,8 @@ fn write_text<W: Write>(out: &mut W, explicit: Option<&Path>) -> io::Result<()> 
 /// ```
 ///
 /// * `active` is the path the loader would actually open (either the
-///   `--config` override or the canonical default for the platform).
+///   `--config` override, the first existing implicit candidate, or the
+///   canonical default path where a new config would be created).
 ///   `null` only when no home directory can be resolved.
 /// * `exists` reflects `Path::exists()` for `active`.
 /// * `overridden` is `true` when `--config` was supplied.
@@ -118,7 +119,7 @@ fn write_json<W: Write>(out: &mut W, explicit: Option<&Path>) -> io::Result<()> 
     let overridden = explicit.is_some();
     let active_path: Option<std::path::PathBuf> = match explicit {
         Some(p) => Some(p.to_path_buf()),
-        None => paths::default_config_path(),
+        None => paths::active_config_path(),
     };
     let exists = active_path.as_deref().map(Path::exists).unwrap_or(false);
     let search_order: Vec<String> = if overridden {
