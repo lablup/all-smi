@@ -1,5 +1,5 @@
 # Multi-stage build for optimal image size
-FROM rust:1.88-slim as builder
+FROM rust:1.95-slim AS builder
 
 # Install system dependencies for cross-compilation
 RUN apt-get update && apt-get install -y \

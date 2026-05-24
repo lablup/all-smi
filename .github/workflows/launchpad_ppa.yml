@@ -25,14 +25,14 @@ jobs:
       matrix:
         include:
           - distro: jammy
-            vendor_rust: "1.92.0"
-            toolchain_source: "Requires backend-ai PPA dependency on ~lablup/+archive/ubuntu/rustc-release"
+            vendor_rust: "1.95.0"
+            toolchain_source: "Requires Rust 1.95+ from ~lablup/+archive/ubuntu/rustc-release"
           - distro: noble
-            vendor_rust: "1.92.0"
-            toolchain_source: "Requires backend-ai PPA dependency on ~lablup/+archive/ubuntu/rustc-release"
+            vendor_rust: "1.95.0"
+            toolchain_source: "Requires Rust 1.95+ from ~lablup/+archive/ubuntu/rustc-release"
           - distro: resolute
-            vendor_rust: "1.92.0"
-            toolchain_source: "Uses the official Ubuntu 26.04 archive Rust 1.92+ toolchain"
+            vendor_rust: "1.95.0"
+            toolchain_source: "Requires a Rust 1.95+ toolchain"
 
     steps:
     - name: Checkout code
