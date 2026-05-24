@@ -305,6 +305,7 @@ impl MacOsCpuReader {
         }];
 
         Ok(CpuInfo {
+            index: 0,                  // Overwritten by AllSmi::get_cpu_info when flattening readers
             host_id: hostname.clone(), // For local mode, host_id is just the hostname
             hostname,
             instance,
@@ -377,6 +378,7 @@ impl MacOsCpuReader {
         }
 
         Ok(CpuInfo {
+            index: 0,                  // Overwritten by AllSmi::get_cpu_info when flattening readers
             host_id: hostname.clone(), // For local mode, host_id is just the hostname
             hostname,
             instance,

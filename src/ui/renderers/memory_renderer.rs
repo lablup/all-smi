@@ -171,6 +171,7 @@ mod tests {
 
     fn make_memory_info(hostname: &str) -> MemoryInfo {
         MemoryInfo {
+            index: 0,
             host_id: "localhost".to_string(),
             hostname: hostname.to_string(),
             instance: String::new(),

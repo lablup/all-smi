@@ -560,6 +560,7 @@ mod tests {
     #[test]
     fn cpu_row_temp_matches_when_present() {
         let cpu = CpuInfo {
+            index: 0,
             host_id: "h".to_string(),
             hostname: "n".to_string(),
             instance: String::new(),
@@ -587,6 +588,7 @@ mod tests {
     #[test]
     fn cpu_row_temp_missing_fails_closed() {
         let cpu = CpuInfo {
+            index: 0,
             host_id: "h".to_string(),
             hostname: "n".to_string(),
             instance: String::new(),

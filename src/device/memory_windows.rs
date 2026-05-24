@@ -75,6 +75,7 @@ impl MemoryReader for WindowsMemoryReader {
         let now = Local::now();
 
         memory_info.push(MemoryInfo {
+            index: 0, // Overwritten by AllSmi::get_memory_info when flattening readers
             host_id: hostname.clone(),
             hostname: hostname.clone(),
             instance: hostname,

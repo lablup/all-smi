@@ -118,6 +118,22 @@ impl std::fmt::Display for DeviceType {
 ///
 /// `AllSmi` is `Send + Sync` and can be safely shared across threads.
 ///
+/// # Refreshing data
+///
+/// The `get_*_info()` getters return point-in-time owned snapshots. Re-calling
+/// a getter returns fresh values but re-enumerates every device. To refresh a
+/// single device of interest without that cost, use a stable correlation
+/// identifier:
+///
+/// * GPUs and NPUs are keyed by [`crate::device::GpuInfo::uuid`]; use
+///   [`AllSmi::get_gpu_by_uuid`] or [`AllSmi::refresh_gpu`].
+/// * CPUs and memory entries are keyed by their 0-based `index`, populated by
+///   `get_cpu_info` / `get_memory_info`; use [`AllSmi::get_cpu_by_index`] /
+///   [`AllSmi::refresh_cpu`] and [`AllSmi::get_memory_by_index`] /
+///   [`AllSmi::refresh_memory`].
+/// * Storage entries already expose
+///   [`crate::storage::StorageInfo::index`].
+///
 /// # Example
 ///
 /// ```rust,no_run
@@ -264,6 +280,84 @@ impl AllSmi {
         all_gpus
     }
 
+    /// Fetch fresh information for a single GPU/NPU identified by its stable
+    /// [`GpuInfo::uuid`], without re-enumerating every device.
+    ///
+    /// Each GPU reader is queried via [`crate::device::GpuReader::get_gpu_info_by_uuid`]
+    /// in turn. The default trait implementation filters that reader's full
+    /// enumeration; readers that can address a device directly (for example
+    /// NVML via `nvmlDeviceGetHandleByUUID`) MAY override it for a faster path.
+    /// Returns `None` when no reader currently sees a device with that UUID
+    /// (e.g., the device was removed, the driver lost it, or the UUID is
+    /// unknown to every installed reader).
+    ///
+    /// # Refreshing a previously held snapshot
+    ///
+    /// Use this to refresh a single device of interest without paying the cost
+    /// of re-enumerating every accelerator in the system:
+    ///
+    /// ```rust,no_run
+    /// use all_smi::AllSmi;
+    ///
+    /// let smi = AllSmi::new()?;
+    /// let snapshot = smi.get_gpu_info();
+    /// if let Some(first) = snapshot.first() {
+    ///     // Later, refresh just this one device.
+    ///     if let Some(fresh) = smi.get_gpu_by_uuid(&first.uuid) {
+    ///         println!("{} util now {:.1}%", fresh.name, fresh.utilization);
+    ///     } else {
+    ///         println!("{} has disappeared", first.name);
+    ///     }
+    /// }
+    /// # Ok::<(), all_smi::Error>(())
+    /// ```
+    pub fn get_gpu_by_uuid(&self, uuid: &str) -> Option<GpuInfo> {
+        for reader in &self.gpu_readers {
+            if let Some(gpu) = reader.get_gpu_info_by_uuid(uuid) {
+                return Some(gpu);
+            }
+        }
+        None
+    }
+
+    /// Refresh a previously fetched [`GpuInfo`] in place by its UUID.
+    ///
+    /// Returns `true` when the device was found and `*info` was overwritten
+    /// with fresh data, `false` when no reader currently sees a device with
+    /// `info.uuid` (the original struct is left untouched in that case so the
+    /// caller can decide how to handle a disappeared device).
+    ///
+    /// This is a convenience wrapper around [`Self::get_gpu_by_uuid`]. The
+    /// existing per-entry identifier on [`GpuInfo::uuid`] is what makes the
+    /// in-place refresh unambiguous even when devices hot-plug or MIG
+    /// reconfiguration renumbers things between calls.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use all_smi::AllSmi;
+    ///
+    /// let smi = AllSmi::new()?;
+    /// let mut gpus = smi.get_gpu_info();
+    /// if let Some(gpu) = gpus.first_mut() {
+    ///     if smi.refresh_gpu(gpu) {
+    ///         println!("{} refreshed: {:.1}% util", gpu.name, gpu.utilization);
+    ///     } else {
+    ///         println!("{} disappeared between calls", gpu.name);
+    ///     }
+    /// }
+    /// # Ok::<(), all_smi::Error>(())
+    /// ```
+    pub fn refresh_gpu(&self, info: &mut GpuInfo) -> bool {
+        match self.get_gpu_by_uuid(&info.uuid) {
+            Some(fresh) => {
+                *info = fresh;
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Get information about GPU/NPU processes.
     ///
     /// Returns a vector of [`ProcessInfo`] structs containing information
@@ -385,7 +479,45 @@ impl AllSmi {
         for reader in &self.cpu_readers {
             all_cpus.extend(reader.get_cpu_info());
         }
+        // Assign stable 0-based correlation indices over the flattened result.
+        // CPU topology is static, so the same physical entry receives the same
+        // index across successive calls — callers may use this as a stable key
+        // when refreshing a previously held [`CpuInfo`].
+        for (idx, cpu) in all_cpus.iter_mut().enumerate() {
+            cpu.index = idx as u32;
+        }
         all_cpus
+    }
+
+    /// Fetch fresh [`CpuInfo`] for a single entry by its stable
+    /// [`CpuInfo::index`].
+    ///
+    /// Re-enumerates CPUs and returns the entry whose freshly assigned index
+    /// matches `index`. CPU topology is static, so the index is a stable
+    /// correlation key across refreshes. Returns `None` when `index` is out
+    /// of range for the current enumeration. The efficiency win over
+    /// [`Self::get_cpu_info`] is marginal in practice (typically a single
+    /// aggregate CPU entry per host); this helper exists for API symmetry
+    /// with [`Self::get_gpu_by_uuid`].
+    pub fn get_cpu_by_index(&self, index: u32) -> Option<CpuInfo> {
+        self.get_cpu_info().into_iter().find(|c| c.index == index)
+    }
+
+    /// Refresh a previously fetched [`CpuInfo`] in place using its stable
+    /// [`CpuInfo::index`].
+    ///
+    /// Returns `true` when the entry was found and `*info` was overwritten,
+    /// `false` when the index is no longer present (the original struct is
+    /// left untouched). See [`Self::get_cpu_by_index`] for the underlying
+    /// lookup semantics.
+    pub fn refresh_cpu(&self, info: &mut CpuInfo) -> bool {
+        match self.get_cpu_by_index(info.index) {
+            Some(fresh) => {
+                *info = fresh;
+                true
+            }
+            None => false,
+        }
     }
 
     /// Get information about system memory.
@@ -414,7 +546,41 @@ impl AllSmi {
         for reader in &self.memory_readers {
             all_memory.extend(reader.get_memory_info());
         }
+        // Assign stable 0-based correlation indices over the flattened result
+        // (see [`Self::get_cpu_info`] for the rationale).
+        for (idx, mem) in all_memory.iter_mut().enumerate() {
+            mem.index = idx as u32;
+        }
         all_memory
+    }
+
+    /// Fetch fresh [`MemoryInfo`] for a single entry by its stable
+    /// [`MemoryInfo::index`].
+    ///
+    /// Returns `None` when `index` is out of range for the current
+    /// enumeration. Memory is effectively a per-host singleton; this helper
+    /// exists for API symmetry with [`Self::get_cpu_by_index`] and
+    /// [`Self::get_gpu_by_uuid`].
+    pub fn get_memory_by_index(&self, index: u32) -> Option<MemoryInfo> {
+        self.get_memory_info()
+            .into_iter()
+            .find(|m| m.index == index)
+    }
+
+    /// Refresh a previously fetched [`MemoryInfo`] in place using its stable
+    /// [`MemoryInfo::index`].
+    ///
+    /// Returns `true` when the entry was found and `*info` was overwritten,
+    /// `false` when the index is no longer present (the original struct is
+    /// left untouched).
+    pub fn refresh_memory(&self, info: &mut MemoryInfo) -> bool {
+        match self.get_memory_by_index(info.index) {
+            Some(fresh) => {
+                *info = fresh;
+                true
+            }
+            None => false,
+        }
     }
 
     /// Get chassis/node-level information.

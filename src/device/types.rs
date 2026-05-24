@@ -288,6 +288,14 @@ pub struct ProcessInfo {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CpuInfo {
+    /// Stable 0-based correlation identifier assigned by
+    /// [`crate::client::AllSmi::get_cpu_info`] as readers are flattened.
+    /// CPU topology is static, so callers can use this as a stable key
+    /// across refreshes to match an old entry to its refreshed counterpart.
+    /// `#[serde(default)]` keeps older snapshots and wire payloads
+    /// deserializing cleanly.
+    #[serde(default)]
+    pub index: u32,
     pub host_id: String,  // Host identifier (e.g., "10.82.128.41:9090")
     pub hostname: String, // DNS hostname of the server
     pub instance: String, // Instance name from metrics
@@ -363,6 +371,14 @@ pub struct AppleSiliconCpuInfo {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct MemoryInfo {
+    /// Stable 0-based correlation identifier assigned by
+    /// [`crate::client::AllSmi::get_memory_info`] as readers are flattened.
+    /// Memory is effectively a per-host singleton, so this field exists
+    /// primarily for API symmetry with [`CpuInfo::index`] and
+    /// [`crate::storage::StorageInfo::index`]. `#[serde(default)]` keeps
+    /// older snapshots and wire payloads deserializing cleanly.
+    #[serde(default)]
+    pub index: u32,
     pub host_id: String,       // Host identifier (e.g., "10.82.128.41:9090")
     pub hostname: String,      // DNS hostname of the server
     pub instance: String,      // Instance name from metrics

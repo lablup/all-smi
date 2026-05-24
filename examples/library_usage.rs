@@ -253,6 +253,73 @@ fn main() -> Result<()> {
     println!();
 
     // ==========================================================================
+    // Targeted Refresh and Stable Correlation IDs
+    // ==========================================================================
+    // The `get_*_info()` getters return owned point-in-time snapshots, so the
+    // copy you hold goes stale over time. Re-calling the full getter is one
+    // option, but it re-enumerates every device. The helpers below let you
+    // refresh a single entry of interest using a stable correlation key:
+    //
+    //   * GPU / NPU: `GpuInfo::uuid` (already unique per device)
+    //   * CPU:       `CpuInfo::index` (0-based, stable, assigned by AllSmi)
+    //   * Memory:    `MemoryInfo::index` (same scheme as CpuInfo)
+    //
+    // The pattern: snapshot once, hold onto the key, then refresh in place
+    // whenever you need fresh numbers for that one device.
+    println!("--- Targeted Refresh Demo ---");
+
+    // GPU refresh by UUID — only runs if at least one GPU/NPU is present.
+    if let Some(first_uuid) = gpus.first().map(|g| g.uuid.clone()) {
+        // Fetch fresh data for just that one device.
+        if let Some(fresh) = smi.get_gpu_by_uuid(&first_uuid) {
+            println!(
+                "  GPU {} refreshed by uuid: util={:.1}%, mem={} MB used",
+                fresh.name,
+                fresh.utilization,
+                fresh.used_memory / 1024 / 1024
+            );
+        }
+
+        // Or refresh an existing owned struct in place.
+        let mut held = gpus[0].clone();
+        if smi.refresh_gpu(&mut held) {
+            println!(
+                "  GPU {} refreshed in place: util now {:.1}%",
+                held.name, held.utilization
+            );
+        } else {
+            println!("  GPU {} disappeared between calls", held.name);
+        }
+    } else {
+        println!("  No GPUs/NPUs detected — skipping targeted GPU refresh demo.");
+    }
+
+    // CPU refresh by index — CPU topology is static, so the index is stable
+    // across calls.
+    if let Some(mut held_cpu) = cpus.first().cloned() {
+        let original_index = held_cpu.index;
+        if smi.refresh_cpu(&mut held_cpu) {
+            println!(
+                "  CPU index {} ({}) refreshed in place: util now {:.1}%",
+                original_index, held_cpu.cpu_model, held_cpu.utilization
+            );
+        }
+    }
+
+    // Memory refresh by index.
+    if let Some(mut held_mem) = memory.first().cloned() {
+        let original_index = held_mem.index;
+        if smi.refresh_memory(&mut held_mem) {
+            let total_gb = held_mem.total_bytes as f64 / 1024.0 / 1024.0 / 1024.0;
+            println!(
+                "  Memory index {} refreshed in place: util now {:.1}% (total {:.1} GB)",
+                original_index, held_mem.utilization, total_gb
+            );
+        }
+    }
+    println!();
+
+    // ==========================================================================
     // Summary
     // ==========================================================================
     println!("--- Summary ---");
