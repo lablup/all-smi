@@ -52,6 +52,11 @@ use writer::{Codec, RotatingWriter};
 /// walk index frames.
 const INDEX_EVERY_N_FRAMES: u64 = 1000;
 
+/// Default basename used for the recorder's NDJSON stream when the
+/// operator does not pass `-o`. Defined once here so the CLI layer,
+/// resolver, doc comments, and tests stay aligned (see issue #223).
+pub const DEFAULT_BASENAME: &str = "all-smi-record.ndjson.zst";
+
 /// Resolved, validated options for a recording run.
 pub struct RecorderOptions {
     pub output: PathBuf,
@@ -80,15 +85,19 @@ impl RecorderOptions {
     /// Merged CLI + `[record]` config constructor. Precedence
     /// (highest → lowest):
     ///
-    /// * CLI flag (`--output`, `--compress`)
+    /// * Explicit CLI flag (`-o <path>` / `--compress`) — always
+    ///   honored verbatim, including when the path happens to equal
+    ///   [`DEFAULT_BASENAME`].
     /// * Config file (`record.output_dir`, `record.compress`)
-    /// * Compiled default (`./all-smi-record.ndjson.zst`, codec zstd)
+    /// * Compiled default ([`DEFAULT_BASENAME`] in the current working
+    ///   directory, codec zstd)
     ///
-    /// `record.output_dir` is treated as the *directory* the default
-    /// basename is placed under — the operator can always pass `-o
-    /// /some/file.ndjson` to bypass it. Tilde expansion is applied so
+    /// When `-o` is omitted, [`DEFAULT_BASENAME`] is placed under
+    /// `record.output_dir` (tilde-expanded so
     /// `output_dir = "~/.cache/all-smi/records"` resolves to the
-    /// user's home at record time.
+    /// user's home at record time). If no config is supplied,
+    /// the default resolves to just [`DEFAULT_BASENAME`] in the
+    /// current working directory.
     pub fn from_args_with_settings(
         args: &RecordArgs,
         settings: Option<&RecordSettings>,
@@ -124,21 +133,21 @@ impl RecorderOptions {
             })
         });
 
-        // Resolve the output path. clap hands us a default basename; if
-        // the operator did not pass `-o` AND the config supplied an
-        // `output_dir`, redirect the default basename under that dir.
-        // Detecting "operator did not pass -o" relies on the clap
-        // default being exactly the documented value — if that ever
-        // changes, update this guard.
-        let default_basename: std::path::PathBuf =
-            std::path::PathBuf::from("all-smi-record.ndjson.zst");
-        let output = if args.output == default_basename
-            && let Some(dir) = settings.map(|s| s.output_dir.as_str())
-            && !dir.is_empty()
-        {
-            crate::common::paths::expand_tilde(std::path::Path::new(dir)).join(&default_basename)
-        } else {
-            args.output.clone()
+        // Resolve the output path. Precedence: explicit `-o` >
+        // `record.output_dir` config + `DEFAULT_BASENAME` >
+        // `DEFAULT_BASENAME` in the current working directory.
+        let output = match &args.output {
+            Some(p) => p.clone(),
+            None => {
+                let dir = settings
+                    .map(|s| s.output_dir.as_str())
+                    .filter(|s| !s.is_empty());
+                match dir {
+                    Some(d) => crate::common::paths::expand_tilde(std::path::Path::new(d))
+                        .join(DEFAULT_BASENAME),
+                    None => std::path::PathBuf::from(DEFAULT_BASENAME),
+                }
+            }
         };
 
         let codec = Codec::detect(&output, compress_override);
@@ -529,5 +538,94 @@ mod tests {
         assert_eq!(parse_byte_size("1K").unwrap(), 1024);
         assert_eq!(parse_byte_size("1M").unwrap(), 1 << 20);
         assert_eq!(parse_byte_size("2G").unwrap(), 2 << 30);
+    }
+
+    /// Build a minimal valid `RecordArgs` for resolver tests. Defaults
+    /// match the clap-compiled defaults (`--source=local`,
+    /// `--include=gpu,cpu,memory,chassis`, etc.) so
+    /// `from_args_with_settings` passes its hosts and includes checks
+    /// without further setup. Callers tweak `output` to exercise the
+    /// path-resolution precedence.
+    fn record_args(output: Option<PathBuf>) -> RecordArgs {
+        RecordArgs {
+            output,
+            interval: 3,
+            duration: "0".to_string(),
+            source: RecordSource::Local,
+            hosts: None,
+            hostfile: None,
+            include: vec![
+                "gpu".to_string(),
+                "cpu".to_string(),
+                "memory".to_string(),
+                "chassis".to_string(),
+            ],
+            max_size: "100M".to_string(),
+            max_files: 10,
+            compress: None,
+        }
+    }
+
+    /// No `-o`, no config: the default basename should resolve to just
+    /// `DEFAULT_BASENAME` in the current working directory (no
+    /// directory prefix). This is the fallback when no config file is
+    /// loaded at all.
+    #[test]
+    fn resolve_output_no_cli_no_config() {
+        let args = record_args(None);
+        let opts = RecorderOptions::from_args_with_settings(&args, None).unwrap();
+        assert_eq!(opts.output, PathBuf::from(DEFAULT_BASENAME));
+    }
+
+    /// No `-o`, config `output_dir` set: the default basename should be
+    /// placed under the configured directory. Uses an absolute path so
+    /// tilde expansion is a no-op and the assertion is portable.
+    #[test]
+    fn resolve_output_no_cli_with_config_dir() {
+        let args = record_args(None);
+        let settings = RecordSettings {
+            output_dir: "/tmp/all-smi-records".to_string(),
+            compress: "zstd".to_string(),
+        };
+        let opts = RecorderOptions::from_args_with_settings(&args, Some(&settings)).unwrap();
+        assert_eq!(
+            opts.output,
+            PathBuf::from("/tmp/all-smi-records/all-smi-record.ndjson.zst")
+        );
+    }
+
+    /// Regression guard for the silent-redirect bug fixed in #223:
+    /// explicit `-o all-smi-record.ndjson.zst` (a path that happens to
+    /// equal `DEFAULT_BASENAME`) must be honored verbatim, even when
+    /// the config has `output_dir` set. The previous string-sentinel
+    /// resolver silently redirected this path under the cache dir.
+    #[test]
+    fn resolve_output_explicit_matching_basename_is_honored() {
+        let args = record_args(Some(PathBuf::from(DEFAULT_BASENAME)));
+        let settings = RecordSettings {
+            output_dir: "/tmp/all-smi-records".to_string(),
+            compress: "zstd".to_string(),
+        };
+        let opts = RecorderOptions::from_args_with_settings(&args, Some(&settings)).unwrap();
+        assert_eq!(opts.output, PathBuf::from(DEFAULT_BASENAME));
+    }
+
+    /// Explicit `-o /var/log/cluster.ndjson.zst` must always be honored
+    /// verbatim, regardless of whether a config layer is present.
+    #[test]
+    fn resolve_output_explicit_absolute_path_is_honored() {
+        let explicit = PathBuf::from("/var/log/cluster.ndjson.zst");
+        // Without config.
+        let args = record_args(Some(explicit.clone()));
+        let opts = RecorderOptions::from_args_with_settings(&args, None).unwrap();
+        assert_eq!(opts.output, explicit);
+        // And with config that sets `output_dir` — explicit `-o` still wins.
+        let args = record_args(Some(explicit.clone()));
+        let settings = RecordSettings {
+            output_dir: "/tmp/all-smi-records".to_string(),
+            compress: "zstd".to_string(),
+        };
+        let opts = RecorderOptions::from_args_with_settings(&args, Some(&settings)).unwrap();
+        assert_eq!(opts.output, explicit);
     }
 }

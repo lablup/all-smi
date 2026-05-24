@@ -438,12 +438,20 @@ impl std::fmt::Display for RecordCompression {
 #[derive(Parser, Clone, Debug)]
 pub struct RecordArgs {
     /// Output path for the NDJSON stream.
-    ///
-    /// Extension drives compression: `.ndjson.zst` → zstd,
-    /// `.ndjson.gz` → gzip, anything else → plain NDJSON. Use
-    /// `--compress` to override detection.
-    #[arg(long, short = 'o', default_value = "all-smi-record.ndjson.zst")]
-    pub output: PathBuf,
+    #[arg(
+        long,
+        short = 'o',
+        long_help = "Output path for the NDJSON stream.\n\n\
+            When omitted, the file lands under the `record.output_dir` config \
+            value (default `~/.cache/all-smi/records/`) with basename \
+            `all-smi-record.ndjson.zst`. If no config file is present, the \
+            file is written to the current working directory as \
+            `all-smi-record.ndjson.zst`.\n\n\
+            Extension drives compression: `.ndjson.zst` → zstd, \
+            `.ndjson.gz` → gzip, anything else → plain NDJSON. Use \
+            `--compress` to override detection."
+    )]
+    pub output: Option<PathBuf>,
 
     /// Interval in seconds between frames.
     #[arg(long, short = 'i', default_value_t = 3)]
