@@ -72,6 +72,7 @@ impl MemoryReader for MacOsMemoryReader {
         let now = Local::now();
 
         memory_info.push(MemoryInfo {
+            index: 0,                  // Overwritten by AllSmi::get_memory_info when flattening readers
             host_id: hostname.clone(), // For local mode, host_id is just the hostname
             hostname: hostname.clone(),
             instance: hostname,

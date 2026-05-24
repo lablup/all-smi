@@ -706,6 +706,7 @@ mod tests {
             .collect();
 
         CpuInfo {
+            index: 0,
             host_id: "localhost".to_string(),
             hostname: hostname.to_string(),
             instance: String::new(),
@@ -745,6 +746,7 @@ mod tests {
             });
         }
         CpuInfo {
+            index: 0,
             host_id: "localhost".to_string(),
             hostname: hostname.to_string(),
             instance: String::new(),

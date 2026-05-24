@@ -60,6 +60,7 @@ impl MemoryReader for LinuxMemoryReader {
             // For containers, we primarily care about the limit and usage
             // Other values like buffers/cached are from /proc/meminfo but less relevant
             memory_info.push(MemoryInfo {
+                index: 0, // Overwritten by AllSmi::get_memory_info when flattening readers
                 host_id: hostname.clone(),
                 hostname: hostname.clone(),
                 instance: hostname,
@@ -125,6 +126,7 @@ impl MemoryReader for LinuxMemoryReader {
             let now = Local::now();
 
             memory_info.push(MemoryInfo {
+                index: 0,                  // Overwritten by AllSmi::get_memory_info when flattening readers
                 host_id: hostname.clone(), // For local mode, host_id is just the hostname
                 hostname: hostname.clone(),
                 instance: hostname,

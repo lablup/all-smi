@@ -580,6 +580,7 @@ mod tests {
             .collect();
 
         CpuInfo {
+            index: 0,
             host_id: "localhost".to_string(),
             hostname: "testhost".to_string(),
             instance: "".to_string(),
@@ -620,6 +621,7 @@ mod tests {
         }
 
         CpuInfo {
+            index: 0,
             host_id: "localhost".to_string(),
             hostname: "testhost".to_string(),
             instance: "".to_string(),

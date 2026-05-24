@@ -655,6 +655,7 @@ mod tests {
         let mut state = AppState::new();
         state.is_local_mode = true;
         state.cpu_info.push(CpuInfo {
+            index: 0,
             host_id: "local".into(),
             hostname: "local".into(),
             instance: "".into(),
@@ -676,6 +677,7 @@ mod tests {
             time: "".into(),
         });
         state.memory_info.push(MemoryInfo {
+            index: 0,
             host_id: "local".into(),
             hostname: "local".into(),
             instance: "".into(),
@@ -706,6 +708,7 @@ mod tests {
         state.is_local_mode = false;
         state.current_tab = 0; // "All" tab
         state.cpu_info.push(CpuInfo {
+            index: 0,
             host_id: "host-a".into(),
             hostname: "host-a".into(),
             instance: "".into(),

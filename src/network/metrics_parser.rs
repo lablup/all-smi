@@ -692,6 +692,7 @@ impl MetricsParser {
             };
 
             CpuInfo {
+                index: 0,                  // Network-parsed CpuInfo: no local AllSmi indexing, default to 0
                 host_id: host.to_string(), // Host identifier (e.g., "10.82.128.41:9090")
                 hostname: crate::get_label_or_default!(labels, "instance", host), // DNS hostname from instance label
                 instance: crate::get_label_or_default!(labels, "instance", host),
@@ -878,6 +879,7 @@ impl MetricsParser {
         let memory_info = memory_info_map
             .entry(memory_key)
             .or_insert_with(|| MemoryInfo {
+                index: 0, // Network-parsed MemoryInfo: no local AllSmi indexing, default to 0
                 host_id: host.to_string(), // Host identifier (e.g., "10.82.128.41:9090")
                 hostname: crate::get_label_or_default!(labels, "instance", host), // DNS hostname from instance label
                 instance: crate::get_label_or_default!(labels, "instance", host),

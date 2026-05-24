@@ -302,6 +302,7 @@ impl WindowsCpuReader {
             .collect();
 
         Ok(CpuInfo {
+            index: 0, // Overwritten by AllSmi::get_cpu_info when flattening readers
             host_id: hostname.clone(),
             hostname,
             instance,

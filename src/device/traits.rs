@@ -21,6 +21,30 @@ pub trait GpuReader: Send + Sync {
     fn get_gpu_info(&self) -> Vec<GpuInfo>;
     fn get_process_info(&self) -> Vec<ProcessInfo>;
 
+    /// Fetch fresh information for a single GPU/NPU identified by its
+    /// stable [`GpuInfo::uuid`].
+    ///
+    /// The default implementation filters the full enumeration produced by
+    /// [`GpuReader::get_gpu_info`] and is therefore no faster than the
+    /// existing path; it exists so callers always have a uniform single-device
+    /// API and so existing readers compile without change.
+    ///
+    /// Readers that can address a device directly (for example via
+    /// `nvmlDeviceGetHandleByUUID`) SHOULD override this with a path that
+    /// avoids enumerating every device.
+    ///
+    /// Returns `None` when no device with `uuid` is currently visible to this
+    /// reader (e.g., the device was removed, the driver lost it, or the UUID
+    /// belongs to a different reader's domain).
+    // `#[allow(dead_code)]`: the default body is dispatched into via
+    // `AllSmi::get_gpu_by_uuid`. The binary target does not exercise that
+    // call path directly, which triggers a spurious unused-warning on the
+    // trait method in `--bin all-smi --tests` builds.
+    #[allow(dead_code)]
+    fn get_gpu_info_by_uuid(&self, uuid: &str) -> Option<GpuInfo> {
+        self.get_gpu_info().into_iter().find(|g| g.uuid == uuid)
+    }
+
     /// Return only raw GPU/NPU process entries and their PIDs, without
     /// system-wide process enumeration.  The collector uses this to avoid
     /// a redundant second call to `merge_gpu_processes`.

@@ -117,6 +117,7 @@ fn mock_gpu(name: &str, util: f64, temp: u32) -> GpuInfo {
 
 fn mock_cpu() -> CpuInfo {
     CpuInfo {
+        index: 0,
         host_id: "mockhost".to_string(),
         hostname: "mockhost".to_string(),
         instance: "mockhost:9090".to_string(),
@@ -141,6 +142,7 @@ fn mock_cpu() -> CpuInfo {
 
 fn mock_memory() -> MemoryInfo {
     MemoryInfo {
+        index: 0,
         host_id: "mockhost".to_string(),
         hostname: "mockhost".to_string(),
         instance: "mockhost:9090".to_string(),
