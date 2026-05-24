@@ -1137,7 +1137,7 @@ operator can filter the visible GPUs mid-playback.
 
 | Flag              | Default                           | Description                                      |
 |-------------------|-----------------------------------|--------------------------------------------------|
-| `--output` / `-o` | `all-smi-record.ndjson.zst`       | Output path. Extension picks the codec.          |
+| `--output` / `-o` | `~/.cache/all-smi/records/all-smi-record.ndjson.zst` (override via `record.output_dir` config, or `-o` flag) | Output path. Extension picks the codec. |
 | `--interval` / `-i` | `3`                             | Seconds between frames.                          |
 | `--duration`      | `0` (= record until SIGTERM)      | Accepts `30s`, `5m`, `1h`, `1d`, or bare seconds. |
 | `--source`        | `local`                           | `local` (hardware readers) or `remote` (HTTP scrape). |
