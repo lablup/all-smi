@@ -42,7 +42,7 @@ pub const ENERGY_HELP: &str = "Energy Session (TUI):
     ALL_SMI_ENERGY_PRICE         $/kWh price (default 0.12; invalid hides cost)
     ALL_SMI_ENERGY_CURRENCY      Display currency code (default USD)
     ALL_SMI_ENERGY_NO_COST=1     Hide cost column; still show kWh
-    ALL_SMI_ENERGY_WAL_PATH      WAL file path (default ~/.cache/all-smi/energy-wal.bin)
+    ALL_SMI_ENERGY_WAL_PATH      WAL file path (default <platform cache dir>/all-smi/energy-wal.bin)
     ALL_SMI_ENERGY_NO_WAL=1      Disable disk WAL (in-memory counters only)
     ALL_SMI_ENERGY_GAP_SECONDS   Gap threshold for trapezoid→hold-last (1..=3600, default 10)";
 
