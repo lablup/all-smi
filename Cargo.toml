@@ -71,9 +71,11 @@ libloading = "0.9"
 
 # AMD GPU support (glibc only, not compatible with musl static linking)
 [target.'cfg(all(target_os = "linux", not(target_env = "musl")))'.dependencies]
-# Pinned exactly: 0.11.4 renamed get_all_proc_usage → update_proc_usage in a
-# patch bump (issue #205). Re-evaluate when bumping.
-libamdgpu_top = "=0.11.4"
+# Pinned exactly: this crate has shipped semver-violating breaking changes in
+# patch releases (0.11.4 renamed get_all_proc_usage → update_proc_usage, #205).
+# 0.11.5 fixes a file-descriptor leak (#218). Re-evaluate the exact version on
+# each bump.
+libamdgpu_top = "=0.11.5"
 
 [target.'cfg(target_env = "musl")'.dependencies]
 openssl = { version = "0.10.75", features = ["vendored"] }
