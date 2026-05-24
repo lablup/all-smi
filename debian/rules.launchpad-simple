@@ -9,8 +9,8 @@ export CARGO_HOME = $(HOME)/.cargo
 export CARGO_TARGET_DIR = $(CURDIR)/target
 export CARGO_NET_OFFLINE = true
 
-RUSTC := $(shell if command -v rustc-1.92 >/dev/null 2>&1; then printf '%s' rustc-1.92; else printf '%s' rustc; fi)
-CARGO := $(shell if command -v cargo-1.92 >/dev/null 2>&1; then printf '%s' cargo-1.92; else printf '%s' cargo; fi)
+RUSTC := $(shell if command -v rustc-1.95 >/dev/null 2>&1; then printf '%s' rustc-1.95; else printf '%s' rustc; fi)
+CARGO := $(shell if command -v cargo-1.95 >/dev/null 2>&1; then printf '%s' cargo-1.95; else printf '%s' cargo; fi)
 
 %:
 	dh $@
