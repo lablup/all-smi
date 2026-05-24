@@ -184,8 +184,10 @@ fn apply_file_energy(raw: &RawConfig, settings: &mut Settings) -> Result<(), Con
     if let Some(s) = e.show_cost {
         settings.energy.show_cost = s;
     }
-    if let Some(w) = &e.wal_path {
-        settings.energy.wal_path = Some(w.clone());
+    if let Some(w) = &e.wal_path
+        && !w.trim().is_empty()
+    {
+        settings.energy.wal_path = Some(w.trim().to_string());
     }
     if let Some(g) = e.gap_interpolate_seconds {
         if !(1..=3600).contains(&g) {
@@ -218,8 +220,10 @@ fn apply_file_record(raw: &RawConfig, settings: &mut Settings) -> Result<(), Con
     let Some(r) = &raw.record else {
         return Ok(());
     };
-    if let Some(o) = &r.output_dir {
-        settings.record.output_dir = Some(o.clone());
+    if let Some(o) = &r.output_dir
+        && !o.trim().is_empty()
+    {
+        settings.record.output_dir = Some(o.trim().to_string());
     }
     if let Some(c) = &r.compress {
         match c.as_str() {

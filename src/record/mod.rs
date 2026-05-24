@@ -149,6 +149,7 @@ impl RecorderOptions {
             None => {
                 let configured = settings
                     .and_then(|s| s.output_dir.as_deref())
+                    .map(str::trim)
                     .filter(|s| !s.is_empty());
                 let base = match configured {
                     Some(d) => Some(crate::common::paths::expand_tilde(std::path::Path::new(d))),
@@ -659,6 +660,27 @@ mod tests {
         };
         let opts = RecorderOptions::from_args_with_settings(&args, Some(&settings)).unwrap();
         assert_eq!(opts.output, explicit);
+    }
+
+    /// A whitespace-only `output_dir` in the TOML config must be treated as
+    /// "not configured" — it must not be passed through as a literal path like
+    /// `"   /all-smi-record.ndjson.zst"`. The resolver trims before the
+    /// `is_empty()` guard so `"   "` falls through to the platform cache
+    /// helper (or the CWD fallback), matching how WAL handles a whitespace-only
+    /// `wal_path` in `resolve_wal_path()`.
+    #[test]
+    fn resolve_output_whitespace_only_config_dir_falls_through() {
+        let args = record_args(None);
+        let settings = RecordSettings {
+            output_dir: Some("   ".to_string()),
+            compress: "zstd".to_string(),
+        };
+        let opts = RecorderOptions::from_args_with_settings(&args, Some(&settings)).unwrap();
+        let s = opts.output.to_string_lossy();
+        assert!(
+            !s.starts_with("   "),
+            "whitespace-only config_dir leaked into output: {s}"
+        );
     }
 
     /// No `-o`, config `output_dir` contains a tilde prefix: the resolver
