@@ -88,16 +88,18 @@ impl RecorderOptions {
     /// * Explicit CLI flag (`-o <path>` / `--compress`) — always
     ///   honored verbatim, including when the path happens to equal
     ///   [`DEFAULT_BASENAME`].
-    /// * Config file (`record.output_dir`, `record.compress`)
-    /// * Compiled default ([`DEFAULT_BASENAME`] in the current working
-    ///   directory, codec zstd)
-    ///
-    /// When `-o` is omitted, [`DEFAULT_BASENAME`] is placed under
-    /// `record.output_dir` (tilde-expanded so
-    /// `output_dir = "~/.cache/all-smi/records"` resolves to the
-    /// user's home at record time). If no config is supplied,
-    /// the default resolves to just [`DEFAULT_BASENAME`] in the
-    /// current working directory.
+    /// * Config file (`record.output_dir`, `record.compress`) —
+    ///   tilde-expanded so `output_dir = "~/my-records"` resolves to
+    ///   the user's home at record time.
+    /// * Platform cache helper ([`crate::common::paths::cache_dir`]
+    ///   joined with `"records"`) — on Linux this resolves to
+    ///   `$XDG_CACHE_HOME/all-smi/records` (or `~/.cache/all-smi/records`
+    ///   when `$XDG_CACHE_HOME` is unset), on macOS to
+    ///   `~/Library/Caches/all-smi/records`, on Windows to
+    ///   `%LOCALAPPDATA%\all-smi\records`. Issue #229.
+    /// * Final fallback: [`DEFAULT_BASENAME`] in the current working
+    ///   directory (when no home-like directory is available — bare
+    ///   CI shells, containers without `$HOME`).
     pub fn from_args_with_settings(
         args: &RecordArgs,
         settings: Option<&RecordSettings>,
@@ -134,17 +136,26 @@ impl RecorderOptions {
         });
 
         // Resolve the output path. Precedence: explicit `-o` >
-        // `record.output_dir` config + `DEFAULT_BASENAME` >
+        // `record.output_dir` config (`expand_tilde`) > platform cache
+        // dir from `paths::cache_dir()` joined with `records/` >
         // `DEFAULT_BASENAME` in the current working directory.
+        //
+        // Issue #229: the third tier replaced the previous hard-coded
+        // `~/.cache/all-smi/records` literal so the layout is correct
+        // on macOS (`~/Library/Caches/...`) and Windows
+        // (`%LOCALAPPDATA%\...`) too.
         let output = match &args.output {
             Some(p) => p.clone(),
             None => {
-                let dir = settings
-                    .map(|s| s.output_dir.as_str())
+                let configured = settings
+                    .and_then(|s| s.output_dir.as_deref())
                     .filter(|s| !s.is_empty());
-                match dir {
-                    Some(d) => crate::common::paths::expand_tilde(std::path::Path::new(d))
-                        .join(DEFAULT_BASENAME),
+                let base = match configured {
+                    Some(d) => Some(crate::common::paths::expand_tilde(std::path::Path::new(d))),
+                    None => crate::common::paths::cache_dir().map(|d| d.join("records")),
+                };
+                match base {
+                    Some(b) => b.join(DEFAULT_BASENAME),
                     None => std::path::PathBuf::from(DEFAULT_BASENAME),
                 }
             }
@@ -566,15 +577,36 @@ mod tests {
         }
     }
 
-    /// No `-o`, no config: the default basename should resolve to just
-    /// `DEFAULT_BASENAME` in the current working directory (no
-    /// directory prefix). This is the fallback when no config file is
-    /// loaded at all.
+    /// No `-o`, no config: the default basename should resolve to the
+    /// platform cache helper's `records/` subdirectory (issue #229).
+    /// When `cache_dir()` returns `None` (no home-like dir resolvable —
+    /// bare CI shells, containers without `$HOME`) the resolver falls
+    /// back to just `DEFAULT_BASENAME` in the current working directory.
     #[test]
     fn resolve_output_no_cli_no_config() {
         let args = record_args(None);
         let opts = RecorderOptions::from_args_with_settings(&args, None).unwrap();
-        assert_eq!(opts.output, PathBuf::from(DEFAULT_BASENAME));
+        let expected = match crate::common::paths::cache_dir() {
+            Some(c) => c.join("records").join(DEFAULT_BASENAME),
+            None => PathBuf::from(DEFAULT_BASENAME),
+        };
+        assert_eq!(opts.output, expected);
+    }
+
+    /// No `-o`, no config, `cache_dir()` resolves: the default basename
+    /// must land under `<cache>/all-smi/records/`. Guards the issue-#229
+    /// promise that record output goes through `paths::cache_dir()` on
+    /// every supported platform.
+    #[test]
+    fn resolve_output_no_cli_no_config_uses_platform_cache_dir() {
+        let Some(cache) = crate::common::paths::cache_dir() else {
+            // Skip when no home-like directory is available — same
+            // pattern as `config_dir_ends_with_app_name`.
+            return;
+        };
+        let args = record_args(None);
+        let opts = RecorderOptions::from_args_with_settings(&args, None).unwrap();
+        assert_eq!(opts.output, cache.join("records").join(DEFAULT_BASENAME));
     }
 
     /// No `-o`, config `output_dir` set: the default basename should be
@@ -584,7 +616,7 @@ mod tests {
     fn resolve_output_no_cli_with_config_dir() {
         let args = record_args(None);
         let settings = RecordSettings {
-            output_dir: "/tmp/all-smi-records".to_string(),
+            output_dir: Some("/tmp/all-smi-records".to_string()),
             compress: "zstd".to_string(),
         };
         let opts = RecorderOptions::from_args_with_settings(&args, Some(&settings)).unwrap();
@@ -603,7 +635,7 @@ mod tests {
     fn resolve_output_explicit_matching_basename_is_honored() {
         let args = record_args(Some(PathBuf::from(DEFAULT_BASENAME)));
         let settings = RecordSettings {
-            output_dir: "/tmp/all-smi-records".to_string(),
+            output_dir: Some("/tmp/all-smi-records".to_string()),
             compress: "zstd".to_string(),
         };
         let opts = RecorderOptions::from_args_with_settings(&args, Some(&settings)).unwrap();
@@ -622,7 +654,7 @@ mod tests {
         // And with config that sets `output_dir` — explicit `-o` still wins.
         let args = record_args(Some(explicit.clone()));
         let settings = RecordSettings {
-            output_dir: "/tmp/all-smi-records".to_string(),
+            output_dir: Some("/tmp/all-smi-records".to_string()),
             compress: "zstd".to_string(),
         };
         let opts = RecorderOptions::from_args_with_settings(&args, Some(&settings)).unwrap();
@@ -639,7 +671,7 @@ mod tests {
     fn resolve_output_no_cli_with_tilde_config_dir() {
         let args = record_args(None);
         let settings = RecordSettings {
-            output_dir: "~/my-records".to_string(),
+            output_dir: Some("~/my-records".to_string()),
             compress: "zstd".to_string(),
         };
         let opts = RecorderOptions::from_args_with_settings(&args, Some(&settings)).unwrap();

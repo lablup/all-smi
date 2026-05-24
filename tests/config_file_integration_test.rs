@@ -361,5 +361,9 @@ fn tilde_paths_stored_verbatim_by_loader() {
         Some("~/all-smi-hosts.csv"),
         "loader preserves leading tilde verbatim"
     );
-    assert_eq!(outcome.settings.energy.wal_path, "~/my-wal.bin");
+    assert_eq!(
+        outcome.settings.energy.wal_path.as_deref(),
+        Some("~/my-wal.bin"),
+        "loader preserves leading tilde verbatim"
+    );
 }

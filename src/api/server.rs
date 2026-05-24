@@ -121,23 +121,40 @@ pub async fn run_api_mode(args: &ApiArgs, settings: &Settings) {
     // monotonic across restarts (issue #191). Failures are logged
     // but do not block startup — the integrator simply begins at
     // zero on this host.
+    //
+    // Path resolution flows through `resolve_wal_path` (issue #229) so
+    // the same precedence rules — operator override → platform cache
+    // dir → in-memory only — apply both here and at the flush task
+    // below.
     if initial_state.energy_config.wal_enabled {
-        let wal_path = initial_state.energy_config.wal_path.clone();
-        match crate::metrics::energy_wal::replay_from_path(
-            std::path::Path::new(&wal_path),
-            initial_state.energy.integrator_mut(),
+        match crate::metrics::energy_wal::resolve_wal_path(
+            initial_state.energy_config.wal_path.as_deref(),
         ) {
-            Ok(index) => {
-                if !index.is_empty() {
-                    tracing::info!(
-                        "energy WAL: replayed {} records from {wal_path}",
-                        index.len()
-                    );
+            Some(wal_path) => {
+                let path_display = wal_path.display().to_string();
+                match crate::metrics::energy_wal::replay_from_path(
+                    &wal_path,
+                    initial_state.energy.integrator_mut(),
+                ) {
+                    Ok(index) => {
+                        if !index.is_empty() {
+                            tracing::info!(
+                                "energy WAL: replayed {} records from {path_display}",
+                                index.len()
+                            );
+                        }
+                        initial_state.energy_wal_replay = index;
+                    }
+                    Err(e) => {
+                        tracing::warn!("energy WAL: replay from {path_display} failed: {e}");
+                    }
                 }
-                initial_state.energy_wal_replay = index;
             }
-            Err(e) => {
-                tracing::warn!("energy WAL: replay from {wal_path} failed: {e}");
+            None => {
+                tracing::warn!(
+                    "energy WAL: no cache directory available in environment; \
+                     counters are in-memory only"
+                );
             }
         }
     }
@@ -164,11 +181,20 @@ pub async fn run_api_mode(args: &ApiArgs, settings: &Settings) {
         let cfg = state_read.energy_config.clone();
         drop(state_read);
         if cfg.wal_enabled {
-            Some(crate::metrics::energy_wal::spawn_wal_flush_task(
-                state,
-                cfg.wal_path.clone(),
-                crate::metrics::energy_wal::DEFAULT_FLUSH_INTERVAL,
-            ))
+            match crate::metrics::energy_wal::resolve_wal_path(cfg.wal_path.as_deref()) {
+                Some(path) => Some(crate::metrics::energy_wal::spawn_wal_flush_task(
+                    state,
+                    path,
+                    crate::metrics::energy_wal::DEFAULT_FLUSH_INTERVAL,
+                )),
+                None => {
+                    tracing::warn!(
+                        "energy WAL: no cache directory available in environment; \
+                         skipping flush task (counters remain in-memory only)"
+                    );
+                    None
+                }
+            }
         } else {
             None
         }

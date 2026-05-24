@@ -255,7 +255,7 @@ The canonical schema carries `schema_version = 1` at the top level and nine sect
 | `price_per_kwh` | float | `0.12` | `ALL_SMI_ENERGY_PRICE_PER_KWH` | Electricity price in $/kWh for cost estimation. |
 | `currency` | string | `"USD"` | `ALL_SMI_ENERGY_CURRENCY` | Currency symbol shown in the TUI. |
 | `show_cost` | bool | `true` | `ALL_SMI_ENERGY_SHOW_COST` | Toggle cost column in the TUI. |
-| `wal_path` | string | `~/.cache/all-smi/energy-wal.bin` | `ALL_SMI_ENERGY_WAL_PATH` | Path to the energy write-ahead log for persistent kWh accumulation. |
+| `wal_path` | string | platform cache dir + `all-smi/energy-wal.bin` [^cache] | `ALL_SMI_ENERGY_WAL_PATH` | Path to the energy write-ahead log for persistent kWh accumulation. Operator override is resolved with `~` expansion; unset uses the platform cache helper (#229). |
 | `gap_interpolate_seconds` | integer | `10` | `ALL_SMI_ENERGY_GAP_INTERPOLATE_SECONDS` | Max gap (1–3600 s) to interpolate across when the WAL has a hole. |
 | `wal_enabled` | bool | `true` | `ALL_SMI_ENERGY_WAL_ENABLED` | Enable the WAL. Disable in read-only container environments. |
 
@@ -271,7 +271,9 @@ The canonical schema carries `schema_version = 1` at the top level and nine sect
 
 | Key | Type | Default | Env var | Description |
 |-----|------|---------|---------|-------------|
-| `output_dir` | string | `~/.cache/all-smi/records` | `ALL_SMI_RECORD_OUTPUT_DIR` | Directory where recording segments are written. |
+| `output_dir` | string | platform cache dir + `all-smi/records` [^cache] | `ALL_SMI_RECORD_OUTPUT_DIR` | Directory where recording segments are written. Operator override is resolved with `~` expansion; unset uses the platform cache helper (#229). |
+
+[^cache]: The platform cache directory is `$XDG_CACHE_HOME` (or `~/.cache`) on Linux, `~/Library/Caches` on macOS, and `%LOCALAPPDATA%` on Windows. All three cache consumers (record output, energy WAL, users-CSV export) go through `dirs::cache_dir()` so the layout is consistent across platforms.
 | `compress` | string | `"zstd"` | `ALL_SMI_RECORD_COMPRESS` | Compression codec: `"zstd"`, `"gzip"`, or `"none"`. |
 
 **`[snapshot]`** — defaults for `all-smi snapshot`
@@ -506,11 +508,12 @@ Stable check IDs (greppable across versions):
   climbing monotonically — `rate()` / `increase()` stay well-defined.
 - **WAL persistence** — in API mode the integrator periodically flushes
   accumulated Joules to a write-ahead log so the Prometheus counter
-  survives restarts. The file lives at `~/.cache/all-smi/energy-wal.bin`
-  by default, is opened with `O_NOFOLLOW` + mode `0o600` on Unix, and is
-  compacted automatically once it grows past ~16 MiB. Flush + fsync run
-  on a dedicated blocking task so a slow filesystem (NFS, SAN failover)
-  cannot stall the tokio runtime.
+  survives restarts. The file lives under the platform cache directory
+  by default (`<cache>/all-smi/energy-wal.bin` — see the `[energy]`
+  table above for the per-platform path), is opened with `O_NOFOLLOW` +
+  mode `0o600` on Unix, and is compacted automatically once it grows
+  past ~16 MiB. Flush + fsync run on a dedicated blocking task so a
+  slow filesystem (NFS, SAN failover) cannot stall the tokio runtime.
 - **Environment overrides** (the Prometheus counter is always exported;
   these only affect the TUI display and the WAL):
   - `ALL_SMI_ENERGY_PRICE=<price_per_kwh>` — set the price used for the
@@ -707,7 +710,9 @@ the column as approximate.
 - `ESC` exits drill-down (ESC outside drill-down returns to normal handling)
 - `f` toggles the system-account filter (hides `root`/`uid<1000` by default)
 - `e` exports the current visible table to
-  `~/.cache/all-smi/users-<timestamp>.csv`
+  `<cache>/all-smi/users-<timestamp>.csv` (the platform cache directory
+  — see the `[energy]` / `[record]` table footnote for the per-platform
+  path)
 
 **Partial coverage.** When some hosts report `--processes` data and others
 don't, the tab shows a yellow chip `⚠ partial coverage: M of N nodes reporting
@@ -832,11 +837,12 @@ threshold}` JSON with a 2-second timeout, fire-and-forget.
   16 KiB as an additional safeguard for any programmatic caller.
 - **Users tab CSV export (`e`) — symlink refusal**: The export file is
   opened with `O_NOFOLLOW` and mode `0600`. On a shared machine a co-tenant
-  could pre-plant `~/.cache/all-smi` or the final filename as a symlink to
-  redirect the write to an arbitrary path. This is refused: any pre-existing
-  symlink at either the cache directory path or the timestamped filename
-  causes the export to fail with an error rather than follow the link.
-  Windows falls back to `share_mode(0)` (exclusive access).
+  could pre-plant the platform cache directory or the final filename as a
+  symlink to redirect the write to an arbitrary path. This is refused:
+  any pre-existing symlink at either the cache directory path or the
+  timestamped filename causes the export to fail with an error rather
+  than follow the link. Windows falls back to `share_mode(0)` (exclusive
+  access).
 - **Users tab CSV export — formula injection mitigation**: Usernames and
   command lines in the exported CSV come from untrusted remote hosts.
   Spreadsheet applications (Excel, LibreOffice Calc, Google Sheets) treat
@@ -1137,7 +1143,7 @@ operator can filter the visible GPUs mid-playback.
 
 | Flag              | Default                           | Description                                      |
 |-------------------|-----------------------------------|--------------------------------------------------|
-| `--output` / `-o` | `~/.cache/all-smi/records/all-smi-record.ndjson.zst` (override via `record.output_dir` config, or `-o` flag) | Output path. Extension picks the codec. |
+| `--output` / `-o` | platform cache dir + `all-smi/records/all-smi-record.ndjson.zst` [^cache] (override via `record.output_dir` config, or `-o` flag) | Output path. Extension picks the codec. |
 | `--interval` / `-i` | `3`                             | Seconds between frames.                          |
 | `--duration`      | `0` (= record until SIGTERM)      | Accepts `30s`, `5m`, `1h`, `1d`, or bare seconds. |
 | `--source`        | `local`                           | `local` (hardware readers) or `remote` (HTTP scrape). |
@@ -1337,7 +1343,7 @@ See the [LICENSE](./LICENSE) file for details.
 ## Changelog
 
 ### Recent Updates
-- **v0.21.0 (upcoming):** Add cluster-wide Users tab (`V` key in remote `view` mode) — aggregates per-process metrics across all scraped hosts into a single table with columns USER, NODES, GPUs, PROCS, VRAM, POWER* (weighted approximation), LONGEST, and CMD; in-tab keys u/m/p/n/t for sorting, Enter for two-level drill-down (user → host → process list), ESC to exit drill-down, f to toggle system-account filter (uid<1000), and e to export the visible table to `~/.cache/all-smi/users-<timestamp>.csv`; partial-coverage chip warns when only a subset of hosts report `--processes` data; mock support via `ALL_SMI_MOCK_PROCESSES=1`; CSV export hardened with O_NOFOLLOW + mode 0600 symlink refusal, RFC 4180 quoting, and formula-injection mitigation; remote parser enforces per-field label caps for process metrics. **BREAKING**: Rename Prometheus GPU labels `index`→`gpu_index` and `uuid`→`gpu_uuid` across all NVIDIA-specific metrics (pcie, thermal thresholds, performance state, hardware details, vGPU, MIG); also rename `index`→`npu_index` and `uuid`→`npu_uuid` across all non-NVIDIA NPU exporters (Tenstorrent, Rebellions, Furiosa, Gaudi, Google TPU) and NPU mock templates; remote parser accepts both old and new label names for backward compatibility during migration. Add NVIDIA vGPU SR-IOV monitoring — per-vGPU utilization, framebuffer memory, scheduler state, and host mode exported as Prometheus metrics; TUI renders per-GPU vGPU sub-sections; remote parser reconstructs vGPU view from scraped metrics; mock server can simulate vGPU data via `ALL_SMI_MOCK_VGPU=1`. Add NVIDIA extended thermal monitoring — slowdown, shutdown, max-operating, and acoustic temperature thresholds exported as Prometheus metrics; TUI shows per-GPU thermal row with proximity highlighting (yellow within 5°C of slowdown, red within 2°C of shutdown); P-state (P0–P15) surfaced in TUI and metrics; all fields degrade gracefully to `None` on older drivers or non-NVIDIA hardware. Add NVIDIA MIG (Multi-Instance GPU) monitoring — per-GPU MIG mode status and per-MIG-instance SM utilization, memory bandwidth utilization, and framebuffer used/total bytes exported as Prometheus metrics; TUI renders MIG instances as nested rows under each parent GPU; remote parser reconstructs MIG view from scraped metrics; mock server can simulate MIG data via `ALL_SMI_MOCK_MIG=1`. Add NVIDIA extended hardware details — NUMA node ID, GSP firmware mode and version, NvLink remote endpoint classification per active link, and GPM SM occupancy and memory bandwidth utilization exported as Prometheus metrics; TUI shows compact HW row per GPU with NUMA node, GSP state, and NvLink count; all fields degrade gracefully to absent on older drivers, non-NVIDIA hardware, or hosts without NUMA topology. Add `snapshot` subcommand — one-shot JSON/CSV/Prometheus export to stdout or file without starting a long-running server, with multi-sample collection (`--samples`/`--interval`), `--query` dot-path column selection for CSV, symlink-safe atomic file writes (Unix `O_NOFOLLOW` + mode `0600`), blocking-pool cap, and NaN/Inf float sanitization. Add `record` subcommand and `view --replay` — capture a live metric stream to a compressed NDJSON file (plain, gzip, zstd; rotating segments; local and remote sources) and play it back through the exact same TUI for post-hoc incident investigation; replay supports play/pause, per-frame stepping, speed cycling (0.25x–8x), ±10s seeks, timecode jumps, and loop mode; security hardening includes O_NOFOLLOW symlink refusal on the writer, 16 MiB per-line cap and 128 MiB zstd window ceiling on the reader, and bounded host-list and frame-cache limits; add interactive filter query bar (`/`) with DSL supporting field comparisons, range checks, and host-name pattern matching; add threshold alert history panel (`A`). Add `doctor` subcommand — read-only suite of 51 environment checks across 14 categories (platform, privileges, container, nvidia, amd, apple, gaudi, tpu, tenstorrent, rebellions, furiosa, windows, env, network) with stable dotted check IDs, parallel execution, 3-second per-check timeout, PASS/WARN/FAIL/SKIP report in human and JSON formats, and `--bundle` support-archive packer with O_NOFOLLOW symlink refusal, 0o600 owner-only permissions, secret-value redaction, and network-identifier scrubbing.
+- **v0.21.0 (upcoming):** Add cluster-wide Users tab (`V` key in remote `view` mode) — aggregates per-process metrics across all scraped hosts into a single table with columns USER, NODES, GPUs, PROCS, VRAM, POWER* (weighted approximation), LONGEST, and CMD; in-tab keys u/m/p/n/t for sorting, Enter for two-level drill-down (user → host → process list), ESC to exit drill-down, f to toggle system-account filter (uid<1000), and e to export the visible table to `~/.cache/all-smi/users-<timestamp>.csv`; partial-coverage chip warns when only a subset of hosts report `--processes` data; mock support via `ALL_SMI_MOCK_PROCESSES=1`; CSV export hardened with O_NOFOLLOW + mode 0600 symlink refusal, RFC 4180 quoting, and formula-injection mitigation; remote parser enforces per-field label caps for process metrics. **BREAKING**: Rename Prometheus GPU labels `index`→`gpu_index` and `uuid`→`gpu_uuid` across all NVIDIA-specific metrics (pcie, thermal thresholds, performance state, hardware details, vGPU, MIG); also rename `index`→`npu_index` and `uuid`→`npu_uuid` across all non-NVIDIA NPU exporters (Tenstorrent, Rebellions, Furiosa, Gaudi, Google TPU) and NPU mock templates; remote parser accepts both old and new label names for backward compatibility during migration. Add NVIDIA vGPU SR-IOV monitoring — per-vGPU utilization, framebuffer memory, scheduler state, and host mode exported as Prometheus metrics; TUI renders per-GPU vGPU sub-sections; remote parser reconstructs vGPU view from scraped metrics; mock server can simulate vGPU data via `ALL_SMI_MOCK_VGPU=1`. Add NVIDIA extended thermal monitoring — slowdown, shutdown, max-operating, and acoustic temperature thresholds exported as Prometheus metrics; TUI shows per-GPU thermal row with proximity highlighting (yellow within 5°C of slowdown, red within 2°C of shutdown); P-state (P0–P15) surfaced in TUI and metrics; all fields degrade gracefully to `None` on older drivers or non-NVIDIA hardware. Add NVIDIA MIG (Multi-Instance GPU) monitoring — per-GPU MIG mode status and per-MIG-instance SM utilization, memory bandwidth utilization, and framebuffer used/total bytes exported as Prometheus metrics; TUI renders MIG instances as nested rows under each parent GPU; remote parser reconstructs MIG view from scraped metrics; mock server can simulate MIG data via `ALL_SMI_MOCK_MIG=1`. Add NVIDIA extended hardware details — NUMA node ID, GSP firmware mode and version, NvLink remote endpoint classification per active link, and GPM SM occupancy and memory bandwidth utilization exported as Prometheus metrics; TUI shows compact HW row per GPU with NUMA node, GSP state, and NvLink count; all fields degrade gracefully to absent on older drivers, non-NVIDIA hardware, or hosts without NUMA topology. Add `snapshot` subcommand — one-shot JSON/CSV/Prometheus export to stdout or file without starting a long-running server, with multi-sample collection (`--samples`/`--interval`), `--query` dot-path column selection for CSV, symlink-safe atomic file writes (Unix `O_NOFOLLOW` + mode `0600`), blocking-pool cap, and NaN/Inf float sanitization. Add `record` subcommand and `view --replay` — capture a live metric stream to a compressed NDJSON file (plain, gzip, zstd; rotating segments; local and remote sources) and play it back through the exact same TUI for post-hoc incident investigation; replay supports play/pause, per-frame stepping, speed cycling (0.25x–8x), ±10s seeks, timecode jumps, and loop mode; security hardening includes O_NOFOLLOW symlink refusal on the writer, 16 MiB per-line cap and 128 MiB zstd window ceiling on the reader, and bounded host-list and frame-cache limits; add interactive filter query bar (`/`) with DSL supporting field comparisons, range checks, and host-name pattern matching; add threshold alert history panel (`A`). Add `doctor` subcommand — read-only suite of 51 environment checks across 14 categories (platform, privileges, container, nvidia, amd, apple, gaudi, tpu, tenstorrent, rebellions, furiosa, windows, env, network) with stable dotted check IDs, parallel execution, 3-second per-check timeout, PASS/WARN/FAIL/SKIP report in human and JSON formats, and `--bundle` support-archive packer with O_NOFOLLOW symlink refusal, 0o600 owner-only permissions, secret-value redaction, and network-identifier scrubbing. Unify the cache base across recordings, energy WAL, and users-CSV export through `dirs::cache_dir()` so files land in the platform-correct location (Linux `$XDG_CACHE_HOME/all-smi` / `~/.cache/all-smi`, macOS `~/Library/Caches/all-smi`, Windows `%LOCALAPPDATA%\all-smi`); a one-time best-effort migration moves any pre-existing `~/.cache/all-smi/{records,energy-wal.bin}` to the new root when the new root is empty, never overwriting (#229).
 - **v0.20.1 (2026/04/10):** Fix local header metric row jitter by using fixed-width formatted fields; auto-promote pre-release to release in CI
 - **v0.20.0 (2026/04/10):** Redesign local-mode TUI with Activity panel featuring braille sparklines, CPU per-core view, host summary bar, and per-node LED grid; add Apple M5 Pro/Max Super core (S-CPU) support
 - **v0.19.0 (2026/04/08):** Fix Apple Silicon SMC float decoding to restore real CPU/GPU die temperatures, cache platform detection to avoid per-frame system_profiler on macOS, and fix TIME+/Command column alignment in process list

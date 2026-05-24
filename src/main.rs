@@ -68,6 +68,14 @@ fn main() {
     #[cfg(target_os = "macos")]
     setup_panic_handler();
 
+    // Best-effort one-time migration of legacy `~/.cache/all-smi/...`
+    // data to the platform-correct cache dir (issue #229). Runs before
+    // any subcommand touches the cache so the new root is the one each
+    // consumer sees. Linux without `$XDG_CACHE_HOME` is a no-op (old ==
+    // new); macOS, Windows, and Linux with `$XDG_CACHE_HOME` set will
+    // see one-time relocation messages on stderr.
+    common::cache_migration::migrate_legacy_cache_paths();
+
     // Build the top-level command with the runtime-composed help
     // blocks injected (issue #213). The "Configuration file" block has
     // to resolve `$HOME` / `$XDG_CONFIG_HOME` / `%APPDATA%` at process

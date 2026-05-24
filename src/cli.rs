@@ -455,10 +455,13 @@ pub struct RecordArgs {
         short = 'o',
         long_help = "Output path for the NDJSON stream.\n\n\
             When omitted, the file lands under the `record.output_dir` config \
-            value (default `~/.cache/all-smi/records/`) with basename \
-            `all-smi-record.ndjson.zst`. If no config file is present, the \
-            file is written to the current working directory as \
-            `all-smi-record.ndjson.zst`.\n\n\
+            value (if set), otherwise under the platform cache directory's \
+            `all-smi/records/` subdirectory, with basename \
+            `all-smi-record.ndjson.zst`. The platform cache directory is \
+            `$XDG_CACHE_HOME` (or `~/.cache`) on Linux, `~/Library/Caches` on \
+            macOS, and `%LOCALAPPDATA%` on Windows. If no home-like directory \
+            is resolvable, the file is written to the current working \
+            directory as `all-smi-record.ndjson.zst`.\n\n\
             Extension drives compression: `.ndjson.zst` → zstd, \
             `.ndjson.gz` → gzip, anything else → plain NDJSON. Use \
             `--compress` to override detection."

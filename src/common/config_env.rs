@@ -245,7 +245,7 @@ fn apply_env_record(settings: &mut Settings, warnings: &mut Vec<String>) {
     if let Ok(v) = env::var("ALL_SMI_RECORD_OUTPUT_DIR")
         && !v.trim().is_empty()
     {
-        settings.record.output_dir = v;
+        settings.record.output_dir = Some(v);
     }
     if let Ok(v) = env::var("ALL_SMI_RECORD_COMPRESS") {
         match v.as_str() {

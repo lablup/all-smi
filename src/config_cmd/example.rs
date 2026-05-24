@@ -67,7 +67,7 @@ schema_version = 1
 # price_per_kwh = 0.12
 # currency = "USD"
 # show_cost = true
-# wal_path = "~/.cache/all-smi/energy-wal.bin"
+# wal_path = "~/.cache/all-smi/energy-wal.bin"   # default: platform cache dir / all-smi / energy-wal.bin
 # gap_interpolate_seconds = 10
 # wal_enabled = true
 
@@ -77,7 +77,7 @@ schema_version = 1
 # show_led_grid = true
 
 [record]
-# output_dir = "~/.cache/all-smi/records"
+# output_dir = "~/.cache/all-smi/records"   # default: platform cache dir / all-smi / records
 # compress = "zstd"           # "zstd" | "gzip" | "none"
 
 [snapshot]

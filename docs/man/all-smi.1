@@ -278,7 +278,15 @@ to compiled defaults plus env vars when no candidate file exists.
 .TP
 .I energy-wal.bin
 Disk-backed write-ahead log persisting the cumulative joules counter
-across restarts. Default: \fI~/.cache/all-smi/energy-wal.bin\fR.
+across restarts. Default: under the platform cache directory as
+\fI<cache>/all-smi/energy-wal.bin\fR — Linux
+\fI$XDG_CACHE_HOME/all-smi/energy-wal.bin\fR (or
+\fI~/.cache/all-smi/energy-wal.bin\fR when
+.B $XDG_CACHE_HOME
+is unset), macOS \fI~/Library/Caches/all-smi/energy-wal.bin\fR, Windows
+\fI%LOCALAPPDATA%\\all-smi\\energy-wal.bin\fR. The record output
+(\fIall-smi record\fR) and the users-tab CSV export share the same
+\fI<cache>/all-smi/\fR root for consistency.
 See
 .B ENERGY ACCOUNTING
 below for the \fBALL_SMI_ENERGY_WAL_PATH\fR / \fBALL_SMI_ENERGY_NO_WAL\fR
@@ -321,8 +329,10 @@ total and average power are still rendered.
 .TP
 .B ALL_SMI_ENERGY_WAL_PATH
 Path to the disk-backed write-ahead log used to persist the cumulative
-joules counter across restarts. Default:
-.IR ~/.cache/all-smi/energy-wal.bin .
+joules counter across restarts. Default: the platform cache directory's
+\fIall-smi/energy-wal.bin\fR — see
+.B FILES
+above for the per-platform path.
 .TP
 .B ALL_SMI_ENERGY_NO_WAL
 When set to any value, disables the disk-backed WAL — counters are

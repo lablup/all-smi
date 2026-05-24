@@ -178,8 +178,12 @@ pub struct EnergyConfig {
     /// monetary cost. Ignored when `price_per_kwh == 0` (there is no
     /// cost to show in that case).
     pub show_cost: bool,
-    /// Path to the WAL file. Tilde expansion is applied at open time.
-    pub wal_path: String,
+    /// Operator-supplied path to the WAL file. `None` (the compiled
+    /// default) means "use the platform cache helper" — the consumer
+    /// resolves it via [`crate::common::paths::cache_dir`] joined with
+    /// `energy-wal.bin`. `Some(s)` is honored verbatim after
+    /// `expand_tilde`. Issue #229.
+    pub wal_path: Option<String>,
     /// Threshold (in seconds) above which the integrator switches from
     /// trapezoidal to hold-last integration across sample gaps.
     pub gap_interpolate_seconds: u64,
@@ -194,7 +198,7 @@ impl Default for EnergyConfig {
             price_per_kwh: 0.12,
             currency: "USD".to_string(),
             show_cost: true,
-            wal_path: "~/.cache/all-smi/energy-wal.bin".to_string(),
+            wal_path: None,
             gap_interpolate_seconds: 10,
             wal_enabled: true,
         }
@@ -210,7 +214,8 @@ impl EnergyConfig {
     /// - `ALL_SMI_ENERGY_CURRENCY`: override `currency`.
     /// - `ALL_SMI_ENERGY_NO_COST`: when set (any value), unsets
     ///   `show_cost`.
-    /// - `ALL_SMI_ENERGY_WAL_PATH`: override `wal_path`.
+    /// - `ALL_SMI_ENERGY_WAL_PATH`: override `wal_path` (replaces the
+    ///   platform cache default with the supplied path).
     /// - `ALL_SMI_ENERGY_NO_WAL`: when set (any value), disables the
     ///   disk-backed WAL.
     /// - `ALL_SMI_ENERGY_GAP_SECONDS`: override
@@ -235,7 +240,7 @@ impl EnergyConfig {
         if let Ok(v) = std::env::var("ALL_SMI_ENERGY_WAL_PATH")
             && !v.trim().is_empty()
         {
-            self.wal_path = v.trim().to_string();
+            self.wal_path = Some(v.trim().to_string());
         }
         if std::env::var("ALL_SMI_ENERGY_NO_WAL").is_ok() {
             self.wal_enabled = false;
@@ -559,7 +564,10 @@ mod tests {
         assert!((cfg.price_per_kwh - 0.12).abs() < 1e-9);
         assert_eq!(cfg.currency, "USD");
         assert!(cfg.show_cost);
-        assert_eq!(cfg.wal_path, "~/.cache/all-smi/energy-wal.bin");
+        // Default is `None` — the consumer resolves the path through
+        // `crate::common::paths::cache_dir()` so the layout is
+        // platform-correct (issue #229).
+        assert_eq!(cfg.wal_path, None);
         assert_eq!(cfg.gap_interpolate_seconds, 10);
         assert!(cfg.wal_enabled);
         assert!(cfg.cost_visible());
@@ -623,7 +631,7 @@ mod tests {
         assert!((cfg.price_per_kwh - 0.30).abs() < 1e-9);
         assert_eq!(cfg.currency, "KRW");
         assert!(!cfg.show_cost, "ALL_SMI_ENERGY_NO_COST must disable cost");
-        assert_eq!(cfg.wal_path, "/tmp/unit-wal.bin");
+        assert_eq!(cfg.wal_path.as_deref(), Some("/tmp/unit-wal.bin"));
         assert!(!cfg.wal_enabled, "ALL_SMI_ENERGY_NO_WAL must disable WAL");
         assert_eq!(cfg.gap_interpolate_seconds, 15);
         unsafe {

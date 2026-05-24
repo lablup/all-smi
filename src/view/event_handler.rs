@@ -496,13 +496,16 @@ fn enter_users_drill_down(state: &mut AppState) {
 }
 
 /// Export the currently-filtered user view to
-/// `$HOME/.cache/all-smi/users-<timestamp>.csv`.  Returns either the
-/// path written or a human-friendly error suitable for display in the
-/// top-of-tab chip.
+/// `<cache>/all-smi/users-<timestamp>.csv` — the cache root is resolved
+/// through [`crate::common::paths::cache_dir`] so the layout is
+/// platform-correct (issue #229): Linux `$XDG_CACHE_HOME/all-smi`
+/// (or `~/.cache/all-smi`), macOS `~/Library/Caches/all-smi`, Windows
+/// `%LOCALAPPDATA%\all-smi`. Returns either the path written or a
+/// human-friendly error suitable for display in the top-of-tab chip.
 ///
 /// On Unix the cache directory and the CSV file itself are opened with
-/// `O_NOFOLLOW` + mode `0o600` so a co-tenant cannot pre-plant
-/// `~/.cache/all-smi` (or the final filename) as a symlink and redirect
+/// `O_NOFOLLOW` + mode `0o600` so a co-tenant cannot pre-plant the
+/// cache directory (or the final filename) as a symlink and redirect
 /// the write to an attacker-chosen location — matching the hardening in
 /// `src/snapshot/mod.rs::write_output_atomic` and
 /// `src/record/writer.rs::open_secure` (addressed for those subcommands
@@ -526,11 +529,13 @@ fn export_users_csv(state: &mut AppState) -> Result<String, String> {
         .collect();
     crate::ui::aggregation::user::sort_users(&mut rows, sort);
 
-    // Resolve `~/.cache/all-smi/users-<timestamp>.csv`.  Mirrors the
-    // XDG Base Directory spec for Linux/macOS and drops the same
-    // layout under `%LOCALAPPDATA%` on Windows.  Avoids pulling in the
-    // `dirs` crate for a single lookup.
-    let base = cache_dir_for_all_smi()?;
+    // Resolve `<cache>/all-smi/users-<timestamp>.csv` via the shared
+    // platform-aware helper (issue #229). The helper goes through
+    // `dirs::cache_dir()` so the layout matches the record output and
+    // energy WAL consumers — Linux honours `$XDG_CACHE_HOME`, macOS
+    // lands under `~/Library/Caches/`, Windows under `%LOCALAPPDATA%`.
+    let base = crate::common::paths::cache_dir()
+        .ok_or_else(|| "no cache directory available in environment".to_string())?;
     std::fs::create_dir_all(&base).map_err(|e| format!("mkdir {}: {e}", base.display()))?;
     // Defense in depth: refuse to write when the cache dir itself is a
     // symlink. `create_dir_all` is a no-op if the path already exists as
@@ -662,36 +667,6 @@ fn csv_escape(s: &str) -> String {
     } else {
         format!("\"{inner}\"")
     }
-}
-
-/// Best-effort cross-platform resolution of the `all-smi` cache dir,
-/// following the XDG convention on Linux/macOS and
-/// `%LOCALAPPDATA%\all-smi` on Windows.  Returns `Err` when neither
-/// `HOME` / `XDG_CACHE_HOME` nor `LOCALAPPDATA` is set.
-fn cache_dir_for_all_smi() -> Result<std::path::PathBuf, String> {
-    if let Ok(xdg) = std::env::var("XDG_CACHE_HOME")
-        && !xdg.is_empty()
-    {
-        return Ok(std::path::PathBuf::from(xdg).join("all-smi"));
-    }
-    #[cfg(target_os = "windows")]
-    {
-        if let Ok(local) = std::env::var("LOCALAPPDATA")
-            && !local.is_empty()
-        {
-            return Ok(std::path::PathBuf::from(local)
-                .join("all-smi")
-                .join("cache"));
-        }
-    }
-    if let Ok(home) = std::env::var("HOME")
-        && !home.is_empty()
-    {
-        return Ok(std::path::PathBuf::from(home)
-            .join(".cache")
-            .join("all-smi"));
-    }
-    Err("no home/cache directory available in environment".to_string())
 }
 
 /// Nudge the seek target by `delta_secs` (positive = forward, negative =
