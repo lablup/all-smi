@@ -300,8 +300,8 @@ fn main() -> Result<()> {
         let original_index = held_cpu.index;
         if smi.refresh_cpu(&mut held_cpu) {
             println!(
-                "  CPU index {} ({}) refreshed in place: util now {:.1}%",
-                original_index, held_cpu.cpu_model, held_cpu.utilization
+                "  CPU index {original_index} ({}) refreshed in place: util now {:.1}%",
+                held_cpu.cpu_model, held_cpu.utilization
             );
         }
     }
@@ -312,8 +312,8 @@ fn main() -> Result<()> {
         if smi.refresh_memory(&mut held_mem) {
             let total_gb = held_mem.total_bytes as f64 / 1024.0 / 1024.0 / 1024.0;
             println!(
-                "  Memory index {} refreshed in place: util now {:.1}% (total {:.1} GB)",
-                original_index, held_mem.utilization, total_gb
+                "  Memory index {original_index} refreshed in place: util now {:.1}% (total {total_gb:.1} GB)",
+                held_mem.utilization
             );
         }
     }

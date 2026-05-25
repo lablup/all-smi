@@ -202,7 +202,6 @@ pub async fn start_servers(args: Args) -> Result<()> {
     let platform_type = PlatformType::from_str(&args.platform);
     let nodes = Arc::new(Mutex::new(HashMap::new()));
     let mut file = File::create(&args.o)?;
-    let mut instance_counter = args.start_index;
 
     // Use appropriate GPU/NPU name based on platform
     let device_name = if args.gpu_name == crate::mock::constants::DEFAULT_NVIDIA_GPU_NAME {
@@ -220,12 +219,11 @@ pub async fn start_servers(args: Args) -> Result<()> {
     };
 
     // Initialize nodes
-    for port in port_range.clone() {
+    for (instance_counter, port) in (args.start_index..).zip(port_range.clone()) {
         let instance_name = format!("node-{instance_counter:04}");
         let node = MockNode::new(instance_name, device_name.clone(), platform_type.clone());
         nodes.lock().unwrap().insert(port, node);
         writeln!(file, "localhost:{port}").unwrap();
-        instance_counter += 1;
     }
 
     println!("Outputting server list to {}", args.o);
