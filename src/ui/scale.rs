@@ -69,7 +69,10 @@ const POWER_LIMIT_KEYS: [&str; 3] = [
 /// shape no longer drifts as the window slides.
 ///
 /// Non-finite or non-positive inputs return `1.0` as a harmless degenerate
-/// ceiling; callers typically apply their own minimum floor beforehand.
+/// ceiling; callers typically apply their own minimum floor beforehand. The
+/// returned ceiling is likewise guaranteed finite even for pathologically
+/// large inputs (near `f64::MAX`), where the rounded value would otherwise
+/// overflow to infinity.
 #[must_use]
 pub fn nice_ceil(v: f64) -> f64 {
     if !v.is_finite() || v <= 0.0 {
@@ -87,7 +90,12 @@ pub fn nice_ceil(v: f64) -> f64 {
     } else {
         10.0
     };
-    nice * pow
+    let ceil = nice * pow;
+    // Guard the rare overflow at the very top of the f64 range (e.g. a
+    // malformed remote power reading near f64::MAX): a non-finite ceiling
+    // would surface downstream as a "0-inf" axis badge. Fall back to the
+    // (finite) input rather than overflow.
+    if ceil.is_finite() { ceil } else { v }
 }
 
 /// Fixed temperature axis `(floor, ceiling)` in °C.
@@ -124,7 +132,11 @@ pub fn power_range(gpu: Option<&GpuInfo>, history: &[f64]) -> (f64, f64) {
             .iter()
             .find_map(|k| g.detail.get(*k))
             .and_then(|s| s.parse::<f64>().ok())
-            .filter(|&w| w > 0.0)
+            // A power limit scraped from a remote endpoint is untrusted, and
+            // `f64` parsing accepts "inf"/"NaN"; require a positive *finite*
+            // value so a malformed limit falls back to the nice-rounded
+            // observed peak below instead of becoming a "0-inf" axis.
+            .filter(|&w| w.is_finite() && w > 0.0)
     });
     let ceil = limit.unwrap_or_else(|| nice_ceil(history_peak(history).max(POWER_MIN_CEIL_W)));
     (0.0, ceil)
@@ -226,6 +238,16 @@ mod tests {
     }
 
     #[test]
+    fn nice_ceil_result_is_always_finite() {
+        // Pathologically large but finite inputs (e.g. a malformed remote power
+        // reading near f64::MAX) must not overflow the rounded ceiling to inf,
+        // which would otherwise surface as a "0-inf" axis badge.
+        assert!(nice_ceil(f64::MAX).is_finite());
+        assert!(nice_ceil(1.0e308).is_finite());
+        assert!(nice_ceil(8.0e307).is_finite());
+    }
+
+    #[test]
     fn temp_range_uses_threshold_priority() {
         // slowdown wins over the others
         let g = gpu_with(Some(83), Some(90), Some(95), HashMap::new());
@@ -293,6 +315,24 @@ mod tests {
         let g = gpu_with(None, None, None, detail);
         // A zero limit is invalid -> fall back to nice_ceil over peak.
         assert_eq!(power_range(Some(&g), &[40.0]), (0.0, nice_ceil(40.0)));
+    }
+
+    #[test]
+    fn power_range_ignores_non_finite_limit() {
+        // A power limit can originate from an untrusted remote Prometheus
+        // scrape, and `f64` parsing accepts "inf"/"NaN". Such a value must not
+        // become the axis ceiling (which would render a "0-inf" badge); it must
+        // fall back to the nice-rounded observed peak.
+        for bogus in ["inf", "Inf", "infinity", "-inf", "NaN", "nan"] {
+            let mut detail = HashMap::new();
+            detail.insert("power_limit_current".to_string(), bogus.to_string());
+            let g = gpu_with(None, None, None, detail);
+            assert_eq!(
+                power_range(Some(&g), &[40.0]),
+                (0.0, nice_ceil(40.0)),
+                "limit {bogus:?} should fall back to the peak"
+            );
+        }
     }
 
     #[test]
