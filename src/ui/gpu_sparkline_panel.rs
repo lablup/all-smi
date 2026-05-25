@@ -18,8 +18,11 @@
 //! Renders a compact stack of braille sparkline rows, each formatted as:
 //!
 //! ```text
-//! <label>  <braille sparkline>  <latest>  <min-max badge>
+//! <label>  <braille sparkline>  <latest>  <scale badge>
 //! ```
+//!
+//! The scale badge shows the row's fixed Y-axis range (e.g. `30-83`), not a
+//! per-frame observed min/max, so it reads as a stable legend for the height.
 //!
 //! Rows rendered (platform-dependent):
 //!
@@ -50,6 +53,7 @@ use crate::device::CpuInfo;
 use crate::ui::activity_panel;
 use crate::ui::braille::sparkline_braille;
 use crate::ui::buffer::BufferWriter;
+use crate::ui::scale::{ane_range, power_range, scale_badge, temp_range};
 use crate::ui::text::print_colored_text;
 
 /// Width reserved for the label column (e.g. "GPU Util").
@@ -214,43 +218,49 @@ struct SparklineRow {
 
 fn build_rows(state: &AppState, is_apple: bool, has_ane: bool, has_npu: bool) -> Vec<SparklineRow> {
     let mut rows = Vec::with_capacity(6);
+    let gpu = state.gpu_info.first();
 
     // 1. GPU Utilization
     let gpu_util: Vec<f64> = state.utilization_history.iter().copied().collect();
     let latest_util = gpu_util.last().copied().unwrap_or(0.0);
+    let util_range = (0.0, 100.0);
     rows.push(SparklineRow {
         label: "GPU Util",
         color: ThemeConfig::gpu_color(),
         latest_str: format!("{latest_util:.1}%"),
-        min_max_str: min_max_badge(&gpu_util),
+        min_max_str: scale_badge(util_range.0, util_range.1),
         history: gpu_util,
-        range: Some((0.0, 100.0)),
+        range: Some(util_range),
         badge: None,
     });
 
     // 2. GPU Memory
     let gpu_mem: Vec<f64> = state.memory_history.iter().copied().collect();
     let latest_mem = gpu_mem.last().copied().unwrap_or(0.0);
+    let mem_range = (0.0, 100.0);
     rows.push(SparklineRow {
         label: "GPU Mem",
         color: ThemeConfig::memory_color(),
         latest_str: format!("{latest_mem:.1}%"),
-        min_max_str: min_max_badge(&gpu_mem),
+        min_max_str: scale_badge(mem_range.0, mem_range.1),
         history: gpu_mem,
-        range: Some((0.0, 100.0)),
+        range: Some(mem_range),
         badge: None,
     });
 
-    // 3. GPU Temperature
+    // 3. GPU Temperature — fixed axis anchored to the reported thermal
+    //    threshold (or a 100°C fallback). The height then tracks how close the
+    //    GPU is to throttling instead of rescaling to per-window noise.
     let gpu_temp: Vec<f64> = state.temperature_history.iter().copied().collect();
     let latest_temp = gpu_temp.last().copied().unwrap_or(0.0);
+    let temp_rng = temp_range(gpu);
     rows.push(SparklineRow {
         label: "GPU Temp",
         color: ThemeConfig::thermal_color(),
         latest_str: format!("{latest_temp:.0}\u{00B0}C"),
-        min_max_str: min_max_badge(&gpu_temp),
+        min_max_str: scale_badge(temp_rng.0, temp_rng.1),
         history: gpu_temp,
-        range: None, // auto-range: temperature varies
+        range: Some(temp_rng),
         badge: None,
     });
 
@@ -268,13 +278,14 @@ fn build_rows(state: &AppState, is_apple: bool, has_ane: bool, has_npu: bool) ->
         } else {
             state.ane_power_history.iter().copied().collect()
         };
+        let ane_rng = ane_range(&ane_history);
         rows.push(SparklineRow {
             label: "ANE",
             color: ThemeConfig::accelerator_color(),
             latest_str: format!("{ane_w:.1}W"),
-            min_max_str: min_max_badge(&ane_history),
+            min_max_str: scale_badge(ane_rng.0, ane_rng.1),
             history: ane_history,
-            range: None,
+            range: Some(ane_rng),
             badge: None,
         });
     }
@@ -292,20 +303,22 @@ fn build_rows(state: &AppState, is_apple: bool, has_ane: bool, has_npu: bool) ->
         });
     }
 
-    // 5. Pkg Power
+    // 5. Pkg Power — fixed axis anchored to the enforced power limit when the
+    //    driver reports one, else a nice-rounded ceiling over the observed peak.
     let power_w = package_power(state, is_apple);
     let power_history: Vec<f64> = if state.package_power_history.is_empty() {
         vec![power_w]
     } else {
         state.package_power_history.iter().copied().collect()
     };
+    let power_rng = power_range(gpu, &power_history);
     rows.push(SparklineRow {
         label: "Pkg Power",
         color: ThemeConfig::power_color(),
         latest_str: format!("{power_w:.1}W"),
-        min_max_str: min_max_badge(&power_history),
+        min_max_str: scale_badge(power_rng.0, power_rng.1),
         history: power_history,
-        range: None,
+        range: Some(power_rng),
         badge: None,
     });
 
@@ -443,32 +456,6 @@ fn package_power(state: &AppState, is_apple: bool) -> f64 {
         // NVIDIA / other: sum GPU board power
         state.gpu_info.iter().map(|g| g.power_consumption).sum()
     }
-}
-
-// ---------------------------------------------------------------------------
-// Formatting helpers
-// ---------------------------------------------------------------------------
-
-fn min_max_badge(data: &[f64]) -> String {
-    if data.is_empty() {
-        return String::new();
-    }
-    let mut min = f64::INFINITY;
-    let mut max = f64::NEG_INFINITY;
-    for &v in data {
-        if v.is_finite() {
-            if v < min {
-                min = v;
-            }
-            if v > max {
-                max = v;
-            }
-        }
-    }
-    if !min.is_finite() || !max.is_finite() {
-        return String::new();
-    }
-    format!("{min:.0}-{max:.0}")
 }
 
 // ---------------------------------------------------------------------------
@@ -740,18 +727,6 @@ mod tests {
     }
 
     #[test]
-    fn test_min_max_badge() {
-        assert_eq!(min_max_badge(&[10.0, 50.0, 90.0]), "10-90");
-        assert_eq!(min_max_badge(&[42.0]), "42-42");
-        assert_eq!(min_max_badge(&[]), "");
-    }
-
-    #[test]
-    fn test_min_max_badge_handles_nan() {
-        assert_eq!(min_max_badge(&[f64::NAN, f64::NAN]), "");
-    }
-
-    #[test]
     fn test_build_rows_nvidia() {
         let state = make_nvidia_state();
         let rows = build_rows(&state, false, false, false);
@@ -772,8 +747,13 @@ mod tests {
         assert_eq!(rows[3].label, "ANE");
         assert_eq!(rows[4].label, "Pkg Power");
         assert!(rows[2].badge.is_none());
-        assert_eq!(rows[3].min_max_str, "0-4");
-        assert_eq!(rows[4].min_max_str, "8-18");
+        // Scale badges now show the fixed axis, not the observed window:
+        //   ANE  peak 3.8 W -> floored to 8 W -> nice_ceil 10 W
+        //   Pkg  peak 17.5 W (no power limit) -> nice_ceil 20 W
+        assert_eq!(rows[3].min_max_str, "0-10");
+        assert_eq!(rows[4].min_max_str, "0-20");
+        // GPU Temp uses the 30°C floor + 100°C fallback (no thresholds set).
+        assert_eq!(rows[2].min_max_str, "30-100");
     }
 
     #[test]

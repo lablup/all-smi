@@ -30,6 +30,7 @@ use crossterm::{queue, style::Color, style::Print};
 
 use crate::app_state::AppState;
 use crate::ui::braille::sparkline_braille;
+use crate::ui::scale::temp_range;
 use crate::ui::text::print_colored_text;
 
 /// Width reserved for the label column (e.g. "GPU Util.").
@@ -117,13 +118,15 @@ pub fn draw_remote_sparkline_panel<W: Write>(stdout: &mut W, state: &AppState, c
             left_color: Color::Yellow,
             left_history: &history_vec(&state.temperature_history),
             left_value: avg_temp_str(&state.temperature_history),
-            left_range: None,
+            // Fixed axis anchored to the GPU thermal threshold (100°C fallback).
+            left_range: Some(temp_range(state.gpu_info.first())),
             left_available: has_gpu,
             right_label: "CPU Temp.",
             right_color: Color::Cyan,
             right_history: &history_vec(&state.cpu_temperature_history),
             right_value: avg_temp_str(&state.cpu_temperature_history),
-            right_range: None,
+            // CPU sensors report no threshold -> fixed 30..100°C axis.
+            right_range: Some(temp_range(None)),
             half_width,
         },
     );

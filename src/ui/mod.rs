@@ -31,6 +31,7 @@ pub mod process_renderer;
 pub mod remote_sparkline_panel;
 pub mod renderer;
 pub mod renderers;
+pub mod scale;
 pub mod tabs;
 pub mod text;
 pub mod topology;

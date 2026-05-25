@@ -736,10 +736,8 @@ impl IOReportMetrics {
                         &mut p_cluster_freqs,
                     );
                 }
-                ("GPU Stats", "GPU Performance States") => {
-                    if item.channel == "GPUPH" {
-                        Self::process_gpu_channel(&item, &mut gpu_freqs);
-                    }
+                ("GPU Stats", "GPU Performance States") if item.channel == "GPUPH" => {
+                    Self::process_gpu_channel(&item, &mut gpu_freqs);
                 }
                 _ => {}
             }
