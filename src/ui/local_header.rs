@@ -36,6 +36,7 @@ use crossterm::{queue, style::Color, style::Print};
 use crate::app_state::AppState;
 use crate::common::config::ThemeConfig;
 use crate::ui::braille::sparkline_braille;
+use crate::ui::scale::{power_range, temp_range};
 use crate::ui::text::print_colored_text;
 
 /// Width in braille cells for each metric sparkline.
@@ -168,7 +169,10 @@ fn draw_metrics_line<W: Write>(stdout: &mut W, state: &AppState) {
             .collect::<Vec<_>>(),
         format_temp(state.cpu_temperature_history.back().copied()),
         ThemeConfig::thermal_color(),
-        None, // auto-range: temperature varies between platforms
+        // Fixed axis (30°C floor, 100°C fallback ceiling): CPU sensors report no
+        // thermal threshold, so the height reflects absolute temperature rather
+        // than rescaling to per-window noise.
+        Some(temp_range(None)),
     );
 
     queue!(stdout, Print("\r\n")).unwrap();
@@ -254,14 +258,11 @@ fn draw_power_sparkline<W: Write>(stdout: &mut W, state: &AppState) {
     let value_str = format!("{power_watts:>5.1}W");
 
     let history: Vec<f64> = state.package_power_history.iter().copied().collect();
-    let range = if history.is_empty() {
-        None
-    } else {
-        Some((
-            0.0,
-            history.iter().copied().fold(0.0, f64::max).max(power_watts),
-        ))
-    };
+    // Fixed axis (0 .. summed enforced power limits, or a nice-rounded peak
+    // when no limit is reported) so the height tracks the power budget instead
+    // of rescaling every frame. Power is summed across all GPUs, so the
+    // ceiling is the aggregate limit.
+    let range = Some(power_range(&state.gpu_info, &history));
     let sparkline = sparkline_braille(&history, SPARKLINE_WIDTH, range);
 
     print_colored_text(stdout, "Pwr", ThemeConfig::power_color(), None, None);
