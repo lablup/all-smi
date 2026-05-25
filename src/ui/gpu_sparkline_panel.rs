@@ -311,7 +311,9 @@ fn build_rows(state: &AppState, is_apple: bool, has_ane: bool, has_npu: bool) ->
     } else {
         state.package_power_history.iter().copied().collect()
     };
-    let power_rng = power_range(gpu, &power_history);
+    // Aggregate axis: package power is summed across all GPUs, so anchor the
+    // ceiling to the summed per-GPU limits (not just the first GPU's).
+    let power_rng = power_range(&state.gpu_info, &power_history);
     rows.push(SparklineRow {
         label: "Pkg Power",
         color: ThemeConfig::power_color(),

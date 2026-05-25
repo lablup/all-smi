@@ -121,25 +121,50 @@ pub fn temp_range(gpu: Option<&GpuInfo>) -> (f64, f64) {
 
 /// Fixed package-power axis `(0, ceiling)` in watts.
 ///
-/// The ceiling prefers the device's enforced power limit from `gpu.detail`
-/// (NVIDIA/Gaudi). When no limit is reported (e.g. Apple Silicon), it falls
-/// back to [`nice_ceil`] over the observed history peak, floored at
-/// [`POWER_MIN_CEIL_W`].
+/// "Package power" is summed across **all** GPUs on the host (see
+/// `package_power` in `gpu_sparkline_panel`), so the ceiling is the aggregate
+/// enforced power limit — the sum of every GPU's reported limit. The summed
+/// limit is used only when *every* GPU reports a valid one; if any GPU lacks a
+/// limit (Apple Silicon, or a heterogeneous node with an older driver) the sum
+/// would understate the budget and clip the sparkline, so it falls back to
+/// [`nice_ceil`] over the observed history peak, floored at
+/// [`POWER_MIN_CEIL_W`], which still tracks real usage.
 #[must_use]
-pub fn power_range(gpu: Option<&GpuInfo>, history: &[f64]) -> (f64, f64) {
-    let limit = gpu.and_then(|g| {
-        POWER_LIMIT_KEYS
-            .iter()
-            .find_map(|k| g.detail.get(*k))
-            .and_then(|s| s.parse::<f64>().ok())
-            // A power limit scraped from a remote endpoint is untrusted, and
-            // `f64` parsing accepts "inf"/"NaN"; require a positive *finite*
-            // value so a malformed limit falls back to the nice-rounded
-            // observed peak below instead of becoming a "0-inf" axis.
-            .filter(|&w| w.is_finite() && w > 0.0)
-    });
-    let ceil = limit.unwrap_or_else(|| nice_ceil(history_peak(history).max(POWER_MIN_CEIL_W)));
+pub fn power_range(gpus: &[GpuInfo], history: &[f64]) -> (f64, f64) {
+    let mut total_limit = 0.0_f64;
+    let mut all_have_limit = !gpus.is_empty();
+    for g in gpus {
+        match gpu_power_limit(g) {
+            Some(w) => total_limit += w,
+            None => {
+                all_have_limit = false;
+                break;
+            }
+        }
+    }
+    let ceil = if all_have_limit && total_limit.is_finite() && total_limit > 0.0 {
+        total_limit
+    } else {
+        nice_ceil(history_peak(history).max(POWER_MIN_CEIL_W))
+    };
     (0.0, ceil)
+}
+
+/// First valid enforced power limit (W) a GPU reports, trying each
+/// [`POWER_LIMIT_KEYS`] entry in `current → max → default` priority order.
+///
+/// A power limit scraped from a remote endpoint is untrusted, and `f64`
+/// parsing accepts "inf"/"NaN"; each candidate must parse to a positive,
+/// *finite* value or the next key is tried (so a present-but-bogus
+/// `power_limit_current` does not mask a valid `power_limit_max`). Returns
+/// `None` when no key yields a usable value.
+fn gpu_power_limit(g: &GpuInfo) -> Option<f64> {
+    POWER_LIMIT_KEYS.iter().find_map(|k| {
+        g.detail
+            .get(*k)
+            .and_then(|s| s.parse::<f64>().ok())
+            .filter(|&w| w.is_finite() && w > 0.0)
+    })
 }
 
 /// Fixed ANE-power axis `(0, ceiling)` in watts.
@@ -282,7 +307,10 @@ mod tests {
         detail.insert("power_limit_current".to_string(), "350.00".to_string());
         let g = gpu_with(None, None, None, detail);
         // History peak is ignored when an enforced limit exists.
-        assert_eq!(power_range(Some(&g), &[100.0, 200.0, 320.0]), (0.0, 350.0));
+        assert_eq!(
+            power_range(std::slice::from_ref(&g), &[100.0, 200.0, 320.0]),
+            (0.0, 350.0)
+        );
     }
 
     #[test]
@@ -292,7 +320,44 @@ mod tests {
         detail.insert("power_limit_default".to_string(), "400".to_string());
         let g = gpu_with(None, None, None, detail);
         // current absent -> max preferred over default
-        assert_eq!(power_range(Some(&g), &[]), (0.0, 450.0));
+        assert_eq!(power_range(std::slice::from_ref(&g), &[]), (0.0, 450.0));
+    }
+
+    #[test]
+    fn power_range_tries_next_key_when_first_invalid() {
+        // A present-but-invalid power_limit_current must not mask a valid
+        // power_limit_max: each key is parsed/validated independently.
+        let mut detail = HashMap::new();
+        detail.insert("power_limit_current".to_string(), "0".to_string());
+        detail.insert("power_limit_max".to_string(), "450".to_string());
+        let g = gpu_with(None, None, None, detail);
+        assert_eq!(power_range(std::slice::from_ref(&g), &[40.0]), (0.0, 450.0));
+    }
+
+    #[test]
+    fn power_range_sums_multi_gpu_limits() {
+        // Package power is summed across GPUs, so the ceiling is the summed
+        // per-GPU limits (4 × 350 W = 1400 W), not a single GPU's limit. A peak
+        // exceeding one GPU's limit must therefore not clip the sparkline.
+        let mut detail = HashMap::new();
+        detail.insert("power_limit_current".to_string(), "350".to_string());
+        let gpus: Vec<GpuInfo> = (0..4)
+            .map(|_| gpu_with(None, None, None, detail.clone()))
+            .collect();
+        assert_eq!(power_range(&gpus, &[900.0, 1200.0]), (0.0, 1400.0));
+    }
+
+    #[test]
+    fn power_range_multi_gpu_falls_back_when_any_limit_missing() {
+        // If even one GPU lacks a valid limit, the summed ceiling would
+        // understate the budget, so fall back to the nice-rounded peak.
+        let mut detail = HashMap::new();
+        detail.insert("power_limit_current".to_string(), "350".to_string());
+        let with_limit = gpu_with(None, None, None, detail);
+        let without_limit = gpu_with(None, None, None, HashMap::new());
+        let gpus = [with_limit, without_limit];
+        // peak 600 -> nice_ceil 1000 (not the partial 350 sum)
+        assert_eq!(power_range(&gpus, &[500.0, 600.0]), (0.0, nice_ceil(600.0)));
     }
 
     #[test]
@@ -300,10 +365,14 @@ mod tests {
         // No GPU detail -> nice_ceil over the observed peak.
         let g = gpu_with(None, None, None, HashMap::new());
         // peak 158 -> nice_ceil 200
-        assert_eq!(power_range(Some(&g), &[120.0, 140.0, 158.0]), (0.0, 200.0));
-        // peak below the minimum floor clamps up to POWER_MIN_CEIL_W's nice_ceil
         assert_eq!(
-            power_range(None, &[2.0, 3.0]),
+            power_range(std::slice::from_ref(&g), &[120.0, 140.0, 158.0]),
+            (0.0, 200.0)
+        );
+        // No GPUs at all -> fallback; peak below the floor clamps up to
+        // POWER_MIN_CEIL_W's nice_ceil.
+        assert_eq!(
+            power_range(&[], &[2.0, 3.0]),
             (0.0, nice_ceil(POWER_MIN_CEIL_W))
         );
     }
@@ -314,7 +383,10 @@ mod tests {
         detail.insert("power_limit_current".to_string(), "0".to_string());
         let g = gpu_with(None, None, None, detail);
         // A zero limit is invalid -> fall back to nice_ceil over peak.
-        assert_eq!(power_range(Some(&g), &[40.0]), (0.0, nice_ceil(40.0)));
+        assert_eq!(
+            power_range(std::slice::from_ref(&g), &[40.0]),
+            (0.0, nice_ceil(40.0))
+        );
     }
 
     #[test]
@@ -328,7 +400,7 @@ mod tests {
             detail.insert("power_limit_current".to_string(), bogus.to_string());
             let g = gpu_with(None, None, None, detail);
             assert_eq!(
-                power_range(Some(&g), &[40.0]),
+                power_range(std::slice::from_ref(&g), &[40.0]),
                 (0.0, nice_ceil(40.0)),
                 "limit {bogus:?} should fall back to the peak"
             );
@@ -352,8 +424,8 @@ mod tests {
         // Two overlapping windows with different peaks that round to the same
         // nice ceiling must yield the same axis (no per-frame drift).
         let g = gpu_with(None, None, None, HashMap::new());
-        let a = power_range(Some(&g), &[280.0, 290.0]);
-        let b = power_range(Some(&g), &[290.0, 295.0]);
+        let a = power_range(std::slice::from_ref(&g), &[280.0, 290.0]);
+        let b = power_range(std::slice::from_ref(&g), &[290.0, 295.0]);
         assert_eq!(a, b);
         assert_eq!(a, (0.0, 500.0));
     }

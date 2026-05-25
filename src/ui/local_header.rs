@@ -258,10 +258,11 @@ fn draw_power_sparkline<W: Write>(stdout: &mut W, state: &AppState) {
     let value_str = format!("{power_watts:>5.1}W");
 
     let history: Vec<f64> = state.package_power_history.iter().copied().collect();
-    // Fixed axis (0 .. enforced power limit, or a nice-rounded peak when no
-    // limit is reported) so the height tracks the power budget instead of
-    // rescaling every frame.
-    let range = Some(power_range(state.gpu_info.first(), &history));
+    // Fixed axis (0 .. summed enforced power limits, or a nice-rounded peak
+    // when no limit is reported) so the height tracks the power budget instead
+    // of rescaling every frame. Power is summed across all GPUs, so the
+    // ceiling is the aggregate limit.
+    let range = Some(power_range(&state.gpu_info, &history));
     let sparkline = sparkline_braille(&history, SPARKLINE_WIDTH, range);
 
     print_colored_text(stdout, "Pwr", ThemeConfig::power_color(), None, None);
