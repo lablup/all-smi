@@ -87,6 +87,12 @@ pub fn generate_gpus(gpu_name: &str, platform: &PlatformType) -> Vec<GpuMetrics>
             let gpu_bias = rng.random_range(-30.0..30.0);
             let max_power = match platform {
                 PlatformType::Furiosa => 180.0, // Furiosa RNGD TDP is 180W
+                // Intel client GPU max power cap. Current-generation
+                // Arc tops out at ~225W (A770 16GB); Battlemage B580
+                // is ~190W. We size the cap with headroom for future
+                // SKUs and prevent the random draw from generating
+                // datacenter-scale wattage on a consumer card.
+                PlatformType::Intel => 250.0,
                 _ => 700.0,
             };
             let power_consumption_watts = match platform {

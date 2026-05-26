@@ -14,7 +14,7 @@
 
 use crate::device::{
     platform_detection::{
-        get_os_type, has_furiosa, has_gaudi, has_nvidia, has_rebellions, is_jetson,
+        get_os_type, has_furiosa, has_gaudi, has_intel_gpu, has_nvidia, has_rebellions, is_jetson,
     },
     readers::{furiosa, gaudi, nvidia, nvidia_jetson, rebellions},
     traits::{CpuReader, GpuReader, MemoryReader},
@@ -40,6 +40,12 @@ use crate::device::{cpu_windows, memory_windows};
 
 #[cfg(target_os = "windows")]
 use crate::device::readers::amd_windows;
+
+#[cfg(target_os = "linux")]
+use crate::device::readers::intel_gpu_linux;
+
+#[cfg(target_os = "windows")]
+use crate::device::readers::intel_gpu_windows;
 
 #[cfg(all(target_os = "linux", not(target_env = "musl")))]
 use crate::device::platform_detection::has_amd;
@@ -99,6 +105,14 @@ pub fn get_gpu_readers() -> Vec<Box<dyn GpuReader>> {
             if has_amd() {
                 readers.push(Box::new(amd::AmdGpuReader::new()));
             }
+
+            // Check for Intel client GPU (Arc / Iris / Xe). Unlike
+            // `libamdgpu_top`, the Intel sysfs reader has no glibc
+            // constraint and works on both glibc and musl targets.
+            #[cfg(target_os = "linux")]
+            if has_intel_gpu() {
+                readers.push(Box::new(intel_gpu_linux::IntelGpuReader::new()));
+            }
         }
         "macos" => {
             #[cfg(target_os = "macos")]
@@ -120,6 +134,12 @@ pub fn get_gpu_readers() -> Vec<Box<dyn GpuReader>> {
                 // Check for AMD GPU on Windows (including APU)
                 if amd_windows::has_amd_gpu_windows() {
                     readers.push(Box::new(amd_windows::AmdWindowsGpuReader::new()));
+                }
+
+                // Check for Intel client GPU (Arc / Iris / Xe) on
+                // Windows via WMI.
+                if intel_gpu_windows::has_intel_gpu_windows() {
+                    readers.push(Box::new(intel_gpu_windows::IntelWindowsGpuReader::new()));
                 }
             }
         }

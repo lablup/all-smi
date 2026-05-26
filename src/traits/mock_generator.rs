@@ -56,6 +56,10 @@ pub enum MockPlatform {
     AppleSilicon,
     Jetson,
     AmdGpu,
+    /// Intel **client** GPU family (Arc / Iris / Xe / integrated
+    /// graphics, issue #244). Distinct from any Intel datacenter HPU
+    /// path which is covered by other readers.
+    IntelGpu,
     Tenstorrent,
     Rebellions,
     Furiosa,

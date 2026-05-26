@@ -51,3 +51,20 @@ pub mod amd;
 
 #[cfg(target_os = "windows")]
 pub mod amd_windows;
+
+// Intel client GPU (Arc / Iris / Xe) — see issue #244. Sysfs on Linux,
+// WMI on Windows. The PCI-ID name lookup and low-level sysfs helpers
+// live in sibling modules so the per-OS reader files stay small.
+// `intel_gpu_names` is platform-agnostic (pure string matching) and is
+// available on both Linux and Windows so the architecture / SYCL
+// classification can be reused by both per-OS readers and by external
+// consumers of the library.
+#[cfg(target_os = "linux")]
+pub mod intel_gpu_linux;
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+pub mod intel_gpu_names;
+#[cfg(target_os = "linux")]
+pub mod intel_gpu_sysfs;
+
+#[cfg(target_os = "windows")]
+pub mod intel_gpu_windows;
