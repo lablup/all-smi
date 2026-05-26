@@ -99,10 +99,10 @@ See [Building from Source](DEVELOPERS.md#building-from-source) in the developer 
 
 > **Note:** This README tracks the `main` branch. Subcommands tagged
 > **Availability: v0.21.0+** below (`snapshot`, `record`, `view --replay`,
-> `config`, `doctor`) are not present in the current published release
-> (v0.20.1) and will ship with v0.21.0. See the [Changelog](#changelog) for
-> what is in each release. To run the latest features today, build from
-> source ([Option 6](#option-6-build-from-source)).
+> `config`, `doctor`) ship with v0.21.0 and are present in the current
+> published release. See the [Changelog](#changelog) for what is in each
+> release. To run the latest unreleased features, build from source
+> ([Option 6](#option-6-build-from-source)).
 
 ```bash
 # Show help
@@ -167,10 +167,9 @@ http://gpu-node3:9090
 
 > **Availability: v0.21.0+.** The `config` subcommand (`config init`, `config
 > print`, `config validate`) and the TOML config-file loader described below
-> are not present in v0.20.1; they are scheduled for v0.21.0. Environment
-> variables documented in the schema tables (e.g., `ALL_SMI_API_PORT`,
-> `ALL_SMI_ALERTS_TEMP_WARN_C`) continue to work in v0.20.1 where they were
-> already supported. To use `config` today, build from source.
+> ship with v0.21.0. Environment variables documented in the schema tables
+> (e.g., `ALL_SMI_API_PORT`, `ALL_SMI_ALERTS_TEMP_WARN_C`) continue to work
+> in earlier releases where they were already supported.
 
 `all-smi` reads optional settings from a TOML config file. Every field has a compiled default, so a fresh install requires no file; operators only create one when they want persistent overrides (hostfile path, update interval, alert thresholds, `$/kWh`, etc.).
 
@@ -337,8 +336,8 @@ Older releases introduced environment variables with different naming. All alias
 
 ## Diagnostics
 
-> **Availability: v0.21.0+.** The `doctor` subcommand is not present in
-> v0.20.1; it is scheduled for v0.21.0. To run it today, build from source.
+> **Availability: v0.21.0+.** The `doctor` subcommand ships with v0.21.0
+> and is available in the current published release.
 
 The `all-smi doctor` subcommand runs a read-only suite of environment checks and
 prints a PASS/WARN/FAIL report covering platform, privileges, container
@@ -1002,8 +1001,8 @@ blocking collect rather than each spawning their own reader set.
 
 ### Scripting / CI (Snapshot Mode)
 
-> **Availability: v0.21.0+.** The `snapshot` subcommand is not present in
-> v0.20.1; it is scheduled for v0.21.0. To use it today, build from source.
+> **Availability: v0.21.0+.** The `snapshot` subcommand ships with v0.21.0
+> and is available in the current published release.
 
 The `snapshot` subcommand emits a single, one-shot machine-readable dump of
 the current hardware state to stdout (or a file) and exits. It is designed
@@ -1343,7 +1342,7 @@ See the [LICENSE](./LICENSE) file for details.
 ## Changelog
 
 ### Recent Updates
-- **v0.21.0 (upcoming):** Add cluster-wide Users tab (`V` key in remote `view` mode) — aggregates per-process metrics across all scraped hosts into a single table with columns USER, NODES, GPUs, PROCS, VRAM, POWER* (weighted approximation), LONGEST, and CMD; in-tab keys u/m/p/n/t for sorting, Enter for two-level drill-down (user → host → process list), ESC to exit drill-down, f to toggle system-account filter (uid<1000), and e to export the visible table to `<platform cache dir>/all-smi/users-<timestamp>.csv` [^cache]; partial-coverage chip warns when only a subset of hosts report `--processes` data; mock support via `ALL_SMI_MOCK_PROCESSES=1`; CSV export hardened with O_NOFOLLOW + mode 0600 symlink refusal, RFC 4180 quoting, and formula-injection mitigation; remote parser enforces per-field label caps for process metrics. **BREAKING**: Rename Prometheus GPU labels `index`→`gpu_index` and `uuid`→`gpu_uuid` across all NVIDIA-specific metrics (pcie, thermal thresholds, performance state, hardware details, vGPU, MIG); also rename `index`→`npu_index` and `uuid`→`npu_uuid` across all non-NVIDIA NPU exporters (Tenstorrent, Rebellions, Furiosa, Gaudi, Google TPU) and NPU mock templates; remote parser accepts both old and new label names for backward compatibility during migration. Add NVIDIA vGPU SR-IOV monitoring — per-vGPU utilization, framebuffer memory, scheduler state, and host mode exported as Prometheus metrics; TUI renders per-GPU vGPU sub-sections; remote parser reconstructs vGPU view from scraped metrics; mock server can simulate vGPU data via `ALL_SMI_MOCK_VGPU=1`. Add NVIDIA extended thermal monitoring — slowdown, shutdown, max-operating, and acoustic temperature thresholds exported as Prometheus metrics; TUI shows per-GPU thermal row with proximity highlighting (yellow within 5°C of slowdown, red within 2°C of shutdown); P-state (P0–P15) surfaced in TUI and metrics; all fields degrade gracefully to `None` on older drivers or non-NVIDIA hardware. Add NVIDIA MIG (Multi-Instance GPU) monitoring — per-GPU MIG mode status and per-MIG-instance SM utilization, memory bandwidth utilization, and framebuffer used/total bytes exported as Prometheus metrics; TUI renders MIG instances as nested rows under each parent GPU; remote parser reconstructs MIG view from scraped metrics; mock server can simulate MIG data via `ALL_SMI_MOCK_MIG=1`. Add NVIDIA extended hardware details — NUMA node ID, GSP firmware mode and version, NvLink remote endpoint classification per active link, and GPM SM occupancy and memory bandwidth utilization exported as Prometheus metrics; TUI shows compact HW row per GPU with NUMA node, GSP state, and NvLink count; all fields degrade gracefully to absent on older drivers, non-NVIDIA hardware, or hosts without NUMA topology. Add `snapshot` subcommand — one-shot JSON/CSV/Prometheus export to stdout or file without starting a long-running server, with multi-sample collection (`--samples`/`--interval`), `--query` dot-path column selection for CSV, symlink-safe atomic file writes (Unix `O_NOFOLLOW` + mode `0600`), blocking-pool cap, and NaN/Inf float sanitization. Add `record` subcommand and `view --replay` — capture a live metric stream to a compressed NDJSON file (plain, gzip, zstd; rotating segments; local and remote sources) and play it back through the exact same TUI for post-hoc incident investigation; replay supports play/pause, per-frame stepping, speed cycling (0.25x–8x), ±10s seeks, timecode jumps, and loop mode; security hardening includes O_NOFOLLOW symlink refusal on the writer, 16 MiB per-line cap and 128 MiB zstd window ceiling on the reader, and bounded host-list and frame-cache limits; add interactive filter query bar (`/`) with DSL supporting field comparisons, range checks, and host-name pattern matching; add threshold alert history panel (`A`). Add `doctor` subcommand — read-only suite of 51 environment checks across 14 categories (platform, privileges, container, nvidia, amd, apple, gaudi, tpu, tenstorrent, rebellions, furiosa, windows, env, network) with stable dotted check IDs, parallel execution, 3-second per-check timeout, PASS/WARN/FAIL/SKIP report in human and JSON formats, and `--bundle` support-archive packer with O_NOFOLLOW symlink refusal, 0o600 owner-only permissions, secret-value redaction, and network-identifier scrubbing. Unify the cache base across recordings, energy WAL, and users-CSV export through `dirs::cache_dir()` so files land in the platform-correct location (Linux `$XDG_CACHE_HOME/all-smi` / `~/.cache/all-smi`, macOS `~/Library/Caches/all-smi`, Windows `%LOCALAPPDATA%\all-smi`); a one-time best-effort migration moves any pre-existing `~/.cache/all-smi/{records,energy-wal.bin}` to the new root when the new root is empty, never overwriting (#229).
+- **v0.21.0 (2026/05/26):** Major release adding new subcommands (`snapshot`, `record`, `view --replay`, `config`, `doctor`), cluster-wide Users tab (`V`) and Topology tab (`T`) in remote view, agentless SSH transport, TOML config file support, SSE streaming endpoint and `/snapshot` JSON, energy accumulation (kWh) with cost estimation, interactive filter query (`/`) and threshold alerts panel (`A`), system swap usage display, NVIDIA vGPU/MIG/extended thermal/P-state/extended hardware details (NUMA, GSP, NvLink, GPM) monitoring, targeted device refresh and stable correlation IDs in the library API, unified platform-aware cache paths via `dirs::cache_dir()`. **BREAKING**: Rename Prometheus labels `index`/`uuid` to `gpu_index`/`gpu_uuid` (NVIDIA) and `npu_index`/`npu_uuid` (other NPUs); remote parser accepts both old and new names for backward compatibility.
 - **v0.20.1 (2026/04/10):** Fix local header metric row jitter by using fixed-width formatted fields; auto-promote pre-release to release in CI
 - **v0.20.0 (2026/04/10):** Redesign local-mode TUI with Activity panel featuring braille sparklines, CPU per-core view, host summary bar, and per-node LED grid; add Apple M5 Pro/Max Super core (S-CPU) support
 - **v0.19.0 (2026/04/08):** Fix Apple Silicon SMC float decoding to restore real CPU/GPU die temperatures, cache platform detection to avoid per-frame system_profiler on macOS, and fix TIME+/Command column alignment in process list

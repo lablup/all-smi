@@ -1,3 +1,52 @@
+all-smi (0.21.0-0) jammy; urgency=medium
+
+  * Add cluster-wide Users tab ('V' key) with two-level drill-down and CSV export
+  * Add Topology view tab ('T') with NvLink/NUMA/PCIe graph and matrix
+  * Add 'snapshot' subcommand for one-shot JSON/CSV/Prometheus output
+  * Add 'record' subcommand and 'view --replay' for live metric capture and playback
+  * Add 'doctor' subcommand with 51 environment checks and support-bundle packer
+  * Add 'config' subcommand and TOML config file support
+  * Add agentless SSH transport for view mode (russh-based, no agent required)
+  * Add SSE streaming endpoint and '/snapshot' JSON for API mode
+  * Add energy accumulation (kWh) and cost estimation with $/kWh config
+  * Add interactive filter query bar ('/') with DSL and threshold alert history panel ('A')
+  * Add NVIDIA vGPU SR-IOV monitoring (utilization, framebuffer, scheduler, host mode)
+  * Add NVIDIA extended thermal monitoring (slowdown, shutdown, max-operating, acoustic) and P-state
+  * Add NVIDIA MIG (Multi-Instance GPU) monitoring with nested TUI rows
+  * Add NVIDIA extended hardware details (NUMA node ID, GSP firmware, NvLink remote endpoints, GPM)
+  * Add system swap usage display in the TUI memory section
+  * Add targeted device refresh and stable correlation IDs to AllSmi library API
+  * Add 'config path' subcommand and surface active TOML config path in --help
+  * Unify cache paths via platform-aware dirs::cache_dir() with one-time migration
+  * BREAKING: Rename Prometheus labels index/uuid to gpu_index/gpu_uuid (NVIDIA) and npu_index/npu_uuid (other NPUs); remote parser accepts both old and new names
+  * Standardize NPU Prometheus labels across Tenstorrent, Rebellions, Furiosa, Gaudi, Google TPU
+  * Add ALL_SMI_MOCK_HARDWARE_DETAILS env-var gate for extended NVIDIA mock metrics
+  * Fix view-mode remote node counter, spacing, and Topology alignment
+  * Fix TUI cursor restoration on exit (Linux/tmux/VTE terminals)
+  * Fix Windows double-dispatch by dropping non-Press key events in view mode
+  * Fix temperature/power/ANE sparkline anchoring to fixed Y-axis ranges
+  * Fix GPU Freq display stabilization on idle Apple Silicon
+  * Fix resolve record default output path consistently
+  * Fix harden cache migration symlink checks
+  * Fix upgrade libamdgpu_top to 0.11.5 to resolve AMD GPU file descriptor leak
+  * Fix pin libamdgpu_top to =0.11.4 and rename update_proc_usage call
+  * Fix remove unused imports in doctor checks modules
+  * Refactor standardize TUI sub-item indentation across all GPU renderers
+  * Refactor extract shared truncate_str helper into renderers/utils.rs
+  * Refactor resolve clippy lints in mock server and example
+  * Build pin tar to 0.4.46
+  * Update align Docker Rust toolchain with MSRV (1.93)
+  * Update realign Rust MSRV to 1.93 for Launchpad PPA builds
+  * Update bump dependencies to latest versions
+  * Docs gate unreleased subcommands with v0.21.0+ availability notes
+  * Docs document Energy Session config in TUI help, --help, and manpage
+  * CI replace Ubuntu 24.10 packaging with Ubuntu 26.04 LTS
+  * CI add Teams release notification workflow
+  * CI align Launchpad PPA packaging with Rust 1.92
+  * CI fix Launchpad noble packaging inputs
+
+ -- Jeongkyu Shin <inureyes@gmail.com>  Mon, 26 May 2026 00:00:00 +0000
+
 all-smi (0.20.1-0) jammy; urgency=medium
 
   * Fix local header metric row jitter with fixed-width formatted fields
