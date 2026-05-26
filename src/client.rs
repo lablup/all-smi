@@ -196,6 +196,13 @@ impl AllSmi {
     /// Returns an error if platform initialization fails.
     #[must_use = "AllSmi instance must be stored to access hardware information"]
     pub fn with_config(config: AllSmiConfig) -> Result<Self> {
+        // `config` is read only by the platform-specific initialisation
+        // blocks below (macOS native metrics, Linux Gaudi). Silence the
+        // unused-variable warning on platforms (e.g. Windows) that have
+        // no such init.
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        let _ = &config;
+
         // Initialize platform-specific managers
         #[cfg(target_os = "macos")]
         let macos_initialized = {

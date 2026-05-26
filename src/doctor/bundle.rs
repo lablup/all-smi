@@ -17,12 +17,16 @@
 
 use std::fs::File;
 use std::path::Path;
+// Only the Unix-gated context collectors (uname/lspci/lsmod/dmesg/
+// system_profiler) use these; on Windows none are compiled in.
+#[cfg(unix)]
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use flate2::Compression;
 use flate2::write::GzEncoder;
 
+#[cfg(unix)]
 use crate::doctor::exec::try_exec;
 use crate::doctor::redact::{RedactOptions, scrub};
 use crate::doctor::report::{render_human_string, render_json_string};

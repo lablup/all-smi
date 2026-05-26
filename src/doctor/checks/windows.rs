@@ -55,19 +55,16 @@ static LHM: Check = Check {
 fn check_wmi(_ctx: &CheckCtx) -> CheckResult {
     #[cfg(target_os = "windows")]
     {
-        // Build a short-lived COM connection via `wmi` crate. Keep this
-        // cheap — we only check if the root\\WMI namespace is reachable.
-        match wmi::COMLibrary::new() {
-            Ok(com) => match wmi::WMIConnection::with_namespace_path("root\\WMI", com) {
-                Ok(_conn) => CheckResult::Pass("root\\WMI reachable".to_string()),
-                Err(e) => CheckResult::Warn(
-                    format!("WMI connection failed: {e}"),
-                    Some("ensure the WinMgmt service is running".to_string()),
-                ),
-            },
+        // Build a short-lived WMI connection via the `wmi` crate. As of
+        // wmi 0.18 COM is initialised automatically (multithreaded
+        // apartment) on the first connection in a thread, so there is no
+        // separate COMLibrary step. Keep this cheap — we only check
+        // whether the root\\WMI namespace is reachable.
+        match wmi::WMIConnection::with_namespace_path("root\\WMI") {
+            Ok(_conn) => CheckResult::Pass("root\\WMI reachable".to_string()),
             Err(e) => CheckResult::Warn(
-                format!("COM initialisation failed: {e}"),
-                Some("ensure wbemcomn.dll is present".to_string()),
+                format!("WMI connection failed: {e}"),
+                Some("ensure the WinMgmt service is running".to_string()),
             ),
         }
     }
@@ -115,19 +112,14 @@ fn check_intel_wmi(_ctx: &CheckCtx) -> CheckResult {
 fn check_lhm(_ctx: &CheckCtx) -> CheckResult {
     #[cfg(target_os = "windows")]
     {
-        // LibreHardwareMonitor ships a WMI provider under root\\LibreHardwareMonitor.
-        match wmi::COMLibrary::new() {
-            Ok(com) => {
-                match wmi::WMIConnection::with_namespace_path("root\\LibreHardwareMonitor", com) {
-                    Ok(_) => {
-                        CheckResult::Pass("LibreHardwareMonitor WMI provider available".to_string())
-                    }
-                    Err(_) => CheckResult::Skip(
-                        "LibreHardwareMonitor not installed or not running".to_string(),
-                    ),
-                }
+        // LibreHardwareMonitor ships a WMI provider under
+        // root\\LibreHardwareMonitor. COM is initialised automatically on
+        // the first connection in a thread (wmi 0.18+).
+        match wmi::WMIConnection::with_namespace_path("root\\LibreHardwareMonitor") {
+            Ok(_) => CheckResult::Pass("LibreHardwareMonitor WMI provider available".to_string()),
+            Err(_) => {
+                CheckResult::Skip("LibreHardwareMonitor not installed or not running".to_string())
             }
-            Err(e) => CheckResult::Skip(format!("COM initialisation failed: {e}")),
         }
     }
     #[cfg(not(target_os = "windows"))]
