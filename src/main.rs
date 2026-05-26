@@ -64,9 +64,8 @@ static NATIVE_METRICS_INITIALIZED: AtomicBool = AtomicBool::new(false);
 static HLSMI_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
 fn main() {
-    // Set up panic handler for cleanup
-    #[cfg(target_os = "macos")]
-    setup_panic_handler();
+    // Set up panic handler for cleanup (cross-platform)
+    setup_panic_handlers();
 
     // Best-effort one-time migration of legacy `~/.cache/all-smi/...`
     // data to the platform-correct cache dir (issue #229). Runs before
@@ -191,6 +190,9 @@ async fn run_command(cli: Cli, settings: Settings) {
         // Set up signal handler for clean shutdown
         tokio::spawn(async {
             signal::ctrl_c().await.expect("Failed to listen for Ctrl+C");
+            // Restore terminal state before exit so the parent shell is usable
+            // (issue #235). No-op when no TUI was running.
+            view::terminal_manager::restore_terminal();
             #[cfg(target_os = "macos")]
             {
                 // Cleanup native metrics manager on signal
@@ -210,6 +212,9 @@ async fn run_command(cli: Cli, settings: Settings) {
             let mut sigterm = signal::unix::signal(signal::unix::SignalKind::terminate())
                 .expect("Failed to listen for SIGTERM");
             sigterm.recv().await;
+            // Restore terminal state before exit so the parent shell is usable
+            // (issue #235). No-op when no TUI was running.
+            view::terminal_manager::restore_terminal();
             #[cfg(target_os = "macos")]
             {
                 // Cleanup native metrics manager on signal
@@ -651,12 +656,17 @@ async fn run_command(cli: Cli, settings: Settings) {
     }
 }
 
-// Set up a panic handler to ensure cleanup
-#[cfg(target_os = "macos")]
-fn setup_panic_handler() {
+// Set up a panic handler to ensure cleanup.
+// Cross-platform: the macOS native-metrics shutdown is gated behind
+// `#[cfg(target_os = "macos")]`. The terminal-restoration hook is installed
+// separately inside `TerminalManager::new()` via `PANIC_HOOK_INSTALLED` —
+// it layers on top of whatever hook this function installs, so the terminal
+// is always restored before this hook's body runs.
+fn setup_panic_handlers() {
     let default_panic = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic_info| {
-        // Cleanup native metrics manager before panicking
+        // Cleanup native metrics manager before panicking (macOS only)
+        #[cfg(target_os = "macos")]
         device::macos_native::shutdown_native_metrics_manager();
         default_panic(panic_info);
     }));

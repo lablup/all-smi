@@ -102,8 +102,9 @@ impl UiLoop {
         // Start the background terminal event reader
         self.event_coordinator.spawn_terminal_reader();
 
-        // Hide cursor once at session start. The cursor is restored in
-        // TerminalManager::drop() (LeaveAlternateScreen resets it).
+        // Hide cursor once at session start. The cursor is restored on every
+        // exit path (normal q, panic, SIGINT/SIGTERM) by terminal_manager —
+        // see Drop and restore_terminal() (issue #235).
         // This avoids per-frame Hide/Show churn.
         {
             let mut stdout = std::io::stdout();
