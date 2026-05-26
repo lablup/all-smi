@@ -44,7 +44,9 @@
 use crate::device::GpuReader;
 use crate::device::common::execute_command_default;
 use crate::device::readers::common_cache::{DeviceStaticInfo, MAX_DEVICES};
-use crate::device::readers::intel_gpu_names::{classify_intel_architecture, resolve_intel_gpu_name};
+use crate::device::readers::intel_gpu_names::{
+    classify_intel_architecture, resolve_intel_gpu_name,
+};
 use crate::device::readers::intel_gpu_sysfs::{
     MemoryVariant, has_nonzero_u64, read_frequency_mhz, read_memory_bytes, read_power_watts,
     read_temperature_celsius,

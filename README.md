@@ -7,7 +7,7 @@
 [![dependency status](https://deps.rs/repo/github/lablup/all-smi/status.svg)](https://deps.rs/repo/github/lablup/all-smi)
 
 
-`all-smi` is a command-line utility for monitoring GPU and NPU hardware across multiple systems. It provides a real-time view of accelerator utilization, memory usage, temperature, power consumption, and other metrics. The tool is designed to be a cross-platform alternative to `nvidia-smi`, with support for NVIDIA GPUs, AMD GPUs, NVIDIA Jetson platforms, Apple Silicon GPUs, Intel Gaudi NPUs, Google Cloud TPUs, Tenstorrent NPUs, Rebellions NPUs, and Furiosa NPUs.
+`all-smi` is a command-line utility for monitoring GPU and NPU hardware across multiple systems. It provides a real-time view of accelerator utilization, memory usage, temperature, power consumption, and other metrics. The tool is designed to be a cross-platform alternative to `nvidia-smi`, with support for NVIDIA GPUs, AMD GPUs, NVIDIA Jetson platforms, Apple Silicon GPUs, Intel Arc/Iris Xe/Xe client GPUs, Intel Gaudi NPUs, Google Cloud TPUs, Tenstorrent NPUs, Rebellions NPUs, and Furiosa NPUs.
 
 The application presents a terminal-based user interface with cluster overview, interactive sorting, and both local and remote monitoring capabilities. It also provides an API mode for Prometheus metrics integration.
 
@@ -557,6 +557,10 @@ Stable check IDs (greppable across versions):
     - GPU process detection with memory usage tracking
     - Temperature, power consumption, frequency, and fan speed metrics
     - Requires sudo access to /dev/dri devices (glibc builds only)
+  - Intel Arc / Iris Xe / Xe client GPUs (Arc A/B-series, Core Ultra iGPU, Iris Xe) via i915/xe sysfs
+    - Architecture classification (Alchemist, Battlemage, Xe-LPG, Iris Xe) with SYCL/oneAPI capability flag
+    - Discrete VRAM tracking (i915 `mem_info_vram_total` and xe `tile0/vram0/total_bytes`)
+    - Frequency, temperature (hwmon), and power (hwmon) metrics
   - CPU monitoring via /proc filesystem
   - Memory monitoring with detailed statistics
   - Intel Gaudi NPUs (Gaudi 1/2/3) via hl-smi with background process monitoring
@@ -862,7 +866,7 @@ threshold}` JSON with a 2-second timeout, fire-and-forget.
   - Simulates realistic GPU clusters with 8 GPUs per node
   - Configurable port ranges for multiple instances
   - Failure simulation for resilience testing
-  - Platform-specific metric generation (NVIDIA, AMD, Apple Silicon, Jetson, Intel Gaudi, Google TPU, Tenstorrent, Rebellions, Furiosa)
+  - Platform-specific metric generation (NVIDIA, AMD, Apple Silicon, Jetson, Intel client GPU, Intel Gaudi, Google TPU, Tenstorrent, Rebellions, Furiosa)
   - Background metric updates with realistic variations
   - Set `ALL_SMI_MOCK_VGPU=1` to simulate NVIDIA vGPU SR-IOV data without real vGPU hardware
   - Set `ALL_SMI_MOCK_MIG=1` to simulate NVIDIA MIG (Multi-Instance GPU) data without MIG hardware
@@ -903,7 +907,7 @@ curl --unix-socket /tmp/all-smi.sock http://localhost/metrics
 - Currently Unix-only (Linux, macOS); Windows support pending Rust ecosystem maturity
 
 Metrics are available at `http://localhost:9090/metrics` (TCP) or via Unix socket and include comprehensive hardware monitoring for:
-- **GPUs:** Utilization, memory, temperature, power, frequency (NVIDIA, AMD, Apple Silicon, Intel Gaudi, Google TPU, Tenstorrent)
+- **GPUs:** Utilization, memory, temperature, power, frequency (NVIDIA, AMD, Apple Silicon, Intel Arc/Iris Xe client GPU, Intel Gaudi, Google TPU, Tenstorrent)
 - **NVIDIA hardware details:** NUMA node ID, GSP firmware mode and version, NvLink remote endpoint type per active link, GPM SM occupancy and memory bandwidth utilization (all omitted when the driver does not support the underlying API)
 - **NVIDIA vGPUs:** Per-vGPU utilization, framebuffer memory, scheduler state, and SR-IOV host mode (emitted only on vGPU-enabled hosts)
 - **NVIDIA MIG:** Per-GPU MIG mode status and per-MIG-instance utilization, framebuffer memory used/total (emitted only on MIG-enabled hosts)

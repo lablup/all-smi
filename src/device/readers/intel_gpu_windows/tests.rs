@@ -250,6 +250,9 @@ fn sycl_capable_label_renders_known_yes_no_unknown() {
     assert_eq!(IntelArchitecture::XeLpg.sycl_capable_label(), "Yes");
     assert_eq!(IntelArchitecture::XeLpgPlus.sycl_capable_label(), "Yes");
     assert_eq!(IntelArchitecture::IrisXe.sycl_capable_label(), "Yes");
-    assert_eq!(IntelArchitecture::OlderIntegrated.sycl_capable_label(), "No");
+    assert_eq!(
+        IntelArchitecture::OlderIntegrated.sycl_capable_label(),
+        "No"
+    );
     assert_eq!(IntelArchitecture::Unknown.sycl_capable_label(), "Unknown");
 }

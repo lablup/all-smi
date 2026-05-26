@@ -530,4 +530,36 @@ mod tests {
         assert!(!is_integrated_name("Intel Arc A770 16GB"));
         assert!(!is_integrated_name("Intel Arc B580 12GB"));
     }
+
+    #[test]
+    fn generate_leaves_no_unreplaced_placeholders() {
+        // `generate_template` intentionally contains `{{UTIL_N}}` etc.;
+        // `generate` must replace every placeholder before returning the
+        // response. Any leftover `{{` would be emitted verbatim to the
+        // Prometheus scraper, breaking numeric-value parsing.
+        let g = IntelGpuMockGenerator::new(
+            Some("Intel Arc B580 12GB".to_string()),
+            "intel-test".to_string(),
+        );
+        let cfg = MockConfig {
+            platform: MockPlatform::IntelGpu,
+            device_count: 2,
+            ..MockConfig::default()
+        };
+        let data = g.generate(&cfg).expect("generate succeeds");
+        assert!(
+            !data.response.contains("{{"),
+            "unreplaced placeholder in output: {}",
+            // Show the first occurrence for easier diagnosis.
+            data.response
+                .lines()
+                .find(|l| l.contains("{{"))
+                .unwrap_or("<not found>")
+        );
+        // Verify the output is Prometheus text format: every metric line
+        // must be preceded by # HELP and # TYPE comment blocks.
+        assert!(data.response.contains("# HELP "), "missing # HELP block");
+        assert!(data.response.contains("# TYPE "), "missing # TYPE block");
+        assert_eq!(data.content_type, "text/plain; version=0.0.4");
+    }
 }

@@ -2,7 +2,7 @@
 
 ## Executive Summary
 
-All-SMI is a unified GPU/NPU monitoring tool that provides both terminal UI (TUI) and Prometheus metrics interface for monitoring local and remote accelerator resources. Built with a modular, event-driven architecture on async Rust patterns, it supports multiple platforms (NVIDIA GPU, AMD GPU, Apple Silicon, Jetson, Intel Gaudi, Tenstorrent, Rebellions, Furiosa) and enables distributed monitoring across multiple nodes.
+All-SMI is a unified GPU/NPU monitoring tool that provides both terminal UI (TUI) and Prometheus metrics interface for monitoring local and remote accelerator resources. Built with a modular, event-driven architecture on async Rust patterns, it supports multiple platforms (NVIDIA GPU, AMD GPU, Apple Silicon, Jetson, Intel Arc/Iris Xe client GPU, Intel Gaudi, Tenstorrent, Rebellions, Furiosa) and enables distributed monitoring across multiple nodes.
 
 ## Table of Contents
 
@@ -206,6 +206,13 @@ pub trait MetricsExporter: Send + Sync {
 - Specialized for Tegra platforms
 - DLA (Deep Learning Accelerator) support
 - Integrated memory architecture handling
+
+#### Intel Arc / Iris Xe client GPU (Linux: `src/device/readers/intel_gpu_linux.rs`, Windows: `src/device/readers/intel_gpu_windows.rs`)
+- Linux: sysfs discovery under `/sys/class/drm/card*`, vendor `0x8086`, driver `i915` or `xe`
+- Windows: WMI `Win32_VideoController` query filtered to Intel graphics adapter names
+- PCI device-ID to marketing-name table in `src/device/readers/intel_gpu_names.rs` covering Arc A/B-series, Iris Xe, Xe-LPG (Core Ultra / Meteor Lake), and Xe2 (Lunar Lake)
+- Architecture classification (Alchemist, Battlemage, XeLpg, XeLpgPlus, IrisXe, OlderIntegrated) with SYCL/oneAPI capability flag
+- Discrete VRAM tracking via i915 `mem_info_vram_total` or xe `tile0/vram0/total_bytes`; integrated GPUs report zero
 
 #### Intel Gaudi (`src/device/readers/gaudi.rs`, `src/device/hlsmi/`)
 - Uses `hl-smi` command running as a background process

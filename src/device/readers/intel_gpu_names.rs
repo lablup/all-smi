@@ -139,11 +139,7 @@ impl IntelArchitecture {
     pub fn is_sycl_capable(self) -> bool {
         matches!(
             self,
-            Self::Alchemist
-                | Self::Battlemage
-                | Self::XeLpg
-                | Self::XeLpgPlus
-                | Self::IrisXe,
+            Self::Alchemist | Self::Battlemage | Self::XeLpg | Self::XeLpgPlus | Self::IrisXe,
         )
     }
 
@@ -220,8 +216,7 @@ pub fn classify_intel_architecture(name: &str) -> IntelArchitecture {
 
     // 2. Battlemage — explicit family name, or Arc + a known B-series SKU.
     if n.contains("battlemage")
-        || (n.contains("arc")
-            && (n.contains("b580") || n.contains("b570") || n.contains("b380")))
+        || (n.contains("arc") && (n.contains("b580") || n.contains("b570") || n.contains("b380")))
     {
         return IntelArchitecture::Battlemage;
     }
@@ -246,9 +241,7 @@ pub fn classify_intel_architecture(name: &str) -> IntelArchitecture {
     //    family name, or any other Arc iGPU — by this point Alchemist and
     //    Lunar Lake have been ruled out, so a residual `arc` + `graphics`
     //    name (notably `Intel Arc Graphics`) is the Meteor Lake iGPU.
-    if (n.contains("xe") && n.contains("lpg"))
-        || (n.contains("arc") && n.contains("graphics"))
-    {
+    if (n.contains("xe") && n.contains("lpg")) || (n.contains("arc") && n.contains("graphics")) {
         return IntelArchitecture::XeLpg;
     }
 
@@ -356,7 +349,10 @@ mod tests {
         // token, so the Alchemist matcher must not fire.
         let result = classify_intel_architecture("Intel Arc 140V Graphics");
         assert!(
-            matches!(result, IntelArchitecture::XeLpgPlus | IntelArchitecture::XeLpg),
+            matches!(
+                result,
+                IntelArchitecture::XeLpgPlus | IntelArchitecture::XeLpg
+            ),
             "Arc 140V should classify as a Lunar Lake / Xe-LPG-family part, got {result:?}",
         );
         assert!(result.is_sycl_capable());
@@ -433,10 +429,7 @@ mod tests {
         assert!(!arch.is_sycl_capable());
 
         // An empty name is also unknown.
-        assert_eq!(
-            classify_intel_architecture(""),
-            IntelArchitecture::Unknown
-        );
+        assert_eq!(classify_intel_architecture(""), IntelArchitecture::Unknown);
     }
 
     #[test]
@@ -487,7 +480,10 @@ mod tests {
         assert_eq!(IntelArchitecture::XeLpg.sycl_capable_label(), "Yes");
         assert_eq!(IntelArchitecture::XeLpgPlus.sycl_capable_label(), "Yes");
         assert_eq!(IntelArchitecture::IrisXe.sycl_capable_label(), "Yes");
-        assert_eq!(IntelArchitecture::OlderIntegrated.sycl_capable_label(), "No");
+        assert_eq!(
+            IntelArchitecture::OlderIntegrated.sycl_capable_label(),
+            "No"
+        );
         assert_eq!(IntelArchitecture::Unknown.sycl_capable_label(), "Unknown");
     }
 }

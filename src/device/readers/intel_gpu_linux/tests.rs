@@ -155,7 +155,10 @@ fn get_gpu_info_populates_basic_fields() {
         g.detail.get("Architecture").map(String::as_str),
         Some("Alchemist (Xe-HPG, A-series)")
     );
-    assert_eq!(g.detail.get("SYCL Capable").map(String::as_str), Some("Yes"));
+    assert_eq!(
+        g.detail.get("SYCL Capable").map(String::as_str),
+        Some("Yes")
+    );
     // The Intel reader populates NVIDIA-only fields with None / empty
     // defaults — verify the contract so consumers can render them as
     // "unavailable" rather than misinterpreting zeros.
