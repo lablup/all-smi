@@ -149,6 +149,13 @@ fn get_gpu_info_populates_basic_fields() {
     );
     assert_eq!(g.detail.get("Driver").map(String::as_str), Some("i915"));
     assert!(g.detail.contains_key("Utilization"));
+    // Architecture / SYCL classification — derived from the resolved
+    // marketing name. Arc A770 is Alchemist (SYCL-capable).
+    assert_eq!(
+        g.detail.get("Architecture").map(String::as_str),
+        Some("Alchemist (Xe-HPG, A-series)")
+    );
+    assert_eq!(g.detail.get("SYCL Capable").map(String::as_str), Some("Yes"));
     // The Intel reader populates NVIDIA-only fields with None / empty
     // defaults — verify the contract so consumers can render them as
     // "unavailable" rather than misinterpreting zeros.
@@ -176,6 +183,15 @@ fn get_gpu_info_integrated_reports_zero_memory() {
     assert!(
         info[0].detail.contains_key("Memory"),
         "integrated GPUs should explain the shared-memory situation"
+    );
+    // Meteor Lake / Core Ultra iGPU is Xe-LPG and SYCL-capable.
+    assert_eq!(
+        info[0].detail.get("Architecture").map(String::as_str),
+        Some("Xe-LPG (Meteor Lake)")
+    );
+    assert_eq!(
+        info[0].detail.get("SYCL Capable").map(String::as_str),
+        Some("Yes")
     );
 }
 

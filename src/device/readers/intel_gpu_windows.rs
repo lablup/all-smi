@@ -31,6 +31,7 @@
 //! the missing values aren't a regression.
 
 use crate::device::GpuReader;
+use crate::device::readers::intel_gpu_names::classify_intel_architecture;
 use crate::device::types::{GpuInfo, ProcessInfo};
 use crate::utils::get_hostname;
 use chrono::Local;
@@ -151,6 +152,18 @@ impl IntelWindowsGpuReader {
                         "Variant".to_string(),
                         classify_intel_variant(&name).to_string(),
                     );
+                    // Architecture / SYCL classification — shared with
+                    // the Linux reader via `intel_gpu_names::classify_*`
+                    // so a single source of truth drives downstream
+                    // accelerator-selection logic (Backend.AI's
+                    // accelerator picker, llama.cpp SYCL backend, etc.)
+                    // on both Linux and Windows.
+                    let arch = classify_intel_architecture(&name);
+                    detail.insert("Architecture".to_string(), arch.label().to_string());
+                    detail.insert(
+                        "SYCL Capable".to_string(),
+                        arch.sycl_capable_label().to_string(),
+                    );
                     detail.insert(
                         "Note".to_string(),
                         "Detailed metrics require Level Zero / xpu-smi".to_string(),
@@ -257,9 +270,11 @@ pub fn has_intel_gpu_windows() -> bool {
 /// Intel client GPU. Requires both:
 ///
 /// 1. The name contains "intel" (case-insensitive).
-/// 2. The name contains at least one of the graphics-family tokens —
-///    `arc`, `iris`, `uhd graphics`, `hd graphics`, `xe graphics`, or
-///    matches the iGPU pattern `intel graphics`.
+/// 2. The name contains at least one of the graphics-family tokens
+///    listed in `FAMILY_TOKENS` — covering both legacy (`hd graphics`,
+///    `uhd graphics`, `iris`) and modern (`arc`, `xe graphics`,
+///    `xe-lpg`, `battlemage`, `lunarlake`, `lunar lake`) marketing
+///    names.
 ///
 /// Step 2 deliberately excludes names like "Intel Display Audio",
 /// "Intel(R) Management Engine Interface", and "Intel Smart Sound" —
@@ -270,7 +285,11 @@ pub fn is_intel_gpu_name(name: &str) -> bool {
         return false;
     }
     // Common Intel GPU family tokens. Order doesn't matter — we just
-    // need ANY match.
+    // need ANY match. The list mirrors the architecture matchers in
+    // `intel_gpu_names::classify_intel_architecture` so any name the
+    // classifier would label as a real Intel GPU also passes this
+    // filter. New family names (e.g. future "Celestial" / "Druid" Arc
+    // generations) need to be added here AND to the classifier.
     const FAMILY_TOKENS: &[&str] = &[
         "arc",
         "iris",
@@ -278,6 +297,10 @@ pub fn is_intel_gpu_name(name: &str) -> bool {
         "hd graphics",
         "xe graphics",
         "intel graphics",
+        "xe-lpg",
+        "battlemage",
+        "lunarlake",
+        "lunar lake",
     ];
     FAMILY_TOKENS.iter().any(|t| lower.contains(t))
 }
@@ -325,122 +348,5 @@ fn is_arc_model_token(token: &str) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn intel_arc_a770_recognised() {
-        assert!(is_intel_gpu_name("Intel(R) Arc(TM) A770 Graphics"));
-    }
-
-    #[test]
-    fn intel_arc_b580_recognised() {
-        assert!(is_intel_gpu_name("Intel(R) Arc(TM) B580 Graphics"));
-    }
-
-    #[test]
-    fn intel_iris_xe_recognised() {
-        assert!(is_intel_gpu_name("Intel(R) Iris(R) Xe Graphics"));
-    }
-
-    #[test]
-    fn intel_uhd_770_recognised() {
-        assert!(is_intel_gpu_name("Intel(R) UHD Graphics 770"));
-    }
-
-    #[test]
-    fn intel_hd_graphics_recognised() {
-        assert!(is_intel_gpu_name("Intel(R) HD Graphics 530"));
-    }
-
-    #[test]
-    fn meteor_lake_arc_igpu_recognised() {
-        // Meteor Lake / Core Ultra iGPU ships as "Intel(R) Arc(TM)
-        // Graphics" with no number.
-        assert!(is_intel_gpu_name("Intel(R) Arc(TM) Graphics"));
-    }
-
-    #[test]
-    fn intel_display_audio_excluded() {
-        // Audio device — must NOT match even though "Intel" is in the name.
-        assert!(!is_intel_gpu_name("Intel(R) Display Audio"));
-    }
-
-    #[test]
-    fn intel_management_engine_excluded() {
-        assert!(!is_intel_gpu_name(
-            "Intel(R) Management Engine Interface #1"
-        ));
-    }
-
-    #[test]
-    fn intel_smart_sound_excluded() {
-        assert!(!is_intel_gpu_name(
-            "Intel(R) Smart Sound Technology (Intel(R) SST)"
-        ));
-    }
-
-    #[test]
-    fn non_intel_excluded() {
-        assert!(!is_intel_gpu_name("NVIDIA GeForce RTX 4090"));
-        assert!(!is_intel_gpu_name("AMD Radeon RX 7900 XTX"));
-    }
-
-    #[test]
-    fn classify_arc_discrete() {
-        assert_eq!(
-            classify_intel_variant("Intel(R) Arc(TM) A770 Graphics"),
-            "Discrete"
-        );
-        assert_eq!(
-            classify_intel_variant("Intel(R) Arc(TM) B580 Graphics"),
-            "Discrete"
-        );
-    }
-
-    #[test]
-    fn classify_iris_integrated() {
-        assert_eq!(
-            classify_intel_variant("Intel(R) Iris(R) Xe Graphics"),
-            "Integrated"
-        );
-    }
-
-    #[test]
-    fn classify_uhd_integrated() {
-        assert_eq!(
-            classify_intel_variant("Intel(R) UHD Graphics 770"),
-            "Integrated"
-        );
-    }
-
-    #[test]
-    fn classify_meteor_lake_arc_igpu_as_integrated() {
-        // "Intel Arc Graphics" without a model number on Core Ultra is
-        // the iGPU and must NOT be classified as Discrete.
-        assert_eq!(
-            classify_intel_variant("Intel(R) Arc(TM) Graphics"),
-            "Integrated"
-        );
-    }
-
-    #[test]
-    fn arc_model_token_recognises_known_skus() {
-        assert!(is_arc_model_token("a770"));
-        assert!(is_arc_model_token("a750"));
-        assert!(is_arc_model_token("a580"));
-        assert!(is_arc_model_token("a380"));
-        assert!(is_arc_model_token("b580"));
-        assert!(is_arc_model_token("b570"));
-    }
-
-    #[test]
-    fn arc_model_token_rejects_non_models() {
-        assert!(!is_arc_model_token("arc"));
-        assert!(!is_arc_model_token("tm"));
-        assert!(!is_arc_model_token("graphics"));
-        assert!(!is_arc_model_token("a"));
-        // Single letter followed by <3 digits doesn't count as a model.
-        assert!(!is_arc_model_token("a77"));
-    }
-}
+#[path = "intel_gpu_windows/tests.rs"]
+mod tests;

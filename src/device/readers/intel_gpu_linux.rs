@@ -44,7 +44,7 @@
 use crate::device::GpuReader;
 use crate::device::common::execute_command_default;
 use crate::device::readers::common_cache::{DeviceStaticInfo, MAX_DEVICES};
-use crate::device::readers::intel_gpu_names::resolve_intel_gpu_name;
+use crate::device::readers::intel_gpu_names::{classify_intel_architecture, resolve_intel_gpu_name};
 use crate::device::readers::intel_gpu_sysfs::{
     MemoryVariant, has_nonzero_u64, read_frequency_mhz, read_memory_bytes, read_power_watts,
     read_temperature_celsius,
@@ -140,6 +140,20 @@ impl IntelGpuReader {
             if let Some(bus) = read_pci_bus_id(&device_dir) {
                 detail.insert("PCI Bus".to_string(), bus);
             }
+            // Architecture / SYCL classification — derived from the
+            // marketing name so downstream consumers (Backend.AI's
+            // accelerator-selection layer, the llama.cpp SYCL backend
+            // picker, etc.) can rely on all-smi as a single source of
+            // truth instead of reimplementing the same name-pattern
+            // table. The classifier is intentionally pure-string so it
+            // stays platform-agnostic and shareable with the Windows
+            // reader.
+            let arch = classify_intel_architecture(&name);
+            detail.insert("Architecture".to_string(), arch.label().to_string());
+            detail.insert(
+                "SYCL Capable".to_string(),
+                arch.sycl_capable_label().to_string(),
+            );
             // Document the v1 scope limitation in-band so library
             // consumers see *why* utilization is always reported as
             // zero rather than thinking the GPU is idle.
