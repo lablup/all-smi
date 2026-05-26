@@ -68,9 +68,11 @@ jobs:
             archive_ext: ".zip"
             protoc_platform: osx-aarch_64
 
-          # Windows x86_64
+          # Windows x86_64 — self-hosted runner with signing certificate
+          # pre-installed in the Windows Certificate Store (shared with
+          # backend.ai-go's packaging pipeline).
           - target: x86_64-pc-windows-msvc
-            os: windows-latest
+            os: windows-on-macmini02-x64
             artifact_name: all-smi.exe
             asset_name: all-smi-windows-x86_64
             archive_ext: ".zip"
@@ -87,8 +89,24 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v6
 
+      # 1.5) Pin Cargo/rustup to persistent paths on the Windows self-hosted
+      # runner so registry/git/target survive workspace cleanup between jobs.
+      # Must run before any cargo or rustup invocation so they use these paths.
+      - name: Setup persistent cache paths (Windows self-hosted)
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        shell: pwsh
+        run: |
+          $cargoHome = "C:\.cargo"
+          if (!(Test-Path $cargoHome)) { New-Item -ItemType Directory -Path $cargoHome -Force | Out-Null }
+          echo "CARGO_HOME=$cargoHome" >> $env:GITHUB_ENV
+          echo "RUSTUP_HOME=C:\.rustup" >> $env:GITHUB_ENV
+
       # 2) Cache Cargo build artifacts
+      # Skipped on the Windows self-hosted runner: its persistent CARGO_HOME
+      # (configured above) already caches the registry across runs, so the
+      # GitHub Actions cache would only mirror an empty ~/.cargo location.
       - name: Cache cargo
+        if: matrix.target != 'x86_64-pc-windows-msvc'
         uses: actions/cache@v5
         with:
           path: |
@@ -148,6 +166,69 @@ jobs:
           codesign --force --timestamp --options runtime \
                    --sign "Developer ID Application" "$BIN"
 
+      # 8.5) macOS notarization via App Store Connect API key
+      # We submit a temporary zip wrapping the already-codesigned binary
+      # (notarytool only accepts .zip/.dmg/.pkg). Stapling is intentionally
+      # skipped: `xcrun stapler` only operates on .app/.dmg/.pkg containers,
+      # not on bare Mach-O executables. Gatekeeper verifies the notarization
+      # ticket online at first launch instead.
+      - name: Notarize macOS binary
+        if: runner.os == 'macOS'
+        env:
+          AC_API_KEY_ID: ${{ secrets.AC_API_KEY_ID }}
+          AC_API_ISSUER_ID: ${{ secrets.AC_API_ISSUER_ID }}
+          AC_API_PRIVATE_KEY_P8: ${{ secrets.AC_API_PRIVATE_KEY_P8 }}
+        run: |
+          set -euo pipefail
+
+          BIN="target/${{ matrix.target }}/release/${{ matrix.artifact_name }}"
+          NOTARIZE_ZIP="${RUNNER_TEMP}/notarize.zip"
+          KEY_FILE="${RUNNER_TEMP}/AuthKey.p8"
+
+          # Always wipe the API key file, even on early failure.
+          cleanup() {
+            rm -f "$KEY_FILE" "$NOTARIZE_ZIP"
+          }
+          trap cleanup EXIT
+
+          printf '%s' "$AC_API_PRIVATE_KEY_P8" > "$KEY_FILE"
+          chmod 600 "$KEY_FILE"
+
+          /usr/bin/ditto -c -k --keepParent "$BIN" "$NOTARIZE_ZIP"
+
+          echo "Submitting notarization request..."
+          SUBMIT_OUTPUT=$(xcrun notarytool submit "$NOTARIZE_ZIP" \
+            --key "$KEY_FILE" \
+            --key-id "$AC_API_KEY_ID" \
+            --issuer "$AC_API_ISSUER_ID" \
+            --wait --timeout 30m 2>&1) || true
+          echo "$SUBMIT_OUTPUT"
+
+          if echo "$SUBMIT_OUTPUT" | grep -qE 'status: (Invalid|Rejected)'; then
+            SUBMISSION_ID=$(echo "$SUBMIT_OUTPUT" | awk '/^[[:space:]]*id:/ {print $2; exit}')
+            if [ -n "${SUBMISSION_ID:-}" ]; then
+              echo "Notarization failed (submission $SUBMISSION_ID). Fetching log..."
+              xcrun notarytool log "$SUBMISSION_ID" \
+                --key "$KEY_FILE" \
+                --key-id "$AC_API_KEY_ID" \
+                --issuer "$AC_API_ISSUER_ID" || true
+            fi
+            exit 1
+          fi
+
+          if ! echo "$SUBMIT_OUTPUT" | grep -q 'status: Accepted'; then
+            echo "::error::notarytool did not report an Accepted status"
+            exit 1
+          fi
+
+          # Gatekeeper verification. The ticket may take a moment to propagate;
+          # treat a transient failure as a warning rather than a hard error.
+          if /usr/sbin/spctl --assess --type execute --verbose "$BIN"; then
+            echo "spctl assessment passed"
+          else
+            echo "::warning::spctl assessment did not pass yet; ticket may still be propagating"
+          fi
+
       # 9) Package binaries
       - name: Package Linux binary (tar.gz)
         if: runner.os == 'Linux'
@@ -167,6 +248,41 @@ jobs:
           cp "$BIN" package/
           cp docs/man/all-smi.1 package/
           ditto -c -k --sequesterRsrc package "$ASSET"
+
+      # Sign the Windows binary before packaging so the .zip artifact contains
+      # the signed .exe. Uses signtool with the certificate already installed
+      # in the self-hosted runner's Windows Certificate Store (same setup as
+      # backend.ai-go's packaging workflow). Timestamp via SSL.com so the
+      # signature remains valid after the signing certificate expires.
+      - name: Sign Windows binary with signtool
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $SignTool = "C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64\signtool.exe"
+          $TimestampUrl = "http://ts.ssl.com/"
+          $Bin = "target/${{ matrix.target }}/release/${{ matrix.artifact_name }}"
+
+          if (-not (Test-Path $SignTool)) {
+            Write-Error "signtool.exe not found at expected path: $SignTool"
+            exit 1
+          }
+          if (-not (Test-Path $Bin)) {
+            Write-Error "Binary not found: $Bin"
+            exit 1
+          }
+
+          Write-Host "Signing: $Bin"
+          & $SignTool sign /tr $TimestampUrl /td sha256 /fd sha256 /a $Bin
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "signtool sign failed (exit $LASTEXITCODE)"
+            exit 1
+          }
+
+          & $SignTool verify /pa $Bin
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "::warning::signtool verify /pa returned exit $LASTEXITCODE"
+          }
 
       - name: Package Windows binary (zip)
         if: runner.os == 'Windows'
