@@ -65,6 +65,25 @@ pub fn is_topology_tab_active(state: &AppState) -> bool {
     topology_tab_index(&state.tabs).is_some_and(|i| i == state.current_tab)
 }
 
+/// True when `name` is a reserved cluster-level tab ("All", Users,
+/// Topology) rather than a per-host tab. Used by callers that want to
+/// count or iterate only the host tabs without hard-coding the reserved
+/// names at the call site (see issue raised when 50 hosts displayed as
+/// `50/52` because the dashboard counted reserved tabs as nodes).
+#[inline]
+pub fn is_reserved_tab(name: &str) -> bool {
+    matches!(name, "All" | USERS_TAB_NAME | TOPOLOGY_TAB_NAME)
+}
+
+/// Count host tabs in `tabs`, excluding the reserved cluster-level tabs
+/// ("All", Users, Topology). The dashboard's `live/total nodes` figure
+/// uses this so newly added cluster-level tabs cannot inflate the
+/// denominator again.
+#[inline]
+pub fn host_tab_count(tabs: &[String]) -> usize {
+    tabs.iter().filter(|t| !is_reserved_tab(t)).count()
+}
+
 pub fn draw_tabs<W: Write>(stdout: &mut W, state: &AppState, cols: u16) {
     // Print tabs
     let mut labels: Vec<(String, Color)> = Vec::new();
@@ -304,5 +323,36 @@ mod tests {
             format_ssh_tab_label("admin@dgx-01:2222"),
             "ssh://admin@dgx-01:2222"
         );
+    }
+
+    #[test]
+    fn host_tab_count_excludes_reserved_tabs() {
+        // Mirrors the real remote-mode layout from
+        // `remote_collector.rs`: [All, Users, Topology, host1, host2, ...]
+        // 50 hosts must register as 50, not 52 (issue: `50/52`).
+        let mut tabs = vec![
+            "All".to_string(),
+            USERS_TAB_NAME.to_string(),
+            TOPOLOGY_TAB_NAME.to_string(),
+        ];
+        for i in 0..50 {
+            tabs.push(format!("host-{i}"));
+        }
+        assert_eq!(host_tab_count(&tabs), 50);
+
+        // Local mode style: only "All" — zero hosts.
+        assert_eq!(host_tab_count(&["All".to_string()]), 0);
+
+        // Defensive: empty tab list returns 0.
+        assert_eq!(host_tab_count(&[]), 0);
+    }
+
+    #[test]
+    fn is_reserved_tab_matches_cluster_level_tabs() {
+        assert!(is_reserved_tab("All"));
+        assert!(is_reserved_tab(USERS_TAB_NAME));
+        assert!(is_reserved_tab(TOPOLOGY_TAB_NAME));
+        assert!(!is_reserved_tab("dgx-01"));
+        assert!(!is_reserved_tab("admin@dgx-01:22"));
     }
 }

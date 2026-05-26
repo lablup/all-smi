@@ -254,12 +254,24 @@ fn render_footer(out: &mut String, model: &TopologyModel) {
     }
 }
 
+/// Centre `s` in a field `w` cells wide.
+///
+/// Uses `chars().count()` for the width measurement so multi-byte box-
+/// drawing characters (e.g. `─`, U+2500, 3 bytes / 1 cell) are sized
+/// correctly. The previous `s.len()` (byte length) implementation
+/// under-padded edge labels like `── NV ──`, which collapsed cells below
+/// `cell_width` and broke the box borders in the Topology tab.
+///
+/// Every label this module emits is composed of ASCII + single-cell
+/// box-drawing characters, so character count equals display width here.
+/// If anyone adds wide (East Asian) or zero-width (combining) glyphs to
+/// edge labels in the future, swap this for `unicode_width::UnicodeWidthStr`.
 fn center(s: &str, w: usize) -> String {
-    if s.len() >= w {
-        let trimmed: String = s.chars().take(w).collect();
-        return trimmed;
+    let visible = s.chars().count();
+    if visible >= w {
+        return s.chars().take(w).collect();
     }
-    let total = w - s.len();
+    let total = w - visible;
     let left = total / 2;
     let right = total - left;
     format!("{}{s}{}", " ".repeat(left), " ".repeat(right))
@@ -398,5 +410,53 @@ mod tests {
         let model = TopologyModel::from_host("h", &gpus);
         let out = render_graph(&model, 200);
         assert!(out.contains("nvsw"), "{out}");
+    }
+
+    #[test]
+    fn center_uses_display_width_not_byte_length() {
+        // Regression: `center` previously measured with `str::len()` so
+        // multi-byte box-drawing chars (3 bytes / 1 cell) under-padded
+        // and the right border `│` slipped left. All cells must report
+        // exactly the requested column width.
+        let width = 13;
+        for label in [
+            "[GPU 0]",    // pure ASCII baseline
+            "──",         // self-cell marker
+            "── NV ──",   // NvLink without generation
+            "── NV5 ──",  // NvLink with generation
+            "── NSW ──",  // NvSwitch
+            "── PXB ──",  // PCIe bridge
+            "── NODE ──", // same NUMA, no NvLink
+            "── SYS ──",  // across NUMA
+        ] {
+            let out = center(label, width);
+            assert_eq!(
+                out.chars().count(),
+                width,
+                "label {label:?} produced {out:?} ({} cells, want {width})",
+                out.chars().count()
+            );
+        }
+    }
+
+    #[test]
+    fn render_numa_box_keeps_borders_aligned_with_unicode_edge_labels() {
+        // 2 GPUs in one NUMA -> 1 row, 2 columns, 1 edge cell carrying
+        // the unicode-laden NvLink label. Every rendered line must have
+        // identical display width, otherwise the right border zig-zags.
+        let gpus = vec![mk_gpu(0, Some(0), 4, false), mk_gpu(1, Some(0), 4, false)];
+        let model = TopologyModel::from_host("h", &gpus);
+        let out = render_graph(&model, 200);
+        let body_lines: Vec<&str> = out
+            .lines()
+            .filter(|l| l.contains('│') || l.starts_with('┌') || l.starts_with('└'))
+            .collect();
+        assert!(!body_lines.is_empty(), "{out}");
+        let widths: Vec<usize> = body_lines.iter().map(|l| l.chars().count()).collect();
+        let first = widths[0];
+        assert!(
+            widths.iter().all(|&w| w == first),
+            "box lines have mismatched widths {widths:?}:\n{out}"
+        );
     }
 }

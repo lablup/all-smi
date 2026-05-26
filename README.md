@@ -1,8 +1,8 @@
 # all-smi
 
 [![Crates.io version](https://img.shields.io/crates/v/all-smi.svg?style=flat-square)](https://crates.io/crates/all-smi)
-[![Crates.io downloads](https://img.shields.io/crates/d/all-smi.svg?style=flat-square)](https://crates.io/crates/all-smi)
-![GitHub Downloads](https://img.shields.io/github/downloads/lablup/all-smi/total?style=flat-square&label=downloads)
+[![Crates.io downloads](https://img.shields.io/crates/d/all-smi.svg?style=flat-square&label=crates.io%20downloads)](https://crates.io/crates/all-smi)
+![GitHub Downloads](https://img.shields.io/github/downloads/lablup/all-smi/total?style=flat-square&label=GitHub%20downloads)
 ![CI](https://github.com/lablup/all-smi/workflows/CI/badge.svg)
 [![dependency status](https://deps.rs/repo/github/lablup/all-smi/status.svg)](https://deps.rs/repo/github/lablup/all-smi)
 
