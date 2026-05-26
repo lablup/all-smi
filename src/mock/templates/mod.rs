@@ -20,6 +20,7 @@ pub mod common;
 pub mod disk;
 pub mod furiosa;
 pub mod gaudi;
+pub mod intel_gpu;
 pub mod jetson;
 pub mod mig;
 pub mod nvidia;

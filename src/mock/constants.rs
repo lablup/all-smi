@@ -25,6 +25,15 @@ pub const DEFAULT_AMD_DRIVER_VERSION: &str = "30.10.1";
 pub const DEFAULT_AMD_ROCM_VERSION: &str = "7.0.2";
 pub const DEFAULT_TENSTORRENT_NAME: &str = "Tenstorrent Grayskull e75 120W";
 pub const DEFAULT_FURIOSA_NAME: &str = "Furiosa RNGD";
+/// Default device name for the Intel client GPU mock (issue #244).
+/// We anchor on the Arc B580 (Battlemage, 12GB) — current-generation
+/// discrete Arc, around 190W TDP. Override via `--gpu-name`.
+pub const DEFAULT_INTEL_GPU_NAME: &str = "Intel Arc B580 12GB";
+/// Representative Intel Graphics Driver version string. The "real"
+/// equivalent on Linux is the kernel/mesa stack, which doesn't
+/// translate to a single version number; the Windows-style version is
+/// what consumers see in the WMI reader's `detail["Driver Version"]`.
+pub const DEFAULT_INTEL_DRIVER_VERSION: &str = "32.0.101.6299";
 pub const NUM_GPUS: usize = 8;
 pub const UPDATE_INTERVAL_SECS: u64 = 3;
 pub const MAX_CONNECTIONS_PER_SERVER: usize = 10;
