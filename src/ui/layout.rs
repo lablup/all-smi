@@ -50,7 +50,7 @@ impl LayoutCalculator {
 
             // Live statistics section (remote sparkline panel)
             if !state.utilization_history.is_empty() || !state.cpu_utilization_history.is_empty() {
-                lines += 5; // Separator + header + 3 sparkline rows
+                lines += 6; // Separator + header + 3 sparkline rows + spacer
             }
 
             // Tabs section

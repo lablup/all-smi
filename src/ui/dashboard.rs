@@ -30,7 +30,10 @@ pub fn draw_system_view<W: Write>(stdout: &mut W, state: &AppState, cols: u16) {
     let total_nodes = if is_local_mode {
         1 // Local mode has 1 node
     } else {
-        state.tabs.len().saturating_sub(1) // Exclude "All" tab in remote mode
+        // Count only host tabs — `state.tabs` also carries the reserved
+        // cluster-level entries (All, Users, Topology). Counting them as
+        // nodes is what caused `50/52` on a 50-host cluster.
+        crate::ui::tabs::host_tab_count(&state.tabs)
     };
     let live_nodes = if is_local_mode {
         1 // Local node is always considered live

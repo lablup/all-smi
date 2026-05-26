@@ -131,6 +131,11 @@ pub fn draw_remote_sparkline_panel<W: Write>(stdout: &mut W, state: &AppState, c
         },
     );
     queue!(stdout, Print("\r\n")).unwrap();
+
+    // Spacer row so the Tabs strip below isn't visually glued to the
+    // last sparkline row. The matching header-line budget lives in
+    // `layout::calculate_header_lines` — keep the two in sync.
+    queue!(stdout, Print("\r\n")).unwrap();
 }
 
 struct SparklinePairParams<'a> {
