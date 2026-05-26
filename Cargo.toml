@@ -54,7 +54,7 @@ prost-types = "0.14"
 zstd = "0.13"
 flate2 = "1"
 # Support bundle packaging for the `doctor --bundle` subcommand (issue #188).
-tar = "0.4"
+tar = "0.4.46"
 # Pure-Rust SSH client for the agentless view transport (issue #194).
 # Chosen over ssh2/libssh2 so musl static builds do not need a C
 # dependency. russh 0.60 targets edition 2021 with tokio 1.x.
