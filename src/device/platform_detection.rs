@@ -119,6 +119,41 @@ pub fn has_amd() -> bool {
     *CACHE.get_or_init(detect_amd)
 }
 
+/// Check whether at least one Intel **client** GPU (Arc / Iris / Xe /
+/// integrated graphics) is present.
+///
+/// Linux: delegates to [`crate::device::readers::intel_gpu_linux::has_intel_client_gpu`]
+/// which walks `/sys/class/drm/card*` and falls back to `lspci -n`.
+///
+/// Windows: delegates to
+/// [`crate::device::readers::intel_gpu_windows::has_intel_gpu_windows`]
+/// which uses a WMI query against `Win32_VideoController`.
+///
+/// On other platforms (macOS, BSD) Intel client GPUs are not in scope —
+/// returns `false` unconditionally so the rest of the detection
+/// machinery short-circuits. Result is cached in a `OnceLock` like
+/// every other `has_*` detector since hardware doesn't change at
+/// runtime.
+pub fn has_intel_gpu() -> bool {
+    static CACHE: OnceLock<bool> = OnceLock::new();
+    *CACHE.get_or_init(detect_intel_gpu)
+}
+
+fn detect_intel_gpu() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        crate::device::readers::intel_gpu_linux::has_intel_client_gpu()
+    }
+    #[cfg(target_os = "windows")]
+    {
+        crate::device::readers::intel_gpu_windows::has_intel_gpu_windows()
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    {
+        false
+    }
+}
+
 #[cfg(all(target_os = "linux", not(target_env = "musl")))]
 fn detect_amd() -> bool {
     // On Linux, check for AMD GPUs
@@ -554,6 +589,11 @@ pub mod introspection {
         pub tenstorrent: bool,
         pub rebellions: bool,
         pub furiosa: bool,
+        /// `true` when an Intel **client** GPU (Arc / Iris / Xe /
+        /// integrated graphics) is detected. Reported on both Linux
+        /// (i915 / xe drivers) and Windows (WMI). Distinct from
+        /// `gaudi`, which is the Intel datacenter HPU.
+        pub intel_gpu: bool,
     }
 
     /// Produce a fresh [`PlatformSnapshot`] from the cached detectors.
@@ -569,6 +609,7 @@ pub mod introspection {
             tenstorrent: detect_tenstorrent(),
             rebellions: super::has_rebellions(),
             furiosa: super::has_furiosa(),
+            intel_gpu: super::has_intel_gpu(),
         }
     }
 
@@ -619,6 +660,10 @@ pub mod introspection {
             let empty = PlatformSnapshot::default();
             assert_eq!(empty.os, "");
             assert!(!empty.nvidia);
+            // Intel client GPU detection (issue #244) must default to
+            // `false` so unconfigured mock/test scenarios don't
+            // accidentally claim Intel hardware.
+            assert!(!empty.intel_gpu);
         }
     }
 }

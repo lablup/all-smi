@@ -190,6 +190,11 @@ fn check_hardware(_ctx: &CheckCtx) -> CheckResult {
     if snap.gaudi {
         kinds.push("Intel Gaudi");
     }
+    if snap.intel_gpu {
+        // Distinct from `gaudi`: this is the Intel **client** GPU
+        // family (Arc / Iris / Xe / integrated graphics, issue #244).
+        kinds.push("Intel GPU");
+    }
     if snap.google_tpu {
         kinds.push("Google TPU");
     }
