@@ -1,3 +1,12 @@
+all-smi (0.22.0-0) jammy; urgency=medium
+
+  * Fix macOS notarization by decoding the base64-stored App Store Connect key before notarytool
+  * Rebuild and re-notarize past release tags by checking out the target tag source in the release workflow
+  * Add a per-OS build target selector (windows, linux, macos, all) to the release workflow dispatch
+  * Document Intel client GPU support (Arc/Iris Xe) in the README, --help output, and developer docs
+
+ -- Jeongkyu Shin <inureyes@gmail.com>  Wed, 27 May 2026 00:00:00 +0000
+
 all-smi (0.21.1-0) jammy; urgency=medium
 
   * Add Intel client GPU reader (Arc/Iris/Xe) for Windows and Linux
