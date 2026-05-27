@@ -85,6 +85,22 @@ cargo build --release --bin all-smi
 cargo build --release --bin all-smi-mock-server --features="mock"
 ```
 
+### Optional Build Features
+
+The default build (`default = ["cli"]`) includes the full CLI, TUI, and API server. Additional opt-in Cargo features:
+
+| Feature | Default | Purpose |
+|---------|---------|---------|
+| `cli` | on | CLI parsing, TUI (`crossterm`), and the `axum` API server. Disable for a lean library-only build. |
+| `mock` | off | Builds the `all-smi-mock-server` binary that simulates GPU/NPU clusters. |
+| `furiosa` | off | Furiosa NPU backend via the `furiosa-smi-rs` crate (Linux targets). |
+| `level_zero` | off | Intel oneAPI Level Zero (Sysman) backend for Intel client GPUs. Dynamically loads `libze_loader.so.1` (Linux) / `ze_loader.dll` (Windows) at runtime; a missing runtime degrades silently to the sysfs/WMI baseline. |
+
+```bash
+# Example: build with the Intel Level Zero backend enabled
+cargo build --release --features level_zero
+```
+
 ### Platform-Specific Builds
 
 #### Linux with musl (for static linking)

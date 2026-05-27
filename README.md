@@ -73,6 +73,8 @@ Download the latest release from the [GitHub releases page](https://github.com/l
 2. Download the appropriate binary for your platform
 3. Extract the archive and place the binary in your `$PATH`
 
+> Release binaries are signed: macOS archives are notarized (so Gatekeeper does not block them as coming from an unidentified developer) and Windows binaries are Authenticode code-signed.
+
 ### Option 5: Install from Cargo
 
 Install all-smi through Cargo:
@@ -318,8 +320,15 @@ Older releases introduced environment variables with different naming. All alias
 - **No Sudo Required:** NVIDIA GPU monitoring works without sudo privileges
 - **Driver Required:** NVIDIA proprietary drivers must be installed
 
+### Linux with Intel GPUs
+- **No Sudo Required (baseline):** Intel Arc / Iris Xe / Xe client GPU monitoring reads `i915`/`xe` sysfs and `hwmon`, which works without elevated privileges
+- **Driver Required:** A kernel with the `i915` (integrated Iris Xe / Xe-LPG and earlier discrete Arc) or `xe` (newer discrete Arc) driver loaded
+- **Per-Process Memory (`--processes`):** Attribution reads `/proc/<pid>/fdinfo`; entries for processes owned by other users may be unavailable and degrade silently per-process (run with `sudo` to attribute every process)
+- **Optional Level Zero Metrics:** Build with `--features level_zero` and install the Intel oneAPI Level Zero runtime so `libze_loader.so.1` is present at runtime. When available, Sysman adds per-engine activity (including the XMX `COMPUTE_SINGLE` class), energy-counter power, temperature, memory, and frequency on top of the sysfs baseline; when absent, all-smi silently falls back to the sysfs baseline
+
 ### Windows
 - **No Sudo Required:** GPU and CPU monitoring works without administrator privileges
+- **Intel client GPUs:** Arc / Iris Xe / Xe metrics are collected via WMI; building with `--features level_zero` adds Intel Level Zero (Sysman) metrics when `ze_loader.dll` (Intel GPU driver / oneAPI runtime) is present, otherwise the WMI baseline is used
 - **CPU Temperature Limitations:**
   - Standard Windows WMI thermal zones (MSAcpi_ThermalZoneTemperature) are not available on all systems
   - The application uses a fallback chain to try multiple temperature sources:
@@ -1335,8 +1344,8 @@ See the [LICENSE](./LICENSE) file for details.
 ## Changelog
 
 ### Recent Updates
-- **v0.21.1 (2026/05/27):** Add Intel client GPU monitoring (Arc/Iris/Xe) on Windows and Linux with an opt-in Level Zero (Sysman) backend for per-engine activity and power, per-process GPU memory via `fdinfo`, and Linux utilization from engine-busy counters; harden Level Zero and `fdinfo` path handling; add notarized macOS and code-signed Windows release binaries
-- **v0.21.0 (2026/05/26):** Major release adding new subcommands (`snapshot`, `record`, `view --replay`, `config`, `doctor`), cluster-wide Users tab (`V`) and Topology tab (`T`) in remote view, agentless SSH transport, TOML config file support, SSE streaming endpoint and `/snapshot` JSON, energy accumulation (kWh) with cost estimation, interactive filter query (`/`) and threshold alerts panel (`A`), system swap usage display, NVIDIA vGPU/MIG/extended thermal/P-state/extended hardware details (NUMA, GSP, NvLink, GPM) monitoring, targeted device refresh and stable correlation IDs in the library API, unified platform-aware cache paths via `dirs::cache_dir()`. **BREAKING**: Rename Prometheus labels `index`/`uuid` to `gpu_index`/`gpu_uuid` (NVIDIA) and `npu_index`/`npu_uuid` (other NPUs); remote parser accepts both old and new names for backward compatibility.
+- **v0.21.1 (2026/05/27):** Add Intel client GPU monitoring (Arc/Iris Xe) on Windows and Linux with an opt-in Level Zero backend, fdinfo-based per-process memory, and engine-busy utilization; add notarized macOS and code-signed Windows release binaries
+- **v0.21.0 (2026/05/26):** Major release adding `snapshot`/`record`/`view --replay`/`config`/`doctor` subcommands, cluster-wide Users (`V`) and Topology (`T`) tabs, agentless SSH transport, TOML config support, energy/cost accounting, filter query (`/`) and threshold alerts (`A`), and NVIDIA vGPU/MIG/extended thermal monitoring. **BREAKING**: rename Prometheus labels `index`/`uuid` to `gpu_index`/`gpu_uuid` (NVIDIA) and `npu_index`/`npu_uuid` (other NPUs); old names still accepted.
 - **v0.20.1 (2026/04/10):** Fix local header metric row jitter by using fixed-width formatted fields; auto-promote pre-release to release in CI
 - **v0.20.0 (2026/04/10):** Redesign local-mode TUI with Activity panel featuring braille sparklines, CPU per-core view, host summary bar, and per-node LED grid; add Apple M5 Pro/Max Super core (S-CPU) support
 - **v0.19.0 (2026/04/08):** Fix Apple Silicon SMC float decoding to restore real CPU/GPU die temperatures, cache platform detection to avoid per-frame system_profiler on macOS, and fix TIME+/Command column alignment in process list

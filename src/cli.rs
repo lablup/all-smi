@@ -88,10 +88,10 @@ pub enum Commands {
     ///
     /// Emits a PASS/WARN/FAIL/SKIP report covering platform, privileges,
     /// container runtime, every supported hardware backend (NVIDIA, AMD,
-    /// Apple, Gaudi, TPU, Tenstorrent, Rebellions, Furiosa, Windows), the
-    /// relevant environment variables, and optional remote endpoint
-    /// connectivity. Every check is read-only and bounded by a hard 3-second
-    /// timeout. See issue #188.
+    /// Intel GPU, Apple, Gaudi, TPU, Tenstorrent, Rebellions, Furiosa,
+    /// Windows), the relevant environment variables, and optional remote
+    /// endpoint connectivity. Every check is read-only and bounded by a
+    /// hard 3-second timeout. See issue #188.
     Doctor(DoctorArgs),
     /// Inspect, initialise, or validate the TOML configuration file
     /// (issue #192). See `all-smi config --help` for subcommands.
