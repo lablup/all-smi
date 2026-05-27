@@ -14,7 +14,7 @@
 
 use crate::device::{
     platform_detection::{
-        get_os_type, has_furiosa, has_gaudi, has_intel_gpu, has_nvidia, has_rebellions, is_jetson,
+        get_os_type, has_furiosa, has_gaudi, has_nvidia, has_rebellions, is_jetson,
     },
     readers::{furiosa, gaudi, nvidia, nvidia_jetson, rebellions},
     traits::{CpuReader, GpuReader, MemoryReader},
