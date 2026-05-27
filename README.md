@@ -562,6 +562,7 @@ Stable check IDs (greppable across versions):
     - Discrete VRAM tracking (i915 `mem_info_vram_total` and xe `tile0/vram0/total_bytes`)
     - Frequency, temperature (hwmon), and power (hwmon) metrics
     - Engine-busy utilization from sysfs per-engine monotonic counters (i915 and xe layouts); `max(render, compute)` reported as primary utilization; first refresh is a seeding call (returns `0.0`), real values available from the second refresh; PMU fallback for older kernels is deferred
+    - Per-process GPU memory tracking via `/proc/<pid>/fdinfo` (Linux, with `--processes` flag); dedupes shared DRM file descriptors by `drm-client-id`; permission errors degrade silently per-process
   - CPU monitoring via /proc filesystem
   - Memory monitoring with detailed statistics
   - Intel Gaudi NPUs (Gaudi 1/2/3) via hl-smi with background process monitoring
@@ -916,7 +917,7 @@ Metrics are available at `http://localhost:9090/metrics` (TCP) or via Unix socke
 - **Memory:** System and swap memory statistics
 - **Storage:** Disk usage information
 - **Chassis:** Node-level power consumption, thermal pressure, inlet/outlet temperatures, fan speeds
-- **Processes:** GPU process metrics including AMD fdinfo-based tracking (with --processes flag)
+- **Processes:** GPU process metrics including AMD and Intel Arc/Xe fdinfo-based tracking (with --processes flag)
 
 For a complete list of all available metrics, see [API.md](API.md).
 

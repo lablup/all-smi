@@ -43,10 +43,12 @@
 //! pages on demand and the budget is a soft cap, not a fixed reservation).
 
 use crate::device::GpuReader;
-use crate::device::common::execute_command_default;
 use crate::device::readers::common_cache::{DeviceStaticInfo, MAX_DEVICES};
 use crate::device::readers::intel_gpu_engine::{
     EngineState, apply_engine_readout, refresh_with_lock,
+};
+use crate::device::readers::intel_gpu_fdinfo::{
+    build_intel_drm_basenames, build_intel_process_infos,
 };
 use crate::device::readers::intel_gpu_names::{
     classify_intel_architecture, resolve_intel_gpu_name,
@@ -112,6 +114,14 @@ fn variant_label(variant: MemoryVariant) -> &'static str {
 /// reader pattern, which also samples device list at `new()`.
 pub struct IntelGpuReader {
     cards: Vec<IntelGpuCard>,
+    /// Map of `/dev/dri/<basename>` to the index of the owning Intel
+    /// card. Cached at construction time because the DRM minor layout
+    /// is static across the lifetime of the kernel. See
+    /// [`build_intel_drm_basenames`] for derivation details.
+    intel_drm_basenames: HashMap<String, usize>,
+    /// Root used for the per-process fdinfo walk. Production is
+    /// `/proc`; tests inject a synthetic procfs tree under tempdir.
+    proc_root: PathBuf,
 }
 
 impl Default for IntelGpuReader {
@@ -122,15 +132,31 @@ impl Default for IntelGpuReader {
 
 impl IntelGpuReader {
     pub fn new() -> Self {
-        Self::new_from_root(Path::new("/sys/class/drm"))
+        Self::new_with_roots(Path::new("/sys/class/drm"), Path::new("/proc"))
     }
 
     /// Constructor used by tests: walk an arbitrary `cardN` root rather
     /// than the real `/sys/class/drm`. Production code uses
     /// [`IntelGpuReader::new`].
+    #[cfg(test)]
     fn new_from_root(drm_root: &Path) -> Self {
+        Self::new_with_roots(drm_root, Path::new("/proc"))
+    }
+
+    /// Internal constructor accepting arbitrary DRM and proc roots; production code uses default paths via [`IntelGpuReader::new`].
+    fn new_with_roots(drm_root: &Path, proc_root: &Path) -> Self {
         let cards = discover_cards(drm_root);
-        Self { cards }
+        let card_refs: Vec<(PathBuf, usize)> = cards
+            .iter()
+            .enumerate()
+            .map(|(i, c)| (c.card_path.clone(), i))
+            .collect();
+        let intel_drm_basenames = build_intel_drm_basenames(&card_refs, drm_root);
+        Self {
+            cards,
+            intel_drm_basenames,
+            proc_root: proc_root.to_path_buf(),
+        }
     }
 
     /// Compute the per-card static identity once and cache it.
@@ -261,13 +287,16 @@ impl GpuReader for IntelGpuReader {
     }
 
     fn get_process_info(&self) -> Vec<ProcessInfo> {
-        // Per-process GPU memory accounting on Intel requires walking
-        // `/proc/<pid>/fdinfo/*` for DRM clients and parsing the
-        // driver-specific `drm-engine-*` / `drm-memory-local` keys. The
-        // engine counter format differs between `i915` and `xe`, and
-        // the implementation needs a delta-tracker to be useful — we
-        // defer that to a follow-up just like utilization.
-        Vec::new()
+        // Build the {card_index -> uuid} map fresh each call so the
+        // UUID seen by per-process consumers matches whatever
+        // `get_gpu_info()` would emit at the same instant. The PCI
+        // bus is stable across the kernel's lifetime, but recomputing
+        // is microsecond-cheap and keeps the contract explicit.
+        let mut card_uuids = HashMap::with_capacity(self.cards.len());
+        for (idx, card) in self.cards.iter().enumerate() {
+            card_uuids.insert(idx, build_uuid(card, &card.card_path.join("device")));
+        }
+        build_intel_process_infos(&self.intel_drm_basenames, &card_uuids, &self.proc_root)
     }
 }
 
@@ -425,6 +454,9 @@ fn resolve_device_name(device_dir: &Path, device_id: u32) -> String {
 
 // ---------- Detection helper ----------
 
+#[path = "intel_gpu_linux/detection.rs"]
+mod detection;
+
 /// Check whether at least one Intel client GPU is present on this Linux
 /// host. Walks `/sys/class/drm/card*` first (cheap), then falls back to
 /// `lspci -n` so containers without `/sys` access still work.
@@ -433,65 +465,8 @@ fn resolve_device_name(device_dir: &Path, device_id: u32) -> String {
 /// not Intel) and from Intel network/storage devices by requiring the
 /// PCI driver to be `i915` or `xe`. Defends against false positives on
 /// hosts that have an Intel-vendor PCI device which is not a GPU at all.
-#[cfg(target_os = "linux")]
 pub fn has_intel_client_gpu() -> bool {
-    has_intel_client_gpu_from_root(Path::new("/sys/class/drm"))
-}
-
-#[cfg(target_os = "linux")]
-fn has_intel_client_gpu_from_root(drm_root: &Path) -> bool {
-    if let Ok(entries) = std::fs::read_dir(drm_root) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let name = match path.file_name().and_then(|n| n.to_str()) {
-                Some(n) => n.to_string(),
-                None => continue,
-            };
-            if !is_card_node(&name) {
-                continue;
-            }
-            let device_dir = path.join("device");
-            if !is_intel_vendor(&device_dir) {
-                continue;
-            }
-            let driver = resolve_driver(&device_dir);
-            if driver == "i915" || driver == "xe" {
-                return true;
-            }
-        }
-    }
-
-    // Fallback: `lspci -n` parsing for hosts without `/sys` access (some
-    // unprivileged containers). Class codes 0300/0301/0302/0380 cover
-    // VGA / XGA / 3D / Display controllers respectively. We need to
-    // confirm vendor `8086` AND a graphics class — a NIC at vendor 8086
-    // would fail the class check.
-    if let Ok(output) = execute_command_default("lspci", &["-n"])
-        && output.status == 0
-    {
-        for line in output.stdout.lines() {
-            if line_matches_intel_gpu(line) {
-                return true;
-            }
-        }
-    }
-    false
-}
-
-fn line_matches_intel_gpu(line: &str) -> bool {
-    // `lspci -n` lines look like:
-    //   `03:00.0 0300: 8086:56a0 (rev 08)`
-    // Pull out the class (`0300`) and the vendor (`8086`) tokens.
-    let mut tokens = line.split_whitespace();
-    let _bdf = tokens.next();
-    let class = tokens.next().unwrap_or("").trim_end_matches(':');
-    let vendor_device = tokens.next().unwrap_or("");
-
-    let class_match = matches!(class, "0300" | "0301" | "0302" | "0380");
-    if !class_match {
-        return false;
-    }
-    vendor_device.split(':').next() == Some("8086")
+    detection::has_intel_client_gpu_from_root(Path::new("/sys/class/drm"))
 }
 
 #[cfg(test)]
