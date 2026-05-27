@@ -39,6 +39,11 @@ use std::collections::HashMap;
 
 #[test]
 fn engine_group_enum_values_match_spec() {
+    // Values cross-checked against the upstream Sysman header at
+    // <https://github.com/oneapi-src/level-zero/blob/master/include/zes_api.h>
+    // (`typedef enum _zes_engine_group_t`). Several of the 9..=14 slots
+    // are marked DEPRECATED in the spec but we still lock their numeric
+    // values to detect any accidental renumbering during future updates.
     assert_eq!(ffi::ZES_ENGINE_GROUP_ALL, 0);
     assert_eq!(ffi::ZES_ENGINE_GROUP_COMPUTE_ALL, 1);
     assert_eq!(ffi::ZES_ENGINE_GROUP_MEDIA_ALL, 2);
@@ -48,10 +53,12 @@ fn engine_group_enum_values_match_spec() {
     assert_eq!(ffi::ZES_ENGINE_GROUP_MEDIA_DECODE_SINGLE, 6);
     assert_eq!(ffi::ZES_ENGINE_GROUP_MEDIA_ENCODE_SINGLE, 7);
     assert_eq!(ffi::ZES_ENGINE_GROUP_COPY_SINGLE, 8);
-    assert_eq!(ffi::ZES_ENGINE_GROUP_RENDER_COMPUTE_ALL, 9);
-    assert_eq!(ffi::ZES_ENGINE_GROUP_3D_ALL, 10);
-    assert_eq!(ffi::ZES_ENGINE_GROUP_3D_SINGLE, 11);
-    assert_eq!(ffi::ZES_ENGINE_GROUP_MEDIA_ENHANCEMENT_SINGLE, 12);
+    assert_eq!(ffi::ZES_ENGINE_GROUP_MEDIA_ENHANCEMENT_SINGLE, 9);
+    assert_eq!(ffi::ZES_ENGINE_GROUP_3D_SINGLE, 10);
+    assert_eq!(ffi::ZES_ENGINE_GROUP_3D_RENDER_COMPUTE_ALL, 11);
+    assert_eq!(ffi::ZES_ENGINE_GROUP_RENDER_ALL, 12);
+    assert_eq!(ffi::ZES_ENGINE_GROUP_3D_ALL, 13);
+    assert_eq!(ffi::ZES_ENGINE_GROUP_MEDIA_CODEC_SINGLE, 14);
 }
 
 #[test]
@@ -64,6 +71,65 @@ fn init_flags_match_spec() {
 fn structure_type_constants_match_spec() {
     assert_eq!(ffi::ZES_STRUCTURE_TYPE_PCI_PROPERTIES, 0x0000_0002);
     assert_eq!(ffi::ZES_STRUCTURE_TYPE_ENGINE_PROPERTIES, 0x0000_0005);
+}
+
+// ----- FFI struct ABI locks -----------------------------------------
+//
+// The Level Zero driver writes into Rust-allocated buffers using the C
+// struct layout from `ze_api.h` / `zes_api.h`. If the Rust struct size
+// drifts from the C struct size, the driver either over- or under-writes
+// our buffer and we read garbage (or worse). These tests measure the
+// Rust struct sizes against the spec-documented C sizes on x86_64 LP64,
+// the only platform combination the L0 backend currently targets.
+//
+// Values verified against the upstream level-zero header at
+// <https://github.com/oneapi-src/level-zero/blob/master/include/zes_api.h>
+// compiled with the system C compiler on x86_64 Linux.
+
+#[cfg(target_pointer_width = "64")]
+#[test]
+fn zes_pci_address_t_size_matches_spec() {
+    assert_eq!(std::mem::size_of::<ffi::zes_pci_address_t>(), 16);
+}
+
+#[cfg(target_pointer_width = "64")]
+#[test]
+fn zes_pci_speed_t_size_matches_spec() {
+    assert_eq!(std::mem::size_of::<ffi::zes_pci_speed_t>(), 16);
+}
+
+#[cfg(target_pointer_width = "64")]
+#[test]
+fn zes_pci_properties_t_size_matches_spec() {
+    // C spec on x86_64 LP64: stype (4) + pad (4) + pNext (8) +
+    // address (16) + maxSpeed (16) + 3x ze_bool_t (3) + trailing pad
+    // (5) = 56 bytes. A previous version of this file declared the
+    // three booleans as u32 each, inflating the Rust struct to 64
+    // bytes; this assertion guards against a regression.
+    assert_eq!(std::mem::size_of::<ffi::zes_pci_properties_t>(), 56);
+}
+
+#[cfg(target_pointer_width = "64")]
+#[test]
+fn zes_engine_properties_t_size_matches_spec() {
+    // C spec on x86_64 LP64: stype (4) + pad (4) + pNext (8) +
+    // type (4) + onSubdevice (1) + pad (3) + subdeviceId (4) = 28,
+    // with trailing pad to the 8-byte struct alignment = 32 bytes.
+    assert_eq!(std::mem::size_of::<ffi::zes_engine_properties_t>(), 32);
+}
+
+#[cfg(target_pointer_width = "64")]
+#[test]
+fn zes_engine_stats_t_size_matches_spec() {
+    // Two u64 fields = 16 bytes.
+    assert_eq!(std::mem::size_of::<ffi::zes_engine_stats_t>(), 16);
+}
+
+#[cfg(target_pointer_width = "64")]
+#[test]
+fn zes_power_energy_counter_t_size_matches_spec() {
+    // Two u64 fields = 16 bytes.
+    assert_eq!(std::mem::size_of::<ffi::zes_power_energy_counter_t>(), 16);
 }
 
 // ----- Engine label classification ----------------------------------
@@ -109,8 +175,11 @@ fn is_tracked_engine_only_singletons() {
     assert!(!is_tracked_engine(ffi::ZES_ENGINE_GROUP_COMPUTE_ALL));
     assert!(!is_tracked_engine(ffi::ZES_ENGINE_GROUP_MEDIA_ALL));
     assert!(!is_tracked_engine(ffi::ZES_ENGINE_GROUP_COPY_ALL));
-    assert!(!is_tracked_engine(ffi::ZES_ENGINE_GROUP_RENDER_COMPUTE_ALL));
+    assert!(!is_tracked_engine(
+        ffi::ZES_ENGINE_GROUP_3D_RENDER_COMPUTE_ALL
+    ));
     assert!(!is_tracked_engine(ffi::ZES_ENGINE_GROUP_3D_ALL));
+    assert!(!is_tracked_engine(ffi::ZES_ENGINE_GROUP_RENDER_ALL));
 }
 
 // ----- PCI BDF formatting ------------------------------------------

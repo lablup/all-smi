@@ -82,10 +82,15 @@ pub const ZES_ENGINE_GROUP_RENDER_SINGLE: i32 = 5;
 pub const ZES_ENGINE_GROUP_MEDIA_DECODE_SINGLE: i32 = 6;
 pub const ZES_ENGINE_GROUP_MEDIA_ENCODE_SINGLE: i32 = 7;
 pub const ZES_ENGINE_GROUP_COPY_SINGLE: i32 = 8;
-pub const ZES_ENGINE_GROUP_RENDER_COMPUTE_ALL: i32 = 9;
-pub const ZES_ENGINE_GROUP_3D_ALL: i32 = 10;
-pub const ZES_ENGINE_GROUP_3D_SINGLE: i32 = 11;
-pub const ZES_ENGINE_GROUP_MEDIA_ENHANCEMENT_SINGLE: i32 = 12;
+pub const ZES_ENGINE_GROUP_MEDIA_ENHANCEMENT_SINGLE: i32 = 9;
+/// [DEPRECATED in spec, retained as a value lock.]
+pub const ZES_ENGINE_GROUP_3D_SINGLE: i32 = 10;
+/// [DEPRECATED in spec, retained as a value lock.]
+pub const ZES_ENGINE_GROUP_3D_RENDER_COMPUTE_ALL: i32 = 11;
+pub const ZES_ENGINE_GROUP_RENDER_ALL: i32 = 12;
+/// [DEPRECATED in spec, retained as a value lock.]
+pub const ZES_ENGINE_GROUP_3D_ALL: i32 = 13;
+pub const ZES_ENGINE_GROUP_MEDIA_CODEC_SINGLE: i32 = 14;
 
 // -- Opaque handles --------------------------------------------------
 
@@ -123,15 +128,24 @@ pub struct zes_pci_speed_t {
 }
 
 /// `zes_pci_properties_t`. Only the `address` field is read.
+///
+/// `have_bandwidth_counters`, `have_packet_counters`, and
+/// `have_replay_counters` are spec-typed `ze_bool_t` which is a
+/// `uint8_t` upstream. Declaring them as `u8` keeps the Rust struct
+/// layout in lock-step with the 56-byte C struct the driver writes; a
+/// previous version of this file declared them as `u32`, which
+/// inflated the struct to 64 bytes and could leave the trailing bytes
+/// of a driver-written buffer reading garbage. A `#[cfg(test)]` size
+/// assertion locks the layout to 56 bytes.
 #[repr(C)]
 pub struct zes_pci_properties_t {
     pub stype: i32,
     pub pnext: *mut c_void,
     pub address: zes_pci_address_t,
     pub max_speed: zes_pci_speed_t,
-    pub have_bandwidth_counters: u32,
-    pub have_packet_counters: u32,
-    pub have_replay_counters: u32,
+    pub have_bandwidth_counters: u8,
+    pub have_packet_counters: u8,
+    pub have_replay_counters: u8,
 }
 
 impl Default for zes_pci_properties_t {
@@ -150,6 +164,10 @@ impl Default for zes_pci_properties_t {
 
 /// `zes_engine_properties_t`. Only `type_` is consumed; the rest is
 /// laid out per spec so the driver does not overrun our buffer.
+///
+/// `on_subdevice` is spec-typed `ze_bool_t` (a `uint8_t` upstream).
+/// Total struct size on x86_64 LP64 is 32 bytes; a `#[cfg(test)]` size
+/// assertion locks this in.
 #[repr(C)]
 pub struct zes_engine_properties_t {
     pub stype: i32,
@@ -159,7 +177,7 @@ pub struct zes_engine_properties_t {
     pub type_: i32,
     /// `ze_bool_t` — non-zero when the engine is bound to a subdevice
     /// (multi-tile parts). We treat any non-zero value as "yes".
-    pub on_subdevice: u32,
+    pub on_subdevice: u8,
     pub subdevice_id: u32,
 }
 

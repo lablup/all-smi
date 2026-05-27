@@ -17,7 +17,7 @@
 //! independently of the public surface and so each file stays under
 //! the 500-line budget.
 
-use super::loader::LzApi;
+use super::loader::{LzApi, cap_handle_count};
 use super::{LevelZeroState, ffi, is_tracked_engine, label_order};
 use std::collections::HashMap;
 use std::ffi::c_void;
@@ -88,14 +88,17 @@ pub(crate) fn populate_engine_samples(api: &LzApi, state: &mut LevelZeroState) {
     if r != ffi::ZE_RESULT_SUCCESS || count == 0 {
         return;
     }
-    let mut handles: Vec<ffi::zes_engine_handle_t> =
-        vec![std::ptr::null_mut::<c_void>(); count as usize];
-    // SAFETY: handles is sized exactly to count.
+    // Cap the driver-reported count to MAX_L0_HANDLES before allocating
+    // — a buggy driver returning u32::MAX would otherwise OOM us.
+    let (cap, mut count) = cap_handle_count(count, "engine groups");
+    let mut handles: Vec<ffi::zes_engine_handle_t> = vec![std::ptr::null_mut::<c_void>(); cap];
+    // SAFETY: handles is sized exactly to count (capped).
     let r =
         unsafe { (api.zes_device_enum_engine_groups)(device, &mut count, handles.as_mut_ptr()) };
     if r != ffi::ZE_RESULT_SUCCESS {
         return;
     }
+    handles.truncate((count as usize).min(cap));
     for handle in handles.into_iter() {
         if handle.is_null() {
             continue;
@@ -136,14 +139,16 @@ pub(crate) fn populate_power_samples(api: &LzApi, state: &mut LevelZeroState) {
     if r != ffi::ZE_RESULT_SUCCESS || count == 0 {
         return;
     }
-    let mut handles: Vec<ffi::zes_pwr_handle_t> =
-        vec![std::ptr::null_mut::<c_void>(); count as usize];
-    // SAFETY: handles is sized exactly to count.
+    // Cap the driver-reported count to MAX_L0_HANDLES before allocating.
+    let (cap, mut count) = cap_handle_count(count, "power domains");
+    let mut handles: Vec<ffi::zes_pwr_handle_t> = vec![std::ptr::null_mut::<c_void>(); cap];
+    // SAFETY: handles is sized exactly to count (capped).
     let r =
         unsafe { (api.zes_device_enum_power_domains)(device, &mut count, handles.as_mut_ptr()) };
     if r != ffi::ZE_RESULT_SUCCESS {
         return;
     }
+    handles.truncate((count as usize).min(cap));
     for handle in handles.into_iter() {
         if handle.is_null() {
             continue;

@@ -23,7 +23,43 @@ use once_cell::sync::OnceCell;
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::sync::{Mutex, Once};
-use tracing::debug;
+use tracing::{debug, warn};
+
+/// Upper bound on any driver-reported handle / device / domain count
+/// we will allocate a buffer for. Mirrors the
+/// [`MAX_DEVICES`](crate::device::readers::common_cache::MAX_DEVICES)
+/// cap used by the generic device-cache layer. A buggy or hostile
+/// driver returning `u32::MAX` here would otherwise trigger a ~32 GiB
+/// allocation when the count is fed into `vec![ptr; count]`; capping
+/// turns that into a bounded warning and a partial enumeration.
+///
+/// Real Intel hardware reports ~6 engines plus a handful of power
+/// domains per card, so hitting this cap in production is essentially
+/// impossible — it is a DoS guard, not a tuning knob.
+pub(crate) const MAX_L0_HANDLES: usize = 256;
+
+/// Clamp a driver-reported `u32` count to [`MAX_L0_HANDLES`] and emit a
+/// warning (only the first time the cap is hit per process) so an
+/// operator notices a misbehaving driver. Returns the capped count as
+/// `(usize, u32)` — the `usize` sizes the Vec, the `u32` is what we
+/// pass back into the second "fill" call of the count-then-buffer
+/// idiom.
+pub(crate) fn cap_handle_count(reported: u32, what: &'static str) -> (usize, u32) {
+    let safe = (reported as usize).min(MAX_L0_HANDLES);
+    if (reported as usize) > MAX_L0_HANDLES {
+        L0_CAP_WARN.call_once(|| {
+            warn!(
+                "Level Zero: driver reported {reported} {what}, capping at {MAX_L0_HANDLES}; \
+                 further over-cap counts will be silently truncated"
+            );
+        });
+    }
+    (safe, safe as u32)
+}
+
+/// One-shot latch around the cap-hit warning so we don't spam the log
+/// every refresh tick if a host genuinely exceeds the cap.
+static L0_CAP_WARN: Once = Once::new();
 
 // Library search paths. We mirror tpu_pjrt.rs by trying the SONAME
 // first (so the dynamic linker can do its usual search), then a small
@@ -272,14 +308,20 @@ fn enumerate_devices(api: &LzApi) -> HashMap<String, zes_device_handle_t_send> {
         debug!("Level Zero: zeDriverGet returned {r}, count {driver_count}");
         return out;
     }
+    // Cap the driver-reported count to MAX_L0_HANDLES before sizing
+    // the Vec — see `cap_handle_count` for the DoS rationale.
+    let (drivers_cap, mut driver_count) = cap_handle_count(driver_count, "drivers");
     let mut drivers: Vec<ffi::ze_driver_handle_t> =
-        vec![std::ptr::null_mut::<c_void>(); driver_count as usize];
-    // SAFETY: drivers vec is sized exactly to driver_count.
+        vec![std::ptr::null_mut::<c_void>(); drivers_cap];
+    // SAFETY: drivers vec is sized exactly to driver_count (capped).
     let r = unsafe { (api.ze_driver_get)(&mut driver_count, drivers.as_mut_ptr()) };
     if r != ffi::ZE_RESULT_SUCCESS {
         debug!("Level Zero: zeDriverGet (fill) returned {r}");
         return out;
     }
+    // The driver writes back the actual number of entries populated;
+    // truncate so we never iterate past the populated prefix.
+    drivers.truncate((driver_count as usize).min(drivers_cap));
 
     for driver in drivers.iter().copied() {
         if driver.is_null() {
@@ -291,13 +333,17 @@ fn enumerate_devices(api: &LzApi) -> HashMap<String, zes_device_handle_t_send> {
         if r != ffi::ZE_RESULT_SUCCESS || dev_count == 0 {
             continue;
         }
+        // Cap the driver-reported count before allocating; see
+        // `cap_handle_count` for the DoS rationale.
+        let (devices_cap, mut dev_count) = cap_handle_count(dev_count, "devices");
         let mut devices: Vec<ffi::ze_device_handle_t> =
-            vec![std::ptr::null_mut::<c_void>(); dev_count as usize];
-        // SAFETY: devices vec is sized exactly to dev_count.
+            vec![std::ptr::null_mut::<c_void>(); devices_cap];
+        // SAFETY: devices vec is sized exactly to dev_count (capped).
         let r = unsafe { (api.ze_device_get)(driver, &mut dev_count, devices.as_mut_ptr()) };
         if r != ffi::ZE_RESULT_SUCCESS {
             continue;
         }
+        devices.truncate((dev_count as usize).min(devices_cap));
         for device in devices.iter().copied() {
             if device.is_null() {
                 continue;
