@@ -291,7 +291,7 @@ fn has_intel_client_gpu_positive() {
     let dir = tempdir().unwrap();
     let root = dir.path();
     make_card(root, 0, "0x8086", "i915", "0x56A0");
-    assert!(has_intel_client_gpu_from_root(root));
+    assert!(super::detection::has_intel_client_gpu_from_root(root));
 }
 
 #[test]
@@ -299,31 +299,31 @@ fn has_intel_client_gpu_rejects_amd() {
     let dir = tempdir().unwrap();
     let root = dir.path();
     make_card(root, 0, "0x1002", "amdgpu", "0x73BF");
-    assert!(!has_intel_client_gpu_from_root(root));
+    assert!(!super::detection::has_intel_client_gpu_from_root(root));
 }
 
 #[test]
 fn line_matches_intel_gpu_positive_3d() {
     // Class 0302 (3D controller), Intel vendor.
     let line = "03:00.0 0302: 8086:56a0 (rev 08)";
-    assert!(line_matches_intel_gpu(line));
+    assert!(super::detection::line_matches_intel_gpu(line));
 }
 
 #[test]
 fn line_matches_intel_gpu_positive_vga() {
     let line = "00:02.0 0300: 8086:7d40";
-    assert!(line_matches_intel_gpu(line));
+    assert!(super::detection::line_matches_intel_gpu(line));
 }
 
 #[test]
 fn line_matches_intel_gpu_rejects_intel_nic() {
     // Intel NIC, vendor 8086 but class 0200 (Ethernet).
     let line = "02:00.0 0200: 8086:15bb";
-    assert!(!line_matches_intel_gpu(line));
+    assert!(!super::detection::line_matches_intel_gpu(line));
 }
 
 #[test]
 fn line_matches_intel_gpu_rejects_other_vendor_vga() {
     let line = "01:00.0 0300: 10de:2204";
-    assert!(!line_matches_intel_gpu(line));
+    assert!(!super::detection::line_matches_intel_gpu(line));
 }

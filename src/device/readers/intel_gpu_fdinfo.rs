@@ -474,6 +474,10 @@ pub fn collect_intel_gpu_processes(
     out
 }
 
+#[path = "intel_gpu_fdinfo/enrichment.rs"]
+mod enrichment;
+pub use enrichment::build_intel_process_infos;
+
 #[cfg(test)]
 #[path = "intel_gpu_fdinfo/tests.rs"]
 mod tests;
