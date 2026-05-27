@@ -327,3 +327,125 @@ fn line_matches_intel_gpu_rejects_other_vendor_vga() {
     let line = "01:00.0 0300: 10de:2204";
     assert!(!super::detection::line_matches_intel_gpu(line));
 }
+
+// ----- get_process_info integration tests (synthetic procfs) -----
+
+/// Build a `cardN` + `renderD<M>` pair sharing a fake PCI device under
+/// `drm_root`. The `device` symlink target is what
+/// `build_intel_drm_basenames` follows to correlate render nodes to
+/// cards, so both nodes point at the same `_pci/<bus>` directory.
+fn make_card_and_render(drm_root: &Path, idx: u32, render_minor: u32, pci_bus: &str) {
+    let pci_dir = drm_root.join("_pci").join(pci_bus);
+    fs::create_dir_all(&pci_dir).unwrap();
+
+    let card = make_card(drm_root, idx, "0x8086", "i915", "0x56A0");
+    // Replace the default `device` directory (a real dir from make_card)
+    // with a symlink to the PCI bus so build_intel_drm_basenames can
+    // resolve the bus identifier. The make_card helper created
+    // device/ as a directory; we move its contents into pci_dir then
+    // replace it with a symlink.
+    let device_dir = card.join("device");
+    // Move existing files into pci_dir so the symlink target has the
+    // same sysfs surface the rest of the reader expects.
+    for entry in fs::read_dir(&device_dir).unwrap().flatten() {
+        let target = pci_dir.join(entry.file_name());
+        fs::rename(entry.path(), target).unwrap();
+    }
+    fs::remove_dir(&device_dir).unwrap();
+    std::os::unix::fs::symlink(&pci_dir, device_dir).unwrap();
+
+    // Render node points at the same PCI device.
+    let render = drm_root.join(format!("renderD{render_minor}"));
+    fs::create_dir_all(&render).unwrap();
+    std::os::unix::fs::symlink(&pci_dir, render.join("device")).unwrap();
+}
+
+/// Create a `/proc/<pid>/fd/<n>` symlink pointing at
+/// `<proc_root>/_dri/<basename>` plus its `fdinfo/<n>` file.
+fn make_proc_fd_for_pid(
+    proc_root: &Path,
+    pid: u32,
+    fd: u32,
+    dri_basename: &str,
+    fdinfo: &str,
+) {
+    let fd_dir = proc_root.join(pid.to_string()).join("fd");
+    let fdinfo_dir = proc_root.join(pid.to_string()).join("fdinfo");
+    fs::create_dir_all(&fd_dir).unwrap();
+    fs::create_dir_all(&fdinfo_dir).unwrap();
+    let target = proc_root.join("_dri").join(dri_basename);
+    fs::create_dir_all(target.parent().unwrap()).unwrap();
+    fs::write(&target, b"").unwrap();
+    std::os::unix::fs::symlink(&target, fd_dir.join(fd.to_string())).unwrap();
+    fs::write(fdinfo_dir.join(fd.to_string()), fdinfo).unwrap();
+}
+
+#[test]
+fn get_process_info_returns_empty_when_no_intel_cards() {
+    // No Intel cards enumerated -> get_process_info MUST return empty
+    // without touching /proc. Guarantees no regression for AMD-only /
+    // NVIDIA-only hosts that incidentally have Intel-vendor non-GPU
+    // PCI devices.
+    let drm = tempdir().unwrap();
+    let proc = tempdir().unwrap();
+    let reader = IntelGpuReader::new_with_roots(drm.path(), proc.path());
+    let infos = reader.get_process_info();
+    assert!(infos.is_empty());
+}
+
+#[test]
+fn get_process_info_collects_fdinfo_from_render_node() {
+    // End-to-end pipeline: enumerate one Intel card, walk a synthetic
+    // /proc, parse the fdinfo block, and yield a populated ProcessInfo
+    // with the expected used_memory.
+    let drm = tempdir().unwrap();
+    let proc = tempdir().unwrap();
+    make_card_and_render(drm.path(), 0, 128, "0000:03:00.0");
+    make_proc_fd_for_pid(
+        proc.path(),
+        std::process::id(),
+        3,
+        "renderD128",
+        "drm-driver: i915\n\
+         drm-pdev: 0000:03:00.0\n\
+         drm-client-id: 42\n\
+         drm-resident-local0: 16384 kB\n",
+    );
+
+    let reader = IntelGpuReader::new_with_roots(drm.path(), proc.path());
+    let infos = reader.get_process_info();
+    assert_eq!(infos.len(), 1, "expected one Intel-GPU-using process");
+    let info = &infos[0];
+    assert_eq!(info.pid, std::process::id());
+    assert_eq!(info.device_id, 0);
+    // UUID format matches `build_uuid`: `Intel-GPU-<pci_bus>`.
+    assert_eq!(info.device_uuid, "Intel-GPU-0000:03:00.0");
+    assert_eq!(info.used_memory, 16_384 * 1024);
+    assert!(info.uses_gpu);
+    // Stretch-goal stays deferred: per-process engine-time stays 0.0.
+    assert_eq!(info.gpu_utilization, 0.0);
+}
+
+#[test]
+fn get_process_info_default_filter_keeps_uses_gpu_processes() {
+    // The default `GpuReader::get_gpu_processes` impl filters by
+    // `uses_gpu == true`. Verify the Intel reader is compatible with
+    // that filter (every emitted entry must have `uses_gpu` set).
+    use crate::device::traits::GpuReader as _;
+
+    let drm = tempdir().unwrap();
+    let proc = tempdir().unwrap();
+    make_card_and_render(drm.path(), 0, 128, "0000:03:00.0");
+    make_proc_fd_for_pid(
+        proc.path(),
+        std::process::id(),
+        3,
+        "renderD128",
+        "drm-driver: i915\ndrm-client-id: 1\ndrm-resident-local0: 4096 kB\n",
+    );
+
+    let reader = IntelGpuReader::new_with_roots(drm.path(), proc.path());
+    let (filtered, pids) = reader.get_gpu_processes();
+    assert_eq!(filtered.len(), 1);
+    assert!(pids.contains(&std::process::id()));
+}
