@@ -101,11 +101,9 @@ See [Building from Source](DEVELOPERS.md#building-from-source) in the developer 
 
 ### Command Overview
 
-> **Note:** This README tracks the `main` branch. Subcommands tagged
-> **Availability: v0.21.0+** below (`snapshot`, `record`, `view --replay`,
-> `config`, `doctor`) ship with v0.21.0 and are present in the current
-> published release. See the [Changelog](#changelog) for what is in each
-> release. To run the latest unreleased features, build from source
+> **Note:** This README tracks the `main` branch. See the
+> [Changelog](#changelog) for what is in each release. To run the latest
+> unreleased features, build from source
 > ([Option 6](#option-6-build-from-source)).
 
 ```bash
@@ -123,13 +121,13 @@ all-smi view --hostfile hosts.csv
 # API mode (expose metrics server)
 all-smi api --port 9090
 
-# One-shot JSON/CSV/Prometheus dump for scripts (Availability: v0.21.0+)
+# One-shot JSON/CSV/Prometheus dump for scripts
 all-smi snapshot
 
-# Capture a stream to disk for later replay (Availability: v0.21.0+)
+# Capture a stream to disk for later replay
 all-smi record --output trace.ndjson.zst --duration 1h
 
-# Replay a captured stream in the TUI (Availability: v0.21.0+)
+# Replay a captured stream in the TUI
 all-smi view --replay trace.ndjson.zst
 ```
 
@@ -168,12 +166,6 @@ http://gpu-node3:9090
 ```
 
 ## Configuration
-
-> **Availability: v0.21.0+.** The `config` subcommand (`config init`, `config
-> print`, `config validate`) and the TOML config-file loader described below
-> ship with v0.21.0. Environment variables documented in the schema tables
-> (e.g., `ALL_SMI_API_PORT`, `ALL_SMI_ALERTS_TEMP_WARN_C`) continue to work
-> in earlier releases where they were already supported.
 
 `all-smi` reads optional settings from a TOML config file. Every field has a compiled default, so a fresh install requires no file; operators only create one when they want persistent overrides (hostfile path, update interval, alert thresholds, `$/kWh`, etc.).
 
@@ -339,9 +331,6 @@ Older releases introduced environment variables with different naming. All alias
   - For best temperature monitoring on Windows, install and run LibreHardwareMonitor in the background
 
 ## Diagnostics
-
-> **Availability: v0.21.0+.** The `doctor` subcommand ships with v0.21.0
-> and is available in the current published release.
 
 The `all-smi doctor` subcommand runs a read-only suite of environment checks and
 prints a PASS/WARN/FAIL report covering platform, privileges, container
@@ -1011,9 +1000,6 @@ requests against a freshly-started or stalled server therefore share one
 blocking collect rather than each spawning their own reader set.
 
 ### Scripting / CI (Snapshot Mode)
-
-> **Availability: v0.21.0+.** The `snapshot` subcommand ships with v0.21.0
-> and is available in the current published release.
 
 The `snapshot` subcommand emits a single, one-shot machine-readable dump of
 the current hardware state to stdout (or a file) and exits. It is designed
