@@ -1,3 +1,15 @@
+all-smi (0.21.1-0) jammy; urgency=medium
+
+  * Add Intel client GPU reader (Arc/Iris/Xe) for Windows and Linux
+  * Add opt-in Level Zero (oneAPI Sysman) backend for advanced Intel GPU metrics
+  * Make Level Zero Sysman the primary Intel GPU metrics source when available
+  * Add per-process Intel GPU memory accounting via fdinfo on Linux
+  * Compute Linux Intel GPU utilization from engine-busy counters
+  * Fix harden Intel Level Zero and fdinfo path handling
+  * Build add macOS notarization and Windows code signing for release binaries
+
+ -- Jeongkyu Shin <inureyes@gmail.com>  Wed, 27 May 2026 00:00:00 +0000
+
 all-smi (0.21.0-0) jammy; urgency=medium
 
   * Add cluster-wide Users tab ('V' key) with two-level drill-down and CSV export
