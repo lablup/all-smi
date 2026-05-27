@@ -27,9 +27,11 @@ use super::refresh::{
     compute_engine_busy_pct, compute_power_watts, make_engine_sample, make_power_sample,
 };
 use super::*;
-use crate::device::types::GpuInfo;
-use std::collections::HashMap;
 
+#[path = "tests/apply.rs"]
+mod apply;
+#[path = "tests/ffi_layout.rs"]
+mod ffi_layout;
 // ----- Enum value locks ---------------------------------------------
 //
 // These tests lock in the `zes_engine_group_t` integer values against
@@ -325,16 +327,14 @@ fn power_handles_zero_delta_t() {
 
 #[test]
 fn power_handles_energy_reset() {
-    // Sometimes the energy counter wraps or resets — saturating_sub
-    // means we report 0 watts that interval, not a u64-wrap-around
-    // garbage value.
+    // Sometimes the energy counter wraps or resets. That interval is
+    // not fresh enough to override a fallback power reading.
     let sample = make_power_sample(1_000_000, 5_000_000);
     let counter = ffi::zes_power_energy_counter_t {
         energy: 500_000, // smaller than last_energy_uj
         timestamp: 6_000_000,
     };
-    let watts = compute_power_watts(&sample, &counter).unwrap();
-    assert_eq!(watts, 0.0);
+    assert!(compute_power_watts(&sample, &counter).is_none());
 }
 
 // ----- Primary utilization picker ---------------------------------
@@ -361,130 +361,6 @@ fn primary_utilization_falls_back_when_no_compute() {
 fn primary_utilization_empty_returns_none() {
     let engines: Vec<(&'static str, f64)> = Vec::new();
     assert_eq!(primary_utilization(&engines), None);
-}
-
-// ----- GpuInfo integration ----------------------------------------
-
-fn make_baseline_gpu_info() -> GpuInfo {
-    GpuInfo {
-        uuid: "Intel-GPU-0000:03:00.0".to_string(),
-        time: "2026-01-01 00:00:00".to_string(),
-        name: "Intel Arc B580".to_string(),
-        device_type: "GPU".to_string(),
-        host_id: "test-host".to_string(),
-        hostname: "test-host".to_string(),
-        instance: "test-host".to_string(),
-        utilization: 0.0,
-        ane_utilization: 0.0,
-        dla_utilization: None,
-        tensorcore_utilization: None,
-        temperature: 0,
-        used_memory: 0,
-        total_memory: 12 * 1024 * 1024 * 1024,
-        frequency: 0,
-        power_consumption: 0.0,
-        gpu_core_count: None,
-        temperature_threshold_slowdown: None,
-        temperature_threshold_shutdown: None,
-        temperature_threshold_max_operating: None,
-        temperature_threshold_acoustic: None,
-        performance_state: None,
-        numa_node_id: None,
-        gsp_firmware_mode: None,
-        gsp_firmware_version: None,
-        nvlink_remote_devices: Vec::new(),
-        gpm_metrics: None,
-        detail: HashMap::new(),
-    }
-}
-
-#[test]
-fn apply_to_gpu_info_linux_does_not_overwrite_utilization() {
-    // Linux semantics: sysfs engine counters drive `utilization`; L0
-    // adds detail entries and the Power (L0) field. The `utilization`
-    // value must remain untouched even when L0 has engine data.
-    let mut gpu = make_baseline_gpu_info();
-    gpu.utilization = 42.0; // pretend sysfs already filled this in
-    gpu.detail.insert(
-        "Metrics Source".to_string(),
-        "sysfs (engine counters)".to_string(),
-    );
-
-    let readout = LevelZeroReadout {
-        engines: vec![("compute (XMX)", 80.0), ("render", 30.0)],
-        power_watts: Some(120.5),
-        had_any_data: true,
-    };
-    apply_to_gpu_info(&mut gpu, &readout, ApplyPlatform::Linux);
-
-    assert_eq!(
-        gpu.utilization, 42.0,
-        "Linux must NOT overwrite utilization"
-    );
-    assert_eq!(
-        gpu.detail
-            .get("Engine: compute (XMX) (L0)")
-            .map(String::as_str),
-        Some("80.00%")
-    );
-    assert_eq!(
-        gpu.detail.get("Engine: render (L0)").map(String::as_str),
-        Some("30.00%")
-    );
-    assert_eq!(
-        gpu.detail.get("Power (L0)").map(String::as_str),
-        Some("120.50 W")
-    );
-    assert_eq!(
-        gpu.detail.get("Metrics Source").map(String::as_str),
-        Some("sysfs + Level Zero")
-    );
-}
-
-#[test]
-fn apply_to_gpu_info_windows_overwrites_zero_fields() {
-    // Windows semantics: WMI baseline has utilization = 0 and
-    // power_consumption = 0.0 — placeholders for "no data". L0
-    // overwrites both with real numbers.
-    let mut gpu = make_baseline_gpu_info();
-    gpu.detail
-        .insert("Metrics Source".to_string(), "WMI".to_string());
-
-    let readout = LevelZeroReadout {
-        engines: vec![("compute (XMX)", 65.0), ("render", 20.0)],
-        power_watts: Some(95.0),
-        had_any_data: true,
-    };
-    apply_to_gpu_info(&mut gpu, &readout, ApplyPlatform::Windows);
-
-    // Primary picks max(render, compute (XMX)) = 65.
-    assert!((gpu.utilization - 65.0).abs() < 1e-9);
-    assert!((gpu.power_consumption - 95.0).abs() < 1e-9);
-    assert_eq!(
-        gpu.detail.get("Metrics Source").map(String::as_str),
-        Some("WMI + Level Zero")
-    );
-}
-
-#[test]
-fn apply_to_gpu_info_no_data_keeps_baseline() {
-    // `had_any_data == false` is the "L0 visible but card not visible"
-    // path — must leave the existing detail map and metric fields
-    // unchanged so the caller's baseline survives.
-    let mut gpu = make_baseline_gpu_info();
-    gpu.utilization = 42.0;
-    gpu.detail
-        .insert("Metrics Source".to_string(), "WMI".to_string());
-
-    let readout = LevelZeroReadout::default();
-    apply_to_gpu_info(&mut gpu, &readout, ApplyPlatform::Windows);
-
-    assert_eq!(gpu.utilization, 42.0);
-    assert_eq!(
-        gpu.detail.get("Metrics Source").map(String::as_str),
-        Some("WMI")
-    );
-    assert!(!gpu.detail.contains_key("Power (L0)"));
 }
 
 // ----- Library-not-found behaviour --------------------------------
@@ -534,7 +410,7 @@ fn refresh_returns_none_without_runtime() {
         // If we DID get a runtime, refresh against an unknown BDF must
         // still produce no data — bind to an unknown card fails.
         assert!(
-            !readout.had_any_data,
+            !readout.has_fresh_data(),
             "unknown BDF must not produce data, got {readout:?}"
         );
     }

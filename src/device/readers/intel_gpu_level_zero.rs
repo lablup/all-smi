@@ -16,43 +16,23 @@
 // is active. Without the feature there are NO Level Zero symbols in the
 // binary.)
 
-//! Opt-in Intel Level Zero (oneAPI) backend used to augment the
-//! sysfs-based Linux reader and to fill the Windows WMI gap. v1 surface:
+//! Opt-in Intel Level Zero Sysman backend used as the preferred Intel
+//! vendor source when `--features level_zero` is enabled and the loader
+//! is present. The default build still compiles no Level Zero symbols.
 //!
-//! 1. **Per-engine activity** via
-//!    [`ffi::ZesDeviceEnumEngineGroups`](ffi::ZesDeviceEnumEngineGroups) +
-//!    [`ffi::ZesEngineGetActivity`](ffi::ZesEngineGetActivity). We
-//!    surface `RENDER_SINGLE`, `COMPUTE_SINGLE` (the XMX class on Arc /
-//!    Battlemage), `COPY_SINGLE`, `MEDIA_DECODE_SINGLE`, and
-//!    `MEDIA_ENCODE_SINGLE`. Anything else the driver enumerates is
-//!    silently ignored.
-//! 2. **Power** via
-//!    [`ffi::ZesDeviceEnumPowerDomains`](ffi::ZesDeviceEnumPowerDomains) +
-//!    [`ffi::ZesPowerGetEnergyCounter`](ffi::ZesPowerGetEnergyCounter).
-//!    The counter is monotonic in microjoules; we delta-track it to
-//!    derive instantaneous watts. The very first sample seeds the
-//!    baseline and reports `None`.
-//!
-//! Explicitly **deferred** to follow-up issues (do not add here):
-//! temperature, frequency, memory state, performance factor, RAS /
-//! error reporting, per-process L0 stats, fine-grained power-limit
-//! control. The v1 scope is intentionally narrow so the PR stays
-//! reviewable.
+//! The backend dynamically resolves only the Sysman functions all-smi
+//! consumes: temperature, memory state, frequency, fan state,
+//! engine-activity deltas, and power energy-counter deltas. Metric
+//! families are independent: missing optional symbols or unsupported
+//! domains degrade only that field, and seeded delta families do not
+//! overwrite OS-specific fallbacks until a fresh second sample exists.
 //!
 //! ## Coexistence model
 //!
-//! L0 **augments** rather than replaces the existing per-OS readers:
-//!
-//! * Linux: PR #249's sysfs engine counters keep producing
-//!   `GpuInfo.utilization` and per-engine `detail` entries. L0 adds the
-//!   XMX `COMPUTE_SINGLE` activity that sysfs cannot reach plus the
-//!   energy-counter-derived `Power (L0)` reading, then flips
-//!   `detail["Metrics Source"]` from `"sysfs (engine counters)"` to
-//!   `"sysfs + Level Zero"`.
-//! * Windows: WMI keeps producing the name + (truncated) `AdapterRAM`.
-//!   L0 fills `GpuInfo.utilization` and `GpuInfo.power_consumption`
-//!   (both zero on the WMI-only path) and flips
-//!   `detail["Metrics Source"]` from `"WMI"` to `"WMI + Level Zero"`.
+//! Linux starts from sysfs/hwmon/fdinfo and Windows starts from WMI.
+//! Fresh Sysman values override those baselines per field except Linux
+//! fan telemetry, where hwmon keeps priority. `detail["Source: <field>"]`
+//! exposes mixed-source results.
 //!
 //! ## Threading model
 //!
@@ -66,18 +46,26 @@
 #![allow(dead_code)] // Some helpers are unused on the non-target OS half.
 #![allow(non_camel_case_types)] // FFI handle wrappers mirror C type names.
 
+mod api;
+mod apply;
 pub(crate) mod ffi;
 mod loader;
+mod point;
 mod refresh;
 
 #[cfg(test)]
 mod tests;
 
+pub use apply::{ApplyPlatform, apply_to_gpu_info};
 #[allow(unused_imports)]
 // `normalise_pci_bdf` is consumed by the per-OS readers wired in commits 3-4.
 pub use loader::normalise_pci_bdf;
 pub use loader::prepare_sysman_env_for_legacy_runtime;
 pub(crate) use loader::with_runtime;
+pub(crate) use point::{
+    FanSample, FrequencySample, MemorySample, TemperatureSample, populate_point_samples,
+    refresh_fan, refresh_frequency, refresh_memory, refresh_temperature,
+};
 pub(crate) use refresh::{
     EngineSample, PowerSample, populate_engine_samples, populate_power_samples, refresh_engines,
     refresh_power,
@@ -104,6 +92,10 @@ pub struct LevelZeroState {
     /// largest delta as the card-level total since the spec does not
     /// publish whether the package domain is "domain 0".
     pub(crate) power_samples: Vec<PowerSample>,
+    pub(crate) temperature_samples: Vec<TemperatureSample>,
+    pub(crate) memory_samples: Vec<MemorySample>,
+    pub(crate) frequency_samples: Vec<FrequencySample>,
+    pub(crate) fan_samples: Vec<FanSample>,
 }
 
 impl LevelZeroState {
@@ -112,11 +104,64 @@ impl LevelZeroState {
     }
 }
 
-/// Aggregated outcome of one [`refresh`] call.
-///
-/// Kept intentionally narrow: the rest of the reader pipeline does not
-/// need to know about L0 handle layout, only the human-presentable
-/// numbers we wish to surface.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum MetricStatus {
+    #[default]
+    Unsupported,
+    Unavailable,
+    Seeded,
+    Fresh,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct LevelZeroDiagnostics {
+    pub engine: MetricStatus,
+    pub power: MetricStatus,
+    pub temperature: MetricStatus,
+    pub memory: MetricStatus,
+    pub frequency: MetricStatus,
+    pub fan: MetricStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FreshValue<T> {
+    pub value: T,
+    pub source: &'static str,
+}
+
+impl<T> FreshValue<T> {
+    pub(crate) fn level_zero(value: T) -> Self {
+        Self {
+            value,
+            source: "Level Zero Sysman",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LevelZeroMemoryKind {
+    DedicatedLocal,
+    SharedSystem,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LevelZeroMemoryReadout {
+    pub used_bytes: u64,
+    pub total_bytes: u64,
+    pub kind: LevelZeroMemoryKind,
+    pub source: &'static str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LevelZeroFanReadout {
+    pub rpm: Option<u32>,
+    pub percent: Option<u32>,
+    pub source: &'static str,
+}
+
+/// Aggregated outcome of one [`refresh`] call. Each metric family has
+/// independent freshness so a seeded power/engine sample cannot hide a
+/// valid OS-specific fallback.
 #[derive(Debug, Clone, Default)]
 pub struct LevelZeroReadout {
     /// Per-engine percentages keyed by short, stable human-readable
@@ -124,13 +169,26 @@ pub struct LevelZeroReadout {
     /// `detail` map only — the primary `GpuInfo.utilization` is driven
     /// by `max(render, compute (XMX))` (see [`apply_to_gpu_info`]).
     pub engines: Vec<(&'static str, f64)>,
-    /// Card-level power in watts derived from the energy counter delta.
-    /// `None` on the seeding call (no prior sample yet).
-    pub power_watts: Option<f64>,
-    /// `true` when the refresh produced at least one fresh data point —
-    /// callers use this to decide whether to flip
-    /// `detail["Metrics Source"]` to indicate the augmented backend.
-    pub had_any_data: bool,
+    pub primary_engine_utilization: Option<FreshValue<f64>>,
+    pub power_watts: Option<FreshValue<f64>>,
+    pub temperature_celsius: Option<FreshValue<u32>>,
+    pub memory: Option<LevelZeroMemoryReadout>,
+    pub frequency_mhz: Option<FreshValue<u32>>,
+    pub frequency_domains: Vec<(&'static str, u32)>,
+    pub fan: Option<LevelZeroFanReadout>,
+    pub diagnostics: LevelZeroDiagnostics,
+}
+
+impl LevelZeroReadout {
+    pub fn has_fresh_data(&self) -> bool {
+        !self.engines.is_empty()
+            || self.primary_engine_utilization.is_some()
+            || self.power_watts.is_some()
+            || self.temperature_celsius.is_some()
+            || self.memory.is_some()
+            || self.frequency_mhz.is_some()
+            || self.fan.is_some()
+    }
 }
 
 /// Drive one refresh for a card. Returns `None` when L0 is unavailable
@@ -151,6 +209,7 @@ pub fn refresh(state: &mut LevelZeroState, pci_bdf: &str) -> Option<LevelZeroRea
                 // L0 data for this card" without retrying.
                 populate_engine_samples(&runtime.api, state);
                 populate_power_samples(&runtime.api, state);
+                populate_point_samples(&runtime.api, state);
             }
         }
         state.device?;
@@ -158,14 +217,58 @@ pub fn refresh(state: &mut LevelZeroState, pci_bdf: &str) -> Option<LevelZeroRea
         let mut out = LevelZeroReadout::default();
 
         let engines = refresh_engines(&runtime.api, state);
-        if !engines.is_empty() {
-            out.engines = engines;
-            out.had_any_data = true;
+        if let Some(primary) = engines.primary {
+            out.primary_engine_utilization = Some(FreshValue::level_zero(primary));
+            out.diagnostics.engine = MetricStatus::Fresh;
+        } else if engines.seeded {
+            out.diagnostics.engine = MetricStatus::Seeded;
+        } else if state.engine_samples.is_empty() {
+            out.diagnostics.engine = MetricStatus::Unsupported;
+        } else {
+            out.diagnostics.engine = MetricStatus::Unavailable;
+        }
+        if !engines.entries.is_empty() {
+            out.engines = engines.entries;
         }
 
         if let Some(watts) = refresh_power(&runtime.api, state) {
-            out.power_watts = Some(watts);
-            out.had_any_data = true;
+            out.power_watts = Some(FreshValue::level_zero(watts));
+            out.diagnostics.power = MetricStatus::Fresh;
+        } else if !state.power_samples.is_empty() {
+            out.diagnostics.power = MetricStatus::Seeded;
+        }
+
+        if let Some(temp) = refresh_temperature(&runtime.api, state) {
+            out.temperature_celsius = Some(temp);
+            out.diagnostics.temperature = MetricStatus::Fresh;
+        } else if !state.temperature_samples.is_empty() {
+            out.diagnostics.temperature = MetricStatus::Unavailable;
+        }
+
+        if let Some(memory) = refresh_memory(&runtime.api, state) {
+            out.memory = Some(memory);
+            out.diagnostics.memory = match memory.kind {
+                LevelZeroMemoryKind::DedicatedLocal => MetricStatus::Fresh,
+                LevelZeroMemoryKind::SharedSystem => MetricStatus::Unavailable,
+            };
+        } else if !state.memory_samples.is_empty() {
+            out.diagnostics.memory = MetricStatus::Unavailable;
+        }
+
+        let (frequency, domains) = refresh_frequency(&runtime.api, state);
+        out.frequency_domains = domains;
+        if let Some(freq) = frequency {
+            out.frequency_mhz = Some(freq);
+            out.diagnostics.frequency = MetricStatus::Fresh;
+        } else if !state.frequency_samples.is_empty() {
+            out.diagnostics.frequency = MetricStatus::Unavailable;
+        }
+
+        if let Some(fan) = refresh_fan(&runtime.api, state) {
+            out.fan = Some(fan);
+            out.diagnostics.fan = MetricStatus::Fresh;
+        } else if !state.fan_samples.is_empty() {
+            out.diagnostics.fan = MetricStatus::Unavailable;
         }
 
         Some(out)
@@ -213,72 +316,6 @@ pub(crate) fn label_order(class: &str) -> u8 {
         "media-encode" => 4,
         _ => 5,
     }
-}
-
-/// Fold a [`LevelZeroReadout`] into an existing `GpuInfo` produced by
-/// the sysfs / WMI baseline. On Linux this **augments** the detail map
-/// without touching `utilization` (the sysfs engine counters remain
-/// the source of truth for the primary number); on Windows it
-/// **overwrites** `utilization` and `power_consumption` because the
-/// WMI baseline reports zero for both.
-///
-/// The `Metrics Source` detail flips from the baseline string
-/// (`"sysfs (engine counters)"` / `"WMI"`) to the augmented one
-/// (`"sysfs + Level Zero"` / `"WMI + Level Zero"`) only when the
-/// readout actually carried fresh data.
-pub fn apply_to_gpu_info(
-    gpu_info: &mut crate::device::types::GpuInfo,
-    readout: &LevelZeroReadout,
-    platform: ApplyPlatform,
-) {
-    if !readout.had_any_data {
-        return;
-    }
-
-    // Per-engine percentages — always added on both platforms.
-    for (label, pct) in &readout.engines {
-        let key = format!("Engine: {label} (L0)");
-        gpu_info.detail.insert(key, format!("{pct:.2}%"));
-    }
-
-    // Power (L0) detail — kept regardless of platform so the operator
-    // can see the energy-counter-derived reading even when the sysfs
-    // path produces its own slightly-different number.
-    if let Some(watts) = readout.power_watts {
-        gpu_info
-            .detail
-            .insert("Power (L0)".to_string(), format!("{watts:.2} W"));
-    }
-
-    match platform {
-        ApplyPlatform::Linux => {
-            gpu_info.detail.insert(
-                "Metrics Source".to_string(),
-                "sysfs + Level Zero".to_string(),
-            );
-        }
-        ApplyPlatform::Windows => {
-            // Overwrite the zeros WMI produced. Use the busiest engine
-            // as the primary utilization (max across render + XMX
-            // compute, matching the Linux sysfs convention).
-            if let Some(primary) = primary_utilization(&readout.engines) {
-                gpu_info.utilization = primary.clamp(0.0, 100.0);
-            }
-            if let Some(watts) = readout.power_watts {
-                gpu_info.power_consumption = watts.max(0.0);
-            }
-            gpu_info
-                .detail
-                .insert("Metrics Source".to_string(), "WMI + Level Zero".to_string());
-        }
-    }
-}
-
-/// Selector for [`apply_to_gpu_info`]'s platform-specific behaviour.
-#[derive(Debug, Clone, Copy)]
-pub enum ApplyPlatform {
-    Linux,
-    Windows,
 }
 
 /// Pick the busiest engine percentage to drive `GpuInfo.utilization`
