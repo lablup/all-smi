@@ -14,7 +14,7 @@
 
 use crate::device::{
     platform_detection::{
-        get_os_type, has_furiosa, has_gaudi, has_intel_gpu, has_nvidia, has_rebellions, is_jetson,
+        get_os_type, has_furiosa, has_gaudi, has_nvidia, has_rebellions, is_jetson,
     },
     readers::{furiosa, gaudi, nvidia, nvidia_jetson, rebellions},
     traits::{CpuReader, GpuReader, MemoryReader},
@@ -110,7 +110,7 @@ pub fn get_gpu_readers() -> Vec<Box<dyn GpuReader>> {
             // `libamdgpu_top`, the Intel sysfs reader has no glibc
             // constraint and works on both glibc and musl targets.
             #[cfg(target_os = "linux")]
-            if has_intel_gpu() {
+            if crate::device::has_intel_gpu() {
                 readers.push(Box::new(intel_gpu_linux::IntelGpuReader::new()));
             }
         }
