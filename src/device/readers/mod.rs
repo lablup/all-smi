@@ -62,6 +62,8 @@ pub mod amd_windows;
 #[cfg(target_os = "linux")]
 pub mod intel_gpu_engine;
 #[cfg(target_os = "linux")]
+pub mod intel_gpu_fdinfo;
+#[cfg(target_os = "linux")]
 pub mod intel_gpu_linux;
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 pub mod intel_gpu_names;
