@@ -298,39 +298,25 @@ jobs:
           ditto -c -k --sequesterRsrc package "$ASSET"
 
       # Sign the Windows binary before packaging so the .zip artifact contains
-      # the signed .exe. Uses signtool with the certificate already installed
-      # in the self-hosted runner's Windows Certificate Store (same setup as
-      # backend.ai-go's packaging workflow). Timestamp via SSL.com so the
-      # signature remains valid after the signing certificate expires.
+      # the signed .exe. Signing runs on the self-hosted runner whose private
+      # key lives in Google Cloud KMS (Sectigo EV cert). This is a PUBLIC repo,
+      # so the certificate paths and the KMS key identifier are NOT committed:
+      # scripts/sign-windows.ps1 reads them from the env vars below, which are
+      # injected from repository secrets (GitHub masks secret values in logs).
       - name: Sign Windows binary with signtool
         if: runner.os == 'Windows'
         shell: pwsh
+        env:
+          # Required (configure as repository secrets):
+          WINDOWS_SIGN_CERT_PATH: ${{ secrets.WINDOWS_SIGN_CERT_PATH }}
+          WINDOWS_SIGN_CA_CERT_PATH: ${{ secrets.WINDOWS_SIGN_CA_CERT_PATH }}
+          WINDOWS_SIGN_KEY_CONTAINER: ${{ secrets.WINDOWS_SIGN_KEY_CONTAINER }}
+          # Optional overrides (unset -> non-sensitive script defaults are used):
+          WINDOWS_SIGNTOOL_PATH: ${{ secrets.WINDOWS_SIGNTOOL_PATH }}
+          WINDOWS_SIGN_CSP: ${{ secrets.WINDOWS_SIGN_CSP }}
+          WINDOWS_SIGN_TIMESTAMP_URL: ${{ secrets.WINDOWS_SIGN_TIMESTAMP_URL }}
         run: |
-          $ErrorActionPreference = "Stop"
-          $SignTool = "C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64\signtool.exe"
-          $TimestampUrl = "http://ts.ssl.com/"
-          $Bin = "target/${{ matrix.target }}/release/${{ matrix.artifact_name }}"
-
-          if (-not (Test-Path $SignTool)) {
-            Write-Error "signtool.exe not found at expected path: $SignTool"
-            exit 1
-          }
-          if (-not (Test-Path $Bin)) {
-            Write-Error "Binary not found: $Bin"
-            exit 1
-          }
-
-          Write-Host "Signing: $Bin"
-          & $SignTool sign /tr $TimestampUrl /td sha256 /fd sha256 /a $Bin
-          if ($LASTEXITCODE -ne 0) {
-            Write-Error "signtool sign failed (exit $LASTEXITCODE)"
-            exit 1
-          }
-
-          & $SignTool verify /pa $Bin
-          if ($LASTEXITCODE -ne 0) {
-            Write-Host "::warning::signtool verify /pa returned exit $LASTEXITCODE"
-          }
+          ./scripts/sign-windows.ps1 "target/${{ matrix.target }}/release/${{ matrix.artifact_name }}"
 
       - name: Package Windows binary (zip)
         if: runner.os == 'Windows'
