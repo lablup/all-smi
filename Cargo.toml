@@ -109,6 +109,17 @@ mock = ["cli", "dep:rand", "dep:hyper", "dep:hyper-util"]
 # Note: the bare dep name form (without `dep:` prefix) preserves the
 # implicit `furiosa-smi-rs` feature that existing reader code keys on.
 furiosa = ["furiosa-smi-rs"]
+# Opt-in Intel Level Zero (oneAPI) backend for Intel client GPU readers.
+# Default OFF — when disabled the binary contains zero references to the
+# Level Zero loader, and the Linux/Windows Intel readers behave exactly
+# as they did before #248. When enabled the readers dynamically load
+# `libze_loader.so.1` (Linux) or `ze_loader.dll` (Windows) at runtime via
+# `libloading`; absence of the runtime degrades gracefully back to the
+# sysfs / WMI baseline. v1 surface: per-engine activity (including the
+# XMX `COMPUTE_SINGLE` class) and power via the Sysman energy counter.
+# See `src/device/readers/intel_gpu_level_zero.rs` for the full module
+# and issue #248 for the rationale and deferred surface.
+level_zero = []
 
 [lib]
 name = "all_smi"

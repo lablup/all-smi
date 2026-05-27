@@ -63,6 +63,16 @@ pub mod amd_windows;
 pub mod intel_gpu_engine;
 #[cfg(target_os = "linux")]
 pub mod intel_gpu_fdinfo;
+// Opt-in Intel Level Zero (oneAPI) backend (issue #248). Cross-platform
+// FFI shim that augments the sysfs/WMI baseline with engine activity
+// (including the XMX `COMPUTE_SINGLE` class) and energy-counter-derived
+// power. Enabled with `--features level_zero`; default build does not
+// pull this module in.
+#[cfg(all(
+    any(target_os = "linux", target_os = "windows"),
+    feature = "level_zero"
+))]
+pub mod intel_gpu_level_zero;
 #[cfg(target_os = "linux")]
 pub mod intel_gpu_linux;
 #[cfg(any(target_os = "linux", target_os = "windows"))]
