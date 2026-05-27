@@ -12,7 +12,7 @@ on:
         type: choice
         options: ['true','false']
       release_tag:
-        description: 'Release tag to upload artifacts to (e.g. v1.2.3)'
+        description: 'Tag to build from AND upload artifacts to (e.g. v1.2.3). Empty = build the dispatched ref.'
         required: false
 
 permissions:
@@ -85,9 +85,21 @@ jobs:
       PROTOC_VERSION: "31.1"
 
     steps:
-      # 1) Checkout repository
+      # 1) Checkout repository.
+      # Self-healing release: build the *source of the target tag* while running
+      # the *current* workflow definition. GitHub always executes the release.yml
+      # baked into the triggering ref, so a bug in an old tag's workflow (e.g. a
+      # broken notarization step) cannot be fixed by re-running that tag. To
+      # recover, dispatch this workflow from a branch carrying the fixed
+      # release.yml and pass the old tag as release_tag: the fixed workflow runs,
+      # but the old tag's source is what gets built and uploaded.
+      #   - release event      -> the published release's tag
+      #   - workflow_dispatch  -> the release_tag input, when provided
+      #   - otherwise          -> the exact commit that triggered the run
       - name: Checkout code
         uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.release.tag_name || github.event.inputs.release_tag || github.sha }}
 
       # 1.5) Pin Cargo/rustup to persistent paths on the Windows self-hosted
       # runner so registry/git/target survive workspace cleanup between jobs.
