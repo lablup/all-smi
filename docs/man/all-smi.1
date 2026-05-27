@@ -175,7 +175,16 @@ Full support via nvidia-smi, including CUDA information, PCIe status, and perfor
 Support for Radeon and Instinct GPUs via ROCm/libamdgpu_top, including VRAM/GTT memory tracking and fdinfo-based process monitoring
 .TP
 .B Intel Arc / Iris Xe / Xe client GPUs
-Support for Arc A/B-series discrete GPUs and Iris Xe/Xe-LPG integrated GPUs via i915/xe sysfs (Linux) and WMI (Windows), including architecture classification, SYCL/oneAPI capability detection, engine-busy utilization computed from sysfs per-engine monotonic counters (Linux; max of render and compute engines reported as primary utilization), and per-process GPU memory tracking via /proc fdinfo (Linux; dedupes shared DRM file descriptors by drm-client-id)
+Support for Arc A/B-series discrete GPUs and Iris Xe/Xe-LPG integrated GPUs via i915/xe sysfs (Linux) and WMI (Windows), including architecture classification, SYCL/oneAPI capability detection, engine-busy utilization computed from sysfs per-engine monotonic counters (Linux; max of render and compute engines reported as primary utilization), and per-process GPU memory tracking via /proc fdinfo (Linux; dedupes shared DRM file descriptors by drm-client-id).
+Optional Intel Level Zero (oneAPI) augmentation is available when the binary is built with
+.B \-\-features level_zero
+(default: off). When enabled and
+.I libze_loader.so.1
+(Linux) or
+.I ze_loader.dll
+(Windows) is present at runtime, additional per-engine activity metrics (including the XMX
+.B COMPUTE_SINGLE
+class not reachable via sysfs) and energy-counter-derived power readings are surfaced. Absence of the runtime at runtime degrades silently to the sysfs/WMI baseline without error or log spam
 .TP
 .B Apple Silicon
 Native support for M1/M2/M3/M4 series with Metal API integration, ANE power monitoring, and thermal pressure tracking

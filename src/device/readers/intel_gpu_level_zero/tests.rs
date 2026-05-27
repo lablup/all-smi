@@ -20,7 +20,9 @@
 //! maintainer hardware verification (issue #248).
 
 use super::ffi;
-use super::loader::{format_pci_bdf, normalise_pci_bdf, try_load_library};
+use super::loader::{
+    MAX_L0_HANDLES, cap_handle_count, format_pci_bdf, normalise_pci_bdf, try_load_library,
+};
 use super::refresh::{
     compute_engine_busy_pct, compute_power_watts, make_engine_sample, make_power_sample,
 };
@@ -570,4 +572,51 @@ fn sort_engine_entries_canonical_order() {
             "media-encode"
         ]
     );
+}
+
+// ----- MAX_L0_HANDLES cap arithmetic ----------------------------------
+//
+// `cap_handle_count` guards every Vec allocation against a buggy or
+// hostile driver that reports a giant count (DoS via OOM). These tests
+// exercise the cap math directly without requiring a real L0 runtime.
+
+#[test]
+fn cap_handle_count_passes_through_when_under_cap() {
+    // Normal hardware: a few engines plus a couple of power domains.
+    // The count must pass through unchanged so the Vec is sized exactly.
+    let (safe, capped_u32) = cap_handle_count(6, "engine groups");
+    assert_eq!(safe, 6);
+    assert_eq!(capped_u32, 6);
+}
+
+#[test]
+fn cap_handle_count_clamps_when_over_cap() {
+    // Driver reports u32::MAX — without the cap this would attempt a
+    // ~32 GiB Vec allocation and OOM the process. The cap must reduce
+    // both the usize (for Vec::with_capacity) and the u32 (for the
+    // second "fill" call of the count-then-buffer idiom) to MAX_L0_HANDLES.
+    let giant: u32 = u32::MAX;
+    let (safe, capped_u32) = cap_handle_count(giant, "drivers");
+    assert_eq!(safe, MAX_L0_HANDLES);
+    assert_eq!(capped_u32, MAX_L0_HANDLES as u32);
+    // The capped values must agree with each other.
+    assert_eq!(safe, capped_u32 as usize);
+}
+
+#[test]
+fn cap_handle_count_at_exact_boundary() {
+    // Exactly MAX_L0_HANDLES — must pass through, not be clamped.
+    let at_limit = MAX_L0_HANDLES as u32;
+    let (safe, capped_u32) = cap_handle_count(at_limit, "devices");
+    assert_eq!(safe, MAX_L0_HANDLES);
+    assert_eq!(capped_u32, at_limit);
+}
+
+#[test]
+fn cap_handle_count_one_over_boundary_is_clamped() {
+    // MAX_L0_HANDLES + 1 must be clamped to MAX_L0_HANDLES.
+    let one_over = (MAX_L0_HANDLES + 1) as u32;
+    let (safe, capped_u32) = cap_handle_count(one_over, "power domains");
+    assert_eq!(safe, MAX_L0_HANDLES);
+    assert_eq!(capped_u32, MAX_L0_HANDLES as u32);
 }
