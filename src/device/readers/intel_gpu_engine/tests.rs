@@ -18,8 +18,8 @@
 //! Synthetic-clock tests use the `with_clock` constructor to drive
 //! `now_fn` from a `static` cell — no real wall-clock sleep is needed.
 
-use super::*;
 use super::discovery::split_class_instance;
+use super::*;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -35,10 +35,12 @@ fn normalize_engine_class_handles_known_tokens() {
     assert_eq!(normalize_engine_class("Render"), "render");
     assert_eq!(normalize_engine_class("ccs"), "compute");
     assert_eq!(normalize_engine_class("Compute"), "compute");
+    assert_eq!(normalize_engine_class("COMPUTE"), "compute");
     assert_eq!(normalize_engine_class("bcs"), "copy");
     assert_eq!(normalize_engine_class("COPY"), "copy");
     assert_eq!(normalize_engine_class("vcs"), "video");
     assert_eq!(normalize_engine_class("video_decode"), "video");
+    assert_eq!(normalize_engine_class("VIDEO_DECODE"), "video");
     assert_eq!(normalize_engine_class("vecs"), "video-enhance");
     assert_eq!(normalize_engine_class("VIDEO_ENHANCE"), "video-enhance");
 }
@@ -74,7 +76,10 @@ fn discover_engine_counters_empty_when_no_engines() {
     let dir = tempdir().unwrap();
     let device = make_card_device(dir.path());
     let counters = discover_engine_counters(&device);
-    assert!(counters.is_empty(), "expected no counters, got {counters:?}");
+    assert!(
+        counters.is_empty(),
+        "expected no counters, got {counters:?}"
+    );
 }
 
 #[test]
@@ -446,4 +451,50 @@ fn refresh_zero_wall_delta_returns_quietly() {
     assert_eq!(r.primary_utilization, 0.0);
     assert!(r.per_class.is_empty());
     assert!(r.status_note.is_none());
+}
+
+// ----- Mutex poisoning recovery -----
+
+#[test]
+fn refresh_with_lock_recovers_from_poisoned_mutex() {
+    use std::sync::Arc;
+
+    let state: Arc<Mutex<EngineState>> = Arc::new(Mutex::new(EngineState::empty()));
+    let poisoner = Arc::clone(&state);
+
+    // Poison the mutex: the spawned thread acquires the lock and panics,
+    // leaving the mutex in a poisoned state.
+    let _ = std::thread::spawn(move || {
+        let _guard = poisoner.lock().unwrap();
+        panic!("intentional mutex poisoning");
+    })
+    .join();
+
+    // Confirm the mutex is actually poisoned before we test recovery.
+    assert!(
+        state.lock().is_err(),
+        "mutex must be poisoned before testing recovery"
+    );
+
+    // refresh_with_lock must not panic and must return a valid readout.
+    // With an empty tempdir (no sysfs engine files) it returns the
+    // unavailable readout — that is expected and fine.
+    let dir = tempdir().unwrap();
+    let readout = refresh_with_lock(&state, dir.path());
+    assert_eq!(readout.primary_utilization, 0.0);
+    assert!(readout.per_class.is_empty());
+
+    // The std::sync::Mutex poison flag is NOT cleared by into_inner(),
+    // so the mutex remains poisoned after recovery. We use
+    // unwrap_or_else to inspect the internal state without panicking.
+    let guard = state.lock().unwrap_or_else(|e| e.into_inner());
+    // refresh() ran discovery on the empty dir: samples empty, discovery done.
+    assert!(
+        guard.samples.is_empty(),
+        "recovered state should have no samples"
+    );
+    assert!(
+        guard.discovery_attempted,
+        "discovery should have been attempted in the recovery refresh"
+    );
 }

@@ -85,7 +85,11 @@ pub fn discover_engine_counters(device_dir: &Path) -> Vec<EngineCounter> {
         }
     }
 
-    out.sort_by(|a, b| a.class.cmp(b.class).then_with(|| a.instance.cmp(&b.instance)));
+    out.sort_by(|a, b| {
+        a.class
+            .cmp(b.class)
+            .then_with(|| a.instance.cmp(&b.instance))
+    });
     out
 }
 

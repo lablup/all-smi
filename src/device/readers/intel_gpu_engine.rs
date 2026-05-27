@@ -390,4 +390,3 @@ fn class_order(class: &str) -> u8 {
         _ => 2,
     }
 }
-

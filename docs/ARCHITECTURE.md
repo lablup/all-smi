@@ -213,6 +213,7 @@ pub trait MetricsExporter: Send + Sync {
 - PCI device-ID to marketing-name table in `src/device/readers/intel_gpu_names.rs` covering Arc A/B-series, Iris Xe, Xe-LPG (Core Ultra / Meteor Lake), and Xe2 (Lunar Lake)
 - Architecture classification (Alchemist, Battlemage, XeLpg, XeLpgPlus, IrisXe, OlderIntegrated) with SYCL/oneAPI capability flag
 - Discrete VRAM tracking via i915 `mem_info_vram_total` or xe `tile0/vram0/total_bytes`; integrated GPUs report zero
+- Engine-busy utilization via `src/device/readers/intel_gpu_engine.rs`: walks sysfs per-engine `busy`/`busy_ns` monotonic counters exposed by both i915 (flat and nested layouts) and xe (single-GT and multi-GT layouts), delta-computes per-engine percentages each refresh, and surfaces `max(render, compute)` as `GpuInfo.utilization`. The first refresh per card is a seeding call returning `0.0`; real values appear from the second refresh. When the kernel exposes no engine counters, `detail["Utilization"]` carries an explanatory note and `utilization` stays `0.0`. The PMU `perf_event_open(2)` fallback used by `intel_gpu_top` on older kernels is deferred to future work.
 
 #### Intel Gaudi (`src/device/readers/gaudi.rs`, `src/device/hlsmi/`)
 - Uses `hl-smi` command running as a background process
