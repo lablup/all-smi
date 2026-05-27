@@ -143,7 +143,7 @@ impl IntelGpuReader {
         Self::new_with_roots(drm_root, Path::new("/proc"))
     }
 
-    /// Test-only constructor injecting both DRM and proc roots.
+    /// Internal constructor accepting arbitrary DRM and proc roots; production code uses default paths via [`IntelGpuReader::new`].
     fn new_with_roots(drm_root: &Path, proc_root: &Path) -> Self {
         let cards = discover_cards(drm_root);
         let card_refs: Vec<(PathBuf, usize)> = cards
