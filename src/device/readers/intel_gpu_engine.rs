@@ -43,7 +43,7 @@ use std::time::Instant;
 
 #[path = "intel_gpu_engine/discovery.rs"]
 mod discovery;
-pub use discovery::{discover_engine_counters, normalize_engine_class};
+pub use discovery::discover_engine_counters;
 
 #[cfg(test)]
 #[path = "intel_gpu_engine/tests.rs"]

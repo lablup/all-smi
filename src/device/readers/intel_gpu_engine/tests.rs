@@ -18,7 +18,7 @@
 //! Synthetic-clock tests use the `with_clock` constructor to drive
 //! `now_fn` from a `static` cell — no real wall-clock sleep is needed.
 
-use super::discovery::split_class_instance;
+use super::discovery::{normalize_engine_class, split_class_instance};
 use super::*;
 use std::fs;
 use std::path::{Path, PathBuf};
