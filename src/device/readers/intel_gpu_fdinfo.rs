@@ -326,10 +326,7 @@ pub fn intel_drm_fds_for_pid(
         let Some(card_index) = intel_drm_basenames.get(target_name).copied() else {
             continue;
         };
-        let fdinfo_path = proc_root
-            .join(pid.to_string())
-            .join("fdinfo")
-            .join(fd_name);
+        let fdinfo_path = proc_root.join(pid.to_string()).join("fdinfo").join(fd_name);
         out.push(IntelDrmFd {
             fd_num,
             fdinfo_path,

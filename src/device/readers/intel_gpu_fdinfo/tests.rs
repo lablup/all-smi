@@ -201,10 +201,8 @@ fn build_intel_drm_basenames_two_cards_two_render_nodes() {
     make_drm_layout(root, 0, Some(128), "0000:03:00.0");
     make_drm_layout(root, 1, Some(129), "0000:04:00.0");
 
-    let basenames = build_intel_drm_basenames(
-        &[(root.join("card0"), 0), (root.join("card1"), 1)],
-        root,
-    );
+    let basenames =
+        build_intel_drm_basenames(&[(root.join("card0"), 0), (root.join("card1"), 1)], root);
 
     assert_eq!(basenames.get("card0").copied(), Some(0));
     assert_eq!(basenames.get("renderD128").copied(), Some(0));

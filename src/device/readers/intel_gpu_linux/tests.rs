@@ -362,13 +362,7 @@ fn make_card_and_render(drm_root: &Path, idx: u32, render_minor: u32, pci_bus: &
 
 /// Create a `/proc/<pid>/fd/<n>` symlink pointing at
 /// `<proc_root>/_dri/<basename>` plus its `fdinfo/<n>` file.
-fn make_proc_fd_for_pid(
-    proc_root: &Path,
-    pid: u32,
-    fd: u32,
-    dri_basename: &str,
-    fdinfo: &str,
-) {
+fn make_proc_fd_for_pid(proc_root: &Path, pid: u32, fd: u32, dri_basename: &str, fdinfo: &str) {
     let fd_dir = proc_root.join(pid.to_string()).join("fd");
     let fdinfo_dir = proc_root.join(pid.to_string()).join("fdinfo");
     fs::create_dir_all(&fd_dir).unwrap();
