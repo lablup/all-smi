@@ -19,16 +19,21 @@
 //! template. The only differences are the vendor / family filter and a
 //! discrete-vs-integrated heuristic surfaced in `detail["Variant"]`.
 //!
-//! ## Limitations (v1 scope)
+//! ## WMI-only baseline limitations
 //!
 //! Detailed metrics (utilization, temperature, fine-grained power) are
-//! **not** available through WMI on Windows for Intel client GPUs.
-//! Surfacing them requires Level Zero (`ze_*` API via the
-//! `libze_intel_gpu` shared library) or `xpu-smi` for datacenter Flex /
-//! Max. That follow-up is documented in the issue and intentionally
-//! deferred — this reader returns `0` for those fields and adds a
-//! `detail["Note"]` entry pointing at the future work, so consumers know
-//! the missing values aren't a regression.
+//! **not** available through WMI for Intel client GPUs. The WMI-only
+//! baseline therefore returns `0` for those fields and writes a
+//! `detail["Note"]` entry that points operators at Level Zero.
+//!
+//! Issue #248 added an opt-in Level Zero augmentation behind the
+//! `level_zero` Cargo feature. When the build includes the feature
+//! AND the L0 loader (`ze_loader.dll`) is present at runtime, the
+//! augmentation overwrites the WMI zeros for `GpuInfo.utilization`
+//! and `GpuInfo.power_consumption` and flips
+//! `detail["Metrics Source"]` from `"WMI"` to `"WMI + Level Zero"`.
+//! Without the feature or the runtime the reader behaves exactly as
+//! before — there is no regression for hosts that lack either.
 
 use crate::device::GpuReader;
 use crate::device::readers::intel_gpu_names::classify_intel_architecture;

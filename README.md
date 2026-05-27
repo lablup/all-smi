@@ -563,6 +563,7 @@ Stable check IDs (greppable across versions):
     - Frequency, temperature (hwmon), and power (hwmon) metrics
     - Engine-busy utilization from sysfs per-engine monotonic counters (i915 and xe layouts); `max(render, compute)` reported as primary utilization; first refresh is a seeding call (returns `0.0`), real values available from the second refresh; PMU fallback for older kernels is deferred
     - Per-process GPU memory tracking via `/proc/<pid>/fdinfo` (Linux, with `--processes` flag); dedupes shared DRM file descriptors by `drm-client-id`; permission errors degrade silently per-process
+    - Opt-in Level Zero (oneAPI) augmentation behind `--features level_zero` (default off): when the build includes the feature and `libze_loader.so.1` / `ze_loader.dll` is present, surfaces XMX `compute (XMX)` engine activity that sysfs cannot reach and energy-counter-derived power; on Windows also fills `utilization` and `power_consumption` (zero on the WMI-only path); `detail["Metrics Source"]` reports `"sysfs + Level Zero"` (Linux) or `"WMI + Level Zero"` (Windows). Hosts without the loader degrade silently to the sysfs / WMI baseline. Temperature, frequency, memory state, per-process L0 stats, and fine-grained power-limit control are deferred to follow-up issues.
   - CPU monitoring via /proc filesystem
   - Memory monitoring with detailed statistics
   - Intel Gaudi NPUs (Gaudi 1/2/3) via hl-smi with background process monitoring

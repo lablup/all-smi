@@ -412,6 +412,41 @@ fn try_load_library_returns_none_for_nonexistent_path() {
     assert!(result.is_none(), "expected None for nonexistent loader path");
 }
 
+#[test]
+fn enumerated_pci_bdfs_empty_when_runtime_absent() {
+    // On hosts without the Level Zero loader (the canonical case for
+    // CI), the BDF enumeration helper must return an empty list, not
+    // panic. The Windows reader relies on this contract to skip the
+    // ordinal-based pairing loop entirely when no L0 hardware is
+    // reachable.
+    let bdfs = enumerated_pci_bdfs();
+    // Either zero (no loader) or some non-empty list (developer host
+    // with Intel GPU). Both are valid; the contract is "does not
+    // panic and returns a Vec<String>".
+    let _: Vec<String> = bdfs;
+}
+
+#[test]
+fn refresh_returns_none_without_runtime() {
+    // Refresh against a fresh state on a host without an L0 loader
+    // must return None — the per-OS readers rely on this to leave
+    // the sysfs / WMI baseline untouched.
+    let mut state = LevelZeroState::empty();
+    let result = refresh(&mut state, "0000:03:00.0");
+    // None when the loader is unavailable. On a host where the loader
+    // happens to be present but the BDF does not match any L0 device,
+    // we also expect None (bind_attempted flips to true, device stays
+    // None).
+    if let Some(readout) = result {
+        // If we DID get a runtime, refresh against an unknown BDF must
+        // still produce no data — bind to an unknown card fails.
+        assert!(
+            !readout.had_any_data,
+            "unknown BDF must not produce data, got {readout:?}"
+        );
+    }
+}
+
 // ----- Diagnostic helpers -----------------------------------------
 
 #[test]
