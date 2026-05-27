@@ -184,7 +184,7 @@ Optional Intel Level Zero (oneAPI) augmentation is available when the binary is 
 .I ze_loader.dll
 (Windows) is present at runtime, additional per-engine activity metrics (including the XMX
 .B COMPUTE_SINGLE
-class not reachable via sysfs) and energy-counter-derived power readings are surfaced. Absence of the runtime at runtime degrades silently to the sysfs/WMI baseline without error or log spam
+class not reachable via sysfs), energy-counter-derived power, temperature, dedicated/local memory state, frequency, and fan readings are surfaced when the corresponding Sysman domains are available and fresh. Seeded power and engine samples do not overwrite sysfs/WMI fallbacks. Missing loaders, missing optional symbols, unsupported domains, and permission failures degrade silently to the sysfs/WMI baseline, and per-field detail entries identify mixed metric sources.
 .TP
 .B Apple Silicon
 Native support for M1/M2/M3/M4 series with Metal API integration, ANE power monitoring, and thermal pressure tracking

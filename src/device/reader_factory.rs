@@ -110,7 +110,7 @@ pub fn get_gpu_readers() -> Vec<Box<dyn GpuReader>> {
             // `libamdgpu_top`, the Intel sysfs reader has no glibc
             // constraint and works on both glibc and musl targets.
             #[cfg(target_os = "linux")]
-            if has_intel_gpu() {
+            if crate::device::has_intel_gpu() {
                 readers.push(Box::new(intel_gpu_linux::IntelGpuReader::new()));
             }
         }

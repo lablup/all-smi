@@ -128,6 +128,22 @@ pub fn read_power_watts(device_dir: &Path) -> f64 {
     0.0
 }
 
+/// Walk `device/hwmon/hwmon*/fan1_input` (RPM). Returns the first
+/// parseable non-zero value.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn read_fan_rpm(device_dir: &Path) -> Option<u32> {
+    let hwmon_root = device_dir.join("hwmon");
+    let iter = std::fs::read_dir(&hwmon_root).ok()?;
+    for entry in iter.flatten() {
+        if let Some(rpm) = read_u32(&entry.path().join("fan1_input"))
+            && rpm > 0
+        {
+            return Some(rpm);
+        }
+    }
+    None
+}
+
 /// Read `path` as a decimal u64. Whitespace-trimmed; returns `None` on
 /// any I/O or parse failure.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
@@ -242,6 +258,15 @@ mod tests {
         fs::write(hwmon.join("power1_average"), "185500000\n").unwrap();
         let w = read_power_watts(dir.path());
         assert!((w - 185.5).abs() < 0.01, "got {w}");
+    }
+
+    #[test]
+    fn fan_rpm_handles_hwmon() {
+        let dir = tempdir().unwrap();
+        let hwmon = dir.path().join("hwmon").join("hwmon2");
+        fs::create_dir_all(&hwmon).unwrap();
+        fs::write(hwmon.join("fan1_input"), "1730\n").unwrap();
+        assert_eq!(read_fan_rpm(dir.path()), Some(1730));
     }
 
     #[test]

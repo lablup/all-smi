@@ -17,13 +17,16 @@
 //! the public API surface stays small and the loader internals can be
 //! exercised by unit tests without pulling in the refresh code path.
 
+use super::api::{LoadedLibrary, LzApi};
 use super::ffi;
-use libloading::{Library, Symbol};
+use libloading::Library;
 use once_cell::sync::OnceCell;
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::sync::{Mutex, Once};
 use tracing::{debug, warn};
+
+pub use super::api::try_load_library;
 
 /// Upper bound on any driver-reported handle / device / domain count
 /// we will allocate a buffer for. Mirrors the
@@ -150,21 +153,6 @@ pub(crate) struct LzRuntime {
 unsafe impl Send for LzRuntime {}
 unsafe impl Sync for LzRuntime {}
 
-/// Function pointer table — extracted from the loaded library once.
-#[derive(Clone, Copy)]
-pub(crate) struct LzApi {
-    pub(crate) ze_init: ffi::ZeInit,
-    pub(crate) zes_init: Option<ffi::ZesInit>,
-    pub(crate) ze_driver_get: ffi::ZeDriverGet,
-    pub(crate) ze_device_get: ffi::ZeDeviceGet,
-    pub(crate) zes_device_pci_get_properties: ffi::ZesDevicePciGetProperties,
-    pub(crate) zes_device_enum_engine_groups: ffi::ZesDeviceEnumEngineGroups,
-    pub(crate) zes_engine_get_properties: ffi::ZesEngineGetProperties,
-    pub(crate) zes_engine_get_activity: ffi::ZesEngineGetActivity,
-    pub(crate) zes_device_enum_power_domains: ffi::ZesDeviceEnumPowerDomains,
-    pub(crate) zes_power_get_energy_counter: ffi::ZesPowerGetEnergyCounter,
-}
-
 /// Wrapper around an `ffi::zes_device_handle_t` opaque pointer that
 /// satisfies `Send + Sync`. The L0 spec documents that opaque handles
 /// can be passed to Sysman entry points from any thread; we serialise
@@ -180,74 +168,6 @@ impl std::fmt::Debug for zes_device_handle_t_send {
         f.debug_tuple("zes_device_handle_t_send")
             .field(&(self.0 as usize))
             .finish()
-    }
-}
-
-/// Wrapper returned by [`try_load_library`] — owned by the static
-/// runtime cell at runtime; tests drop it explicitly.
-pub struct LoadedLibrary {
-    pub(crate) library: Library,
-    pub(crate) api: LzApi,
-}
-
-/// Attempt to load the Level Zero loader at the given path and resolve
-/// every symbol we need. Returns `None` on any failure — the caller
-/// degrades to the sysfs/WMI baseline. Public so the tests can probe
-/// it with a deliberately-bogus path.
-///
-/// # Safety
-///
-/// Loads an arbitrary shared library and resolves C symbols. The
-/// caller must ensure `path` points to a real Level Zero loader; if any
-/// resolved symbol has the wrong signature, calling it later is UB.
-/// In production [`LIBZE_PATHS`] only contains canonical loader
-/// filenames; every resolution failure short-circuits to `None`.
-pub unsafe fn try_load_library(path: &str) -> Option<LoadedLibrary> {
-    unsafe {
-        debug!("Level Zero: trying to load loader at {path}");
-        let lib = match Library::new(path) {
-            Ok(l) => l,
-            Err(e) => {
-                debug!("Level Zero: failed to load {path}: {e}");
-                return None;
-            }
-        };
-
-        // Resolve every symbol we care about. A single missing symbol
-        // means the runtime does not match our expected API surface;
-        // we conservatively refuse to bind.
-        let ze_init: Symbol<ffi::ZeInit> = lib.get(b"zeInit\0").ok()?;
-        let zes_init: Option<ffi::ZesInit> =
-            lib.get::<ffi::ZesInit>(b"zesInit\0").ok().map(|sym| *sym);
-        let ze_driver_get: Symbol<ffi::ZeDriverGet> = lib.get(b"zeDriverGet\0").ok()?;
-        let ze_device_get: Symbol<ffi::ZeDeviceGet> = lib.get(b"zeDeviceGet\0").ok()?;
-        let zes_device_pci_get_properties: Symbol<ffi::ZesDevicePciGetProperties> =
-            lib.get(b"zesDevicePciGetProperties\0").ok()?;
-        let zes_device_enum_engine_groups: Symbol<ffi::ZesDeviceEnumEngineGroups> =
-            lib.get(b"zesDeviceEnumEngineGroups\0").ok()?;
-        let zes_engine_get_properties: Symbol<ffi::ZesEngineGetProperties> =
-            lib.get(b"zesEngineGetProperties\0").ok()?;
-        let zes_engine_get_activity: Symbol<ffi::ZesEngineGetActivity> =
-            lib.get(b"zesEngineGetActivity\0").ok()?;
-        let zes_device_enum_power_domains: Symbol<ffi::ZesDeviceEnumPowerDomains> =
-            lib.get(b"zesDeviceEnumPowerDomains\0").ok()?;
-        let zes_power_get_energy_counter: Symbol<ffi::ZesPowerGetEnergyCounter> =
-            lib.get(b"zesPowerGetEnergyCounter\0").ok()?;
-
-        let api = LzApi {
-            ze_init: *ze_init,
-            zes_init,
-            ze_driver_get: *ze_driver_get,
-            ze_device_get: *ze_device_get,
-            zes_device_pci_get_properties: *zes_device_pci_get_properties,
-            zes_device_enum_engine_groups: *zes_device_enum_engine_groups,
-            zes_engine_get_properties: *zes_engine_get_properties,
-            zes_engine_get_activity: *zes_engine_get_activity,
-            zes_device_enum_power_domains: *zes_device_enum_power_domains,
-            zes_power_get_energy_counter: *zes_power_get_energy_counter,
-        };
-
-        Some(LoadedLibrary { library: lib, api })
     }
 }
 

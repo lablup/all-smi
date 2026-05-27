@@ -200,6 +200,15 @@ impl IntelWindowsGpuReader {
                         "Note".to_string(),
                         "Detailed metrics require Level Zero / xpu-smi".to_string(),
                     );
+                    detail.insert("Source: Utilization".to_string(), "unavailable".to_string());
+                    detail.insert("Source: Temperature".to_string(), "unavailable".to_string());
+                    detail.insert("Source: Power".to_string(), "unavailable".to_string());
+                    detail.insert("Source: Frequency".to_string(), "unavailable".to_string());
+                    detail.insert(
+                        "Source: Memory".to_string(),
+                        if total_memory > 0 { "WMI" } else { "unavailable" }.to_string(),
+                    );
+                    detail.insert("Source: Fan".to_string(), "unavailable".to_string());
 
                     gpu_list.push(GpuInfo {
                         uuid,

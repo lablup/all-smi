@@ -564,10 +564,10 @@ Stable check IDs (greppable across versions):
   - Intel Arc / Iris Xe / Xe client GPUs (Arc A/B-series, Core Ultra iGPU, Iris Xe) via i915/xe sysfs
     - Architecture classification (Alchemist, Battlemage, Xe-LPG, Iris Xe) with SYCL/oneAPI capability flag
     - Discrete VRAM tracking (i915 `mem_info_vram_total` and xe `tile0/vram0/total_bytes`)
-    - Frequency, temperature (hwmon), and power (hwmon) metrics
+    - Frequency, temperature (hwmon), power (hwmon), and fan (hwmon) metrics
     - Engine-busy utilization from sysfs per-engine monotonic counters (i915 and xe layouts); `max(render, compute)` reported as primary utilization; first refresh is a seeding call (returns `0.0`), real values available from the second refresh; PMU fallback for older kernels is deferred
     - Per-process GPU memory tracking via `/proc/<pid>/fdinfo` (Linux, with `--processes` flag); dedupes shared DRM file descriptors by `drm-client-id`; permission errors degrade silently per-process
-    - Opt-in Level Zero (oneAPI) augmentation behind `--features level_zero` (default off): when the build includes the feature and `libze_loader.so.1` / `ze_loader.dll` is present, surfaces XMX `compute (XMX)` engine activity that sysfs cannot reach and energy-counter-derived power; on Windows also fills `utilization` and `power_consumption` (zero on the WMI-only path); `detail["Metrics Source"]` reports `"sysfs + Level Zero"` (Linux) or `"WMI + Level Zero"` (Windows). Hosts without the loader degrade silently to the sysfs / WMI baseline. Temperature, frequency, memory state, per-process L0 stats, and fine-grained power-limit control are deferred to follow-up issues.
+    - Opt-in Level Zero Sysman backend behind `--features level_zero` (default off): dynamically loads `libze_loader.so.1` / `libze_loader.so` on Linux or `ze_loader.dll` on Windows and uses Sysman as the preferred Intel vendor source when values are fresh. Temperature, fresh energy-counter power deltas, dedicated/local memory state, fresh engine-activity deltas, and frequency can override the sysfs/WMI baseline per field; Linux fan keeps hwmon priority and falls back to Sysman, while Windows uses Sysman fan data when available. Seeded delta samples never overwrite a valid fallback, missing loaders/symbols degrade silently, and `detail["Source: <field>"]` exposes mixed-source results.
   - CPU monitoring via /proc filesystem
   - Memory monitoring with detailed statistics
   - Intel Gaudi NPUs (Gaudi 1/2/3) via hl-smi with background process monitoring

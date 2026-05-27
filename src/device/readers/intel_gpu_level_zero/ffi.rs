@@ -43,6 +43,9 @@
 
 use std::ffi::c_void;
 
+mod sysman;
+pub use sysman::*;
+
 // -- Result code -----------------------------------------------------
 
 /// `ZE_RESULT_SUCCESS` — every Level Zero function returns this on

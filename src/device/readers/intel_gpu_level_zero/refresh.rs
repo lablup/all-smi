@@ -17,10 +17,13 @@
 //! independently of the public surface and so each file stays under
 //! the 500-line budget.
 
-use super::loader::{LzApi, cap_handle_count};
+use super::api::LzApi;
+use super::loader::cap_handle_count;
 use super::{LevelZeroState, ffi, is_tracked_engine, label_order};
 use std::collections::HashMap;
 use std::ffi::c_void;
+
+const MAX_GPU_POWER_WATTS: f64 = 750.0;
 
 /// Per-engine running snapshot. Same delta-tracking shape as the sysfs
 /// `EngineSample` used by `intel_gpu_engine` — `last_active_us` is
@@ -42,49 +45,43 @@ pub(crate) struct PowerSample {
     pub(crate) last_timestamp_us: u64,
 }
 
-/// `Send + Sync` wrappers — the L0 spec allows opaque handles to be
-/// shared across threads as long as concurrent activity reads are
-/// serialised, which we do via the per-card `Mutex` around
-/// `LevelZeroState`.
-#[derive(Clone, Copy)]
-pub(crate) struct zes_engine_handle_t_send(pub(crate) ffi::zes_engine_handle_t);
-unsafe impl Send for zes_engine_handle_t_send {}
-unsafe impl Sync for zes_engine_handle_t_send {}
-
-impl std::fmt::Debug for zes_engine_handle_t_send {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_tuple("zes_engine_handle_t_send")
-            .field(&(self.0 as usize))
-            .finish()
-    }
+macro_rules! send_handle {
+    ($name:ident, $raw:ty) => {
+        #[derive(Clone, Copy)]
+        pub(crate) struct $name(pub(crate) $raw);
+        unsafe impl Send for $name {}
+        unsafe impl Sync for $name {}
+        impl std::fmt::Debug for $name {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.debug_tuple(stringify!($name))
+                    .field(&(self.0 as usize))
+                    .finish()
+            }
+        }
+    };
 }
 
-#[derive(Clone, Copy)]
-pub(crate) struct zes_pwr_handle_t_send(pub(crate) ffi::zes_pwr_handle_t);
-unsafe impl Send for zes_pwr_handle_t_send {}
-unsafe impl Sync for zes_pwr_handle_t_send {}
-
-impl std::fmt::Debug for zes_pwr_handle_t_send {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_tuple("zes_pwr_handle_t_send")
-            .field(&(self.0 as usize))
-            .finish()
-    }
-}
+send_handle!(zes_engine_handle_t_send, ffi::zes_engine_handle_t);
+send_handle!(zes_pwr_handle_t_send, ffi::zes_pwr_handle_t);
 
 /// Enumerate per-engine handles for the bound L0 device. Filters the
 /// raw enumeration to only the engine groups we surface in v1 (see
 /// [`super::is_tracked_engine`]) so that aggregated `_ALL` totals do
 /// not double-count against the per-engine `_SINGLE` readings.
 pub(crate) fn populate_engine_samples(api: &LzApi, state: &mut LevelZeroState) {
+    let (Some(enum_engine_groups), Some(get_properties)) = (
+        api.zes_device_enum_engine_groups,
+        api.zes_engine_get_properties,
+    ) else {
+        return;
+    };
     let device = match state.device {
         Some(d) => d.0,
         None => return,
     };
     let mut count: u32 = 0;
     // SAFETY: null pointer for count-only call per spec.
-    let r =
-        unsafe { (api.zes_device_enum_engine_groups)(device, &mut count, std::ptr::null_mut()) };
+    let r = unsafe { (enum_engine_groups)(device, &mut count, std::ptr::null_mut()) };
     if r != ffi::ZE_RESULT_SUCCESS || count == 0 {
         return;
     }
@@ -93,8 +90,7 @@ pub(crate) fn populate_engine_samples(api: &LzApi, state: &mut LevelZeroState) {
     let (cap, mut count) = cap_handle_count(count, "engine groups");
     let mut handles: Vec<ffi::zes_engine_handle_t> = vec![std::ptr::null_mut::<c_void>(); cap];
     // SAFETY: handles is sized exactly to count (capped).
-    let r =
-        unsafe { (api.zes_device_enum_engine_groups)(device, &mut count, handles.as_mut_ptr()) };
+    let r = unsafe { (enum_engine_groups)(device, &mut count, handles.as_mut_ptr()) };
     if r != ffi::ZE_RESULT_SUCCESS {
         return;
     }
@@ -105,7 +101,7 @@ pub(crate) fn populate_engine_samples(api: &LzApi, state: &mut LevelZeroState) {
         }
         let mut props = ffi::zes_engine_properties_t::default();
         // SAFETY: props is correctly initialised; driver writes the rest.
-        let r = unsafe { (api.zes_engine_get_properties)(handle, &mut props) };
+        let r = unsafe { (get_properties)(handle, &mut props) };
         if r != ffi::ZE_RESULT_SUCCESS {
             continue;
         }
@@ -128,14 +124,16 @@ pub(crate) fn populate_engine_samples(api: &LzApi, state: &mut LevelZeroState) {
 /// parts and a conservative approximation on multi-tile ones until a
 /// follow-up adds explicit domain-class handling.
 pub(crate) fn populate_power_samples(api: &LzApi, state: &mut LevelZeroState) {
+    let Some(enum_power_domains) = api.zes_device_enum_power_domains else {
+        return;
+    };
     let device = match state.device {
         Some(d) => d.0,
         None => return,
     };
     let mut count: u32 = 0;
     // SAFETY: null pointer for count-only call per spec.
-    let r =
-        unsafe { (api.zes_device_enum_power_domains)(device, &mut count, std::ptr::null_mut()) };
+    let r = unsafe { (enum_power_domains)(device, &mut count, std::ptr::null_mut()) };
     if r != ffi::ZE_RESULT_SUCCESS || count == 0 {
         return;
     }
@@ -143,8 +141,7 @@ pub(crate) fn populate_power_samples(api: &LzApi, state: &mut LevelZeroState) {
     let (cap, mut count) = cap_handle_count(count, "power domains");
     let mut handles: Vec<ffi::zes_pwr_handle_t> = vec![std::ptr::null_mut::<c_void>(); cap];
     // SAFETY: handles is sized exactly to count (capped).
-    let r =
-        unsafe { (api.zes_device_enum_power_domains)(device, &mut count, handles.as_mut_ptr()) };
+    let r = unsafe { (enum_power_domains)(device, &mut count, handles.as_mut_ptr()) };
     if r != ffi::ZE_RESULT_SUCCESS {
         return;
     }
@@ -164,36 +161,61 @@ pub(crate) fn populate_power_samples(api: &LzApi, state: &mut LevelZeroState) {
 /// Read every enumerated engine handle once and compute the per-class
 /// busy percentage against the previous sample. Returns a sorted list
 /// of `(label, percentage)` pairs.
-pub(crate) fn refresh_engines(api: &LzApi, state: &mut LevelZeroState) -> Vec<(&'static str, f64)> {
+#[derive(Debug, Clone, Default)]
+pub(crate) struct EngineRefresh {
+    pub(crate) entries: Vec<(&'static str, f64)>,
+    pub(crate) primary: Option<f64>,
+    pub(crate) seeded: bool,
+}
+
+pub(crate) fn refresh_engines(api: &LzApi, state: &mut LevelZeroState) -> EngineRefresh {
     if state.engine_samples.is_empty() {
-        return Vec::new();
+        return EngineRefresh::default();
     }
+    let Some(get_activity) = api.zes_engine_get_activity else {
+        return EngineRefresh::default();
+    };
     let mut per_group: HashMap<&'static str, f64> = HashMap::new();
     let mut any_sample = false;
+    let mut any_fresh = false;
     for sample in state.engine_samples.iter_mut() {
         let mut stats = ffi::zes_engine_stats_t::default();
         // SAFETY: stats is fully initialised; driver writes the fields.
-        let r = unsafe { (api.zes_engine_get_activity)(sample.handle.0, &mut stats) };
+        let r = unsafe { (get_activity)(sample.handle.0, &mut stats) };
         if r != ffi::ZE_RESULT_SUCCESS {
             continue;
         }
+        let was_seeded = sample.last_timestamp_us == 0;
         let pct = compute_engine_busy_pct(sample, &stats);
         sample.last_active_us = stats.active_time;
         sample.last_timestamp_us = stats.timestamp;
         sample.last_busy_pct = pct;
         any_sample = true;
+        if was_seeded {
+            continue;
+        }
+        any_fresh = true;
         let key = super::engine_label(sample.group);
         let entry = per_group.entry(key).or_insert(0.0);
         if pct > *entry {
             *entry = pct;
         }
     }
-    if !any_sample {
-        return Vec::new();
+    if !any_sample || !any_fresh {
+        return EngineRefresh {
+            entries: Vec::new(),
+            primary: None,
+            seeded: any_sample,
+        };
     }
     let mut out: Vec<(&'static str, f64)> = per_group.into_iter().collect();
     out.sort_by(|a, b| label_order(a.0).cmp(&label_order(b.0)).then(a.0.cmp(b.0)));
-    out
+    let primary = super::primary_utilization(&out).map(|p| p.clamp(0.0, 100.0));
+    EngineRefresh {
+        entries: out,
+        primary,
+        seeded: false,
+    }
 }
 
 /// Read every enumerated power-domain handle once and compute the
@@ -204,11 +226,12 @@ pub(crate) fn refresh_power(api: &LzApi, state: &mut LevelZeroState) -> Option<f
     if state.power_samples.is_empty() {
         return None;
     }
+    let get_counter = api.zes_power_get_energy_counter?;
     let mut best: Option<f64> = None;
     for sample in state.power_samples.iter_mut() {
         let mut counter = ffi::zes_power_energy_counter_t::default();
         // SAFETY: counter is fully initialised; driver writes its fields.
-        let r = unsafe { (api.zes_power_get_energy_counter)(sample.handle.0, &mut counter) };
+        let r = unsafe { (get_counter)(sample.handle.0, &mut counter) };
         if r != ffi::ZE_RESULT_SUCCESS {
             continue;
         }
@@ -216,6 +239,7 @@ pub(crate) fn refresh_power(api: &LzApi, state: &mut LevelZeroState) -> Option<f
         sample.last_energy_uj = counter.energy;
         sample.last_timestamp_us = counter.timestamp;
         if let Some(w) = watts
+            && w <= MAX_GPU_POWER_WATTS
             && (best.is_none() || best.unwrap() < w)
         {
             best = Some(w);
@@ -265,7 +289,10 @@ pub(crate) fn compute_power_watts(
     if delta_t_us == 0 {
         return None;
     }
-    let delta_e_uj = counter.energy.saturating_sub(sample.last_energy_uj);
+    if counter.energy < sample.last_energy_uj {
+        return None;
+    }
+    let delta_e_uj = counter.energy - sample.last_energy_uj;
     // (µJ / µs) = (10⁻⁶ J) / (10⁻⁶ s) = J/s = W. Do NOT divide by 1e6.
     let watts = (delta_e_uj as f64) / (delta_t_us as f64);
     if watts.is_finite() && watts >= 0.0 {

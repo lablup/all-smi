@@ -19,8 +19,6 @@
 //! on Core Ultra / Meteor Lake) — by walking `/sys/class/drm/card*` for
 //! devices whose vendor is `0x8086` and whose driver is `i915` or `xe`.
 //!
-//! ## Scope
-//!
 //! Surfaces device identity, memory, frequency, temperature, power,
 //! and engine-busy utilization. Engine-busy is delta-computed from
 //! sysfs counters by [`super::intel_gpu_engine`]: `max(render,
@@ -35,12 +33,9 @@
 //! ## Memory semantics
 //!
 //! Discrete GPUs report dedicated VRAM via `device/mem_info_vram_total`
-//! (i915) or `device/tile0/vram0/total_bytes` (xe). Integrated GPUs have
-//! no dedicated VRAM — the reader records `total_memory = 0` and writes a
-//! `"Memory"` detail explaining the value is shared system memory. The
-//! reader never fabricates a number from `MemTotal` because that
-//! misrepresents the actual GPU memory budget (the kernel allocates GTT
-//! pages on demand and the budget is a soft cap, not a fixed reservation).
+//! (i915) or `device/tile0/vram0/total_bytes` (xe). Integrated GPUs have no
+//! dedicated VRAM, so the reader records `total_memory = 0` and explains that
+//! memory is shared system memory.
 
 use crate::device::GpuReader;
 use crate::device::readers::common_cache::{DeviceStaticInfo, MAX_DEVICES};
@@ -54,8 +49,8 @@ use crate::device::readers::intel_gpu_names::{
     classify_intel_architecture, resolve_intel_gpu_name,
 };
 use crate::device::readers::intel_gpu_sysfs::{
-    MemoryVariant, has_nonzero_u64, read_frequency_mhz, read_memory_bytes, read_power_watts,
-    read_temperature_celsius,
+    MemoryVariant, has_nonzero_u64, read_fan_rpm, read_frequency_mhz, read_memory_bytes,
+    read_power_watts, read_temperature_celsius,
 };
 use crate::device::types::{GpuInfo, ProcessInfo};
 use crate::utils::get_hostname;
@@ -230,6 +225,7 @@ impl GpuReader for IntelGpuReader {
             let frequency = read_frequency_mhz(&device_dir);
             let temperature = read_temperature_celsius(&device_dir);
             let power_consumption = read_power_watts(&device_dir);
+            let fan_rpm = read_fan_rpm(&device_dir);
 
             // Round-trip values through the validation caps so that a
             // garbled sysfs file can never propagate u32::MAX into the
@@ -241,19 +237,20 @@ impl GpuReader for IntelGpuReader {
             let total_memory = total_memory.min(MAX_GPU_MEMORY_BYTES);
             let used_memory = used_memory.min(total_memory);
 
-            // Surface the raw memory budget as a detail entry too so a
-            // remote operator inspecting the `detail` map can see what
-            // the driver reported even when `total_memory` was clamped
-            // (this is purely defensive — no current Intel client GPU
-            // is anywhere near the 96GB cap).
-            if total_memory > 0 {
-                detail.insert("VRAM Total".to_string(), format!("{total_memory} bytes"));
-            }
+            sources::decorate_static_sources(
+                &mut detail,
+                total_memory,
+                temperature,
+                power_consumption,
+                frequency,
+                fan_rpm,
+            );
 
             // Engine-busy refresh — guarded by a per-card mutex.
             let readout = refresh_with_lock(&card.engine_state, &device_dir);
             let utilization = readout.primary_utilization.clamp(0.0, MAX_GPU_UTILIZATION);
             apply_engine_readout(&mut detail, &readout);
+            sources::decorate_utilization_source(&mut detail, &readout);
 
             let uuid = build_uuid(card, &device_dir);
 
@@ -493,6 +490,9 @@ pub fn has_intel_client_gpu() -> bool {
 #[cfg(feature = "level_zero")]
 #[path = "intel_gpu_linux/level_zero_glue.rs"]
 mod level_zero_glue;
+
+#[path = "intel_gpu_linux/sources.rs"]
+mod sources;
 
 #[cfg(test)]
 #[path = "intel_gpu_linux/tests.rs"]
