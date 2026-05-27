@@ -12,71 +12,87 @@ on:
         type: choice
         options: ['true','false']
       release_tag:
-        description: 'Release tag to upload artifacts to (e.g. v1.2.3)'
+        description: 'Tag to build from AND upload artifacts to (e.g. v1.2.3). Empty = build the dispatched ref.'
         required: false
+      targets:
+        description: 'Platforms to build (comma-separated: windows, linux, macos, or all). Empty = all.'
+        required: false
+        default: ''
+        type: string
 
 permissions:
   contents: write
 
 jobs:
+  # Resolve which platforms to build into a matrix. A real release always
+  # builds every target; the `targets` input only filters manual dispatch
+  # runs (empty => all). The build job's matrix is generated from this so
+  # there is a single source of truth for the platform list.
+  setup:
+    name: Resolve build matrix
+    runs-on: ubuntu-latest
+    outputs:
+      includes: ${{ steps.resolve.outputs.includes }}
+    steps:
+      - name: Resolve target platforms
+        id: resolve
+        env:
+          # release event => build everything; the input only applies to dispatch.
+          TARGETS: ${{ github.event_name == 'release' && 'all' || github.event.inputs.targets }}
+        run: |
+          set -euo pipefail
+
+          # Full build matrix; each entry is tagged with os_family for filtering.
+          # JSON uses only double quotes, so a single-quoted bash literal is safe
+          # and avoids heredoc indentation pitfalls inside this YAML block.
+          ALL='[
+            {"os_family":"linux",   "target":"x86_64-unknown-linux-gnu",    "os":"ubuntu-22.04",             "artifact_name":"all-smi",     "asset_name":"all-smi-linux-x86_64",       "archive_ext":".tar.gz", "protoc_platform":"linux-x86_64"},
+            {"os_family":"linux",   "target":"x86_64-unknown-linux-musl",   "os":"ubuntu-latest",           "artifact_name":"all-smi",     "asset_name":"all-smi-linux-x86_64-musl",  "archive_ext":".tar.gz", "protoc_platform":"linux-x86_64"},
+            {"os_family":"linux",   "target":"aarch64-unknown-linux-gnu",   "os":"ubuntu-22.04-arm",        "artifact_name":"all-smi",     "asset_name":"all-smi-linux-aarch64",      "archive_ext":".tar.gz", "protoc_platform":"linux-aarch_64"},
+            {"os_family":"linux",   "target":"aarch64-unknown-linux-musl",  "os":"ubuntu-24.04-arm",        "artifact_name":"all-smi",     "asset_name":"all-smi-linux-aarch64-musl", "archive_ext":".tar.gz", "protoc_platform":"linux-aarch_64"},
+            {"os_family":"macos",   "target":"aarch64-apple-darwin",        "os":"macos-14",                "artifact_name":"all-smi",     "asset_name":"all-smi-macos-aarch64",      "archive_ext":".zip",    "protoc_platform":"osx-aarch_64"},
+            {"os_family":"windows", "target":"x86_64-pc-windows-msvc",      "os":"windows-on-macmini02-x64","artifact_name":"all-smi.exe", "asset_name":"all-smi-windows-x86_64",     "archive_ext":".zip",    "protoc_platform":""}
+          ]'
+
+          # Normalize selection: lowercase, strip spaces; empty => all.
+          sel="$(printf '%s' "${TARGETS:-}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+          if [ -z "$sel" ]; then sel="all"; fi
+
+          # Validate tokens and expand `all` into concrete families.
+          fams=""
+          IFS=','
+          for tok in $sel; do
+            case "$tok" in
+              all) fams="windows linux macos" ;;
+              windows|linux|macos) fams="$fams $tok" ;;
+              "") ;;
+              *) echo "::error::Unknown build target '$tok'. Allowed: windows, linux, macos, all."; exit 1 ;;
+            esac
+          done
+          unset IFS
+
+          fam_json="$(printf '%s\n' $fams | awk 'NF' | sort -u | jq -R . | jq -cs .)"
+          includes="$(printf '%s' "$ALL" | jq -c --argjson fams "$fam_json" \
+            '[ .[] | select(.os_family as $f | $fams | index($f)) ]')"
+
+          if [ "$(printf '%s' "$includes" | jq 'length')" -eq 0 ]; then
+            echo "::error::No build targets selected."; exit 1
+          fi
+
+          echo "Building families: $fam_json"
+          printf '%s' "$includes" | jq -r '.[] | "  - " + .target'
+          echo "includes=$includes" >> "$GITHUB_OUTPUT"
+
   build:
     name: Build ${{ matrix.target }}
+    needs: setup
     runs-on: ${{ matrix.os }}
     environment: packaging
 
     strategy:
       fail-fast: false
       matrix:
-        include:
-          # Linux x86_64 (glibc)
-          - target: x86_64-unknown-linux-gnu
-            os: ubuntu-22.04
-            artifact_name: all-smi
-            asset_name: all-smi-linux-x86_64
-            archive_ext: ".tar.gz"
-            protoc_platform: linux-x86_64
-
-          # Linux x86_64 (musl - static)
-          - target: x86_64-unknown-linux-musl
-            os: ubuntu-latest
-            artifact_name: all-smi
-            asset_name: all-smi-linux-x86_64-musl
-            archive_ext: ".tar.gz"
-            protoc_platform: linux-x86_64
-
-          # Linux ARM64 (glibc)
-          - target: aarch64-unknown-linux-gnu
-            os: ubuntu-22.04-arm
-            artifact_name: all-smi
-            asset_name: all-smi-linux-aarch64
-            archive_ext: ".tar.gz"
-            protoc_platform: linux-aarch_64
-
-          # Linux ARM64 (musl - static)
-          - target: aarch64-unknown-linux-musl
-            os: ubuntu-24.04-arm
-            artifact_name: all-smi
-            asset_name: all-smi-linux-aarch64-musl
-            archive_ext: ".tar.gz"
-            protoc_platform: linux-aarch_64
-
-          # macOS ARM64
-          - target: aarch64-apple-darwin
-            os: macos-14
-            artifact_name: all-smi
-            asset_name: all-smi-macos-aarch64
-            archive_ext: ".zip"
-            protoc_platform: osx-aarch_64
-
-          # Windows x86_64 — self-hosted runner with signing certificate
-          # pre-installed in the Windows Certificate Store (shared with
-          # backend.ai-go's packaging pipeline).
-          - target: x86_64-pc-windows-msvc
-            os: windows-on-macmini02-x64
-            artifact_name: all-smi.exe
-            asset_name: all-smi-windows-x86_64
-            archive_ext: ".zip"
-            protoc_platform: ""  # Not needed for Windows (TPU is Linux-only)
+        include: ${{ fromJSON(needs.setup.outputs.includes) }}
 
     env:
       BIN_NAME: all-smi
@@ -85,9 +101,21 @@ jobs:
       PROTOC_VERSION: "31.1"
 
     steps:
-      # 1) Checkout repository
+      # 1) Checkout repository.
+      # Self-healing release: build the *source of the target tag* while running
+      # the *current* workflow definition. GitHub always executes the release.yml
+      # baked into the triggering ref, so a bug in an old tag's workflow (e.g. a
+      # broken notarization step) cannot be fixed by re-running that tag. To
+      # recover, dispatch this workflow from a branch carrying the fixed
+      # release.yml and pass the old tag as release_tag: the fixed workflow runs,
+      # but the old tag's source is what gets built and uploaded.
+      #   - release event      -> the published release's tag
+      #   - workflow_dispatch  -> the release_tag input, when provided
+      #   - otherwise          -> the exact commit that triggered the run
       - name: Checkout code
         uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.release.tag_name || github.event.inputs.release_tag || github.sha }}
 
       # 1.5) Pin Cargo/rustup to persistent paths on the Windows self-hosted
       # runner so registry/git/target survive workspace cleanup between jobs.
@@ -191,8 +219,28 @@ jobs:
           }
           trap cleanup EXIT
 
-          printf '%s' "$AC_API_PRIVATE_KEY_P8" > "$KEY_FILE"
+          # The AC_API_PRIVATE_KEY_P8 secret stores the App Store Connect .p8
+          # key base64-encoded (same convention as DEV_ID_CERT_P12, which the
+          # import-codesign-certs action consumes as base64). Decode it back to
+          # PEM here. Also tolerate a raw .p8 pasted verbatim, and strip CR so a
+          # CRLF-mangled paste still parses. Writing the secret verbatim without
+          # decoding makes notarytool fail with the opaque "Error: invalidAsn1".
+          if [ -z "${AC_API_PRIVATE_KEY_P8:-}" ]; then
+            echo "::error::AC_API_PRIVATE_KEY_P8 secret is not set or empty"
+            exit 1
+          fi
+          if printf '%s' "$AC_API_PRIVATE_KEY_P8" | grep -q 'BEGIN PRIVATE KEY'; then
+            printf '%s\n' "$AC_API_PRIVATE_KEY_P8" | tr -d '\r' > "$KEY_FILE"
+          else
+            printf '%s' "$AC_API_PRIVATE_KEY_P8" | tr -d '[:space:]' | base64 --decode > "$KEY_FILE"
+          fi
           chmod 600 "$KEY_FILE"
+
+          # Surface a clear message if the materialized key is not a valid
+          # PKCS#8 key, instead of the opaque notarytool "invalidAsn1" later.
+          if command -v openssl >/dev/null 2>&1 && ! openssl pkey -in "$KEY_FILE" -noout 2>/dev/null; then
+            echo "::warning::AC_API_PRIVATE_KEY_P8 did not parse as a PKCS#8 private key after decoding; notarization will likely fail. Re-store it as base64 of the .p8 file (base64 -i AuthKey_XXXX.p8 | pbcopy)."
+          fi
 
           /usr/bin/ditto -c -k --keepParent "$BIN" "$NOTARIZE_ZIP"
 
