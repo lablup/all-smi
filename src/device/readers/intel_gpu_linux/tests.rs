@@ -169,6 +169,16 @@ fn get_gpu_info_populates_basic_fields() {
         g.detail.get("SYCL Capable").map(String::as_str),
         Some("Yes")
     );
+    // `Metrics Source` advertises which backend produced the metrics.
+    // With the L0 feature off (or no L0 runtime on the host) this MUST
+    // stay at the sysfs baseline so operators can see the augmentation
+    // never ran. The level_zero augmentation upgrades it to
+    // `"sysfs + Level Zero"` only when an L0 readout carries data —
+    // which requires real hardware (issue #248 deferred AC).
+    assert_eq!(
+        g.detail.get("Metrics Source").map(String::as_str),
+        Some("sysfs (engine counters)")
+    );
     // The Intel reader populates NVIDIA-only fields with None / empty
     // defaults — verify the contract so consumers can render them as
     // "unavailable" rather than misinterpreting zeros.
