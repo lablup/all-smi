@@ -61,9 +61,9 @@ pub const ZE_INIT_FLAG_DEFAULT: u32 = 0;
 // -- ze_structure_type_t (subset) ------------------------------------
 
 /// `ZES_STRUCTURE_TYPE_PCI_PROPERTIES` per the Sysman spec.
-pub const ZES_STRUCTURE_TYPE_PCI_PROPERTIES: i32 = 0x0000_0001;
+pub const ZES_STRUCTURE_TYPE_PCI_PROPERTIES: i32 = 0x0000_0002;
 /// `ZES_STRUCTURE_TYPE_ENGINE_PROPERTIES` per the Sysman spec.
-pub const ZES_STRUCTURE_TYPE_ENGINE_PROPERTIES: i32 = 0x0000_000a;
+pub const ZES_STRUCTURE_TYPE_ENGINE_PROPERTIES: i32 = 0x0000_0005;
 
 // -- zes_engine_group_t (full enum, only some are matched) -----------
 //

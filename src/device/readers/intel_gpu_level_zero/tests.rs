@@ -62,8 +62,8 @@ fn init_flags_match_spec() {
 
 #[test]
 fn structure_type_constants_match_spec() {
-    assert_eq!(ffi::ZES_STRUCTURE_TYPE_PCI_PROPERTIES, 0x0000_0001);
-    assert_eq!(ffi::ZES_STRUCTURE_TYPE_ENGINE_PROPERTIES, 0x0000_000a);
+    assert_eq!(ffi::ZES_STRUCTURE_TYPE_PCI_PROPERTIES, 0x0000_0002);
+    assert_eq!(ffi::ZES_STRUCTURE_TYPE_ENGINE_PROPERTIES, 0x0000_0005);
 }
 
 // ----- Engine label classification ----------------------------------
