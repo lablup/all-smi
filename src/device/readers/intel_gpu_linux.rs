@@ -19,17 +19,18 @@
 //! on Core Ultra / Meteor Lake) — by walking `/sys/class/drm/card*` for
 //! devices whose vendor is `0x8086` and whose driver is `i915` or `xe`.
 //!
-//! ## Scope (v1)
+//! ## Scope
 //!
-//! This implementation surfaces device identity (name, PCI device ID),
-//! memory totals and used bytes where the driver exposes them, current
-//! frequency, temperature, and instantaneous power. Engine-busy utilization
-//! (the `engine/*/busy` perf counters) requires sampling deltas across
-//! polling intervals and is **deferred** — `utilization` is reported as
-//! `0.0` and the `detail` map carries a `"Utilization"` note pointing the
-//! user at `intel_gpu_top` for live engine-busy figures. Intel client GPUs
-//! have no MIG/vGPU equivalent so the `GpuReader` default `Vec::new()`
-//! returns apply unchanged.
+//! Surfaces device identity, memory, frequency, temperature, power,
+//! and engine-busy utilization. Engine-busy is delta-computed from
+//! sysfs counters by [`super::intel_gpu_engine`]: `max(render,
+//! compute)` becomes `GpuInfo.utilization`, the per-class breakdown
+//! lands in `detail["Engine: <class>"]`. The first refresh per card
+//! is a seeding call returning `0.0`; real values appear from the
+//! second refresh. When the kernel exposes no engine counters,
+//! `detail["Utilization"]` carries the note in
+//! `intel_gpu_engine::ENGINE_UNAVAILABLE_NOTE` and the PMU fallback is
+//! deferred. Intel client GPUs have no MIG/vGPU equivalent.
 //!
 //! ## Memory semantics
 //!
@@ -44,6 +45,9 @@
 use crate::device::GpuReader;
 use crate::device::common::execute_command_default;
 use crate::device::readers::common_cache::{DeviceStaticInfo, MAX_DEVICES};
+use crate::device::readers::intel_gpu_engine::{
+    EngineState, apply_engine_readout, refresh_with_lock,
+};
 use crate::device::readers::intel_gpu_names::{
     classify_intel_architecture, resolve_intel_gpu_name,
 };
@@ -56,7 +60,7 @@ use crate::utils::get_hostname;
 use chrono::Local;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 // GPU metric validation constants — Intel client GPUs are smaller than
 // datacenter accelerators, so we use tighter caps than the AMD reader.
@@ -66,6 +70,7 @@ const MAX_GPU_POWER_WATTS: f64 = 750.0; // largest Arc Pro variants stay <250W
 const MAX_GPU_TEMP_CELSIUS: u32 = 125; // package max across i915/xe
 const MAX_GPU_FREQ_MHZ: u32 = 5000;
 const MAX_GPU_MEMORY_BYTES: u64 = 96 * 1024 * 1024 * 1024; // 96GB headroom
+const MAX_GPU_UTILIZATION: f64 = 100.0; // Engine-busy is clamped to 100% per engine
 
 // Per-card sysfs anchor.  We hold the absolute card path (e.g.
 // `/sys/class/drm/card0`) plus a one-time-cached identity (the name and
@@ -87,6 +92,10 @@ struct IntelGpuCard {
     /// Cached static info (name + base `detail` map). Filled on first
     /// `get_gpu_info` call so that `IntelGpuReader::new` stays cheap.
     static_info: OnceLock<DeviceStaticInfo>,
+    /// Engine-busy delta tracker. Mirrors the AMD reader's
+    /// `vram_usage: Mutex<VramUsage>` pattern (including poisoning
+    /// recovery via `refresh_with_lock`).
+    engine_state: Mutex<EngineState>,
 }
 
 /// Render the discrete/integrated classification as the string we put in
@@ -156,13 +165,8 @@ impl IntelGpuReader {
                 "SYCL Capable".to_string(),
                 arch.sycl_capable_label().to_string(),
             );
-            // Document the v1 scope limitation in-band so library
-            // consumers see *why* utilization is always reported as
-            // zero rather than thinking the GPU is idle.
-            detail.insert(
-                "Utilization".to_string(),
-                "Requires intel_gpu_top (perf engine counters)".to_string(),
-            );
+            // The `"Utilization"` detail entry is populated dynamically
+            // by `get_gpu_info` via the engine-busy refresh path.
             if card.variant == MemoryVariant::Integrated {
                 detail.insert(
                     "Memory".to_string(),
@@ -210,6 +214,11 @@ impl GpuReader for IntelGpuReader {
                 detail.insert("VRAM Total".to_string(), format!("{total_memory} bytes"));
             }
 
+            // Engine-busy refresh — guarded by a per-card mutex.
+            let readout = refresh_with_lock(&card.engine_state, &device_dir);
+            let utilization = readout.primary_utilization.clamp(0.0, MAX_GPU_UTILIZATION);
+            apply_engine_readout(&mut detail, &readout);
+
             let uuid = build_uuid(card, &device_dir);
 
             out.push(GpuInfo {
@@ -220,7 +229,7 @@ impl GpuReader for IntelGpuReader {
                 host_id: hostname.clone(),
                 hostname: hostname.clone(),
                 instance: hostname.clone(),
-                utilization: 0.0,
+                utilization,
                 ane_utilization: 0.0,
                 dla_utilization: None,
                 tensorcore_utilization: None,
@@ -313,6 +322,7 @@ fn discover_cards(drm_root: &Path) -> Vec<IntelGpuCard> {
             device_id,
             variant,
             static_info: OnceLock::new(),
+            engine_state: Mutex::new(EngineState::empty()),
         });
     }
 

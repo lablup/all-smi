@@ -60,6 +60,8 @@ pub mod amd_windows;
 // classification can be reused by both per-OS readers and by external
 // consumers of the library.
 #[cfg(target_os = "linux")]
+pub mod intel_gpu_engine;
+#[cfg(target_os = "linux")]
 pub mod intel_gpu_linux;
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 pub mod intel_gpu_names;

@@ -561,6 +561,7 @@ Stable check IDs (greppable across versions):
     - Architecture classification (Alchemist, Battlemage, Xe-LPG, Iris Xe) with SYCL/oneAPI capability flag
     - Discrete VRAM tracking (i915 `mem_info_vram_total` and xe `tile0/vram0/total_bytes`)
     - Frequency, temperature (hwmon), and power (hwmon) metrics
+    - Engine-busy utilization from sysfs per-engine monotonic counters (i915 and xe layouts); `max(render, compute)` reported as primary utilization; first refresh is a seeding call (returns `0.0`), real values available from the second refresh; PMU fallback for older kernels is deferred
   - CPU monitoring via /proc filesystem
   - Memory monitoring with detailed statistics
   - Intel Gaudi NPUs (Gaudi 1/2/3) via hl-smi with background process monitoring
