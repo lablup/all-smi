@@ -148,7 +148,17 @@ fn get_gpu_info_populates_basic_fields() {
         Some("Discrete")
     );
     assert_eq!(g.detail.get("Driver").map(String::as_str), Some("i915"));
-    assert!(g.detail.contains_key("Utilization"));
+    // No engine sysfs entries in this fixture -> reader must surface
+    // the explanatory note, NOT the obsolete `intel_gpu_top` text.
+    assert_eq!(
+        g.detail.get("Utilization").map(String::as_str),
+        Some("Engine counters unavailable (kernel does not expose engine busy)")
+    );
+    // The pre-issue-#246 placeholder must not leak back in.
+    assert_ne!(
+        g.detail.get("Utilization").map(String::as_str),
+        Some("Requires intel_gpu_top (perf engine counters)")
+    );
     // Architecture / SYCL classification — derived from the resolved
     // marketing name. Arc A770 is Alchemist (SYCL-capable).
     assert_eq!(
@@ -195,6 +205,84 @@ fn get_gpu_info_integrated_reports_zero_memory() {
     assert_eq!(
         info[0].detail.get("SYCL Capable").map(String::as_str),
         Some("Yes")
+    );
+}
+
+#[test]
+fn get_gpu_info_seeding_emits_seeding_note_when_engines_exist() {
+    // When engine counters are discoverable, the very first refresh
+    // is a seeding call: baselines are stamped, utilization stays at
+    // 0.0, and the detail map carries the seeding note instead of
+    // the no-counters note.
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let card = make_card(root, 0, "0x8086", "i915", "0x56A0");
+    // Add an i915 engine counter so discovery finds something.
+    let engine_root = card.join("engine").join("rcs0");
+    fs::create_dir_all(&engine_root).unwrap();
+    fs::write(engine_root.join("busy"), "0\n").unwrap();
+
+    let reader = IntelGpuReader::new_from_root(root);
+    let info = reader.get_gpu_info();
+    assert_eq!(info.len(), 1);
+    let g = &info[0];
+    assert_eq!(g.utilization, 0.0);
+    assert_eq!(
+        g.detail.get("Utilization").map(String::as_str),
+        Some("Engine counters seeded (utilization available next refresh)")
+    );
+    // No per-engine entries yet — they appear from the *second* call.
+    assert!(
+        g.detail.keys().all(|k| !k.starts_with("Engine: ")),
+        "seeding call must not produce Engine: detail keys yet, got: {:?}",
+        g.detail.keys().collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn get_gpu_info_second_call_surfaces_engine_percent() {
+    // After a seeding call, the second refresh — with a non-zero busy
+    // counter update — must compute a real utilization and add per-
+    // engine `Engine: <class>` entries to the detail map. We can't
+    // inject a fake clock into the production reader, so the assertion
+    // here is on what the second call *can* observe: the counter
+    // delta is positive and the readout is no longer in the seeding
+    // state.
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let card = make_card(root, 0, "0x8086", "i915", "0x56A0");
+    let engine_root = card.join("engine").join("rcs0");
+    fs::create_dir_all(&engine_root).unwrap();
+    fs::write(engine_root.join("busy"), "0\n").unwrap();
+
+    let reader = IntelGpuReader::new_from_root(root);
+    let _seed = reader.get_gpu_info(); // seeding call
+    // Bump the counter to a value larger than any plausible wall-clock
+    // delta so the resulting percentage clamps to 100. This avoids a
+    // flaky assertion that depends on how long the test runner takes
+    // between the two `get_gpu_info` calls.
+    fs::write(engine_root.join("busy"), "10000000000000\n").unwrap();
+    let info = reader.get_gpu_info();
+    assert_eq!(info.len(), 1);
+    let g = &info[0];
+    // Utilization should reflect a positive engine-busy fraction.
+    assert!(
+        g.utilization > 0.0,
+        "second call must report non-zero utilization, got {}",
+        g.utilization
+    );
+    // Per-engine detail entry must exist for the render engine.
+    assert!(
+        g.detail.contains_key("Engine: render"),
+        "missing Engine: render entry. detail = {:?}",
+        g.detail
+    );
+    // The static `Utilization` note is removed once live data is
+    // available.
+    assert!(
+        !g.detail.contains_key("Utilization"),
+        "Utilization note should be cleared when engine data is live, got: {:?}",
+        g.detail.get("Utilization")
     );
 }
 
