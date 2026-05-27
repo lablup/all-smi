@@ -67,6 +67,22 @@ fn main() {
     // Set up panic handler for cleanup (cross-platform)
     setup_panic_handlers();
 
+    // Level Zero Sysman can be initialised with `zesInit` on modern
+    // runtimes, but older Intel loaders still require
+    // ZES_ENABLE_SYSMAN=1 before the first `zeInit`. Do that while the
+    // process is still single-threaded so Rust 2024's environment
+    // mutation safety contract is upheld.
+    #[cfg(all(
+        any(target_os = "linux", target_os = "windows"),
+        feature = "level_zero"
+    ))]
+    unsafe {
+        // SAFETY: `main` has not created the Tokio runtime or spawned
+        // signal-handler/background threads yet, and this runs before
+        // any Level Zero loader call.
+        device::readers::intel_gpu_level_zero::prepare_sysman_env_for_legacy_runtime();
+    }
+
     // Best-effort one-time migration of legacy `~/.cache/all-smi/...`
     // data to the platform-correct cache dir (issue #229). Runs before
     // any subcommand touches the cache so the new root is the one each

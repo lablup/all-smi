@@ -61,6 +61,10 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+#[path = "intel_gpu_fdinfo/io.rs"]
+mod io;
+use io::read_fdinfo_to_string;
+
 /// Hard cap on process enumeration. Matches the spirit of
 /// `MAX_DEVICES = 256` in [`crate::device::readers::common_cache`] —
 /// defends against a runaway `/proc` walk on degenerate hosts. A real
@@ -407,9 +411,8 @@ pub fn collect_intel_gpu_processes(
         process_count += 1;
 
         for fd in fds {
-            let content = match std::fs::read_to_string(&fd.fdinfo_path) {
-                Ok(c) => c,
-                Err(_) => continue, // permission / TOCTOU process exit
+            let Some(content) = read_fdinfo_to_string(&fd.fdinfo_path) else {
+                continue; // permission / TOCTOU process exit / oversized fdinfo
             };
             let Some(info) = parse_fdinfo(&content) else {
                 continue;
