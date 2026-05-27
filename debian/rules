@@ -9,8 +9,8 @@ export CARGO_HOME = $(HOME)/.cargo
 export CARGO_TARGET_DIR = $(CURDIR)/target
 export CARGO_NET_OFFLINE = true
 
-RUSTC := $(shell for c in rustc-1.95 rustc-1.94 rustc-1.93 rustc; do command -v $$c >/dev/null 2>&1 && { printf '%s' "$$c"; break; }; done)
-CARGO := $(shell for c in cargo-1.95 cargo-1.94 cargo-1.93 cargo; do command -v $$c >/dev/null 2>&1 && { printf '%s' "$$c"; break; }; done)
+RUSTC := $(shell for c in rustc-1.95 rustc; do command -v $$c >/dev/null 2>&1 && { printf '%s' "$$c"; break; }; done)
+CARGO := $(shell for c in cargo-1.95 cargo; do command -v $$c >/dev/null 2>&1 && { printf '%s' "$$c"; break; }; done)
 
 %:
 	dh $@
@@ -23,12 +23,12 @@ override_dh_auto_configure:
 	$(CARGO) --version
 	rustc_version=$$($(RUSTC) --version | awk '{print $$2}'); \
 	cargo_version=$$($(CARGO) --version | awk '{print $$2}'); \
-	dpkg --compare-versions "$$rustc_version" ge 1.93 || { \
-		echo "rustc 1.93+ is required for the current dependency set (found $$rustc_version)"; \
+	dpkg --compare-versions "$$rustc_version" ge 1.95 || { \
+		echo "rustc 1.95+ is required for the current dependency set (found $$rustc_version)"; \
 		exit 1; \
 	}; \
-	dpkg --compare-versions "$$cargo_version" ge 1.93 || { \
-		echo "cargo 1.93+ is required for the current dependency set (found $$cargo_version)"; \
+	dpkg --compare-versions "$$cargo_version" ge 1.95 || { \
+		echo "cargo 1.95+ is required for the current dependency set (found $$cargo_version)"; \
 		exit 1; \
 	}
 
