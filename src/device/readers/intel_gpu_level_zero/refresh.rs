@@ -17,8 +17,8 @@
 //! independently of the public surface and so each file stays under
 //! the 500-line budget.
 
-use super::{ffi, is_tracked_engine, label_order, LevelZeroState};
 use super::loader::LzApi;
+use super::{LevelZeroState, ffi, is_tracked_engine, label_order};
 use std::collections::HashMap;
 use std::ffi::c_void;
 

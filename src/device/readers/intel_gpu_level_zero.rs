@@ -73,7 +73,8 @@ mod refresh;
 #[cfg(test)]
 mod tests;
 
-#[allow(unused_imports)] // `normalise_pci_bdf` is consumed by the per-OS readers wired in commits 3-4.
+#[allow(unused_imports)]
+// `normalise_pci_bdf` is consumed by the per-OS readers wired in commits 3-4.
 pub use loader::normalise_pci_bdf;
 pub(crate) use loader::with_runtime;
 pub(crate) use refresh::{
@@ -250,9 +251,10 @@ pub fn apply_to_gpu_info(
 
     match platform {
         ApplyPlatform::Linux => {
-            gpu_info
-                .detail
-                .insert("Metrics Source".to_string(), "sysfs + Level Zero".to_string());
+            gpu_info.detail.insert(
+                "Metrics Source".to_string(),
+                "sysfs + Level Zero".to_string(),
+            );
         }
         ApplyPlatform::Windows => {
             // Overwrite the zeros WMI produced. Use the busiest engine
@@ -339,4 +341,3 @@ pub fn is_bound(state: &LevelZeroState) -> bool {
 pub(crate) fn sort_engine_entries(engines: &mut [(&'static str, f64)]) {
     engines.sort_by(|a, b| label_order(a.0).cmp(&label_order(b.0)).then(a.0.cmp(b.0)));
 }
-

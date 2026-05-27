@@ -98,9 +98,8 @@ pub struct IntelWindowsGpuReader {
     /// Behind a `Mutex` because the public `&self` methods are called
     /// concurrently by the collector thread and the API server.
     #[cfg(feature = "level_zero")]
-    level_zero_state: Mutex<
-        HashMap<String, crate::device::readers::intel_gpu_level_zero::LevelZeroState>,
-    >,
+    level_zero_state:
+        Mutex<HashMap<String, crate::device::readers::intel_gpu_level_zero::LevelZeroState>>,
 }
 
 impl Default for IntelWindowsGpuReader {
@@ -292,7 +291,9 @@ impl IntelWindowsGpuReader {
             // Key state by GPU UUID (which the WMI path derived from
             // PNPDeviceID) so the per-card energy-counter baseline
             // survives across `get_gpu_info` calls.
-            let state = states.entry(gpu.uuid.clone()).or_insert_with(l0::LevelZeroState::empty);
+            let state = states
+                .entry(gpu.uuid.clone())
+                .or_insert_with(l0::LevelZeroState::empty);
             if let Some(readout) = l0::refresh(state, bdf) {
                 l0::apply_to_gpu_info(gpu, &readout, l0::ApplyPlatform::Windows);
             }

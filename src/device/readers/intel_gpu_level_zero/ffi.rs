@@ -229,10 +229,8 @@ pub type ZesEngineGetProperties = unsafe extern "C" fn(
     p_properties: *mut zes_engine_properties_t,
 ) -> i32;
 
-pub type ZesEngineGetActivity = unsafe extern "C" fn(
-    h_engine: zes_engine_handle_t,
-    p_stats: *mut zes_engine_stats_t,
-) -> i32;
+pub type ZesEngineGetActivity =
+    unsafe extern "C" fn(h_engine: zes_engine_handle_t, p_stats: *mut zes_engine_stats_t) -> i32;
 
 pub type ZesDeviceEnumPowerDomains = unsafe extern "C" fn(
     h_device: zes_device_handle_t,

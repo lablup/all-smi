@@ -21,7 +21,9 @@
 
 use super::ffi;
 use super::loader::{format_pci_bdf, normalise_pci_bdf, try_load_library};
-use super::refresh::{compute_engine_busy_pct, compute_power_watts, make_engine_sample, make_power_sample};
+use super::refresh::{
+    compute_engine_busy_pct, compute_power_watts, make_engine_sample, make_power_sample,
+};
 use super::*;
 use crate::device::types::GpuInfo;
 use std::collections::HashMap;
@@ -68,11 +70,20 @@ fn structure_type_constants_match_spec() {
 
 #[test]
 fn engine_label_maps_known_groups() {
-    assert_eq!(engine_label(ffi::ZES_ENGINE_GROUP_COMPUTE_SINGLE), "compute (XMX)");
+    assert_eq!(
+        engine_label(ffi::ZES_ENGINE_GROUP_COMPUTE_SINGLE),
+        "compute (XMX)"
+    );
     assert_eq!(engine_label(ffi::ZES_ENGINE_GROUP_RENDER_SINGLE), "render");
     assert_eq!(engine_label(ffi::ZES_ENGINE_GROUP_COPY_SINGLE), "copy");
-    assert_eq!(engine_label(ffi::ZES_ENGINE_GROUP_MEDIA_DECODE_SINGLE), "media-decode");
-    assert_eq!(engine_label(ffi::ZES_ENGINE_GROUP_MEDIA_ENCODE_SINGLE), "media-encode");
+    assert_eq!(
+        engine_label(ffi::ZES_ENGINE_GROUP_MEDIA_DECODE_SINGLE),
+        "media-decode"
+    );
+    assert_eq!(
+        engine_label(ffi::ZES_ENGINE_GROUP_MEDIA_ENCODE_SINGLE),
+        "media-encode"
+    );
 }
 
 #[test]
@@ -323,8 +334,10 @@ fn apply_to_gpu_info_linux_does_not_overwrite_utilization() {
     // value must remain untouched even when L0 has engine data.
     let mut gpu = make_baseline_gpu_info();
     gpu.utilization = 42.0; // pretend sysfs already filled this in
-    gpu.detail
-        .insert("Metrics Source".to_string(), "sysfs (engine counters)".to_string());
+    gpu.detail.insert(
+        "Metrics Source".to_string(),
+        "sysfs (engine counters)".to_string(),
+    );
 
     let readout = LevelZeroReadout {
         engines: vec![("compute (XMX)", 80.0), ("render", 30.0)],
@@ -333,9 +346,14 @@ fn apply_to_gpu_info_linux_does_not_overwrite_utilization() {
     };
     apply_to_gpu_info(&mut gpu, &readout, ApplyPlatform::Linux);
 
-    assert_eq!(gpu.utilization, 42.0, "Linux must NOT overwrite utilization");
     assert_eq!(
-        gpu.detail.get("Engine: compute (XMX) (L0)").map(String::as_str),
+        gpu.utilization, 42.0,
+        "Linux must NOT overwrite utilization"
+    );
+    assert_eq!(
+        gpu.detail
+            .get("Engine: compute (XMX) (L0)")
+            .map(String::as_str),
         Some("80.00%")
     );
     assert_eq!(
@@ -384,7 +402,8 @@ fn apply_to_gpu_info_no_data_keeps_baseline() {
     // unchanged so the caller's baseline survives.
     let mut gpu = make_baseline_gpu_info();
     gpu.utilization = 42.0;
-    gpu.detail.insert("Metrics Source".to_string(), "WMI".to_string());
+    gpu.detail
+        .insert("Metrics Source".to_string(), "WMI".to_string());
 
     let readout = LevelZeroReadout::default();
     apply_to_gpu_info(&mut gpu, &readout, ApplyPlatform::Windows);
@@ -409,7 +428,10 @@ fn try_load_library_returns_none_for_nonexistent_path() {
     // SAFETY: nonexistent path → dlopen fails → returns None without
     // dereferencing any function pointers.
     let result = unsafe { try_load_library(bogus) };
-    assert!(result.is_none(), "expected None for nonexistent loader path");
+    assert!(
+        result.is_none(),
+        "expected None for nonexistent loader path"
+    );
 }
 
 #[test]
@@ -471,6 +493,12 @@ fn sort_engine_entries_canonical_order() {
     // render first, then compute (XMX), then copy, then media-decode, then media-encode.
     assert_eq!(
         order,
-        vec!["render", "compute (XMX)", "copy", "media-decode", "media-encode"]
+        vec![
+            "render",
+            "compute (XMX)",
+            "copy",
+            "media-decode",
+            "media-encode"
+        ]
     );
 }

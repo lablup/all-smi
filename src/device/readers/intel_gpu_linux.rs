@@ -102,8 +102,7 @@ struct IntelGpuCard {
     /// `engine_state` — delta-tracked behind a `Mutex` for power
     /// readings, only present when `--features level_zero` is active.
     #[cfg(feature = "level_zero")]
-    level_zero_state:
-        Mutex<crate::device::readers::intel_gpu_level_zero::LevelZeroState>,
+    level_zero_state: Mutex<crate::device::readers::intel_gpu_level_zero::LevelZeroState>,
 }
 
 /// Render the discrete/integrated classification as the string we put in
@@ -206,7 +205,10 @@ impl IntelGpuReader {
                 );
             }
             // Baseline `Metrics Source`; L0 augmentation may upgrade it.
-            detail.insert("Metrics Source".to_string(), "sysfs (engine counters)".to_string());
+            detail.insert(
+                "Metrics Source".to_string(),
+                "sysfs (engine counters)".to_string(),
+            );
 
             DeviceStaticInfo::with_details(name, None, detail)
         })

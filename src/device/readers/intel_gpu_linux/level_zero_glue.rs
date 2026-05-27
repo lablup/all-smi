@@ -27,7 +27,9 @@ use std::path::Path;
 /// `out`.
 pub(super) fn augment(card: &IntelGpuCard, out: &mut [GpuInfo], device_dir: &Path) {
     let Some(last) = out.last_mut() else { return };
-    let Some(bus) = read_pci_bus_id(device_dir) else { return };
+    let Some(bus) = read_pci_bus_id(device_dir) else {
+        return;
+    };
     let normalised = l0::normalise_pci_bdf(&bus);
     if let Ok(mut state) = card.level_zero_state.lock()
         && let Some(readout) = l0::refresh(&mut state, &normalised)
