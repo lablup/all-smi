@@ -304,6 +304,23 @@ pub fn engine_count(state: &LevelZeroState) -> usize {
     state.engine_samples.len()
 }
 
+/// Snapshot the BDF strings the L0 runtime knows about, sorted to
+/// give the caller a deterministic ordinal mapping. Used by the
+/// Windows reader to pair L0 device handles with WMI Intel video
+/// controllers when no shared per-card identifier is available
+/// (`Win32_VideoController.PNPDeviceID` does not expose the BDF in a
+/// stable, parseable form across driver versions).
+///
+/// Returns an empty list when the L0 runtime is unavailable.
+pub fn enumerated_pci_bdfs() -> Vec<String> {
+    with_runtime(|runtime| {
+        let mut keys: Vec<String> = runtime.devices_by_pci.keys().cloned().collect();
+        keys.sort();
+        keys
+    })
+    .unwrap_or_default()
+}
+
 /// Convenience for diagnostics: number of power domains the L0 layer
 /// discovered for this card.
 pub fn power_domain_count(state: &LevelZeroState) -> usize {

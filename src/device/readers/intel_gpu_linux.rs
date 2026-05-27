@@ -98,15 +98,12 @@ struct IntelGpuCard {
     /// `vram_usage: Mutex<VramUsage>` pattern (including poisoning
     /// recovery via `refresh_with_lock`).
     engine_state: Mutex<EngineState>,
-    /// Per-card Level Zero handle state. Only populated when the
-    /// `level_zero` feature is enabled AND the L0 runtime resolved to
-    /// a handle for this device. Wrapped in a `Mutex` for the same
-    /// reasons `engine_state` is (delta tracking on power requires
-    /// interior mutability). See issue #248 for the rationale.
+    /// Per-card Level Zero handle state (issue #248). Mirrors
+    /// `engine_state` — delta-tracked behind a `Mutex` for power
+    /// readings, only present when `--features level_zero` is active.
     #[cfg(feature = "level_zero")]
-    level_zero_state: Mutex<
-        crate::device::readers::intel_gpu_level_zero::LevelZeroState,
-    >,
+    level_zero_state:
+        Mutex<crate::device::readers::intel_gpu_level_zero::LevelZeroState>,
 }
 
 /// Render the discrete/integrated classification as the string we put in
@@ -208,6 +205,8 @@ impl IntelGpuReader {
                     "Shared system memory (no dedicated VRAM)".to_string(),
                 );
             }
+            // Baseline `Metrics Source`; L0 augmentation may upgrade it.
+            detail.insert("Metrics Source".to_string(), "sysfs (engine counters)".to_string());
 
             DeviceStaticInfo::with_details(name, None, detail)
         })
@@ -254,19 +253,7 @@ impl GpuReader for IntelGpuReader {
             let utilization = readout.primary_utilization.clamp(0.0, MAX_GPU_UTILIZATION);
             apply_engine_readout(&mut detail, &readout);
 
-            // Baseline `Metrics Source` so the operator can tell which
-            // path produced the engine-busy numbers (sysfs only vs.
-            // sysfs + Level Zero). The L0 augmentation below upgrades
-            // this string when it produces fresh data.
-            detail.insert(
-                "Metrics Source".to_string(),
-                "sysfs (engine counters)".to_string(),
-            );
-
             let uuid = build_uuid(card, &device_dir);
-
-            #[cfg(feature = "level_zero")]
-            let pci_bus = read_pci_bus_id(&device_dir);
 
             out.push(GpuInfo {
                 uuid,
@@ -304,22 +291,11 @@ impl GpuReader for IntelGpuReader {
             });
 
             // Level Zero augmentation runs *after* the baseline
-            // `GpuInfo` is pushed, so we can mutate the just-pushed
-            // entry in place. On hosts without the L0 runtime, or for
-            // cards L0 cannot bind to, this branch is a noop and the
+            // `GpuInfo` is pushed. On hosts without the L0 runtime, or
+            // for cards L0 cannot bind to, this is a noop and the
             // sysfs baseline remains unchanged.
             #[cfg(feature = "level_zero")]
-            {
-                use crate::device::readers::intel_gpu_level_zero as l0;
-                let Some(last) = out.last_mut() else { continue };
-                let Some(bus) = pci_bus.as_deref() else { continue };
-                let normalised = l0::normalise_pci_bdf(bus);
-                if let Ok(mut state) = card.level_zero_state.lock()
-                    && let Some(readout) = l0::refresh(&mut state, &normalised)
-                {
-                    l0::apply_to_gpu_info(last, &readout, l0::ApplyPlatform::Linux);
-                }
-            }
+            level_zero_glue::augment(card, &mut out, &device_dir);
         }
 
         out
@@ -511,6 +487,10 @@ mod detection;
 pub fn has_intel_client_gpu() -> bool {
     detection::has_intel_client_gpu_from_root(Path::new("/sys/class/drm"))
 }
+
+#[cfg(feature = "level_zero")]
+#[path = "intel_gpu_linux/level_zero_glue.rs"]
+mod level_zero_glue;
 
 #[cfg(test)]
 #[path = "intel_gpu_linux/tests.rs"]
