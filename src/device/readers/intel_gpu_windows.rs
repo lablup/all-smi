@@ -19,16 +19,21 @@
 //! template. The only differences are the vendor / family filter and a
 //! discrete-vs-integrated heuristic surfaced in `detail["Variant"]`.
 //!
-//! ## Limitations (v1 scope)
+//! ## WMI-only baseline limitations
 //!
 //! Detailed metrics (utilization, temperature, fine-grained power) are
-//! **not** available through WMI on Windows for Intel client GPUs.
-//! Surfacing them requires Level Zero (`ze_*` API via the
-//! `libze_intel_gpu` shared library) or `xpu-smi` for datacenter Flex /
-//! Max. That follow-up is documented in the issue and intentionally
-//! deferred — this reader returns `0` for those fields and adds a
-//! `detail["Note"]` entry pointing at the future work, so consumers know
-//! the missing values aren't a regression.
+//! **not** available through WMI for Intel client GPUs. The WMI-only
+//! baseline therefore returns `0` for those fields and writes a
+//! `detail["Note"]` entry that points operators at Level Zero.
+//!
+//! Issue #248 added an opt-in Level Zero augmentation behind the
+//! `level_zero` Cargo feature. When the build includes the feature
+//! AND the L0 loader (`ze_loader.dll`) is present at runtime, the
+//! augmentation overwrites the WMI zeros for `GpuInfo.utilization`
+//! and `GpuInfo.power_consumption` and flips
+//! `detail["Metrics Source"]` from `"WMI"` to `"WMI + Level Zero"`.
+//! Without the feature or the runtime the reader behaves exactly as
+//! before — there is no regression for hosts that lack either.
 
 use crate::device::GpuReader;
 use crate::device::readers::intel_gpu_names::classify_intel_architecture;
@@ -37,6 +42,8 @@ use crate::utils::get_hostname;
 use chrono::Local;
 use serde::Deserialize;
 use std::collections::HashMap;
+#[cfg(feature = "level_zero")]
+use std::sync::Mutex;
 use wmi::WMIConnection;
 
 // Thread-local WMI connection for reuse within the same thread —
@@ -82,7 +89,18 @@ struct VideoControllerName {
     name: Option<String>,
 }
 
-pub struct IntelWindowsGpuReader {}
+pub struct IntelWindowsGpuReader {
+    /// Per-PNP-id Level Zero handle state. Keyed by `PNPDeviceID` so
+    /// state persists across WMI iterations (each `get_gpu_info` call
+    /// re-queries WMI, but L0 state — the energy-counter baseline in
+    /// particular — must survive between calls so the delta-derived
+    /// power reading is meaningful from the second refresh onward).
+    /// Behind a `Mutex` because the public `&self` methods are called
+    /// concurrently by the collector thread and the API server.
+    #[cfg(feature = "level_zero")]
+    level_zero_state:
+        Mutex<HashMap<String, crate::device::readers::intel_gpu_level_zero::LevelZeroState>>,
+}
 
 impl Default for IntelWindowsGpuReader {
     fn default() -> Self {
@@ -92,7 +110,10 @@ impl Default for IntelWindowsGpuReader {
 
 impl IntelWindowsGpuReader {
     pub fn new() -> Self {
-        Self {}
+        Self {
+            #[cfg(feature = "level_zero")]
+            level_zero_state: Mutex::new(HashMap::new()),
+        }
     }
 
     fn query_intel_gpus(&self) -> Vec<GpuInfo> {
@@ -164,6 +185,17 @@ impl IntelWindowsGpuReader {
                         "SYCL Capable".to_string(),
                         arch.sycl_capable_label().to_string(),
                     );
+                    // `Metrics Source` advertises which backend
+                    // produced the metrics. WMI on its own surfaces no
+                    // utilization / temperature / power; the level_zero
+                    // augmentation below upgrades this string when L0
+                    // produces a readout. The legacy `Note` key is
+                    // retained for compatibility with downstream
+                    // consumers but conveys the same meaning.
+                    detail.insert(
+                        "Metrics Source".to_string(),
+                        "WMI".to_string(),
+                    );
                     detail.insert(
                         "Note".to_string(),
                         "Detailed metrics require Level Zero / xpu-smi".to_string(),
@@ -214,7 +246,10 @@ impl IntelWindowsGpuReader {
 
 impl GpuReader for IntelWindowsGpuReader {
     fn get_gpu_info(&self) -> Vec<GpuInfo> {
-        self.query_intel_gpus()
+        let mut gpus = self.query_intel_gpus();
+        #[cfg(feature = "level_zero")]
+        self.augment_with_level_zero(&mut gpus);
+        gpus
     }
 
     fn get_process_info(&self) -> Vec<ProcessInfo> {
@@ -222,6 +257,47 @@ impl GpuReader for IntelWindowsGpuReader {
         // Level Zero. Not available via Win32_VideoController. Mirrors
         // the AMD-on-Windows reader.
         Vec::new()
+    }
+}
+
+#[cfg(feature = "level_zero")]
+impl IntelWindowsGpuReader {
+    /// Layer Level Zero metrics on top of the WMI baseline. Each
+    /// Intel WMI controller is paired with an L0 device by ordinal
+    /// position in the sorted-BDF enumeration — `Win32_VideoController.PNPDeviceID`
+    /// does not expose the PCI bus / device / function in a stable,
+    /// parseable form across driver versions, so ordinal matching is
+    /// the most reliable strategy we can guarantee for v1. On
+    /// single-Intel-GPU hosts (the overwhelming majority of Windows
+    /// installations) this is a perfect 1:1 match.
+    ///
+    /// Multi-Intel-GPU Windows hosts are rare; when the WMI list and
+    /// the L0 list are mismatched in length we still pair the prefix
+    /// to keep the common cases working — the unpaired suffix simply
+    /// gets the WMI-only baseline. A follow-up issue can introduce
+    /// BDF parsing from `Win32_PnPEntity.LocationInformation` for
+    /// stronger matching when needed.
+    fn augment_with_level_zero(&self, gpus: &mut [GpuInfo]) {
+        use crate::device::readers::intel_gpu_level_zero as l0;
+        let bdfs = l0::enumerated_pci_bdfs();
+        if bdfs.is_empty() {
+            return;
+        }
+        let mut states = match self.level_zero_state.lock() {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        for (gpu, bdf) in gpus.iter_mut().zip(bdfs.iter()) {
+            // Key state by GPU UUID (which the WMI path derived from
+            // PNPDeviceID) so the per-card energy-counter baseline
+            // survives across `get_gpu_info` calls.
+            let state = states
+                .entry(gpu.uuid.clone())
+                .or_insert_with(l0::LevelZeroState::empty);
+            if let Some(readout) = l0::refresh(state, bdf) {
+                l0::apply_to_gpu_info(gpu, &readout, l0::ApplyPlatform::Windows);
+            }
+        }
     }
 }
 

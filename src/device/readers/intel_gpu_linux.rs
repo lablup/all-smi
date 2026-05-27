@@ -98,6 +98,11 @@ struct IntelGpuCard {
     /// `vram_usage: Mutex<VramUsage>` pattern (including poisoning
     /// recovery via `refresh_with_lock`).
     engine_state: Mutex<EngineState>,
+    /// Per-card Level Zero handle state (issue #248). Mirrors
+    /// `engine_state` — delta-tracked behind a `Mutex` for power
+    /// readings, only present when `--features level_zero` is active.
+    #[cfg(feature = "level_zero")]
+    level_zero_state: Mutex<crate::device::readers::intel_gpu_level_zero::LevelZeroState>,
 }
 
 /// Render the discrete/integrated classification as the string we put in
@@ -199,6 +204,11 @@ impl IntelGpuReader {
                     "Shared system memory (no dedicated VRAM)".to_string(),
                 );
             }
+            // Baseline `Metrics Source`; L0 augmentation may upgrade it.
+            detail.insert(
+                "Metrics Source".to_string(),
+                "sysfs (engine counters)".to_string(),
+            );
 
             DeviceStaticInfo::with_details(name, None, detail)
         })
@@ -281,6 +291,13 @@ impl GpuReader for IntelGpuReader {
                 gpm_metrics: None,
                 detail,
             });
+
+            // Level Zero augmentation runs *after* the baseline
+            // `GpuInfo` is pushed. On hosts without the L0 runtime, or
+            // for cards L0 cannot bind to, this is a noop and the
+            // sysfs baseline remains unchanged.
+            #[cfg(feature = "level_zero")]
+            level_zero_glue::augment(card, &mut out, &device_dir);
         }
 
         out
@@ -352,6 +369,10 @@ fn discover_cards(drm_root: &Path) -> Vec<IntelGpuCard> {
             variant,
             static_info: OnceLock::new(),
             engine_state: Mutex::new(EngineState::empty()),
+            #[cfg(feature = "level_zero")]
+            level_zero_state: Mutex::new(
+                crate::device::readers::intel_gpu_level_zero::LevelZeroState::empty(),
+            ),
         });
     }
 
@@ -468,6 +489,10 @@ mod detection;
 pub fn has_intel_client_gpu() -> bool {
     detection::has_intel_client_gpu_from_root(Path::new("/sys/class/drm"))
 }
+
+#[cfg(feature = "level_zero")]
+#[path = "intel_gpu_linux/level_zero_glue.rs"]
+mod level_zero_glue;
 
 #[cfg(test)]
 #[path = "intel_gpu_linux/tests.rs"]
