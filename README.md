@@ -1097,10 +1097,6 @@ all-smi snapshot --format csv --include gpu --query utilization \
 
 ### Recording & Replay
 
-> **Availability: v0.21.0+.** The `record` subcommand and `view --replay` are
-> not present in v0.20.1; they are scheduled for v0.21.0. To use them today,
-> build from source.
-
 The `record` subcommand captures a live metric stream to disk as NDJSON, and
 `view --replay <file>` plays it back through the same TUI the operator would
 have seen live. Intended for post-hoc incident investigation without a
