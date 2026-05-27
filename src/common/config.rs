@@ -597,17 +597,9 @@ mod tests {
         assert!(!cfg.cost_visible(), "show_cost=false must hide cost");
     }
 
-    /// Shared mutex used by the env-var tests to serialize
-    /// mutations of `ALL_SMI_ENERGY_*`. Cargo runs test fns on
-    /// multiple threads by default; without this lock, the `set_var`
-    /// / `remove_var` calls from two tests would race and either
-    /// observe each other's partial state or observe the value the
-    /// OTHER test was mid-clearing.
-    static ENERGY_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     #[test]
     fn energy_config_env_overrides_apply() {
-        let _guard = ENERGY_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::common::test_env::lock_env();
         let keys = [
             "ALL_SMI_ENERGY_PRICE",
             "ALL_SMI_ENERGY_CURRENCY",
@@ -643,7 +635,7 @@ mod tests {
 
     #[test]
     fn energy_config_gap_seconds_env_clamped_to_range() {
-        let _guard = ENERGY_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::common::test_env::lock_env();
         // A value beyond the 1-hour cap must be ignored so the default
         // survives instead of allowing an hours-long hold-last window.
         unsafe {
@@ -671,7 +663,7 @@ mod tests {
 
     #[test]
     fn energy_config_invalid_price_env_ignored() {
-        let _guard = ENERGY_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::common::test_env::lock_env();
         unsafe {
             std::env::remove_var("ALL_SMI_ENERGY_PRICE");
             std::env::set_var("ALL_SMI_ENERGY_PRICE", "not-a-number");

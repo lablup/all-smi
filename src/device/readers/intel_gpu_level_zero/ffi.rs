@@ -222,6 +222,12 @@ pub struct zes_power_energy_counter_t {
 
 pub type ZeInit = unsafe extern "C" fn(flags: u32) -> i32;
 
+/// Optional modern Sysman initialiser. Newer Level Zero loaders expose
+/// this so callers do not need to mutate `ZES_ENABLE_SYSMAN` before
+/// `zeInit`; older loaders may not export it, so the dynamic resolver
+/// treats this symbol as optional.
+pub type ZesInit = unsafe extern "C" fn(flags: u32) -> i32;
+
 pub type ZeDriverGet =
     unsafe extern "C" fn(p_count: *mut u32, p_drivers: *mut ze_driver_handle_t) -> i32;
 

@@ -17,11 +17,6 @@
 
 use super::*;
 
-/// Shared mutex used by env-var tests. Cargo runs tests on multiple
-/// threads by default; without this lock the `set_var`/`remove_var`
-/// calls from concurrent tests race each other.
-static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
 fn clear_env() {
     let keys = [
         "ALL_SMI_GENERAL_DEFAULT_MODE",
@@ -146,7 +141,7 @@ fn parse_toml_fails_on_invalid_syntax() {
 
 #[test]
 fn load_with_missing_path_returns_error() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = crate::common::test_env::lock_env();
     clear_env();
     let path = std::path::Path::new("/nonexistent/all-smi/fake-test-config.toml");
     let result = load(Some(path));
@@ -158,7 +153,7 @@ fn load_with_missing_path_returns_error() {
 
 #[test]
 fn load_without_path_uses_defaults_when_no_file() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = crate::common::test_env::lock_env();
     clear_env();
     // We pass `None` to `load`. If no candidate file exists we get
     // compiled defaults; if one happens to exist on the test host we
@@ -172,7 +167,7 @@ fn load_without_path_uses_defaults_when_no_file() {
 
 #[test]
 fn load_with_explicit_file_applies_values() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = crate::common::test_env::lock_env();
     clear_env();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("config.toml");
@@ -213,7 +208,7 @@ currency = "EUR"
 
 #[test]
 fn schema_version_mismatch_rejected() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = crate::common::test_env::lock_env();
     clear_env();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("config.toml");
@@ -233,7 +228,7 @@ fn schema_version_mismatch_rejected() {
 
 #[test]
 fn semantic_error_on_invalid_theme() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = crate::common::test_env::lock_env();
     clear_env();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("config.toml");
@@ -247,7 +242,7 @@ fn semantic_error_on_invalid_theme() {
 
 #[test]
 fn semantic_error_on_negative_price() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = crate::common::test_env::lock_env();
     clear_env();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("config.toml");
@@ -258,7 +253,7 @@ fn semantic_error_on_negative_price() {
 
 #[test]
 fn validate_file_strict_rejects_unknown() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = crate::common::test_env::lock_env();
     clear_env();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("config.toml");
@@ -271,7 +266,7 @@ fn validate_file_strict_rejects_unknown() {
 
 #[test]
 fn env_override_wins_over_file() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = crate::common::test_env::lock_env();
     clear_env();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("config.toml");
@@ -291,7 +286,7 @@ fn env_override_wins_over_file() {
 
 #[test]
 fn legacy_alert_env_alias_still_works() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = crate::common::test_env::lock_env();
     clear_env();
     unsafe {
         std::env::set_var("ALL_SMI_ALERT_TEMP", "77");
@@ -310,7 +305,7 @@ fn legacy_alert_env_alias_still_works() {
 
 #[test]
 fn legacy_energy_env_alias_still_works() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = crate::common::test_env::lock_env();
     clear_env();
     unsafe {
         std::env::set_var("ALL_SMI_ENERGY_PRICE", "0.25");
@@ -327,7 +322,7 @@ fn legacy_energy_env_alias_still_works() {
 
 #[test]
 fn canonical_energy_env_wins_over_legacy() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = crate::common::test_env::lock_env();
     clear_env();
     unsafe {
         std::env::set_var("ALL_SMI_ENERGY_PRICE", "0.10"); // legacy
@@ -343,7 +338,7 @@ fn canonical_energy_env_wins_over_legacy() {
 
 #[test]
 fn unknown_keys_captured_in_settings() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = crate::common::test_env::lock_env();
     clear_env();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("config.toml");
@@ -371,7 +366,7 @@ fn unknown_keys_captured_in_settings() {
 
 #[test]
 fn api_socket_as_bool_and_path() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = crate::common::test_env::lock_env();
     clear_env();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("config.toml");
@@ -392,7 +387,7 @@ fn api_socket_as_bool_and_path() {
 
 #[test]
 fn malformed_toml_returns_parse_error() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = crate::common::test_env::lock_env();
     clear_env();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("config.toml");

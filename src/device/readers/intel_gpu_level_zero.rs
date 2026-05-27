@@ -76,6 +76,7 @@ mod tests;
 #[allow(unused_imports)]
 // `normalise_pci_bdf` is consumed by the per-OS readers wired in commits 3-4.
 pub use loader::normalise_pci_bdf;
+pub use loader::prepare_sysman_env_for_legacy_runtime;
 pub(crate) use loader::with_runtime;
 pub(crate) use refresh::{
     EngineSample, PowerSample, populate_engine_samples, populate_power_samples, refresh_engines,

@@ -87,20 +87,45 @@ pub(crate) const LIBZE_PATHS: &[&str] = &[
 #[cfg(not(any(target_os = "linux", target_os = "windows")))]
 pub(crate) const LIBZE_PATHS: &[&str] = &[];
 
-/// Sysman is initialised by setting `ZES_ENABLE_SYSMAN=1` **before**
-/// the first `zeInit` call. See
+/// Legacy Sysman initialisation environment key. Newer loaders expose
+/// `zesInit`; older ones require `ZES_ENABLE_SYSMAN=1` **before** the
+/// first `zeInit` call. See
 /// <https://oneapi-src.github.io/level-zero-spec/level-zero/latest/sysman/PROG.html#using-sysman>.
 ///
-/// Issue #248 design notes picked the env-var route (Option A) over
-/// `zesInit` for broader compatibility — older Intel driver stacks ship
-/// a loader that exports `zeInit` but not `zesInit`.
+/// The CLI binary sets this at process start for legacy runtime
+/// compatibility. Library callers can either call `zesInit` through a
+/// modern loader (handled automatically here) or set this environment
+/// variable before starting threads / invoking all-smi.
 pub(crate) const SYSMAN_ENV_KEY: &str = "ZES_ENABLE_SYSMAN";
 
-/// One-shot env-var injector. Setting an env var inside a process is
-/// `unsafe` under the 2024 edition because other threads could read
-/// the environment concurrently; we therefore gate the call behind
-/// [`Once`] and ensure it runs strictly before the first `zeInit`.
+/// One-shot env-var injector used only by callers that can prove they
+/// are still in process startup.
 static SYSMAN_ENV_INIT: Once = Once::new();
+
+/// Enable Sysman for legacy Level Zero loaders that do not export
+/// `zesInit`.
+///
+/// Modern loaders are initialised through `zesInit` in
+/// [`initialize_runtime`], so this function exists only to preserve
+/// compatibility with older Intel runtimes that still require the
+/// environment-variable path.
+///
+/// # Safety
+///
+/// Must be called during single-threaded process startup, before any
+/// other thread can concurrently read or mutate the process
+/// environment. This is why the CLI calls it from `main()` before
+/// constructing a Tokio runtime or spawning signal-handler tasks.
+pub unsafe fn prepare_sysman_env_for_legacy_runtime() {
+    SYSMAN_ENV_INIT.call_once(|| {
+        // SAFETY: upheld by this function's contract.
+        unsafe {
+            if std::env::var_os(SYSMAN_ENV_KEY).is_none() {
+                std::env::set_var(SYSMAN_ENV_KEY, "1");
+            }
+        }
+    });
+}
 
 /// Process-wide initialisation latch. First caller pays the dlopen +
 /// `zeInit` + driver/device enumeration cost; later callers reuse the
@@ -129,6 +154,7 @@ unsafe impl Sync for LzRuntime {}
 #[derive(Clone, Copy)]
 pub(crate) struct LzApi {
     pub(crate) ze_init: ffi::ZeInit,
+    pub(crate) zes_init: Option<ffi::ZesInit>,
     pub(crate) ze_driver_get: ffi::ZeDriverGet,
     pub(crate) ze_device_get: ffi::ZeDeviceGet,
     pub(crate) zes_device_pci_get_properties: ffi::ZesDevicePciGetProperties,
@@ -191,6 +217,8 @@ pub unsafe fn try_load_library(path: &str) -> Option<LoadedLibrary> {
         // means the runtime does not match our expected API surface;
         // we conservatively refuse to bind.
         let ze_init: Symbol<ffi::ZeInit> = lib.get(b"zeInit\0").ok()?;
+        let zes_init: Option<ffi::ZesInit> =
+            lib.get::<ffi::ZesInit>(b"zesInit\0").ok().map(|sym| *sym);
         let ze_driver_get: Symbol<ffi::ZeDriverGet> = lib.get(b"zeDriverGet\0").ok()?;
         let ze_device_get: Symbol<ffi::ZeDeviceGet> = lib.get(b"zeDeviceGet\0").ok()?;
         let zes_device_pci_get_properties: Symbol<ffi::ZesDevicePciGetProperties> =
@@ -208,6 +236,7 @@ pub unsafe fn try_load_library(path: &str) -> Option<LoadedLibrary> {
 
         let api = LzApi {
             ze_init: *ze_init,
+            zes_init,
             ze_driver_get: *ze_driver_get,
             ze_device_get: *ze_device_get,
             zes_device_pci_get_properties: *zes_device_pci_get_properties,
@@ -240,20 +269,6 @@ pub(crate) fn with_runtime<R>(f: impl FnOnce(&LzRuntime) -> R) -> Option<R> {
 }
 
 fn initialize_runtime() -> Option<LzRuntime> {
-    // Set ZES_ENABLE_SYSMAN before any L0 call, exactly once.
-    SYSMAN_ENV_INIT.call_once(|| {
-        // SAFETY: Inside `Once::call_once`, so no L0 thread has begun
-        // yet (every L0 caller goes through `ensure_runtime`, which is
-        // what we are inside of). We only set the variable when it is
-        // currently unset so we never clobber an operator's
-        // intentional override.
-        unsafe {
-            if std::env::var_os(SYSMAN_ENV_KEY).is_none() {
-                std::env::set_var(SYSMAN_ENV_KEY, "1");
-            }
-        }
-    });
-
     // Try every candidate path until one loads and resolves all
     // symbols. A failure here is the normal case on a host without the
     // L0 runtime — we log at debug, never warn or error.
@@ -270,6 +285,15 @@ fn initialize_runtime() -> Option<LzRuntime> {
     let loaded = loaded?;
 
     let api = loaded.api;
+    let sysman_env_enabled = std::env::var(SYSMAN_ENV_KEY)
+        .map(|v| v == "1")
+        .unwrap_or(false);
+    if api.zes_init.is_none() && !sysman_env_enabled {
+        debug!(
+            "Level Zero: loader does not expose zesInit and {SYSMAN_ENV_KEY}=1 was not set before zeInit; degrading"
+        );
+        return None;
+    }
 
     // SAFETY: api function pointers were resolved from the library
     // above and `lib` is still alive (we own it). Their C signatures
@@ -278,6 +302,18 @@ fn initialize_runtime() -> Option<LzRuntime> {
     if init_res != ffi::ZE_RESULT_SUCCESS {
         debug!("Level Zero: zeInit returned {init_res}; degrading");
         return None;
+    }
+
+    if let Some(zes_init) = api.zes_init {
+        // SAFETY: optional symbol was resolved from the same live
+        // Level Zero loader as the other function pointers. The spec
+        // allows calling `zesInit` before or after `zeInit`, but it
+        // must happen before any other Sysman function.
+        let sysman_res = unsafe { (zes_init)(ffi::ZE_INIT_FLAG_DEFAULT) };
+        if sysman_res != ffi::ZE_RESULT_SUCCESS {
+            debug!("Level Zero: zesInit returned {sysman_res}; degrading");
+            return None;
+        }
     }
 
     let devices_by_pci = enumerate_devices(&api);

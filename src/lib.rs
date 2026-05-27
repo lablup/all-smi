@@ -205,4 +205,6 @@ pub mod common {
     /// Shared secure file-write helper (O_NOFOLLOW + 0o600).
     #[cfg(feature = "cli")]
     pub mod secure_write;
+    #[cfg(test)]
+    pub(crate) mod test_env;
 }
