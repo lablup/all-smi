@@ -191,8 +191,28 @@ jobs:
           }
           trap cleanup EXIT
 
-          printf '%s' "$AC_API_PRIVATE_KEY_P8" > "$KEY_FILE"
+          # The AC_API_PRIVATE_KEY_P8 secret stores the App Store Connect .p8
+          # key base64-encoded (same convention as DEV_ID_CERT_P12, which the
+          # import-codesign-certs action consumes as base64). Decode it back to
+          # PEM here. Also tolerate a raw .p8 pasted verbatim, and strip CR so a
+          # CRLF-mangled paste still parses. Writing the secret verbatim without
+          # decoding makes notarytool fail with the opaque "Error: invalidAsn1".
+          if [ -z "${AC_API_PRIVATE_KEY_P8:-}" ]; then
+            echo "::error::AC_API_PRIVATE_KEY_P8 secret is not set or empty"
+            exit 1
+          fi
+          if printf '%s' "$AC_API_PRIVATE_KEY_P8" | grep -q 'BEGIN PRIVATE KEY'; then
+            printf '%s\n' "$AC_API_PRIVATE_KEY_P8" | tr -d '\r' > "$KEY_FILE"
+          else
+            printf '%s' "$AC_API_PRIVATE_KEY_P8" | tr -d '[:space:]' | base64 --decode > "$KEY_FILE"
+          fi
           chmod 600 "$KEY_FILE"
+
+          # Surface a clear message if the materialized key is not a valid
+          # PKCS#8 key, instead of the opaque notarytool "invalidAsn1" later.
+          if command -v openssl >/dev/null 2>&1 && ! openssl pkey -in "$KEY_FILE" -noout 2>/dev/null; then
+            echo "::warning::AC_API_PRIVATE_KEY_P8 did not parse as a PKCS#8 private key after decoding; notarization will likely fail. Re-store it as base64 of the .p8 file (base64 -i AuthKey_XXXX.p8 | pbcopy)."
+          fi
 
           /usr/bin/ditto -c -k --keepParent "$BIN" "$NOTARIZE_ZIP"
 
