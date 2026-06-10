@@ -13,8 +13,10 @@
 // limitations under the License.
 
 use std::io::{self, Read};
-use std::process::{Command, Output, Stdio};
+use std::process::{Output, Stdio};
 use std::time::{Duration, Instant};
+
+use crate::utils::command::new_command;
 
 /// Maximum bytes of stdout or stderr captured from a child process by
 /// [`run_command_with_timeout`]. Output beyond this cap is truncated and
@@ -94,7 +96,7 @@ pub fn run_command_with_timeout(
     timeout: Duration,
 ) -> io::Result<Output> {
     // Spawn the child process
-    let mut child = Command::new(command)
+    let mut child = new_command(command)
         .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

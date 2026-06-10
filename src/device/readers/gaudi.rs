@@ -19,6 +19,8 @@ use crate::device::hlsmi::parser::{GaudiDeviceMetrics, map_device_name};
 use crate::device::readers::common_cache::{DetailBuilder, DeviceStaticInfo};
 use crate::device::types::{GpuInfo, ProcessInfo};
 #[cfg(target_os = "linux")]
+use crate::utils::command::new_command;
+#[cfg(target_os = "linux")]
 use crate::utils::get_hostname;
 #[cfg(target_os = "linux")]
 use chrono::Local;
@@ -126,7 +128,7 @@ impl GaudiNpuReader {
         }
 
         // Check if command is available in PATH
-        if let Ok(output) = std::process::Command::new("which").arg("hl-smi").output()
+        if let Ok(output) = new_command("which").arg("hl-smi").output()
             && output.status.success()
         {
             // Cache the result

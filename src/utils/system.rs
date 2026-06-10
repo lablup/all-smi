@@ -12,9 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::utils::command::new_command;
 use once_cell::sync::Lazy;
 use std::io::{self, Write};
-use std::process::Command;
 use std::sync::Mutex;
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
@@ -59,7 +59,7 @@ pub fn refresh_global_processes() {
 
 /// Check if the current process already has sudo privileges
 pub fn has_sudo_privileges() -> bool {
-    Command::new("sudo")
+    new_command("sudo")
         .arg("-n") // Non-interactive mode
         .arg("-v") // Validate sudo timestamp
         .output()
@@ -292,7 +292,7 @@ fn request_sudo_with_explanation(platform: SudoPlatform, return_bool: bool) -> b
     io::stdout().flush().unwrap();
 
     // Attempt to get sudo privileges
-    let status = Command::new("sudo")
+    let status = new_command("sudo")
         .arg("-v")
         .status()
         .expect("Failed to execute sudo command");
