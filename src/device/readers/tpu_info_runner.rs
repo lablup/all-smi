@@ -15,7 +15,6 @@
 use crate::utils::command::new_command;
 use regex::Regex;
 use std::collections::HashMap;
-use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::thread;

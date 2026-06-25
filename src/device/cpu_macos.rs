@@ -22,7 +22,6 @@ use crate::device::{
 use crate::utils::command::new_command;
 use crate::utils::system::get_hostname;
 use chrono::Local;
-use std::process::Command;
 use std::sync::{Mutex, RwLock};
 use sysinfo::System;
 

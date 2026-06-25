@@ -16,7 +16,7 @@ use crate::utils::command::new_command;
 use std::io::BufRead;
 use std::io::BufReader;
 use std::panic::{self, AssertUnwindSafe};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
