@@ -14,3 +14,10 @@ too-many-arguments-threshold = 7
 
 # Allow mixed uninlined format args during transition
 allow-mixed-uninlined-format-args = false
+
+# Force all process spawning through utils::command::new_command so the
+# Windows CREATE_NO_WINDOW flag is always applied, preventing console-window
+# flashes when all-smi is used as a library in GUI apps (see issue #263).
+disallowed-methods = [
+    { path = "std::process::Command::new", reason = "use utils::command::new_command to suppress the Windows console window (#263)" },
+]

@@ -19,9 +19,9 @@ use crate::device::{
     AppleSiliconCpuInfo, CoreType, CoreUtilization, CpuInfo, CpuPlatformType, CpuReader,
     CpuSocketInfo,
 };
+use crate::utils::command::new_command;
 use crate::utils::system::get_hostname;
 use chrono::Local;
-use std::process::Command;
 use std::sync::{Mutex, RwLock};
 use sysinfo::System;
 
@@ -77,7 +77,7 @@ impl MacOsCpuReader {
     }
 
     fn detect_apple_silicon() -> bool {
-        if let Ok(output) = Command::new("uname").arg("-m").output() {
+        if let Ok(output) = new_command("uname").arg("-m").output() {
             let architecture = String::from_utf8_lossy(&output.stdout);
             return architecture.trim() == "arm64";
         }
@@ -347,7 +347,7 @@ impl MacOsCpuReader {
                 info
             } else {
                 // Get CPU information using system_profiler (first time only)
-                let output = Command::new("system_profiler")
+                let output = new_command("system_profiler")
                     .arg("SPHardwareDataType")
                     .output()?;
 
@@ -436,7 +436,7 @@ impl MacOsCpuReader {
         // Read perflevel names and core counts to determine core types dynamically
         // M5 Pro/Max: perflevel0.name=Super, perflevel1.name=Performance (no E-cores)
         // M1-M4:      perflevel0.name=Performance (or absent), perflevel1.name=Efficiency
-        let output = Command::new("sysctl")
+        let output = new_command("sysctl")
             .args(["hw.perflevel0.physicalcpu", "hw.perflevel1.physicalcpu"])
             .output()?;
 
@@ -497,7 +497,7 @@ impl MacOsCpuReader {
     /// Returns None if the sysctl key does not exist (M1-M4 chips)
     fn get_perflevel_name(level: u32) -> Option<String> {
         let key = format!("hw.perflevel{level}.name");
-        let output = Command::new("sysctl").args(["-n", &key]).output().ok()?;
+        let output = new_command("sysctl").args(["-n", &key]).output().ok()?;
 
         if !output.status.success() {
             return None;
@@ -510,7 +510,7 @@ impl MacOsCpuReader {
     /// Get CPU model from sysctl machdep.cpu.brand_string
     /// This is significantly faster than system_profiler (~10ms vs ~500ms)
     fn get_cpu_model_sysctl(&self) -> Result<String, Box<dyn std::error::Error>> {
-        let output = Command::new("sysctl")
+        let output = new_command("sysctl")
             .args(["-n", "machdep.cpu.brand_string"])
             .output()?;
 
@@ -530,7 +530,7 @@ impl MacOsCpuReader {
 
     /// Get GPU core count using ioreg (faster than system_profiler)
     fn get_gpu_core_count_ioreg(&self) -> Result<u32, Box<dyn std::error::Error>> {
-        let output = Command::new("ioreg")
+        let output = new_command("ioreg")
             .args(["-rc", "AGXAccelerator", "-d1"])
             .output()?;
 
@@ -594,7 +594,7 @@ impl MacOsCpuReader {
     // These methods are no longer used since we fetch both values in a single sysctl call
     #[allow(dead_code)]
     fn get_p_core_count(&self) -> Result<u32, Box<dyn std::error::Error>> {
-        let output = Command::new("sysctl")
+        let output = new_command("sysctl")
             .arg("hw.perflevel0.physicalcpu")
             .output()?;
 
@@ -609,7 +609,7 @@ impl MacOsCpuReader {
 
     #[allow(dead_code)]
     fn get_e_core_count(&self) -> Result<u32, Box<dyn std::error::Error>> {
-        let output = Command::new("sysctl")
+        let output = new_command("sysctl")
             .arg("hw.perflevel1.physicalcpu")
             .output()?;
 
@@ -624,7 +624,7 @@ impl MacOsCpuReader {
 
     #[allow(dead_code)] // Kept as fallback, but get_gpu_core_count_ioreg() is preferred
     fn get_gpu_core_count(&self) -> Result<u32, Box<dyn std::error::Error>> {
-        let output = Command::new("system_profiler")
+        let output = new_command("system_profiler")
             .arg("SPDisplaysDataType")
             .arg("-json")
             .output()?;
@@ -664,7 +664,7 @@ impl MacOsCpuReader {
         }
 
         // On M5 Pro/Max, perflevel0 = Super cores
-        let output = Command::new("sysctl")
+        let output = new_command("sysctl")
             .arg("hw.perflevel0.l2cachesize")
             .output()?;
 
@@ -696,7 +696,7 @@ impl MacOsCpuReader {
             "hw.perflevel0.l2cachesize"
         };
 
-        let output = Command::new("sysctl").arg(perflevel).output()?;
+        let output = new_command("sysctl").arg(perflevel).output()?;
 
         let output_str = String::from_utf8_lossy(&output.stdout);
         if let Some(value_str) = output_str.split(':').nth(1) {
@@ -726,7 +726,7 @@ impl MacOsCpuReader {
         }
 
         // On M1-M4, E-cores are perflevel1
-        let output = Command::new("sysctl")
+        let output = new_command("sysctl")
             .arg("hw.perflevel1.l2cachesize")
             .output()?;
 
@@ -829,7 +829,7 @@ impl MacOsCpuReader {
     #[allow(dead_code)] // Kept as fallback method when sysinfo is unavailable
     fn get_cpu_utilization_iostat(&self) -> Result<f64, Box<dyn std::error::Error>> {
         // Fallback method using iostat (kept for compatibility)
-        let output = Command::new("iostat").args(["-c", "1"]).output()?;
+        let output = new_command("iostat").args(["-c", "1"]).output()?;
 
         let iostat_output = String::from_utf8_lossy(&output.stdout);
 

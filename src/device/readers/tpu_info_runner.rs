@@ -12,9 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::utils::command::new_command;
 use regex::Regex;
 use std::collections::HashMap;
-use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::thread;
@@ -152,7 +152,7 @@ impl TpuInfoRunner {
 
         // Run tpu-info in normal mode (NOT streaming mode)
         // Streaming mode uses Rich's Live display which doesn't work with pipes
-        let output_res = Command::new("tpu-info")
+        let output_res = new_command("tpu-info")
             .env("TERM", "dumb")
             .env("NO_COLOR", "1")
             .env("FORCE_COLOR", "0")

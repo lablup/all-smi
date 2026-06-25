@@ -12,10 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::utils::command::new_command;
 use std::io::BufRead;
 use std::io::BufReader;
 use std::panic::{self, AssertUnwindSafe};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -85,7 +86,7 @@ impl ProcessManager {
         &self,
         command_rx: Receiver<ReaderCommand>,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut cmd = Command::new("hl-smi");
+        let mut cmd = new_command("hl-smi");
 
         let args = self.config.get_hlsmi_args();
         cmd.args(&args)
@@ -268,7 +269,7 @@ impl ProcessManager {
             }
         }
 
-        let mut cmd = Command::new("hl-smi");
+        let mut cmd = new_command("hl-smi");
         let args = config.get_hlsmi_args();
         cmd.args(&args)
             .stdin(Stdio::null())

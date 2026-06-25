@@ -647,7 +647,7 @@ impl GoogleTpuReader {
     /// Try to get accelerator type from tpu-info CLI (fast, no heavy imports)
     #[cfg(target_os = "linux")]
     fn get_accelerator_type_from_tpu_info() -> Option<String> {
-        use std::process::Command;
+        use crate::utils::command::new_command;
         static ACCELERATOR_TYPE_CACHE: OnceLock<Option<String>> = OnceLock::new();
 
         ACCELERATOR_TYPE_CACHE
@@ -656,7 +656,7 @@ impl GoogleTpuReader {
                 // - tpu-info version: 0.8.0
                 // - libtpu version: 0.0.17
                 // - accelerator type: v6e
-                let output = Command::new("tpu-info").arg("-v").output().ok()?;
+                let output = new_command("tpu-info").arg("-v").output().ok()?;
 
                 if !output.status.success() {
                     return None;

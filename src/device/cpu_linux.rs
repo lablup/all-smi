@@ -24,6 +24,7 @@ use crate::device::container_info::{ContainerInfo, parse_cpu_stat_with_container
 use crate::device::{
     CoreType, CoreUtilization, CpuInfo, CpuPlatformType, CpuReader, CpuSocketInfo,
 };
+use crate::utils::command::new_command;
 use crate::utils::system::get_hostname;
 use crate::utils::{hz_to_mhz, khz_to_mhz, millicelsius_to_celsius};
 
@@ -90,7 +91,7 @@ impl LinuxCpuReader {
         }
 
         // Run lscpu once and cache the result
-        if let Ok(output) = std::process::Command::new("lscpu").output()
+        if let Ok(output) = new_command("lscpu").output()
             && let Ok(lscpu_output) = String::from_utf8(output.stdout)
         {
             *self.cached_lscpu_output.write().unwrap() = Some(lscpu_output.clone());
@@ -336,7 +337,7 @@ impl LinuxCpuReader {
         let total_cores = total_threads; // Default assumption, may be incorrect with hyperthreading
 
         // Try to get architecture from uname
-        if let Ok(output) = std::process::Command::new("uname").arg("-m").output() {
+        if let Ok(output) = new_command("uname").arg("-m").output() {
             architecture = String::from_utf8_lossy(&output.stdout).trim().to_string();
 
             // If architecture is ARM and we don't have a CPU model, construct one

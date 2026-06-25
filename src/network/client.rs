@@ -214,11 +214,11 @@ impl NetworkClient {
         // Get system limits using sysctl or /proc
         #[cfg(unix)]
         {
-            use std::process::Command;
+            use crate::utils::command::new_command;
 
             // Try to get system file descriptor limit
             let limit = if cfg!(target_os = "macos") {
-                Command::new("sysctl")
+                new_command("sysctl")
                     .args(["kern.maxfiles"])
                     .output()
                     .ok()

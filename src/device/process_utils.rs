@@ -13,9 +13,9 @@
 // limitations under the License.
 
 use std::fs;
-use std::process::Command;
 
 use crate::device::{platform_detection::get_os_type, types::ProcessInfoResult};
+use crate::utils::command::new_command;
 
 // Helper function to get system process information
 #[allow(dead_code)]
@@ -110,7 +110,7 @@ fn get_linux_process_info(pid: u32) -> ProcessInfoResult {
 #[allow(dead_code)]
 fn get_macos_process_info(pid: u32) -> ProcessInfoResult {
     // Use ps command to get process information on macOS
-    let output = Command::new("ps")
+    let output = new_command("ps")
         .args([
             "-p",
             &pid.to_string(),

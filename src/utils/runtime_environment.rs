@@ -13,12 +13,12 @@
 // limitations under the License.
 
 use crate::common::config::AppConfig;
+use crate::utils::command::new_command;
 #[cfg(feature = "cli")]
 use crossterm::style::Color;
 use std::env;
 use std::fs;
 use std::path::Path;
-use std::process::Command;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ContainerRuntime {
@@ -364,7 +364,7 @@ pub struct VirtualizationInfo {
 /// Detects if the current process is running inside a virtual machine
 pub fn detect_virtualization() -> VirtualizationInfo {
     // Try systemd-detect-virt first (most reliable if available)
-    if let Ok(output) = Command::new("systemd-detect-virt").output()
+    if let Ok(output) = new_command("systemd-detect-virt").output()
         && output.status.success()
     {
         let virt_type = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -602,7 +602,7 @@ fn check_aws_metadata() -> bool {
     }
 
     // Try to access AWS metadata service with very short timeout
-    match Command::new("curl")
+    match new_command("curl")
         .args([
             "-s",
             "--max-time",

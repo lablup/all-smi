@@ -232,8 +232,10 @@ fn get_process_priority_nice(pid: u32) -> (i32, i32) {
 
     #[cfg(target_os = "macos")]
     {
+        use crate::utils::command::new_command;
+
         // On macOS, use ps command to get priority and nice
-        if let Ok(output) = std::process::Command::new("ps")
+        if let Ok(output) = new_command("ps")
             .args(["-p", &pid.to_string(), "-o", "pri,nice"])
             .output()
         {
