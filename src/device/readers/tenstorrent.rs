@@ -17,11 +17,11 @@ use crate::device::process_list::{get_all_processes, merge_gpu_processes};
 use crate::device::readers::common_cache::{DetailBuilder, DeviceStaticInfo};
 use crate::device::types::{GpuInfo, ProcessInfo};
 use crate::utils::{get_hostname, with_global_system};
-use all_smi_luwen_core;
-use all_smi_luwen_if::ChipDetectOptions;
-use all_smi_luwen_if::chip::{Chip, ChipImpl, Telemetry};
-use all_smi_luwen_ref;
 use chrono::Local;
+use luwen_api::ChipDetectOptions;
+use luwen_api::chip::{Chip, ChipImpl, Telemetry};
+use luwen_def::Arch;
+use luwen_pci::detect_chips_silent;
 use once_cell::sync::Lazy;
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
@@ -103,15 +103,42 @@ impl TenstorrentReader {
             return;
         }
 
-        // Detect and initialize chips
+        // luwen 0.8.x has sunset Grayskull and panics (`unimplemented!()` in luwen-kmd)
+        // when it opens one. Detection opens every node under /dev/tenstorrent, so a
+        // single Grayskull card would crash collection for the whole host. Detect it
+        // from sysfs *before* calling luwen and skip detection entirely. This is what
+        // protects the release binary, where `panic = "abort"` makes the catch_unwind
+        // below unable to recover.
+        if grayskull_present() {
+            set_tenstorrent_status(
+                "Skipped Tenstorrent detection: Grayskull is no longer supported by the luwen 0.8.x backend".to_string(),
+            );
+            *chips_guard = Some(Vec::new());
+            return;
+        }
+
+        // Detect and initialize chips. The Grayskull pre-check above already returned,
+        // so luwen should not reach its sunset `unimplemented!()` path here. Keep the
+        // call wrapped in `catch_unwind` as defense in depth: any other unexpected panic
+        // inside luwen degrades to a status message instead of unwinding through the
+        // reader and poisoning the chip-cache lock.
         let options = ChipDetectOptions {
             local_only: true,
             ..Default::default()
         };
-        let uninit_chips = match all_smi_luwen_ref::detect_chips_silent(options) {
-            Ok(chips) => chips,
-            Err(e) => {
+        let detect_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            detect_chips_silent(options)
+        }));
+        let uninit_chips = match detect_result {
+            Ok(Ok(chips)) => chips,
+            Ok(Err(e)) => {
                 set_tenstorrent_status(format!("Failed to detect Tenstorrent chips: {e}"));
+                return;
+            }
+            Err(_) => {
+                set_tenstorrent_status(
+                    "Skipped Tenstorrent detection: a connected device is unsupported by luwen 0.8.x (e.g. Grayskull, which upstream has sunset)".to_string(),
+                );
                 return;
             }
         };
@@ -129,7 +156,7 @@ impl TenstorrentReader {
                             tenstorrent_info,
                         })
                     }
-                    Err(_) => None, // This should never happen with Infallible
+                    Err(_) => None, // Drop the chip on init failure (InitError::PlatformError can occur even with an Infallible callback).
                 }
             })
             .collect();
@@ -239,6 +266,38 @@ fn clear_tenstorrent_status() {
     }
 }
 
+/// Returns true if a Tenstorrent Grayskull device (PCI vendor 0x1e52, device
+/// 0xfaca) is present, by scanning sysfs.
+///
+/// luwen 0.8.x sunset Grayskull: opening such a device hits `unimplemented!()`
+/// in luwen-kmd and panics. Because detection opens every /dev/tenstorrent node,
+/// a single Grayskull card would crash collection for the whole host (and abort
+/// outright under the release `panic = "abort"` profile). We detect it from sysfs
+/// first and skip luwen entirely. The check is conservative: it only reports true
+/// on a positive vendor+device match, so Wormhole (0x401e) and Blackhole (0xb140)
+/// hosts are never affected, and any sysfs read failure falls through to normal
+/// detection.
+fn grayskull_present() -> bool {
+    const TT_VENDOR: &str = "0x1e52";
+    const GRAYSKULL_DEVICE: &str = "0xfaca";
+
+    let Ok(entries) = std::fs::read_dir("/sys/bus/pci/devices") else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let vendor = std::fs::read_to_string(path.join("vendor")).unwrap_or_default();
+        if vendor.trim() != TT_VENDOR {
+            continue;
+        }
+        let device = std::fs::read_to_string(path.join("device")).unwrap_or_default();
+        if device.trim() == GRAYSKULL_DEVICE {
+            return true;
+        }
+    }
+    false
+}
+
 /// Get a user-friendly message about Tenstorrent status
 #[allow(dead_code)]
 pub fn get_tenstorrent_status_message() -> Option<String> {
@@ -251,14 +310,14 @@ fn extract_static_info(chip: &Chip) -> Option<(DeviceStaticInfo, TenstorrentStat
 
     // Get board type name
     let board_type = telem.try_board_type().unwrap_or("Unknown");
-    let device_name = format!(
-        "Tenstorrent {} {board_type}",
-        match telem.arch {
-            all_smi_luwen_core::Arch::Grayskull => "Grayskull",
-            all_smi_luwen_core::Arch::Wormhole => "Wormhole",
-            all_smi_luwen_core::Arch::Blackhole => "Blackhole",
-        }
-    );
+    #[allow(deprecated)]
+    // Arch::Grayskull is deprecated upstream (legacy/unsupported); keep labeling it.
+    let arch_name = match telem.arch {
+        Arch::Grayskull => "Grayskull",
+        Arch::Wormhole => "Wormhole",
+        Arch::Blackhole => "Blackhole",
+    };
+    let device_name = format!("Tenstorrent {arch_name} {board_type}");
 
     let uuid = Some(telem.board_serial_number_hex());
 
