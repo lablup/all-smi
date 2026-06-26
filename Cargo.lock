@@ -58,10 +58,6 @@ dependencies = [
 name = "all-smi"
 version = "0.22.0"
 dependencies = [
- "all-smi-luwen-core",
- "all-smi-luwen-if",
- "all-smi-luwen-ref",
- "all-smi-ttkmd-if",
  "anyhow",
  "async-trait",
  "axum",
@@ -79,6 +75,9 @@ dependencies = [
  "libamdgpu_top",
  "libc",
  "libloading 0.9.0",
+ "luwen-api",
+ "luwen-def",
+ "luwen-pci",
  "num_cpus",
  "nvml-wrapper",
  "once_cell",
@@ -107,66 +106,6 @@ dependencies = [
  "whoami",
  "wmi",
  "zstd",
-]
-
-[[package]]
-name = "all-smi-luwen-core"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "869f10a9df29c78c44c62ee6efac065900eef06635f5e077606161cc08125091"
-dependencies = [
- "thiserror 1.0.69",
-]
-
-[[package]]
-name = "all-smi-luwen-if"
-version = "0.7.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "94638f78059e4791023e7ab25457b245379d9af8e0d0918b82ccdad76e09f64a"
-dependencies = [
- "all-smi-luwen-core",
- "bincode",
- "bitfield-struct",
- "bytemuck",
- "home",
- "num-derive",
- "num-traits",
- "once_cell",
- "prost 0.13.5",
- "prost-build 0.13.5",
- "prost-types 0.13.5",
- "rust-embed",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
-]
-
-[[package]]
-name = "all-smi-luwen-ref"
-version = "0.7.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5f9feba838e557802707e6f3b0cacb1c69c4c38899f4a097356d2442295887b6"
-dependencies = [
- "all-smi-luwen-core",
- "all-smi-luwen-if",
- "all-smi-ttkmd-if",
- "indicatif",
- "thiserror 1.0.69",
- "tracing",
-]
-
-[[package]]
-name = "all-smi-ttkmd-if"
-version = "0.2.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8f98a3664d72852216ce3a81545d2b6a392c81ff8712765dd53391ce7647687a"
-dependencies = [
- "all-smi-luwen-core",
- "bitfield-struct",
- "memmap2",
- "nix 0.26.4",
- "thiserror 1.0.69",
- "tracing",
 ]
 
 [[package]]
@@ -2408,6 +2347,61 @@ name = "lru-slab"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "112b39cec0b298b6c1999fee3e31427f74f676e4cb9879ed1a121b43661a4154"
+
+[[package]]
+name = "luwen-api"
+version = "0.8.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "58697974cd3b67d9bf6e9445214cfa42eb42feef41e31b7e6fa9f032d364ae3a"
+dependencies = [
+ "bincode",
+ "bitfield-struct",
+ "bytemuck",
+ "home",
+ "luwen-def",
+ "num-derive",
+ "num-traits",
+ "once_cell",
+ "prost 0.13.5",
+ "prost-build 0.13.5",
+ "rust-embed",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "luwen-def"
+version = "0.8.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1dde1be053ac6f2e7d2c01393ce8e66518b51f4b9422adc68f79e7c2656c6d35"
+
+[[package]]
+name = "luwen-kmd"
+version = "0.8.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fcc8aa8cacf528e062e9239bab05de871bc1601a3782def748b1f8a9710b09d9"
+dependencies = [
+ "bitfield-struct",
+ "luwen-def",
+ "memmap2",
+ "nix 0.26.4",
+ "thiserror 1.0.69",
+ "tracing",
+]
+
+[[package]]
+name = "luwen-pci"
+version = "0.8.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "01b7ec20f41454c1f82ef42576f181964e9ee07564682d709a15c085c0f9f4c0"
+dependencies = [
+ "indicatif",
+ "luwen-api",
+ "luwen-def",
+ "luwen-kmd",
+ "thiserror 1.0.69",
+]
 
 [[package]]
 name = "matchers"

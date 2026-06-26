@@ -17,11 +17,11 @@ use crate::device::process_list::{get_all_processes, merge_gpu_processes};
 use crate::device::readers::common_cache::{DetailBuilder, DeviceStaticInfo};
 use crate::device::types::{GpuInfo, ProcessInfo};
 use crate::utils::{get_hostname, with_global_system};
-use all_smi_luwen_core;
-use all_smi_luwen_if::ChipDetectOptions;
-use all_smi_luwen_if::chip::{Chip, ChipImpl, Telemetry};
-use all_smi_luwen_ref;
 use chrono::Local;
+use luwen_api::ChipDetectOptions;
+use luwen_api::chip::{Chip, ChipImpl, Telemetry};
+use luwen_def::Arch;
+use luwen_pci::detect_chips_silent;
 use once_cell::sync::Lazy;
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
@@ -108,7 +108,7 @@ impl TenstorrentReader {
             local_only: true,
             ..Default::default()
         };
-        let uninit_chips = match all_smi_luwen_ref::detect_chips_silent(options) {
+        let uninit_chips = match detect_chips_silent(options) {
             Ok(chips) => chips,
             Err(e) => {
                 set_tenstorrent_status(format!("Failed to detect Tenstorrent chips: {e}"));
@@ -129,7 +129,7 @@ impl TenstorrentReader {
                             tenstorrent_info,
                         })
                     }
-                    Err(_) => None, // This should never happen with Infallible
+                    Err(_) => None, // Drop the chip on init failure (InitError::PlatformError can occur even with an Infallible callback).
                 }
             })
             .collect();
@@ -251,14 +251,14 @@ fn extract_static_info(chip: &Chip) -> Option<(DeviceStaticInfo, TenstorrentStat
 
     // Get board type name
     let board_type = telem.try_board_type().unwrap_or("Unknown");
-    let device_name = format!(
-        "Tenstorrent {} {board_type}",
-        match telem.arch {
-            all_smi_luwen_core::Arch::Grayskull => "Grayskull",
-            all_smi_luwen_core::Arch::Wormhole => "Wormhole",
-            all_smi_luwen_core::Arch::Blackhole => "Blackhole",
-        }
-    );
+    #[allow(deprecated)]
+    // Arch::Grayskull is deprecated upstream (legacy/unsupported); keep labeling it.
+    let arch_name = match telem.arch {
+        Arch::Grayskull => "Grayskull",
+        Arch::Wormhole => "Wormhole",
+        Arch::Blackhole => "Blackhole",
+    };
+    let device_name = format!("Tenstorrent {arch_name} {board_type}");
 
     let uuid = Some(telem.board_serial_number_hex());
 

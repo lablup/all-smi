@@ -60,11 +60,12 @@ tar = "0.4.46"
 # dependency. russh 0.60 targets edition 2021 with tokio 1.x.
 russh = "0.61"
 [target.'cfg(target_os = "linux")'.dependencies]
-# Tenstorrent dependencies from GitHub
-all-smi-luwen-core = "0.2.0"
-all-smi-luwen-if = "0.7.9"
-all-smi-luwen-ref = "0.7.9"
-all-smi-ttkmd-if = "0.2.2"
+# Tenstorrent NPU support via the upstream luwen crates (published on crates.io,
+# tracking luwen main). Replaces the former all-smi-luwen-* republished forks.
+luwen-api = "0.8.5"
+luwen-pci = "0.8.5"
+luwen-def = "0.8.5"
+# luwen-kmd (the ttkmd-if successor) is pulled in transitively via luwen-pci/luwen-api.
 furiosa-smi-rs = { version = "2025.3.0", optional = true }
 cgroups-rs = "0.5.0"
 # Dynamic library loading for tpu_pjrt
