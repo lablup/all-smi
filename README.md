@@ -570,7 +570,7 @@ Stable check IDs (greppable across versions):
   - Memory monitoring with detailed statistics
   - Intel Gaudi NPUs (Gaudi 1/2/3) via hl-smi with background process monitoring
   - Google Cloud TPUs (v2-v7/Ironwood) via libtpu with JAX/Python integration
-  - Tenstorrent NPUs (Grayskull, Wormhole, Blackhole) via luwen library
+  - Tenstorrent NPUs (Wormhole, Blackhole) via luwen library
   - Rebellions NPUs (ATOM, ATOM+, ATOM Max) via rbln-stat
   - Furiosa NPUs (RNGD) via furiosa-smi
 - **macOS:**
