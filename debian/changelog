@@ -1,3 +1,15 @@
+all-smi (0.23.0-0) jammy; urgency=medium
+
+  * Migrate the Tenstorrent reader to the upstream-published luwen 0.8.5 crates (luwen-api, luwen-pci, luwen-def)
+  * Drop Tenstorrent Grayskull support; detect and skip Grayskull instead of aborting, leaving Wormhole and Blackhole supported
+  * Remove the obsolete scripts/vendor_all_luwen.sh luwen vendoring script
+  * Suppress console windows when spawning subprocesses on Windows
+  * Enforce the new_command subprocess helper with a clippy disallowed-methods lint
+  * Bump sysinfo to 0.39 and raise the minimum supported Rust version to 1.95
+  * Move the Docker build base and Launchpad PPA toolchain references to Rust 1.95
+
+ -- Jeongkyu Shin <inureyes@gmail.com>  Sat, 27 Jun 2026 00:00:00 +0000
+
 all-smi (0.22.0-0) jammy; urgency=medium
 
   * Fix macOS notarization by decoding the base64-stored App Store Connect key before notarytool

@@ -1344,6 +1344,7 @@ See the [LICENSE](./LICENSE) file for details.
 ## Changelog
 
 ### Recent Updates
+- **v0.23.0 (2026/06/27):** Migrate the Tenstorrent reader to the upstream-published luwen 0.8.5 crates (supported architectures now Wormhole and Blackhole), suppress console windows on Windows subprocess spawns, and bump sysinfo to 0.39. **BREAKING**: Tenstorrent Grayskull is no longer supported (detected and skipped instead of aborting); building from source now requires Rust 1.95 (MSRV)
 - **v0.22.0 (2026/05/27):** Harden the release workflow with a corrected macOS notarization key decode, self-healing rebuild and re-notarization of past tags, and a per-OS build target selector; document Intel client GPU support (Arc/Iris Xe) across the README, `--help` output, and developer docs
 - **v0.21.1 (2026/05/27):** Add Intel client GPU monitoring (Arc/Iris Xe) on Windows and Linux with an opt-in Level Zero backend, fdinfo-based per-process memory, and engine-busy utilization; add notarized macOS and code-signed Windows release binaries
 - **v0.21.0 (2026/05/26):** Major release adding `snapshot`/`record`/`view --replay`/`config`/`doctor` subcommands, cluster-wide Users (`V`) and Topology (`T`) tabs, agentless SSH transport, TOML config support, energy/cost accounting, filter query (`/`) and threshold alerts (`A`), and NVIDIA vGPU/MIG/extended thermal monitoring. **BREAKING**: rename Prometheus labels `index`/`uuid` to `gpu_index`/`gpu_uuid` (NVIDIA) and `npu_index`/`npu_uuid` (other NPUs); old names still accepted.
