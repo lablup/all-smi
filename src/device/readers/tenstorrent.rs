@@ -103,15 +103,33 @@ impl TenstorrentReader {
             return;
         }
 
-        // Detect and initialize chips
+        // Detect and initialize chips.
+        //
+        // luwen 0.8.x has sunset Grayskull: detection opens every node under
+        // /dev/tenstorrent, and mapping a Grayskull PCI id (0xfaca) to an Arch hits
+        // `unimplemented!()` inside luwen-kmd, which panics instead of returning an
+        // error. Guard the call with `catch_unwind` so an unsupported card degrades to
+        // a status message instead of unwinding through the reader and poisoning the
+        // chip-cache lock. Note: the release profile sets `panic = "abort"`, so a
+        // Grayskull host still aborts there; upstream dropping Grayskull means a full
+        // in-process fix is out of scope for this migration.
         let options = ChipDetectOptions {
             local_only: true,
             ..Default::default()
         };
-        let uninit_chips = match detect_chips_silent(options) {
-            Ok(chips) => chips,
-            Err(e) => {
+        let detect_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            detect_chips_silent(options)
+        }));
+        let uninit_chips = match detect_result {
+            Ok(Ok(chips)) => chips,
+            Ok(Err(e)) => {
                 set_tenstorrent_status(format!("Failed to detect Tenstorrent chips: {e}"));
+                return;
+            }
+            Err(_) => {
+                set_tenstorrent_status(
+                    "Skipped Tenstorrent detection: a connected device is unsupported by luwen 0.8.x (e.g. Grayskull, which upstream has sunset)".to_string(),
+                );
                 return;
             }
         };
