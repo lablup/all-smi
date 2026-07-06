@@ -87,7 +87,7 @@ pub fn sanitize_label_value(s: &str) -> String {
 /// Converts spaces to underscores and makes lowercase.
 /// Prometheus label names must match: [a-zA-Z_][a-zA-Z0-9_]*
 pub fn sanitize_label_name(s: &str) -> String {
-    s.replace([' ', '-'], "_").to_lowercase()
+    s.replace([' ', '-', ':'], "_").to_lowercase()
 }
 
 /// Extract the substring that appears after the first ':' character, trimmed.
@@ -170,6 +170,7 @@ mod tests {
         assert_eq!(sanitize_label_name("pcie-gen-current"), "pcie_gen_current");
         assert_eq!(sanitize_label_name("UPPER_CASE"), "upper_case");
         assert_eq!(sanitize_label_name("already_valid"), "already_valid");
+        assert_eq!(sanitize_label_name("Source: Fan"), "source__fan");
     }
 
     #[test]
