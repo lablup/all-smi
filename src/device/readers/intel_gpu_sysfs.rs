@@ -91,10 +91,14 @@ pub fn read_frequency_mhz(device_dir: &Path) -> u32 {
     0
 }
 
-/// Walk `device/hwmon/hwmon*/temp1_input` (milli-Celsius). Returns the
-/// first parseable value divided by 1000. On failure or absence the
-/// reader returns `0`; the caller documents that "no thermal data" in
-/// `detail` so consumers don't confuse zero with "literally 0 degrees".
+/// Walk `device/hwmon/hwmon*/tempN_input` (milli-Celsius) for N in 1..=21.
+/// Returns the first parseable value divided by 1000. On failure the
+/// reader returns `0`.
+///
+/// The Xe kernel driver starts hwmon sensor numbering at temp2 (temp1 is
+/// absent), so we try temp1 first then fall back sequentially through
+/// temp21 to cover both i915 (temp1 = package) and xe (temp2 = package)
+/// without driver-specific branching.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub fn read_temperature_celsius(device_dir: &Path) -> u32 {
     let hwmon_root = device_dir.join("hwmon");
@@ -103,8 +107,10 @@ pub fn read_temperature_celsius(device_dir: &Path) -> u32 {
         Err(_) => return 0,
     };
     for entry in iter.flatten() {
-        if let Some(milli) = read_u64(&entry.path().join("temp1_input")) {
-            return (milli / 1000) as u32;
+        for idx in 1..=21 {
+            if let Some(milli) = read_u64(&entry.path().join(format!("temp{idx}_input"))) {
+                return (milli / 1000) as u32;
+            }
         }
     }
     0
@@ -236,12 +242,22 @@ mod tests {
     }
 
     #[test]
-    fn temperature_handles_milli_celsius() {
+    fn temperature_reads_temp1_first() {
         let dir = tempdir().unwrap();
         let hwmon = dir.path().join("hwmon").join("hwmon3");
         fs::create_dir_all(&hwmon).unwrap();
         fs::write(hwmon.join("temp1_input"), "72500\n").unwrap();
         assert_eq!(read_temperature_celsius(dir.path()), 72);
+    }
+
+    #[test]
+    fn temperature_falls_back_to_temp2() {
+        let dir = tempdir().unwrap();
+        let hwmon = dir.path().join("hwmon").join("hwmon1");
+        fs::create_dir_all(&hwmon).unwrap();
+        // Xe driver: no temp1, temp2 is the package sensor
+        fs::write(hwmon.join("temp2_input"), "69000\n").unwrap();
+        assert_eq!(read_temperature_celsius(dir.path()), 69);
     }
 
     #[test]
