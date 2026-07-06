@@ -49,8 +49,8 @@ use crate::device::readers::intel_gpu_names::{
     classify_intel_architecture, resolve_intel_gpu_name,
 };
 use crate::device::readers::intel_gpu_sysfs::{
-    MemoryVariant, has_nonzero_u64, read_fan_rpm, read_frequency_mhz, read_memory_bytes,
-    read_power_watts, read_temperature_celsius,
+    MemoryVariant, has_nonzero_u64, read_fan_rpm, read_frequency_mhz, read_gtidle_ms,
+    read_memory_bytes, read_power_watts, read_temperature_celsius,
 };
 use crate::device::types::{GpuInfo, ProcessInfo};
 use crate::utils::get_hostname;
@@ -93,6 +93,8 @@ struct IntelGpuCard {
     /// `vram_usage: Mutex<VramUsage>` pattern (including poisoning
     /// recovery via `refresh_with_lock`).
     engine_state: Mutex<EngineState>,
+    /// Per-card gtidle delta tracker for Xe driver utilization fallback.
+    gtidle_state: Mutex<GtidleState>,
     /// Per-card Level Zero handle state (issue #248). Mirrors
     /// `engine_state` — delta-tracked behind a `Mutex` for power
     /// readings, only present when `--features level_zero` is active.
@@ -102,6 +104,13 @@ struct IntelGpuCard {
 
 /// Render the discrete/integrated classification as the string we put in
 /// `detail["Variant"]`.
+
+/// Per-GT idle residency delta tracker for Xe driver.
+struct GtidleState {
+    timestamps: Vec<std::time::Instant>,
+    readings: Vec<u64>,
+}
+
 fn variant_label(variant: MemoryVariant) -> &'static str {
     match variant {
         MemoryVariant::Discrete => "Discrete",
@@ -210,6 +219,47 @@ impl IntelGpuReader {
     }
 }
 
+/// Compute GPU utilization from Xe driver gtidle counters. Returns 0.0 on
+/// the first call (seeds) and (1 - delta_idle/delta_time)*100 thereafter.
+fn compute_gtidle_utilization(
+    state: &std::sync::Mutex<GtidleState>,
+    device_dir: &std::path::Path,
+) -> f64 {
+    let mut guard = match state.lock() {
+        Ok(g) => g,
+        Err(_) => return 0.0,
+    };
+    let current = read_gtidle_ms(device_dir);
+    let now = std::time::Instant::now();
+
+    if current.is_empty() {
+        return 0.0;
+    }
+    let n = current.len();
+    if guard.readings.is_empty() {
+        // Seed: store first reading, return 0.
+        guard.readings = current;
+        guard.timestamps = vec![now; n];
+        return 0.0;
+    }
+
+    // Take the maximum utilization across all GTs.
+    let mut max_util = 0.0f64;
+    for i in 0..n.min(guard.readings.len()) {
+        let delta_idle = current[i].saturating_sub(guard.readings[i]);
+        let delta_us = (now - guard.timestamps[i]).as_micros() as u64;
+        if delta_us > 0 {
+            let idle_frac = delta_idle as f64 * 1000.0 / delta_us as f64;
+            let util = ((1.0 - idle_frac) * 100.0).clamp(0.0, 100.0);
+            max_util = max_util.max(util);
+        }
+    }
+
+    guard.readings = current;
+    guard.timestamps = vec![now; n];
+    max_util
+}
+
 impl GpuReader for IntelGpuReader {
     fn get_gpu_info(&self) -> Vec<GpuInfo> {
         let hostname = get_hostname();
@@ -248,9 +298,23 @@ impl GpuReader for IntelGpuReader {
 
             // Engine-busy refresh — guarded by a per-card mutex.
             let readout = refresh_with_lock(&card.engine_state, &device_dir);
-            let utilization = readout.primary_utilization.clamp(0.0, MAX_GPU_UTILIZATION);
+            let mut utilization = readout.primary_utilization.clamp(0.0, MAX_GPU_UTILIZATION);
             apply_engine_readout(&mut detail, &readout);
+            // Xe driver: fall back to gtidle when engine busy counters are unavailable.
+            if utilization == 0.0 {
+                let gtidle_util = compute_gtidle_utilization(&card.gtidle_state, &device_dir);
+                if gtidle_util > 0.0 {
+                    utilization = gtidle_util;
+                    detail.insert(
+                        "Utilization".to_string(),
+                        "Engine busy from gtidle (xe)".to_string(),
+                    );
+                }
+            }
             sources::decorate_utilization_source(&mut detail, &readout);
+            if utilization > 0.0 && readout.primary_utilization == 0.0 {
+                detail.insert("Source: Utilization".to_string(), "gtidle (xe)".to_string());
+            }
 
             let uuid = build_uuid(card, &device_dir);
 
@@ -366,6 +430,10 @@ fn discover_cards(drm_root: &Path) -> Vec<IntelGpuCard> {
             variant,
             static_info: OnceLock::new(),
             engine_state: Mutex::new(EngineState::empty()),
+            gtidle_state: Mutex::new(GtidleState {
+                timestamps: Vec::new(),
+                readings: Vec::new(),
+            }),
             #[cfg(feature = "level_zero")]
             level_zero_state: Mutex::new(
                 crate::device::readers::intel_gpu_level_zero::LevelZeroState::empty(),

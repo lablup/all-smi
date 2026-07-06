@@ -174,6 +174,25 @@ pub fn has_nonzero_u64(path: &Path) -> bool {
     read_u64(path).map(|v| v > 0).unwrap_or(false)
 }
 
+/// Read GPU idle residency counter in milliseconds from the Xe driver
+/// gtidle interface. Returns values from all discovered GTs (typically
+/// gt0=render/compute, gt1=media). An empty vec means no gtidle support.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn read_gtidle_ms(device_dir: &Path) -> Vec<u64> {
+    let mut values = Vec::new();
+    for gt in 0..=1 {
+        let path = device_dir
+            .join("tile0")
+            .join(format!("gt{gt}"))
+            .join("gtidle")
+            .join("idle_residency_ms");
+        if let Some(v) = read_u64(&path) {
+            values.push(v);
+        }
+    }
+    values
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
