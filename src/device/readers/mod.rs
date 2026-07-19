@@ -76,7 +76,9 @@ pub mod intel_gpu_level_zero;
 pub mod intel_gpu_linux;
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 pub mod intel_gpu_names;
-#[cfg(target_os = "linux")]
+// The helpers themselves only use portable filesystem APIs, so keep their unit
+// tests available on non-Linux development hosts as well.
+#[cfg(any(target_os = "linux", test))]
 pub mod intel_gpu_sysfs;
 
 #[cfg(target_os = "windows")]

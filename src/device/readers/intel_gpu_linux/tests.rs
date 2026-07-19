@@ -189,6 +189,29 @@ fn get_gpu_info_populates_basic_fields() {
 }
 
 #[test]
+fn get_gpu_info_reads_xe_temp2() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let card = make_card(root, 0, "0x8086", "xe", "0xE20B");
+    let hwmon = card.join("device").join("hwmon").join("hwmon0");
+    fs::create_dir_all(&hwmon).unwrap();
+    fs::write(hwmon.join("temp2_input"), "69000\n").unwrap();
+
+    let reader = IntelGpuReader::new_from_root(root);
+    let info = reader.get_gpu_info();
+
+    assert_eq!(info.len(), 1);
+    assert_eq!(info[0].temperature, 69);
+    assert_eq!(
+        info[0]
+            .detail
+            .get("Source: Temperature")
+            .map(String::as_str),
+        Some("hwmon")
+    );
+}
+
+#[test]
 fn get_gpu_info_integrated_reports_zero_memory() {
     let dir = tempdir().unwrap();
     let root = dir.path();
