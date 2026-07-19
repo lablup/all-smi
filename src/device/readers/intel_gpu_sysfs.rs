@@ -186,6 +186,22 @@ pub fn has_nonzero_u64(path: &Path) -> bool {
     read_u64(path).map(|v| v > 0).unwrap_or(false)
 }
 
+/// Read GPU idle residency counters in milliseconds from the Xe driver
+/// gtidle interface. The array slots preserve the GT number (`gt0`, `gt1`),
+/// including when one file is temporarily unreadable, so callers never
+/// compare one GT's counter against another GT's previous sample.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn read_gtidle_ms(device_dir: &Path) -> [Option<u64>; 2] {
+    std::array::from_fn(|gt| {
+        let path = device_dir
+            .join("tile0")
+            .join(format!("gt{gt}"))
+            .join("gtidle")
+            .join("idle_residency_ms");
+        read_u64(&path)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -336,5 +352,15 @@ mod tests {
         assert!(has_nonzero_u64(&f));
         // Missing file.
         assert!(!has_nonzero_u64(&dir.path().join("missing")));
+    }
+
+    #[test]
+    fn gtidle_readings_preserve_gt_identity() {
+        let dir = tempdir().unwrap();
+        let gt1 = dir.path().join("tile0").join("gt1").join("gtidle");
+        fs::create_dir_all(&gt1).unwrap();
+        fs::write(gt1.join("idle_residency_ms"), "42\n").unwrap();
+
+        assert_eq!(read_gtidle_ms(dir.path()), [None, Some(42)]);
     }
 }

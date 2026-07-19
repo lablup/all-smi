@@ -20,15 +20,16 @@
 //! devices whose vendor is `0x8086` and whose driver is `i915` or `xe`.
 //!
 //! Surfaces device identity, memory, frequency, temperature, power,
-//! and engine-busy utilization. Engine-busy is delta-computed from
+//! and utilization. Engine-busy is delta-computed from
 //! sysfs counters by [`super::intel_gpu_engine`]: `max(render,
 //! compute)` becomes `GpuInfo.utilization`, the per-class breakdown
 //! lands in `detail["Engine: <class>"]`. The first refresh per card
 //! is a seeding call returning `0.0`; real values appear from the
 //! second refresh. When the kernel exposes no engine counters,
 //! `detail["Utilization"]` carries the note in
-//! `intel_gpu_engine::ENGINE_UNAVAILABLE_NOTE` and the PMU fallback is
-//! deferred. Intel client GPUs have no MIG/vGPU equivalent.
+//! `intel_gpu_engine::ENGINE_UNAVAILABLE_NOTE`. Xe cards then fall back to
+//! GT active residency derived from `gtidle/idle_residency_ms`; the PMU
+//! fallback remains deferred. Intel client GPUs have no MIG/vGPU equivalent.
 //!
 //! ## Memory semantics
 //!
@@ -44,6 +45,9 @@ use crate::device::readers::intel_gpu_engine::{
 };
 use crate::device::readers::intel_gpu_fdinfo::{
     build_intel_drm_basenames, build_intel_process_infos,
+};
+use crate::device::readers::intel_gpu_gtidle::{
+    GtidleState, apply_fallback as apply_gtidle_fallback,
 };
 use crate::device::readers::intel_gpu_names::{
     classify_intel_architecture, resolve_intel_gpu_name,
@@ -93,6 +97,8 @@ struct IntelGpuCard {
     /// `vram_usage: Mutex<VramUsage>` pattern (including poisoning
     /// recovery via `refresh_with_lock`).
     engine_state: Mutex<EngineState>,
+    /// Per-card Xe GT idle-residency delta tracker.
+    gtidle_state: Mutex<GtidleState>,
     /// Per-card Level Zero handle state (issue #248). Mirrors
     /// `engine_state` — delta-tracked behind a `Mutex` for power
     /// readings, only present when `--features level_zero` is active.
@@ -248,9 +254,17 @@ impl GpuReader for IntelGpuReader {
 
             // Engine-busy refresh — guarded by a per-card mutex.
             let readout = refresh_with_lock(&card.engine_state, &device_dir);
-            let utilization = readout.primary_utilization.clamp(0.0, MAX_GPU_UTILIZATION);
+            let mut utilization = readout.primary_utilization.clamp(0.0, MAX_GPU_UTILIZATION);
             apply_engine_readout(&mut detail, &readout);
             sources::decorate_utilization_source(&mut detail, &readout);
+            apply_gtidle_fallback(
+                &card.driver,
+                &readout,
+                &card.gtidle_state,
+                &device_dir,
+                &mut detail,
+                &mut utilization,
+            );
 
             let uuid = build_uuid(card, &device_dir);
 
@@ -366,6 +380,7 @@ fn discover_cards(drm_root: &Path) -> Vec<IntelGpuCard> {
             variant,
             static_info: OnceLock::new(),
             engine_state: Mutex::new(EngineState::empty()),
+            gtidle_state: Mutex::new(GtidleState::empty()),
             #[cfg(feature = "level_zero")]
             level_zero_state: Mutex::new(
                 crate::device::readers::intel_gpu_level_zero::LevelZeroState::empty(),
