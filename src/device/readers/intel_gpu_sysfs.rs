@@ -91,10 +91,16 @@ pub fn read_frequency_mhz(device_dir: &Path) -> u32 {
     0
 }
 
-/// Walk `device/hwmon/hwmon*/temp1_input` (milli-Celsius). Returns the
-/// first parseable value divided by 1000. On failure or absence the
-/// reader returns `0`; the caller documents that "no thermal data" in
-/// `detail` so consumers don't confuse zero with "literally 0 degrees".
+/// Walk `device/hwmon/hwmon*/tempN_input` (milli-Celsius) for N in 1..=21.
+/// Returns the first parseable value divided by 1000. Lower-numbered channels
+/// are preferred across every hwmon directory. Values too large for `u32`
+/// saturate so the caller's validation cap remains effective. On failure the
+/// reader returns `0`.
+///
+/// The Xe kernel driver starts hwmon sensor numbering at temp2 (temp1 is
+/// absent), so we try temp1 first then fall back sequentially through
+/// temp21 to cover both i915 (temp1 = package) and xe (temp2 = package)
+/// without driver-specific branching.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub fn read_temperature_celsius(device_dir: &Path) -> u32 {
     let hwmon_root = device_dir.join("hwmon");
@@ -102,9 +108,15 @@ pub fn read_temperature_celsius(device_dir: &Path) -> u32 {
         Ok(i) => i,
         Err(_) => return 0,
     };
-    for entry in iter.flatten() {
-        if let Some(milli) = read_u64(&entry.path().join("temp1_input")) {
-            return (milli / 1000) as u32;
+    let mut hwmon_paths: Vec<_> = iter.flatten().map(|entry| entry.path()).collect();
+    hwmon_paths.sort_unstable();
+
+    for idx in 1..=21 {
+        let input_name = format!("temp{idx}_input");
+        for hwmon_path in &hwmon_paths {
+            if let Some(milli) = read_u64(&hwmon_path.join(&input_name)) {
+                return u32::try_from(milli / 1000).unwrap_or(u32::MAX);
+            }
         }
     }
     0
@@ -236,12 +248,57 @@ mod tests {
     }
 
     #[test]
-    fn temperature_handles_milli_celsius() {
+    fn temperature_reads_temp1_first() {
         let dir = tempdir().unwrap();
         let hwmon = dir.path().join("hwmon").join("hwmon3");
         fs::create_dir_all(&hwmon).unwrap();
         fs::write(hwmon.join("temp1_input"), "72500\n").unwrap();
         assert_eq!(read_temperature_celsius(dir.path()), 72);
+    }
+
+    #[test]
+    fn temperature_falls_back_to_temp2() {
+        let dir = tempdir().unwrap();
+        let hwmon = dir.path().join("hwmon").join("hwmon1");
+        fs::create_dir_all(&hwmon).unwrap();
+        // Xe driver: no temp1, temp2 is the package sensor
+        fs::write(hwmon.join("temp2_input"), "69000\n").unwrap();
+        assert_eq!(read_temperature_celsius(dir.path()), 69);
+    }
+
+    #[test]
+    fn temperature_prefers_lower_channel_across_hwmon_directories() {
+        let dir = tempdir().unwrap();
+        let hwmon_root = dir.path().join("hwmon");
+        let first = hwmon_root.join("hwmon1");
+        let second = hwmon_root.join("hwmon2");
+        fs::create_dir_all(&first).unwrap();
+        fs::create_dir_all(&second).unwrap();
+        fs::write(first.join("temp2_input"), "69000\n").unwrap();
+        fs::write(second.join("temp1_input"), "72000\n").unwrap();
+
+        assert_eq!(read_temperature_celsius(dir.path()), 72);
+    }
+
+    #[test]
+    fn temperature_scans_full_xe_channel_range() {
+        let dir = tempdir().unwrap();
+        let hwmon = dir.path().join("hwmon").join("hwmon1");
+        fs::create_dir_all(&hwmon).unwrap();
+        fs::write(hwmon.join("temp21_input"), "61000\n").unwrap();
+
+        assert_eq!(read_temperature_celsius(dir.path()), 61);
+    }
+
+    #[test]
+    fn temperature_saturates_before_narrowing_to_u32() {
+        let dir = tempdir().unwrap();
+        let hwmon = dir.path().join("hwmon").join("hwmon1");
+        fs::create_dir_all(&hwmon).unwrap();
+        let overflowing_milli = (u64::from(u32::MAX) + 1) * 1000;
+        fs::write(hwmon.join("temp1_input"), format!("{overflowing_milli}\n")).unwrap();
+
+        assert_eq!(read_temperature_celsius(dir.path()), u32::MAX);
     }
 
     #[test]
