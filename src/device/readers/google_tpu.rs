@@ -518,7 +518,7 @@ impl GoogleTpuReader {
         if !sysfs_devices.is_empty() {
             for sys_dev in sysfs_devices {
                 let chip_version = Self::detect_tpu_version_from_device_id(&sys_dev.device_id);
-                let accel_type = format!("TPU {}", &chip_version);
+                let accel_type = format!("TPU {}", chip_version);
                 let generation = TpuGeneration::from_chip_version(&chip_version);
 
                 metadata.push(TpuDeviceMetadata {
@@ -607,7 +607,7 @@ impl GoogleTpuReader {
         // Create device entries for each vfio device
         let devices: Vec<TpuDeviceMetadata> = (0..vfio_count)
             .map(|i| {
-                let accel_type = format!("TPU {}", &chip_version);
+                let accel_type = format!("TPU {}", chip_version);
                 TpuDeviceMetadata {
                     index: i,
                     chip_version: chip_version.clone(),
@@ -721,7 +721,7 @@ impl GoogleTpuReader {
 
         // Create device info for each chip
         // For simplicity, we report the total as one "device" since we can't get per-chip metrics
-        let accel_type = format!("TPU {}", &chip_version);
+        let accel_type = format!("TPU {}", chip_version);
         let device = TpuDeviceMetadata {
             index: 0,
             chip_version,
