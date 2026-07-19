@@ -513,6 +513,27 @@ mod tests {
     }
 
     #[test]
+    fn exporter_sanitizes_dynamic_detail_label_names() {
+        let mut gpu = make_nvidia_gpu();
+        gpu.detail
+            .insert("Source: Fan".to_string(), "hwmon".to_string());
+        gpu.detail
+            .insert("3D Engine".to_string(), "busy".to_string());
+        gpu.detail
+            .insert("GPU.Temp/Limit".to_string(), "90".to_string());
+        let gpus = vec![gpu];
+        let output = GpuMetricExporter::new(&gpus).export_metrics();
+        let info_line = output
+            .lines()
+            .find(|line| line.starts_with("all_smi_gpu_info{"))
+            .expect("GPU info metric");
+
+        assert!(info_line.contains("source__fan=\"hwmon\""));
+        assert!(info_line.contains("_3d_engine=\"busy\""));
+        assert!(info_line.contains("gpu_temp_limit=\"90\""));
+    }
+
+    #[test]
     fn exporter_emits_pstate_from_structured_field() {
         let gpu = make_nvidia_gpu();
         let gpus = vec![gpu];

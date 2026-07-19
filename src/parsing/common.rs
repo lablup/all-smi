@@ -84,10 +84,29 @@ pub fn sanitize_label_value(s: &str) -> String {
 }
 
 /// Sanitize a label name for Prometheus compatibility.
-/// Converts spaces to underscores and makes lowercase.
+/// Replaces invalid characters with underscores, makes ASCII letters lowercase,
+/// and prefixes names that start with a digit.
 /// Prometheus label names must match: [a-zA-Z_][a-zA-Z0-9_]*
 pub fn sanitize_label_name(s: &str) -> String {
-    s.replace([' ', '-'], "_").to_lowercase()
+    let mut sanitized = String::with_capacity(s.len().max(1));
+
+    for (index, character) in s.chars().enumerate() {
+        if index == 0 && character.is_ascii_digit() {
+            sanitized.push('_');
+        }
+
+        if character.is_ascii_alphanumeric() {
+            sanitized.push(character.to_ascii_lowercase());
+        } else {
+            sanitized.push('_');
+        }
+    }
+
+    if sanitized.is_empty() {
+        sanitized.push('_');
+    }
+
+    sanitized
 }
 
 /// Extract the substring that appears after the first ':' character, trimmed.
@@ -170,6 +189,36 @@ mod tests {
         assert_eq!(sanitize_label_name("pcie-gen-current"), "pcie_gen_current");
         assert_eq!(sanitize_label_name("UPPER_CASE"), "upper_case");
         assert_eq!(sanitize_label_name("already_valid"), "already_valid");
+        assert_eq!(sanitize_label_name("Source: Fan"), "source__fan");
+        assert_eq!(sanitize_label_name("3D Engine"), "_3d_engine");
+        assert_eq!(sanitize_label_name("GPU.Temp/Limit"), "gpu_temp_limit");
+        assert_eq!(sanitize_label_name("온도"), "__");
+        assert_eq!(sanitize_label_name(""), "_");
+    }
+
+    #[test]
+    fn sanitized_label_names_always_match_prometheus_grammar() {
+        for input in [
+            "Source: Fan",
+            "3D Engine",
+            "GPU.Temp/Limit",
+            "punctuation!@#$%^&*()",
+            "온도",
+            "",
+        ] {
+            let sanitized = sanitize_label_name(input);
+            let mut characters = sanitized.chars();
+            let first = characters.next().expect("sanitized name is never empty");
+
+            assert!(
+                first.is_ascii_alphabetic() || first == '_',
+                "invalid first character in {sanitized:?} from {input:?}"
+            );
+            assert!(
+                characters.all(|character| character.is_ascii_alphanumeric() || character == '_'),
+                "invalid character in {sanitized:?} from {input:?}"
+            );
+        }
     }
 
     #[test]
