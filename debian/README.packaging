@@ -10,8 +10,8 @@ Launchpad build environments do NOT have internet access. This means:
 
 ### Build Dependencies
 The following packages are required and must be available in the Ubuntu repository:
-- `rustc-1.95 | rustc (>= 1.95)` - Rust compiler for the current dependency set
-- `cargo-1.95 | cargo (>= 1.95)` - Cargo for the current lockfile/dependency set
+- `rustc-1.96 | rustc (>= 1.96)` - Rust compiler for the current dependency set
+- `cargo-1.96 | cargo (>= 1.96)` - Cargo for the current lockfile/dependency set
 - `pkg-config` - For finding system libraries
 - `libssl-dev` - OpenSSL development files
 - `protobuf-compiler` - Protocol buffer compiler
@@ -19,15 +19,15 @@ The following packages are required and must be available in the Ubuntu reposito
 - `cmake` - Build system
 
 ### Rust Version Requirements
-This project currently requires Rust 1.95 or newer. This means:
-- Ubuntu 22.04 (Jammy): needs the `~lablup/+archive/ubuntu/rustc-release` dependency PPA (provides `rustc-1.95`)
-- Ubuntu 24.04 (Noble): needs the `~lablup/+archive/ubuntu/rustc-release` dependency PPA (provides `rustc-1.95`)
-- Ubuntu 26.04 (Resolute): its archived `rustc`/`cargo` (1.93) is below the new 1.95 floor, so it also needs the `~lablup/+archive/ubuntu/rustc-release` dependency PPA (provides `rustc-1.95`)
+This project currently requires Rust 1.96 or newer. This means:
+- Ubuntu 22.04 (Jammy): needs the `~lablup/+archive/ubuntu/rustc-release` dependency PPA (provides `rustc-1.96`)
+- Ubuntu 24.04 (Noble): needs the `~lablup/+archive/ubuntu/rustc-release` dependency PPA (provides `rustc-1.96`)
+- Ubuntu 26.04 (Resolute): its archived `rustc`/`cargo` (1.93) is below the new 1.96 floor, so it also needs the `~lablup/+archive/ubuntu/rustc-release` dependency PPA (provides `rustc-1.96`)
 
 ### Build Process
 1. The GitHub Actions workflow vendors dependencies into `vendor/`
 2. `debian/sanitize-vendor.py` removes hidden/orig checksum entries that break Launchpad source tarballs
-3. The debian/rules file auto-detects an available toolchain, preferring `rustc-1.95` and falling back to the unversioned `rustc` (a `>= 1.95` guard validates whichever is selected)
+3. The debian/rules file auto-detects an available toolchain, preferring `rustc-1.96` and falling back to the unversioned `rustc` (a `>= 1.96` guard validates whichever is selected)
 4. The project is built with `cargo build --release --frozen`
 5. The binary is installed to `/usr/bin/all-smi`
 
@@ -36,7 +36,7 @@ If the build fails on Launchpad:
 1. Check the build log for the exact error
 2. Common issues:
    - Missing build dependencies: Add them to debian/control
-   - Rust version incompatibility: Ensure Rust 1.95+ is available
+   - Rust version incompatibility: Ensure Rust 1.96+ is available
    - Network access attempts: Remove any code that downloads dependencies
    - Vendored checksum mismatch: Re-run the vendor sanitization step
    - Permission issues: Ensure proper file permissions in debian/rules

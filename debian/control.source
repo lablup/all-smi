@@ -4,8 +4,8 @@ Priority: optional
 Maintainer: Jeongkyu Shin <jshin@lablup.com>
 Build-Depends: debhelper-compat (= 13),
                build-essential,
-               rustc-1.95 | rustc (>= 1.95),
-               cargo-1.95 | cargo (>= 1.95),
+               rustc-1.96 | rustc (>= 1.96),
+               cargo-1.96 | cargo (>= 1.96),
                libssl-dev,
                pkg-config,
                protobuf-compiler,
