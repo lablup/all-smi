@@ -1,3 +1,13 @@
+all-smi (0.23.1-0) jammy; urgency=medium
+
+  * Fully sanitize dynamic Prometheus label names so keys like "Source: Fan" no longer produce invalid exposition that can fail scrapes
+  * Compute Intel Xe GPU utilization from the Xe kernel driver gtidle/idle_residency_ms, since Xe does not expose engine-busy counters like i915
+  * Support Xe kernel driver hwmon temperature sensor numbering by scanning temp1 through temp21 and returning the first parseable value
+  * Align the Docker build base image with Rust 1.96
+  * Raise the minimum supported Rust version to 1.96 and move the Launchpad PPA toolchain to rustc-1.96
+
+ -- Jeongkyu Shin <inureyes@gmail.com>  Mon, 20 Jul 2026 00:00:00 +0000
+
 all-smi (0.23.0-0) jammy; urgency=medium
 
   * Migrate the Tenstorrent reader to the upstream-published luwen 0.8.5 crates (luwen-api, luwen-pci, luwen-def)
