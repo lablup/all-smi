@@ -63,6 +63,8 @@ pub mod amd_windows;
 pub mod intel_gpu_engine;
 #[cfg(target_os = "linux")]
 pub mod intel_gpu_fdinfo;
+#[cfg(target_os = "linux")]
+pub mod intel_gpu_gtidle;
 // Opt-in Intel Level Zero (oneAPI) backend. Cross-platform FFI shim that
 // prefers Sysman metrics per field when available, while keeping sysfs/WMI
 // as the baseline and fallback. Enabled with `--features level_zero`;
