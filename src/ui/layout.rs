@@ -69,8 +69,11 @@ impl LayoutCalculator {
         // additional rows.  Both halves render on the same terminal rows, so
         // we take the maximum height of the two.
         let activity_panel_lines = if state.is_local_mode {
-            let cpu_lines = activity_panel::panel_height(&state.cpu_info, cols);
-            let gpu_content = gpu_sparkline_panel::gpu_content_rows(state) as u16;
+            // Both height functions take `rows` and share the same multi-row
+            // mode decision (`use_multirow_graphs`) as the renderer, so the
+            // reserved height always matches the emitted line count.
+            let cpu_lines = activity_panel::panel_height(&state.cpu_info, cols, rows);
+            let gpu_content = gpu_sparkline_panel::gpu_content_rows(state, rows) as u16;
             // GPU panel has top+bottom borders (+2) when it has content
             let gpu_lines = if gpu_content > 0 { gpu_content + 2 } else { 0 };
             cpu_lines.max(gpu_lines)
@@ -431,6 +434,61 @@ mod tests {
             remote_lines_no_history < remote_lines_with_history,
             "remote mode with history ({remote_lines_with_history}) should use more header lines than without ({remote_lines_no_history})"
         );
+    }
+
+    #[test]
+    fn test_content_area_reserves_multirow_activity_panel() {
+        use crate::app_state::AppState;
+        use crate::device::{CoreType, CoreUtilization, CpuInfo, CpuPlatformType};
+
+        // Local mode with one NVIDIA GPU (no ANE) and an 8-core CPU. At width
+        // 120 the CPU uses the Individual strategy (3 bar lines) and the GPU
+        // panel has 4 metric rows in fallback / a 3-row graph + 2 compact rows
+        // in multirow mode.
+        let mut state = AppState::new();
+        state.is_local_mode = true;
+        state
+            .gpu_info
+            .push(make_minimal_gpu("localhost", "NVIDIA A100"));
+        let per_core: Vec<CoreUtilization> = (0..8)
+            .map(|i| CoreUtilization {
+                core_id: i,
+                core_type: CoreType::Standard,
+                utilization: 10.0,
+            })
+            .collect();
+        state.cpu_info.push(CpuInfo {
+            index: 0,
+            host_id: "localhost".to_string(),
+            hostname: "localhost".to_string(),
+            instance: String::new(),
+            cpu_model: "Test CPU".to_string(),
+            architecture: "x86_64".to_string(),
+            platform_type: CpuPlatformType::Intel,
+            socket_count: 1,
+            total_cores: 8,
+            total_threads: 16,
+            base_frequency_mhz: 3000,
+            max_frequency_mhz: 4000,
+            cache_size_mb: 16,
+            utilization: 50.0,
+            temperature: Some(60),
+            power_consumption: Some(90.0),
+            per_socket_info: Vec::new(),
+            apple_silicon_info: None,
+            per_core_utilization: per_core,
+            time: String::new(),
+        });
+
+        let header = LayoutCalculator::calculate_header_lines(&state);
+
+        // Short terminal -> fallback: CPU 5 rows, GPU 6 rows -> panel 6.
+        let short = LayoutCalculator::calculate_content_area(&state, 120, 24);
+        assert_eq!(short.y, header + 6, "fallback activity panel height");
+
+        // Tall terminal -> multirow: CPU 8 rows, GPU 7 rows -> panel 8.
+        let tall = LayoutCalculator::calculate_content_area(&state, 120, 50);
+        assert_eq!(tall.y, header + 8, "multirow activity panel height");
     }
 
     // --- per-GPU line-count math ---

@@ -53,7 +53,7 @@ use crossterm::{queue, style::Color, style::Print};
 use crate::app_state::AppState;
 use crate::common::config::ThemeConfig;
 use crate::device::CpuInfo;
-use crate::ui::activity_panel;
+use crate::ui::activity_panel::{self, GRAPH_ROWS, use_multirow_graphs};
 use crate::ui::braille::sparkline_braille;
 use crate::ui::buffer::BufferWriter;
 use crate::ui::scale::{
@@ -77,15 +77,27 @@ const SPACING: usize = 5; // 1+1 border padding + 3 inter-column spaces
 
 /// Calculate the number of content rows for the GPU sparkline panel.
 ///
-/// Returns the content row count (excluding borders).
-pub fn gpu_content_rows(state: &AppState) -> usize {
+/// Returns the content row count (excluding borders). `terminal_rows` drives
+/// the same mode decision as the renderer ([`use_multirow_graphs`]): in
+/// multi-row mode GPU Util becomes a [`GRAPH_ROWS`]-tall graph and the
+/// remaining metrics collapse to compact rows of two metrics each.
+pub fn gpu_content_rows(state: &AppState, terminal_rows: u16) -> usize {
     if state.gpu_info.is_empty() {
         return 0;
     }
     let ane = show_ane_row(state);
     let npu = show_npu_row(state);
-    // GPU Util + GPU Mem + GPU Temp + (ANE?) + (NPU?) + Pkg Power
-    3 + usize::from(ane) + usize::from(npu) + 1
+    // build_rows always emits: GPU Util + GPU Mem + GPU Temp + (ANE?) + (NPU?) + Pkg Power
+    let metric_rows = 3 + usize::from(ane) + usize::from(npu) + 1;
+
+    if use_multirow_graphs(terminal_rows) {
+        // GPU Util is drawn as a GRAPH_ROWS-tall history graph; the remaining
+        // metrics are paired two-per-line.
+        let secondary = metric_rows - 1;
+        GRAPH_ROWS + secondary.div_ceil(2)
+    } else {
+        metric_rows
+    }
 }
 
 /// Render the combined Activity panel (CPU left half + GPU right half).
@@ -94,11 +106,15 @@ pub fn gpu_content_rows(state: &AppState) -> usize {
 /// interleaved so they appear on the same terminal rows.
 ///
 /// When there is no GPU data, only the CPU left half is rendered.
+/// `terminal_rows` is threaded to both halves so the multi-row-graph mode
+/// decision (and therefore the emitted line count) matches the height
+/// functions used by [`LayoutCalculator`](crate::ui::layout::LayoutCalculator).
 pub fn render_combined_activity_panel<W: Write>(
     stdout: &mut W,
     state: &AppState,
     cpu_info: &[CpuInfo],
     width: usize,
+    terminal_rows: u16,
 ) {
     if cpu_info.is_empty() || cpu_info[0].per_core_utilization.is_empty() {
         return;
@@ -107,11 +123,14 @@ pub fn render_combined_activity_panel<W: Write>(
     let left_width = width / 2;
     let right_width = width - left_width;
 
-    // Render left half (CPU) into line buffer
-    let left_lines = render_cpu_lines(cpu_info, width);
+    // Render left half (CPU) into line buffer. The CPU total-utilization
+    // history is handed down as a slice so `activity_panel` stays decoupled
+    // from `AppState`.
+    let cpu_history: Vec<f64> = state.cpu_utilization_history.iter().copied().collect();
+    let left_lines = render_cpu_lines(cpu_info, &cpu_history, width, terminal_rows);
 
     // Render right half (GPU) into line buffer
-    let right_lines = render_gpu_lines(state, right_width);
+    let right_lines = render_gpu_lines(state, right_width, terminal_rows);
 
     // Determine total lines needed (max of both halves)
     let total_lines = left_lines.len().max(right_lines.len());
@@ -142,10 +161,15 @@ pub fn render_combined_activity_panel<W: Write>(
 /// Render the CPU activity panel into a vector of pre-formatted lines.
 ///
 /// Each line is an ANSI-escaped string WITHOUT a trailing `\r\n`.
-fn render_cpu_lines(cpu_info: &[CpuInfo], width: usize) -> Vec<String> {
+fn render_cpu_lines(
+    cpu_info: &[CpuInfo],
+    cpu_history: &[f64],
+    width: usize,
+    terminal_rows: u16,
+) -> Vec<String> {
     // Render the full CPU panel into a buffer
     let mut buf = BufferWriter::new();
-    activity_panel::render_activity_panel(&mut buf, cpu_info, width);
+    activity_panel::render_activity_panel(&mut buf, cpu_info, cpu_history, width, terminal_rows);
     let raw = buf.get_buffer().to_string();
 
     // Split on "\r\n" and strip trailing empty line
@@ -161,8 +185,11 @@ fn render_cpu_lines(cpu_info: &[CpuInfo], width: usize) -> Vec<String> {
 
 /// Render the GPU sparkline panel into a vector of pre-formatted lines.
 ///
-/// Each line is an ANSI-escaped string WITHOUT a trailing `\r\n`.
-fn render_gpu_lines(state: &AppState, panel_width: usize) -> Vec<String> {
+/// Each line is an ANSI-escaped string WITHOUT a trailing `\r\n`. In multi-row
+/// mode ([`use_multirow_graphs`]) GPU Util is drawn as a [`GRAPH_ROWS`]-tall
+/// history graph and the remaining metrics collapse to compact rows of two
+/// metrics each; otherwise every metric keeps its own single-row sparkline.
+fn render_gpu_lines(state: &AppState, panel_width: usize, terminal_rows: u16) -> Vec<String> {
     if state.gpu_info.is_empty() {
         return Vec::new();
     }
@@ -179,11 +206,25 @@ fn render_gpu_lines(state: &AppState, panel_width: usize) -> Vec<String> {
         draw_top_border(w, panel_width);
     }));
 
-    // Content rows
-    for row in &rows {
-        lines.push(render_line_to_string(|w| {
-            draw_sparkline_row(w, row, panel_width);
-        }));
+    if use_multirow_graphs(terminal_rows) {
+        // GPU Util (row 0) becomes a multi-row history graph.
+        if let Some(util) = rows.first() {
+            lines.extend(draw_gpu_util_graph(util, panel_width));
+        }
+        // Remaining metrics: two compact half-cells per line.
+        let secondary = if rows.is_empty() { &[][..] } else { &rows[1..] };
+        for pair in secondary.chunks(2) {
+            lines.push(render_line_to_string(|w| {
+                draw_compact_pair(w, pair, panel_width);
+            }));
+        }
+    } else {
+        // Content rows (one single-row sparkline per metric).
+        for row in &rows {
+            lines.push(render_line_to_string(|w| {
+                draw_sparkline_row(w, row, panel_width);
+            }));
+        }
     }
 
     // Bottom border
@@ -210,6 +251,9 @@ where
 
 struct SparklineRow {
     label: &'static str,
+    /// Short label used by the compact 2-per-line multi-row layout (e.g.
+    /// `Mem`, `Temp`, `Pkg`) where the full `label` will not fit a half-cell.
+    short_label: &'static str,
     color: Color,
     history: Vec<f64>,
     latest_str: String,
@@ -239,6 +283,7 @@ fn build_rows(state: &AppState, is_apple: bool, has_ane: bool, has_npu: bool) ->
     );
     rows.push(SparklineRow {
         label: "GPU Util",
+        short_label: "GPU",
         color: ThemeConfig::gpu_color(),
         latest_str: format!("{latest_util:.1}%"),
         min_max_str: scale_badge(util_range.0, util_range.1),
@@ -258,6 +303,7 @@ fn build_rows(state: &AppState, is_apple: bool, has_ane: bool, has_npu: bool) ->
     );
     rows.push(SparklineRow {
         label: "GPU Mem",
+        short_label: "Mem",
         color: ThemeConfig::memory_color(),
         latest_str: format!("{latest_mem:.1}%"),
         min_max_str: scale_badge(mem_range.0, mem_range.1),
@@ -280,6 +326,7 @@ fn build_rows(state: &AppState, is_apple: bool, has_ane: bool, has_npu: bool) ->
     );
     rows.push(SparklineRow {
         label: "GPU Temp",
+        short_label: "Temp",
         color: ThemeConfig::thermal_color(),
         latest_str: format!("{latest_temp:.0}\u{00B0}C"),
         min_max_str: scale_badge(temp_rng.0, temp_rng.1),
@@ -313,6 +360,7 @@ fn build_rows(state: &AppState, is_apple: bool, has_ane: bool, has_npu: bool) ->
         );
         rows.push(SparklineRow {
             label: "ANE",
+            short_label: "ANE",
             color: ThemeConfig::accelerator_color(),
             latest_str: format!("{ane_w:.1}W"),
             min_max_str: scale_badge(ane_rng.0, ane_rng.1),
@@ -326,6 +374,7 @@ fn build_rows(state: &AppState, is_apple: bool, has_ane: bool, has_npu: bool) ->
     if has_npu {
         rows.push(SparklineRow {
             label: "NPU",
+            short_label: "NPU",
             color: ThemeConfig::accelerator_color(),
             latest_str: "0.0W".to_string(),
             min_max_str: String::new(),
@@ -354,6 +403,7 @@ fn build_rows(state: &AppState, is_apple: bool, has_ane: bool, has_npu: bool) ->
     );
     rows.push(SparklineRow {
         label: "Pkg Power",
+        short_label: "Pkg",
         color: ThemeConfig::power_color(),
         latest_str: format!("{power_w:.1}W"),
         min_max_str: scale_badge(power_rng.0, power_rng.1),
@@ -444,6 +494,112 @@ fn draw_sparkline_row<W: Write>(stdout: &mut W, row: &SparklineRow, panel_width:
         print_colored_text(stdout, &" ".repeat(pad), Color::White, None, None);
     }
     print_colored_text(stdout, " \u{2502}", ThemeConfig::accent_color(), None, None);
+}
+
+// ---------------------------------------------------------------------------
+// Multi-row (btop-style) rendering
+// ---------------------------------------------------------------------------
+
+/// Short label column width in a compact half-cell (fits `Temp`, `Pkg`, ...).
+const COMPACT_LABEL_WIDTH: usize = 4;
+/// Latest-value column width in a compact half-cell (fits `1400.0W`, `100.0%`).
+const COMPACT_VALUE_WIDTH: usize = 7;
+/// Scale-badge column width in a compact half-cell (fits `0-100`, `0-350`).
+const COMPACT_BADGE_WIDTH: usize = 5;
+
+/// Render the GPU Util metric as a stacked multi-row history graph on a fixed
+/// `0..100` axis. Returns [`GRAPH_ROWS`] line strings (no trailing newline),
+/// matching the format of the panel's other rows.
+fn draw_gpu_util_graph(util: &SparklineRow, panel_width: usize) -> Vec<String> {
+    // Content width between the "│ " and " │" borders (matches draw_sparkline_row).
+    let content_width = panel_width.saturating_sub(4);
+    activity_panel::multirow_graph_lines(
+        &util.history,
+        (0.0, 100.0),
+        util.color,
+        ThemeConfig::accent_color(),
+        "",
+        content_width,
+        &util.latest_str,
+        "0-100",
+    )
+}
+
+/// Draw one compact line holding up to two metric half-cells side by side.
+///
+/// The content area (`panel_width - 4`) is split into two halves; a `None`
+/// second half is filled with spaces so the right border stays aligned. All
+/// width math is saturating and stays panic-free at narrow widths.
+fn draw_compact_pair<W: Write>(stdout: &mut W, pair: &[SparklineRow], panel_width: usize) {
+    let content_width = panel_width.saturating_sub(4);
+    let first_budget = content_width / 2;
+    let second_budget = content_width - first_budget;
+
+    print_colored_text(stdout, "\u{2502} ", ThemeConfig::accent_color(), None, None);
+
+    let mut used = 0usize;
+    used += draw_compact_cell(stdout, pair.first(), first_budget);
+    used += draw_compact_cell(stdout, pair.get(1), second_budget);
+
+    let pad = content_width.saturating_sub(used);
+    if pad > 0 {
+        print_colored_text(stdout, &" ".repeat(pad), Color::White, None, None);
+    }
+    print_colored_text(stdout, " \u{2502}", ThemeConfig::accent_color(), None, None);
+}
+
+/// Render a single compact half-cell into `budget` columns and return the
+/// number of columns emitted. `None` renders an empty (all-spaces) cell.
+///
+/// Cell layout: `<label> <sparkline> <value><badge>`, keeping the #273 soft
+/// range and scale badge. The sparkline absorbs whatever columns the fixed
+/// label/value/badge fields leave, with a 1-column minimum floor. The emitted
+/// width never exceeds `budget`: when the budget cannot hold the minimum
+/// layout (fixed fields + 1 sparkline column), trailing fields are truncated
+/// instead of leaking past the pair's half-width split, which at terminal
+/// widths 81-82 would push the compact row past the panel border and wrap.
+fn draw_compact_cell<W: Write>(stdout: &mut W, row: Option<&SparklineRow>, budget: usize) -> usize {
+    let Some(row) = row else {
+        if budget > 0 {
+            print_colored_text(stdout, &" ".repeat(budget), Color::White, None, None);
+        }
+        return budget;
+    };
+
+    // label + " " + spark + " " + value + badge
+    let fixed = COMPACT_LABEL_WIDTH + 1 + 1 + COMPACT_VALUE_WIDTH + COMPACT_BADGE_WIDTH;
+    let spark_width = budget.saturating_sub(fixed).max(1);
+    let spark = sparkline_braille(&row.history, spark_width, row.range);
+
+    let mut remaining = budget;
+    let segments: [(&str, usize, Color); 6] = [
+        (row.short_label, COMPACT_LABEL_WIDTH, row.color),
+        (" ", 1, Color::White),
+        (&spark, spark_width, row.color),
+        (" ", 1, Color::White),
+        (&row.latest_str, COMPACT_VALUE_WIDTH, Color::White),
+        (&row.min_max_str, COMPACT_BADGE_WIDTH, Color::DarkGrey),
+    ];
+    for (text, width, color) in segments {
+        if remaining == 0 {
+            break;
+        }
+        let w = width.min(remaining);
+        print_colored_text(stdout, &fit_field(text, w), color, None, None);
+        remaining -= w;
+    }
+    budget - remaining
+}
+
+/// Truncate or right-pad `s` to exactly `width` characters (char-based, so the
+/// `°` in a temperature value counts as a single display column).
+fn fit_field(s: &str, width: usize) -> String {
+    let count = s.chars().count();
+    if count > width {
+        s.chars().take(width).collect()
+    } else {
+        format!("{s:<width$}")
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -698,24 +854,75 @@ mod tests {
         }
     }
 
+    /// A 24-core Apple Silicon CPU (16P + 8E). At width 120 the core count
+    /// exceeds the collapse threshold (16), so the panel uses the PECluster
+    /// strategy -- the scenario the multirow "no growth" target is written for.
+    fn make_apple_cpu_many_cores() -> CpuInfo {
+        let mut per_core = Vec::new();
+        for i in 0..8 {
+            per_core.push(CoreUtilization {
+                core_id: i as u32,
+                core_type: CoreType::Efficiency,
+                utilization: 20.0 + i as f64 * 3.0,
+            });
+        }
+        for i in 0..16 {
+            per_core.push(CoreUtilization {
+                core_id: (8 + i) as u32,
+                core_type: CoreType::Performance,
+                utilization: 40.0 + i as f64 * 2.0,
+            });
+        }
+        let mut cpu = make_apple_cpu();
+        cpu.total_cores = 24;
+        cpu.total_threads = 24;
+        if let Some(a) = cpu.apple_silicon_info.as_mut() {
+            a.p_core_count = 16;
+            a.e_core_count = 8;
+        }
+        cpu.per_core_utilization = per_core;
+        cpu
+    }
+
+    /// Terminal heights that select each mode.
+    const SHORT_ROWS: u16 = 24;
+    const TALL_ROWS: u16 = 50;
+
     #[test]
     fn test_gpu_content_rows_empty() {
         let state = AppState::new();
-        assert_eq!(gpu_content_rows(&state), 0);
+        assert_eq!(gpu_content_rows(&state, SHORT_ROWS), 0);
+        assert_eq!(gpu_content_rows(&state, TALL_ROWS), 0);
     }
 
     #[test]
     fn test_gpu_content_rows_nvidia() {
         let state = make_nvidia_state();
-        // GPU Util + GPU Mem + GPU Temp + Pkg Power = 4
-        assert_eq!(gpu_content_rows(&state), 4);
+        // Fallback: GPU Util + GPU Mem + GPU Temp + Pkg Power = 4 (unchanged).
+        assert_eq!(gpu_content_rows(&state, SHORT_ROWS), 4);
+        // Multirow: 3 graph rows + ceil(3 secondary / 2) = 3 + 2 = 5.
+        assert_eq!(gpu_content_rows(&state, TALL_ROWS), 5);
     }
 
     #[test]
     fn test_gpu_content_rows_apple_with_ane() {
         let state = make_apple_silicon_state();
-        // GPU Util + GPU Mem + GPU Temp + ANE + Pkg Power = 5
-        assert_eq!(gpu_content_rows(&state), 5);
+        // Fallback: GPU Util + GPU Mem + GPU Temp + ANE + Pkg Power = 5.
+        assert_eq!(gpu_content_rows(&state, SHORT_ROWS), 5);
+        // Multirow: 3 graph rows + ceil(4 secondary / 2) = 3 + 2 = 5.
+        // With +2 borders this lands the GPU half at the 7-row target.
+        assert_eq!(gpu_content_rows(&state, TALL_ROWS), 5);
+    }
+
+    #[test]
+    fn test_gpu_content_rows_nvidia_with_npu_multirow() {
+        let state = make_nvidia_state();
+        // Secondary = Mem + Temp + NPU + Pkg = 4 -> ceil(4/2) = 2 compact lines.
+        assert_eq!(build_rows(&state, false, false, true).len(), 5);
+        // Height helper counts NPU only when show_npu_row is true (currently
+        // false), so exercise the count via the compact-line arithmetic here:
+        // 3 graph + 2 = 5, matching the Apple/NVIDIA multirow height.
+        assert_eq!(gpu_content_rows(&state, TALL_ROWS), 5);
     }
 
     #[test]
@@ -749,7 +956,7 @@ mod tests {
         let mut state = make_apple_silicon_state();
         state.gpu_info[0].ane_utilization = 0.0;
         // GPU Util + GPU Mem + GPU Temp + ANE (always-on) + Pkg Power = 5
-        assert_eq!(gpu_content_rows(&state), 5);
+        assert_eq!(gpu_content_rows(&state, SHORT_ROWS), 5);
     }
 
     #[test]
@@ -813,8 +1020,8 @@ mod tests {
     #[test]
     fn test_render_gpu_lines_nvidia() {
         let state = make_nvidia_state();
-        let lines = render_gpu_lines(&state, 60);
-        // top border + 4 content rows + bottom border = 6
+        let lines = render_gpu_lines(&state, 60, SHORT_ROWS);
+        // Fallback: top border + 4 content rows + bottom border = 6.
         assert_eq!(lines.len(), 6);
         assert!(!lines[0].is_empty()); // top border
     }
@@ -822,16 +1029,105 @@ mod tests {
     #[test]
     fn test_render_gpu_lines_apple_silicon() {
         let state = make_apple_silicon_state();
-        let lines = render_gpu_lines(&state, 60);
-        // top border + 5 content rows + bottom border = 7
+        let lines = render_gpu_lines(&state, 60, SHORT_ROWS);
+        // Fallback: top border + 5 content rows + bottom border = 7.
         assert_eq!(lines.len(), 7);
     }
 
     #[test]
     fn test_render_gpu_lines_empty() {
         let state = AppState::new();
-        let lines = render_gpu_lines(&state, 60);
+        let lines = render_gpu_lines(&state, 60, SHORT_ROWS);
         assert!(lines.is_empty());
+        assert!(render_gpu_lines(&state, 60, TALL_ROWS).is_empty());
+    }
+
+    // --- multirow: rendered line count == gpu_content_rows + 2 borders ------
+
+    #[test]
+    fn test_render_gpu_lines_multirow_matches_content_rows() {
+        for state in [make_nvidia_state(), make_apple_silicon_state()] {
+            for &rows in &[SHORT_ROWS, TALL_ROWS] {
+                let expected = gpu_content_rows(&state, rows) + 2; // + borders
+                let lines = render_gpu_lines(&state, 60, rows);
+                assert_eq!(
+                    lines.len(),
+                    expected,
+                    "line count must match gpu_content_rows at rows={rows}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_render_gpu_lines_apple_multirow_is_seven() {
+        let state = make_apple_silicon_state();
+        // top border + 3 graph rows + 2 compact rows + bottom border = 7.
+        let lines = render_gpu_lines(&state, 60, TALL_ROWS);
+        assert_eq!(lines.len(), 7);
+    }
+
+    #[test]
+    fn test_render_gpu_lines_multirow_no_panic_narrow() {
+        // Narrow right-half widths must not panic in multirow mode.
+        for state in [make_nvidia_state(), make_apple_silicon_state()] {
+            for &w in &[40usize, 41, 30, 12] {
+                let _ = render_gpu_lines(&state, w, TALL_ROWS);
+            }
+        }
+    }
+
+    /// Display width of a rendered line with ANSI color escapes stripped
+    /// (every payload char, braille included, is one terminal column).
+    fn visible_width(line: &str) -> usize {
+        let mut count = 0usize;
+        let mut in_escape = false;
+        for c in line.chars() {
+            if in_escape {
+                if c == 'm' {
+                    in_escape = false;
+                }
+            } else if c == '\u{1b}' {
+                in_escape = true;
+            } else {
+                count += 1;
+            }
+        }
+        count
+    }
+
+    #[test]
+    fn test_multirow_lines_fit_panel_width_at_narrow_widths() {
+        // Regression: at terminal widths 81-82 the right half is 41 columns
+        // wide, and a compact half-cell whose budget cannot hold the minimum
+        // field layout used to emit one extra column, pushing the row past
+        // the border and wrapping the terminal line. Every rendered line
+        // (borders, graph rows, compact rows) must be exactly panel_width
+        // display columns at any width, in both modes.
+        for state in [make_nvidia_state(), make_apple_silicon_state()] {
+            for &w in &[40usize, 41, 42, 60] {
+                for &rows in &[SHORT_ROWS, TALL_ROWS] {
+                    for (i, line) in render_gpu_lines(&state, w, rows).iter().enumerate() {
+                        assert_eq!(
+                            visible_width(line),
+                            w,
+                            "line {i} must be {w} columns (rows={rows})"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Count the interleaved terminal lines emitted by the combined panel.
+    fn combined_line_count(state: &AppState, cpu: &[CpuInfo], width: usize, rows: u16) -> usize {
+        let mut buf: Vec<u8> = Vec::new();
+        render_combined_activity_panel(&mut buf, state, cpu, width, rows);
+        String::from_utf8(buf)
+            .unwrap()
+            .split("\r\n")
+            .filter(|l| !l.is_empty())
+            .count()
     }
 
     #[test]
@@ -839,9 +1135,11 @@ mod tests {
         let mut state = make_nvidia_state();
         let cpu = vec![make_standard_cpu(8)];
         state.cpu_info = cpu.clone();
-        let mut buf: Vec<u8> = Vec::new();
-        render_combined_activity_panel(&mut buf, &state, &cpu, 120);
-        assert!(!buf.is_empty());
+        for &rows in &[SHORT_ROWS, TALL_ROWS] {
+            let mut buf: Vec<u8> = Vec::new();
+            render_combined_activity_panel(&mut buf, &state, &cpu, 120, rows);
+            assert!(!buf.is_empty());
+        }
     }
 
     #[test]
@@ -849,9 +1147,11 @@ mod tests {
         let mut state = make_apple_silicon_state();
         let cpu = vec![make_apple_cpu()];
         state.cpu_info = cpu.clone();
-        let mut buf: Vec<u8> = Vec::new();
-        render_combined_activity_panel(&mut buf, &state, &cpu, 120);
-        assert!(!buf.is_empty());
+        for &rows in &[SHORT_ROWS, TALL_ROWS] {
+            let mut buf: Vec<u8> = Vec::new();
+            render_combined_activity_panel(&mut buf, &state, &cpu, 120, rows);
+            assert!(!buf.is_empty());
+        }
     }
 
     #[test]
@@ -859,7 +1159,7 @@ mod tests {
         let state = AppState::new();
         let cpu = vec![make_standard_cpu(4)];
         let mut buf: Vec<u8> = Vec::new();
-        render_combined_activity_panel(&mut buf, &state, &cpu, 120);
+        render_combined_activity_panel(&mut buf, &state, &cpu, 120, TALL_ROWS);
         // Should still render - CPU only
         assert!(!buf.is_empty());
     }
@@ -869,8 +1169,66 @@ mod tests {
         let state = make_nvidia_state();
         let cpu: Vec<CpuInfo> = Vec::new();
         let mut buf: Vec<u8> = Vec::new();
-        render_combined_activity_panel(&mut buf, &state, &cpu, 120);
+        render_combined_activity_panel(&mut buf, &state, &cpu, 120, TALL_ROWS);
         // No CPU info -> no output
         assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn test_render_combined_line_count_matches_layout_math() {
+        // The combined panel emits max(cpu_height, gpu_height) lines, exactly
+        // what LayoutCalculator reserves. Verify for both platforms/modes.
+        let mut nvidia = make_nvidia_state();
+        let nvidia_cpu = vec![make_standard_cpu(8)];
+        nvidia.cpu_info = nvidia_cpu.clone();
+
+        let mut apple = make_apple_silicon_state();
+        let apple_cpu = vec![make_apple_cpu()];
+        apple.cpu_info = apple_cpu.clone();
+
+        for &rows in &[SHORT_ROWS, TALL_ROWS] {
+            for (state, cpu) in [(&nvidia, &nvidia_cpu), (&apple, &apple_cpu)] {
+                let cpu_h = activity_panel::panel_height(cpu, 120, rows) as usize;
+                let gpu_content = gpu_content_rows(state, rows);
+                let gpu_h = if gpu_content > 0 { gpu_content + 2 } else { 0 };
+                let expected = cpu_h.max(gpu_h);
+                let actual = combined_line_count(state, cpu, 120, rows);
+                assert_eq!(actual, expected, "combined mismatch at rows={rows}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_render_combined_apple_multirow_no_growth() {
+        // Apple Silicon: the combined panel stays 7 rows in both modes (the
+        // multirow graphs consume the space the CPU half left blank, so there
+        // is no net growth versus the fallback layout).
+        let mut apple = make_apple_silicon_state();
+        // 24-core Apple Silicon -> PECluster at width 120.
+        let cpu = vec![make_apple_cpu_many_cores()];
+        apple.cpu_info = cpu.clone();
+        assert_eq!(combined_line_count(&apple, &cpu, 120, SHORT_ROWS), 7);
+        assert_eq!(combined_line_count(&apple, &cpu, 120, TALL_ROWS), 7);
+    }
+
+    #[test]
+    fn test_render_combined_no_panic_narrow_short_tall() {
+        // No-panic at narrow (81 cols), short (24 rows) and tall (50 rows),
+        // including empty histories and a missing GPU.
+        let mut apple = make_apple_silicon_state();
+        apple.utilization_history.clear();
+        apple.memory_history.clear();
+        apple.temperature_history.clear();
+        apple.ane_power_history.clear();
+        apple.package_power_history.clear();
+        apple.cpu_utilization_history.clear();
+        let cpu = vec![make_apple_cpu()];
+        let no_gpu = AppState::new();
+        for &(w, r) in &[(81usize, SHORT_ROWS), (81, TALL_ROWS), (200, TALL_ROWS)] {
+            let mut buf: Vec<u8> = Vec::new();
+            render_combined_activity_panel(&mut buf, &apple, &cpu, w, r);
+            let mut buf2: Vec<u8> = Vec::new();
+            render_combined_activity_panel(&mut buf2, &no_gpu, &cpu, w, r);
+        }
     }
 }
