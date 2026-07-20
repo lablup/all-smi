@@ -23,8 +23,16 @@
 //!
 //! **Line 2** — metrics sparkline row (8-cell braille sparklines):
 //! ```text
-//! CPU <pct>% ⣿⣷⣶…  GPU <pct>% ⣿⣷…  RAM <used>/<total>GB ⣿…  Pwr <W>W ⣿…  Tmp <°C>°C ⣿…
+//! CPU <pct>%<t> ⣿⣷⣶…  GPU <pct>%<t> ⣿⣷…  RAM <used>/<total>GB<t> ⣿…  Pwr <W>W<t> ⣿…  Tmp <°C>°C<t> ⣿…
 //! ```
+//!
+//! Each metric carries a one-cell trend glyph `<t>` (`↑ ↗ → ↘ ↓`) immediately
+//! after its latest value, coloured in the metric's theme colour, derived from
+//! the recent slope of that metric's history (see [`trend_glyph`]).
+//!
+//! Each sparkline uses a per-metric [`soft_range`](crate::ui::scale::soft_range)
+//! auto-axis (zoomed into the visible window with a minimum span, coarse-grid
+//! hysteresis, and hard-domain clamping) so small variations stay visible.
 //!
 //! Colors come from `ThemeConfig` — none are hardcoded.
 //! Sparklines are rendered via [`sparkline_braille`] from the braille utility module.
@@ -36,11 +44,29 @@ use crossterm::{queue, style::Color, style::Print};
 use crate::app_state::AppState;
 use crate::common::config::ThemeConfig;
 use crate::ui::braille::sparkline_braille;
-use crate::ui::scale::{power_range, temp_range};
+use crate::ui::scale::{
+    PERCENT_DOMAIN, PERCENT_SOFT_GRID, PERCENT_SOFT_MIN_SPAN, TEMP_SOFT_GRID, TEMP_SOFT_MIN_SPAN,
+    power_range, power_soft_grid, power_soft_min_span, soft_range, temp_range,
+};
 use crate::ui::text::print_colored_text;
 
 /// Width in braille cells for each metric sparkline.
 const SPARKLINE_WIDTH: usize = 8;
+
+/// Trend-classification thresholds `(flat, steep)` for percentage metrics
+/// (CPU / GPU / RAM), in percentage points. A recent change below `flat` reads
+/// as level (`→`), below `steep` as a gentle slope (`↗`/`↘`), otherwise steep
+/// (`↑`/`↓`).
+const TREND_PERCENT: (f64, f64) = (1.0, 5.0);
+
+/// Trend-classification thresholds `(flat, steep)` for temperature, in °C.
+const TREND_TEMP: (f64, f64) = (0.5, 2.0);
+
+/// Trend-classification thresholds `(flat, steep)` for package power, in W.
+const TREND_POWER: (f64, f64) = (0.2, 1.0);
+
+/// How many samples back the trend slope is measured over.
+const TREND_LOOKBACK: usize = 5;
 
 /// Render the two-line local-mode host summary bar.
 ///
@@ -117,33 +143,39 @@ fn draw_identity_line<W: Write>(stdout: &mut W, state: &AppState) {
 /// Render the metrics sparkline row.
 fn draw_metrics_line<W: Write>(stdout: &mut W, state: &AppState) {
     // CPU% — theme color Cyan
+    let cpu_history: Vec<f64> = state.cpu_utilization_history.iter().copied().collect();
     draw_metric_sparkline(
         stdout,
         "CPU",
-        &state
-            .cpu_utilization_history
-            .iter()
-            .copied()
-            .collect::<Vec<_>>(),
+        &cpu_history,
         format_pct(state.cpu_utilization_history.back().copied()),
         ThemeConfig::cpu_color(),
-        Some((0.0, 100.0)),
+        Some(soft_range(
+            &cpu_history,
+            PERCENT_SOFT_MIN_SPAN,
+            PERCENT_SOFT_GRID,
+            PERCENT_DOMAIN,
+        )),
+        TREND_PERCENT,
     );
 
     print_colored_text(stdout, "  ", Color::White, None, None);
 
     // GPU% — theme color Blue
+    let gpu_history: Vec<f64> = state.utilization_history.iter().copied().collect();
     draw_metric_sparkline(
         stdout,
         "GPU",
-        &state
-            .utilization_history
-            .iter()
-            .copied()
-            .collect::<Vec<_>>(),
+        &gpu_history,
         format_pct(state.utilization_history.back().copied()),
         ThemeConfig::gpu_color(),
-        Some((0.0, 100.0)),
+        Some(soft_range(
+            &gpu_history,
+            PERCENT_SOFT_MIN_SPAN,
+            PERCENT_SOFT_GRID,
+            PERCENT_DOMAIN,
+        )),
+        TREND_PERCENT,
     );
 
     print_colored_text(stdout, "  ", Color::White, None, None);
@@ -159,20 +191,24 @@ fn draw_metrics_line<W: Write>(stdout: &mut W, state: &AppState) {
     print_colored_text(stdout, "  ", Color::White, None, None);
 
     // Temperature — theme color Magenta
+    let temp_history: Vec<f64> = state.cpu_temperature_history.iter().copied().collect();
+    // Soft axis clamped to (0, temp ceiling): CPU sensors report no thermal
+    // threshold, so the ceiling is the 100°C fallback while the floor is 0 so a
+    // cool sensor can zoom below 30°C. The window then tracks small changes.
+    let temp_ceiling = temp_range(None).1;
     draw_metric_sparkline(
         stdout,
         "Tmp",
-        &state
-            .cpu_temperature_history
-            .iter()
-            .copied()
-            .collect::<Vec<_>>(),
+        &temp_history,
         format_temp(state.cpu_temperature_history.back().copied()),
         ThemeConfig::thermal_color(),
-        // Fixed axis (30°C floor, 100°C fallback ceiling): CPU sensors report no
-        // thermal threshold, so the height reflects absolute temperature rather
-        // than rescaling to per-window noise.
-        Some(temp_range(None)),
+        Some(soft_range(
+            &temp_history,
+            TEMP_SOFT_MIN_SPAN,
+            TEMP_SOFT_GRID,
+            (0.0, temp_ceiling),
+        )),
+        TREND_TEMP,
     );
 
     queue!(stdout, Print("\r\n")).unwrap();
@@ -180,7 +216,8 @@ fn draw_metrics_line<W: Write>(stdout: &mut W, state: &AppState) {
 
 /// Draw a single labelled metric with a braille sparkline.
 ///
-/// Format: `<label> <value> <sparkline>`
+/// Format: `<label> <value><trend> <sparkline>`, where `<trend>` is a one-cell
+/// glyph (`↑ ↗ → ↘ ↓`) coloured in the metric's theme colour.
 fn draw_metric_sparkline<W: Write>(
     stdout: &mut W,
     label: &str,
@@ -188,14 +225,54 @@ fn draw_metric_sparkline<W: Write>(
     value_str: String,
     color: Color,
     range: Option<(f64, f64)>,
+    trend: (f64, f64),
 ) {
     let sparkline = sparkline_braille(history, SPARKLINE_WIDTH, range);
+    let glyph = trend_glyph(history, trend.0, trend.1);
 
     print_colored_text(stdout, label, color, None, None);
     print_colored_text(stdout, " ", Color::White, None, None);
     print_colored_text(stdout, &value_str, Color::White, None, None);
+    print_colored_text(stdout, glyph, color, None, None);
     print_colored_text(stdout, " ", Color::DarkGrey, None, None);
     print_colored_text(stdout, &sparkline, color, None, None);
+}
+
+/// Classify the recent slope of `history` into one of five trend glyphs.
+///
+/// The slope is the delta between the latest sample and the sample
+/// [`TREND_LOOKBACK`] positions back (or the oldest available when the history
+/// is shorter). Classification, by the delta `d` against `(flat, steep)`:
+/// - `|d| < flat` → `→` (level)
+/// - `flat ≤ d < steep` → `↗`, `steep ≤ d` → `↑`
+/// - `flat ≤ -d < steep` → `↘`, `steep ≤ -d` → `↓`
+///
+/// Fewer than two samples yields a single space so the metric column stays
+/// aligned. A non-finite latest or reference sample reads as level (`→`).
+#[must_use]
+fn trend_glyph(history: &[f64], flat: f64, steep: f64) -> &'static str {
+    if history.len() < 2 {
+        return " ";
+    }
+    let latest = history[history.len() - 1];
+    let reference = history[history.len().saturating_sub(TREND_LOOKBACK + 1)];
+    if !latest.is_finite() || !reference.is_finite() {
+        return "\u{2192}"; // →
+    }
+    let delta = latest - reference;
+    if delta.abs() < flat {
+        "\u{2192}" // →
+    } else if delta > 0.0 {
+        if delta >= steep {
+            "\u{2191}" // ↑
+        } else {
+            "\u{2197}" // ↗
+        }
+    } else if delta <= -steep {
+        "\u{2193}" // ↓
+    } else {
+        "\u{2198}" // ↘
+    }
 }
 
 /// Draw the RAM metric: `RAM <used>/<total>GB <sparkline>`.
@@ -213,11 +290,20 @@ fn draw_ram_sparkline<W: Write>(stdout: &mut W, state: &AppState) {
 
     let history: Vec<f64> = state.system_memory_history.iter().copied().collect();
 
-    let sparkline = sparkline_braille(&history, SPARKLINE_WIDTH, Some((0.0, 100.0)));
+    // Soft axis over the memory-utilization (%) window.
+    let range = soft_range(
+        &history,
+        PERCENT_SOFT_MIN_SPAN,
+        PERCENT_SOFT_GRID,
+        PERCENT_DOMAIN,
+    );
+    let sparkline = sparkline_braille(&history, SPARKLINE_WIDTH, Some(range));
+    let glyph = trend_glyph(&history, TREND_PERCENT.0, TREND_PERCENT.1);
 
     print_colored_text(stdout, "RAM", ThemeConfig::memory_color(), None, None);
     print_colored_text(stdout, " ", Color::White, None, None);
     print_colored_text(stdout, &value_str, Color::White, None, None);
+    print_colored_text(stdout, glyph, ThemeConfig::memory_color(), None, None);
     print_colored_text(stdout, " ", Color::DarkGrey, None, None);
     print_colored_text(stdout, &sparkline, ThemeConfig::memory_color(), None, None);
 }
@@ -258,16 +344,24 @@ fn draw_power_sparkline<W: Write>(stdout: &mut W, state: &AppState) {
     let value_str = format!("{power_watts:>5.1}W");
 
     let history: Vec<f64> = state.package_power_history.iter().copied().collect();
-    // Fixed axis (0 .. summed enforced power limits, or a nice-rounded peak
-    // when no limit is reported) so the height tracks the power budget instead
-    // of rescaling every frame. Power is summed across all GPUs, so the
-    // ceiling is the aggregate limit.
-    let range = Some(power_range(&state.gpu_info, &history));
-    let sparkline = sparkline_braille(&history, SPARKLINE_WIDTH, range);
+    // Soft axis clamped to (0, power ceiling), where the ceiling is the summed
+    // enforced power limits (or a nice-rounded peak when no limit is reported).
+    // The soft-axis min span and grid step scale with that ceiling, so the
+    // height zooms into the visible window without leaving the power budget.
+    let ceiling = power_range(&state.gpu_info, &history).1;
+    let range = soft_range(
+        &history,
+        power_soft_min_span(ceiling),
+        power_soft_grid(ceiling),
+        (0.0, ceiling),
+    );
+    let sparkline = sparkline_braille(&history, SPARKLINE_WIDTH, Some(range));
+    let glyph = trend_glyph(&history, TREND_POWER.0, TREND_POWER.1);
 
     print_colored_text(stdout, "Pwr", ThemeConfig::power_color(), None, None);
     print_colored_text(stdout, " ", Color::White, None, None);
     print_colored_text(stdout, &value_str, Color::White, None, None);
+    print_colored_text(stdout, glyph, ThemeConfig::power_color(), None, None);
     print_colored_text(stdout, " ", Color::DarkGrey, None, None);
     print_colored_text(stdout, &sparkline, ThemeConfig::power_color(), None, None);
 }
@@ -451,6 +545,56 @@ mod tests {
     }
 
     #[test]
+    fn test_trend_glyph_insufficient_history() {
+        // Fewer than two samples -> a single space to preserve column alignment.
+        assert_eq!(trend_glyph(&[], 1.0, 5.0), " ");
+        assert_eq!(trend_glyph(&[42.0], 1.0, 5.0), " ");
+    }
+
+    #[test]
+    fn test_trend_glyph_flat() {
+        // |delta| < flat threshold -> level arrow.
+        assert_eq!(trend_glyph(&[50.0, 50.5], 1.0, 5.0), "\u{2192}"); // →
+        assert_eq!(trend_glyph(&[50.0, 49.5], 1.0, 5.0), "\u{2192}"); // →
+    }
+
+    #[test]
+    fn test_trend_glyph_gentle_slopes() {
+        // flat <= |delta| < steep -> diagonal arrows.
+        assert_eq!(trend_glyph(&[50.0, 53.0], 1.0, 5.0), "\u{2197}"); // ↗
+        assert_eq!(trend_glyph(&[53.0, 50.0], 1.0, 5.0), "\u{2198}"); // ↘
+    }
+
+    #[test]
+    fn test_trend_glyph_steep_slopes() {
+        // |delta| >= steep -> vertical arrows.
+        assert_eq!(trend_glyph(&[50.0, 60.0], 1.0, 5.0), "\u{2191}"); // ↑
+        assert_eq!(trend_glyph(&[60.0, 50.0], 1.0, 5.0), "\u{2193}"); // ↓
+    }
+
+    #[test]
+    fn test_trend_glyph_uses_sample_lookback_not_oldest() {
+        // With more than TREND_LOOKBACK+1 samples the reference is the sample
+        // ~5 back, not the oldest. Here the oldest (0.0) would read as a steep
+        // rise, but the last 5 steps are flat, so the glyph must be level.
+        let h = [0.0, 50.0, 50.0, 50.0, 50.0, 50.0, 50.2];
+        assert_eq!(trend_glyph(&h, 1.0, 5.0), "\u{2192}"); // →
+    }
+
+    #[test]
+    fn test_trend_glyph_short_history_uses_oldest() {
+        // Between 2 and TREND_LOOKBACK+1 samples: reference is the oldest.
+        let h = [10.0, 20.0, 30.0];
+        assert_eq!(trend_glyph(&h, 1.0, 5.0), "\u{2191}"); // delta 20 -> ↑
+    }
+
+    #[test]
+    fn test_trend_glyph_non_finite_reads_level() {
+        assert_eq!(trend_glyph(&[f64::NAN, 50.0], 1.0, 5.0), "\u{2192}");
+        assert_eq!(trend_glyph(&[50.0, f64::NAN], 1.0, 5.0), "\u{2192}");
+    }
+
+    #[test]
     fn test_draw_local_header_bar_does_not_panic_empty_state() {
         use crate::app_state::AppState;
         let state = AppState::new();
@@ -476,5 +620,76 @@ mod tests {
         draw_local_header_bar(&mut buf, &state, 120);
         // Buffer must be non-empty
         assert!(!buf.is_empty());
+    }
+
+    /// [`trend_glyph`] is covered in isolation above, but nothing previously
+    /// checked that its result actually reaches the rendered byte stream in
+    /// the right column. Six-sample histories are used so `TREND_LOOKBACK`
+    /// (5) always compares against the oldest sample, and each metric is
+    /// engineered to land in a distinct classification bucket so the test can
+    /// pin down exactly which glyph is expected in which metric's segment of
+    /// the output.
+    #[test]
+    fn test_draw_local_header_bar_renders_trend_glyphs() {
+        use crate::app_state::AppState;
+        let mut state = AppState::new();
+        for v in [10.0, 10.0, 10.0, 10.0, 10.0, 60.0] {
+            state.cpu_utilization_history.push_back(v); // delta 50 -> steep rise
+        }
+        for v in [80.0, 80.0, 80.0, 80.0, 80.0, 20.0] {
+            state.utilization_history.push_back(v); // delta -60 -> steep fall
+        }
+        for v in [50.0, 50.0, 50.0, 50.0, 50.0, 50.5] {
+            state.system_memory_history.push_back(v); // delta 0.5 -> flat
+        }
+        for v in [10.0, 10.0, 10.0, 10.0, 10.0, 10.5] {
+            state.package_power_history.push_back(v); // delta 0.5 -> gentle rise
+        }
+        for v in [50.0, 50.0, 50.0, 50.0, 50.0, 49.0] {
+            state.cpu_temperature_history.push_back(v); // delta -1.0 -> gentle fall
+        }
+
+        let mut buf: Vec<u8> = Vec::new();
+        draw_local_header_bar(&mut buf, &state, 120);
+        let out = String::from_utf8_lossy(&buf);
+
+        // Locate each metric's label so the glyph search can be scoped to
+        // that metric's segment of line 2, confirming both the glyph value
+        // and that it lands in the correct column.
+        let cpu = out.find("CPU").expect("CPU label rendered");
+        let gpu = out.find("GPU").expect("GPU label rendered");
+        let ram = out.find("RAM").expect("RAM label rendered");
+        let pwr = out.find("Pwr").expect("Pwr label rendered");
+        let tmp = out.find("Tmp").expect("Tmp label rendered");
+        assert!(
+            cpu < gpu && gpu < ram && ram < pwr && pwr < tmp,
+            "metric labels rendered out of order: {out:?}"
+        );
+
+        assert!(
+            out[cpu..gpu].contains('\u{2191}'), // ↑
+            "CPU segment should contain the steep-rise glyph: {:?}",
+            &out[cpu..gpu]
+        );
+        assert!(
+            out[gpu..ram].contains('\u{2193}'), // ↓
+            "GPU segment should contain the steep-fall glyph: {:?}",
+            &out[gpu..ram]
+        );
+        assert!(
+            out[ram..pwr].contains('\u{2192}'), // →
+            "RAM segment should contain the level glyph: {:?}",
+            &out[ram..pwr]
+        );
+        assert!(
+            out[pwr..tmp].contains('\u{2197}'), // ↗
+            "Pwr segment should contain the gentle-rise glyph: {:?}",
+            &out[pwr..tmp]
+        );
+        assert!(
+            out[tmp..].contains('\u{2198}'), // ↘
+            "Tmp segment should contain the gentle-fall glyph: {:?}",
+            &out[tmp..]
+        );
     }
 }
