@@ -218,7 +218,7 @@ pub fn render_activity_panel<W: Write>(
 /// Draw the 3-row CPU total-utilization history graph (fixed 0..100 axis) into
 /// the panel, emitting exactly [`GRAPH_ROWS`] lines each terminated by "\r\n".
 fn draw_cpu_history_graph<W: Write>(stdout: &mut W, cpu_history: &[f64], panel_width: usize) {
-    let content_width = panel_width.saturating_sub(6);
+    let content_width = panel_width.saturating_sub(4);
     let latest = cpu_history.last().copied().unwrap_or(0.0);
     let value_str = format!("{latest:.1}%");
     let lines = multirow_graph_lines(
@@ -226,7 +226,6 @@ fn draw_cpu_history_graph<W: Write>(stdout: &mut W, cpu_history: &[f64], panel_w
         (0.0, 100.0),
         ThemeConfig::cpu_color(),
         Color::Cyan,
-        "  ",
         content_width,
         &value_str,
         "0-100",
@@ -241,12 +240,12 @@ fn draw_cpu_history_graph<W: Write>(stdout: &mut W, cpu_history: &[f64], panel_w
 /// btop-style right-aligned annotations. Returns exactly [`GRAPH_ROWS`]
 /// strings, top row first, each WITHOUT a trailing newline.
 ///
-/// Layout of every row: `<left_margin>│ <sparkline><annotation> │`. The
-/// sparkline occupies the same width on all rows (so the stacked dots stay
-/// vertically aligned); the annotation column shows `value_str` right-aligned
-/// on the top row and `axis_str` right-aligned on the bottom row. `content_width`
+/// Layout of every row: `│ <sparkline><annotation> │`. The sparkline
+/// occupies the same width on all rows (so the stacked dots stay vertically
+/// aligned); the annotation column shows `value_str` right-aligned on the
+/// top row and `axis_str` right-aligned on the bottom row. `content_width`
 /// is the width available between the `│ ` and ` │` borders, so the total row
-/// width is always `left_margin.len() + 4 + content_width`.
+/// width is always `4 + content_width`.
 ///
 /// Each row's sparkline segment is colored by height, btop-style: the bottom
 /// row keeps `spark_color` (the metric's base theme color) and rows above it
@@ -262,7 +261,6 @@ pub(crate) fn multirow_graph_lines(
     range: (f64, f64),
     spark_color: Color,
     border_color: Color,
-    left_margin: &str,
     content_width: usize,
     value_str: &str,
     axis_str: &str,
@@ -293,9 +291,6 @@ pub(crate) fn multirow_graph_lines(
             let row_color = graph_row_color(row_from_bottom, rows, spark_color);
 
             let mut buf = BufferWriter::new();
-            if !left_margin.is_empty() {
-                print_colored_text(&mut buf, left_margin, Color::White, None, None);
-            }
             print_colored_text(&mut buf, "\u{2502} ", border_color, None, None);
             print_colored_text(&mut buf, spark, row_color, None, None);
 
@@ -383,12 +378,11 @@ fn draw_panel_top_border<W: Write>(
         }
     };
 
-    // "  " + "+-" + " title " + "---..." + "-+"
-    let inner_width = panel_width.saturating_sub(4); // 2 margin + 2 corners
+    // "+-" + " title " + "---..." + "-+"
+    let inner_width = panel_width.saturating_sub(2); // 2 corners
     let title_space = 1 + title.len() + 1; // space + title + space
     let dashes = inner_width.saturating_sub(title_space + 1); // +1 for the initial dash
 
-    print_colored_text(stdout, "  ", Color::White, None, None);
     print_colored_text(stdout, "\u{256d}\u{2500}", Color::Cyan, None, None);
     print_colored_text(stdout, " ", Color::White, None, None);
     print_colored_text(stdout, &title, Color::Cyan, None, None);
@@ -402,8 +396,7 @@ fn draw_panel_top_border<W: Write>(
 }
 
 fn draw_panel_bottom_border<W: Write>(stdout: &mut W, panel_width: usize, _full_width: usize) {
-    let inner_width = panel_width.saturating_sub(4); // 2 margin + 2 corners
-    print_colored_text(stdout, "  ", Color::White, None, None);
+    let inner_width = panel_width.saturating_sub(2); // 2 corners
     print_colored_text(stdout, "\u{2570}", Color::Cyan, None, None);
     for _ in 0..inner_width {
         print_colored_text(stdout, "\u{2500}", Color::Cyan, None, None);
@@ -420,7 +413,7 @@ fn calculate_cores_per_line(panel_width: usize) -> usize {
     // Each core needs: label (3 chars) + ": [" + bar + "]" + spacing
     // For compact display, use utilization blocks (1 char per core) with grouping
     // When we have enough width, show progress bars (4 per line for <=16 cores)
-    let content_width = panel_width.saturating_sub(6); // 4 margin + 2 border
+    let content_width = panel_width.saturating_sub(4); // 2 border chars + 2 inner padding
     let spacing = 2;
     // Minimum bar width per core: label(3) + ": [" + bar(8) + "]" = ~15 chars
     let min_core_width = 15;
@@ -434,7 +427,7 @@ fn draw_individual_cores<W: Write>(
     panel_width: usize,
     _full_width: usize,
 ) {
-    let content_width = panel_width.saturating_sub(6); // 2 margin + 2 border chars + 2 inner padding
+    let content_width = panel_width.saturating_sub(4); // 2 border chars + 2 inner padding
     let cores_per_line = calculate_cores_per_line(panel_width);
     let spacing = 2;
     let core_bar_width =
@@ -472,7 +465,6 @@ fn draw_individual_cores<W: Write>(
 
     for (core, prefix) in &ordered_cores {
         if cores_on_line == 0 {
-            print_colored_text(stdout, "  ", Color::White, None, None);
             print_colored_text(stdout, "\u{2502} ", Color::Cyan, None, None);
         }
 
@@ -508,7 +500,7 @@ fn draw_individual_cores<W: Write>(
 
         if cores_on_line >= cores_per_line {
             // Pad to panel width and close border
-            let used = 4 + cores_on_line * core_bar_width + (cores_on_line - 1) * spacing;
+            let used = 2 + cores_on_line * core_bar_width + (cores_on_line - 1) * spacing;
             let pad = panel_width.saturating_sub(used + 2); // 2 for " |"
             if pad > 0 {
                 print_colored_text(stdout, &" ".repeat(pad), Color::White, None, None);
@@ -534,7 +526,7 @@ fn draw_individual_cores<W: Write>(
                 None,
             );
         }
-        let used = 4 + cores_per_line * core_bar_width + (cores_per_line - 1) * spacing;
+        let used = 2 + cores_per_line * core_bar_width + (cores_per_line - 1) * spacing;
         let pad = panel_width.saturating_sub(used + 2);
         if pad > 0 {
             print_colored_text(stdout, &" ".repeat(pad), Color::White, None, None);
@@ -559,7 +551,7 @@ fn draw_pe_cluster_bars<W: Write>(
         None => return,
     };
 
-    let content_width = panel_width.saturating_sub(6);
+    let content_width = panel_width.saturating_sub(4);
 
     // Collect per-core utilization blocks for each cluster
     let s_cores: Vec<&CoreUtilization> = info
@@ -641,7 +633,6 @@ fn draw_cluster_line<W: Write>(
     bar_width: usize,
     panel_width: usize,
 ) {
-    print_colored_text(stdout, "  ", Color::White, None, None);
     print_colored_text(stdout, "\u{2502} ", Color::Cyan, None, None);
 
     // Draw the progress bar using the pre-computed shared bar_width
@@ -664,7 +655,7 @@ fn draw_cluster_line<W: Write>(
         } else {
             0
         };
-    let used = 4 + bar_width + 1 + blocks_printed;
+    let used = 2 + bar_width + 1 + blocks_printed;
     let pad = panel_width.saturating_sub(used + 2);
     if pad > 0 {
         print_colored_text(stdout, &" ".repeat(pad), Color::White, None, None);
@@ -683,7 +674,7 @@ fn draw_socket_group_bars<W: Write>(
     panel_width: usize,
     _full_width: usize,
 ) {
-    let content_width = panel_width.saturating_sub(6);
+    let content_width = panel_width.saturating_sub(4);
     let socket_count = info.socket_count.max(1) as usize;
     let cores_per_socket = info.per_core_utilization.len() / socket_count;
 
@@ -711,7 +702,6 @@ fn draw_socket_group_bars<W: Write>(
         let block_section_width = block_count + group_separators;
         let bar_width = content_width.saturating_sub(block_section_width + 2);
 
-        print_colored_text(stdout, "  ", Color::White, None, None);
         print_colored_text(stdout, "\u{2502} ", Color::Cyan, None, None);
 
         draw_bar(stdout, &label, avg_util, 100.0, bar_width, None);
@@ -728,7 +718,7 @@ fn draw_socket_group_bars<W: Write>(
 
         // Pad to panel width
         let blocks_printed = block_count + group_separators;
-        let used = 4 + bar_width + 1 + blocks_printed;
+        let used = 2 + bar_width + 1 + blocks_printed;
         let pad = panel_width.saturating_sub(used + 2);
         if pad > 0 {
             print_colored_text(stdout, &" ".repeat(pad), Color::White, None, None);
@@ -1067,6 +1057,102 @@ mod tests {
         }
     }
 
+    // --- regression: no left margin (#280) ---
+
+    /// Display width of a rendered line with ANSI color escapes stripped,
+    /// mirroring the equivalent helper in `gpu_sparkline_panel`'s tests
+    /// (every payload char is one terminal column).
+    fn visible_width(line: &str) -> usize {
+        let mut count = 0usize;
+        let mut in_escape = false;
+        for c in line.chars() {
+            if in_escape {
+                if c == 'm' {
+                    in_escape = false;
+                }
+            } else if c == '\u{1b}' {
+                in_escape = true;
+            } else {
+                count += 1;
+            }
+        }
+        count
+    }
+
+    /// First non-escape (visible) character of a rendered line, or `None` if
+    /// the line is empty or entirely escape sequences.
+    fn first_visible_char(line: &str) -> Option<char> {
+        let mut in_escape = false;
+        for c in line.chars() {
+            if in_escape {
+                if c == 'm' {
+                    in_escape = false;
+                }
+            } else if c == '\u{1b}' {
+                in_escape = true;
+            } else {
+                return Some(c);
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn test_cpu_panel_lines_start_at_column_zero_and_fit_panel_width() {
+        // Regression for #280: the CPU panel border must start at column 0
+        // (no leading margin spaces) and every rendered line must be exactly
+        // `panel_width` (= width / 2) display columns wide, in both the
+        // fallback and multirow rendering modes, across all three collapse
+        // strategies.
+        // Fixture and width choices avoid three separate, pre-existing
+        // rendering boundary cases that are unrelated to the margin fix
+        // under test (and out of scope to fix here): (1) 12 cores divides
+        // evenly into every `cores_per_line` value produced by the tested
+        // widths below (3 and 4), so every Individual-mode line is a full
+        // line - a trailing partial line exercises a separate padding
+        // computation in `draw_individual_cores`; (2) the PECluster and
+        // SocketGroup core counts are kept low enough that their shared bar
+        // width stays above the 17-column floor `draw_bar` needs to fit its
+        // label and value text without overflowing its requested width; (3)
+        // the narrowest allowed panel width (81 cols, panel_width 40) is
+        // excluded because the SocketGroup title text alone does not fit an
+        // inner width that small, which is a pre-existing title-truncation
+        // gap in `draw_panel_top_border` rather than a margin regression.
+        let individual_cpu = vec![make_standard_cpu(12)];
+        let pe_cluster_cpu = vec![make_apple_silicon_cpu(10, 8)];
+        let mut socket_cpu = make_standard_cpu(24);
+        socket_cpu.socket_count = 2;
+        let socket_cpu = vec![socket_cpu];
+
+        let history = ramp_history(40);
+        let border_chars = ['\u{256d}', '\u{2502}', '\u{2570}']; // ╭ │ ╰
+
+        for cpu in [&individual_cpu, &pe_cluster_cpu, &socket_cpu] {
+            for &width in &[120usize, 200] {
+                let panel_width = width / 2;
+                for &rows in &[SHORT_ROWS, TALL_ROWS] {
+                    let mut buf: Vec<u8> = Vec::new();
+                    render_activity_panel(&mut buf, cpu, &history, width, rows);
+                    let text = String::from_utf8(buf).unwrap();
+                    for line in text.split("\r\n").filter(|l| !l.is_empty()) {
+                        let first = first_visible_char(line);
+                        assert!(
+                            first.is_some_and(|c| border_chars.contains(&c)),
+                            "line must start with a border char, not a margin, at \
+                             width={width} rows={rows}: {line:?}"
+                        );
+                        assert_eq!(
+                            visible_width(line),
+                            panel_width,
+                            "line must be exactly panel_width={panel_width} columns \
+                             at width={width} rows={rows}: {line:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     // --- graph_row_color: btop-style height gradient ---
 
     #[test]
@@ -1181,7 +1267,6 @@ mod tests {
             (0.0, 100.0),
             base,
             Color::Magenta,
-            "  ",
             40,
             "50.0%",
             "0-100",
