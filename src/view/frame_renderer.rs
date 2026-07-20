@@ -211,6 +211,7 @@ impl FrameRenderer {
                     &view_state,
                     &snapshot.cpu_info,
                     width,
+                    rows,
                 );
             }
         } else {

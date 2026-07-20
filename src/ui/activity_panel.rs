@@ -25,7 +25,10 @@ use std::io::Write;
 
 use crossterm::{queue, style::Color, style::Print};
 
+use crate::common::config::ThemeConfig;
 use crate::device::{CoreType, CoreUtilization, CpuInfo};
+use crate::ui::braille::sparkline_braille_rows;
+use crate::ui::buffer::BufferWriter;
 use crate::ui::renderers::widgets::gauges::get_utilization_block;
 use crate::ui::text::print_colored_text;
 use crate::ui::widgets::draw_bar;
@@ -33,6 +36,29 @@ use crate::ui::widgets::draw_bar;
 /// Minimum terminal width required to show the Activity panel.
 /// Below this threshold the panel is omitted entirely.
 const MIN_PANEL_WIDTH: u16 = 80;
+
+/// Terminal height (rows) at or above which the Activity panel switches to the
+/// btop-style multi-row history graphs. Below it, both halves fall back to the
+/// compact single-row layout so the process list is not starved.
+pub const MULTIROW_MIN_TERMINAL_ROWS: u16 = 35;
+
+/// Number of terminal rows a multi-row history graph occupies. Three rows give
+/// `3 * 4 = 12` braille dot levels of vertical resolution.
+pub const GRAPH_ROWS: usize = 3;
+
+/// Whether the multi-row history graphs should be used at the given terminal
+/// height.
+///
+/// This is the single source of truth for the mode decision. Both the height
+/// functions ([`panel_height`], [`gpu_content_rows`](crate::ui::gpu_sparkline_panel::gpu_content_rows))
+/// and the rendering paths ([`render_activity_panel`],
+/// [`render_combined_activity_panel`](crate::ui::gpu_sparkline_panel::render_combined_activity_panel))
+/// call this with the same `terminal_rows`, so the reported height can never
+/// disagree with the rendered line count.
+#[must_use]
+pub fn use_multirow_graphs(terminal_rows: u16) -> bool {
+    terminal_rows >= MULTIROW_MIN_TERMINAL_ROWS
+}
 
 /// Strategy for how to display CPU cores in the Activity panel.
 #[derive(Debug, Clone, PartialEq)]
@@ -71,10 +97,33 @@ pub fn should_show_panel(cols: u16) -> bool {
     cols > MIN_PANEL_WIDTH
 }
 
+/// Number of core-bar content lines the CPU panel renders for the given
+/// strategy (excludes the optional history graph and the borders).
+///
+/// Shared by [`panel_height`] and the rendering path so the reported height
+/// and the emitted line count can never drift apart.
+fn bar_line_count(info: &CpuInfo, strategy: &CollapseStrategy, width: usize) -> usize {
+    match strategy {
+        CollapseStrategy::Individual => {
+            let half_width = width / 2;
+            let cores_per_line = calculate_cores_per_line(half_width);
+            let core_count = info.per_core_utilization.len();
+            core_count.div_ceil(cores_per_line)
+        }
+        // P-cluster bar + E-cluster bar (or S+P on M-series Pro/Max) = 2 lines.
+        CollapseStrategy::PECluster => 2,
+        CollapseStrategy::SocketGroup => info.socket_count.max(1) as usize,
+    }
+}
+
 /// Calculate the number of terminal rows the Activity panel will consume.
 ///
 /// Returns 0 when the panel should be hidden (narrow terminal or no data).
-pub fn panel_height(cpu_info: &[CpuInfo], cols: u16) -> u16 {
+///
+/// `rows` is the full terminal height; when it is tall enough
+/// ([`use_multirow_graphs`]) the panel reserves [`GRAPH_ROWS`] extra rows for
+/// the CPU total-utilization history graph above the core bars.
+pub fn panel_height(cpu_info: &[CpuInfo], cols: u16, rows: u16) -> u16 {
     if !should_show_panel(cols) || cpu_info.is_empty() {
         return 0;
     }
@@ -86,26 +135,15 @@ pub fn panel_height(cpu_info: &[CpuInfo], cols: u16) -> u16 {
 
     let width = cols as usize;
     let strategy = core_collapse_strategy(info, width);
-
-    // 1 line for the header/border top
-    // N lines for the core bars (depends on strategy and core count)
-    // 1 line for the border bottom
-    let bar_lines = match strategy {
-        CollapseStrategy::Individual => {
-            let half_width = width / 2;
-            let cores_per_line = calculate_cores_per_line(half_width);
-            let core_count = info.per_core_utilization.len();
-            core_count.div_ceil(cores_per_line)
-        }
-        CollapseStrategy::PECluster => {
-            // P-cluster bar + E-cluster bar = 2 lines
-            2
-        }
-        CollapseStrategy::SocketGroup => info.socket_count.max(1) as usize,
+    let bar_lines = bar_line_count(info, &strategy, width);
+    let graph_lines = if use_multirow_graphs(rows) {
+        GRAPH_ROWS
+    } else {
+        0
     };
 
-    // top border + content lines + bottom border
-    (1 + bar_lines + 1) as u16
+    // top border + optional history graph + core bars + bottom border
+    (1 + graph_lines + bar_lines + 1) as u16
 }
 
 /// Render the CPU Activity panel into the given writer.
@@ -114,11 +152,24 @@ pub fn panel_height(cpu_info: &[CpuInfo], cols: u16) -> u16 {
 /// terminal width. The panel is self-contained: it draws its own borders
 /// and handles all layout internally.
 ///
+/// When `terminal_rows` is tall enough ([`use_multirow_graphs`]) a 3-row CPU
+/// total-utilization history graph (fixed 0..100 axis, fed from `cpu_history`)
+/// is inserted above the core bars, btop-style.
+///
 /// # Arguments
 /// * `stdout` - Writer to render into
 /// * `cpu_info` - CPU information (first entry used for per-core data)
+/// * `cpu_history` - CPU total-utilization history (most recent last); passed
+///   in as a slice to keep this module decoupled from `AppState`
 /// * `width` - Full terminal width in columns
-pub fn render_activity_panel<W: Write>(stdout: &mut W, cpu_info: &[CpuInfo], width: usize) {
+/// * `terminal_rows` - Full terminal height in rows (drives the mode decision)
+pub fn render_activity_panel<W: Write>(
+    stdout: &mut W,
+    cpu_info: &[CpuInfo],
+    cpu_history: &[f64],
+    width: usize,
+    terminal_rows: u16,
+) {
     if cpu_info.is_empty() {
         return;
     }
@@ -136,6 +187,10 @@ pub fn render_activity_panel<W: Write>(stdout: &mut W, cpu_info: &[CpuInfo], wid
     // Draw the panel
     draw_panel_top_border(stdout, panel_width, &strategy, info);
 
+    if use_multirow_graphs(terminal_rows) {
+        draw_cpu_history_graph(stdout, cpu_history, panel_width);
+    }
+
     match strategy {
         CollapseStrategy::Individual => {
             draw_individual_cores(stdout, &info.per_core_utilization, panel_width, width);
@@ -149,6 +204,101 @@ pub fn render_activity_panel<W: Write>(stdout: &mut W, cpu_info: &[CpuInfo], wid
     }
 
     draw_panel_bottom_border(stdout, panel_width, width);
+}
+
+// ---------------------------------------------------------------------------
+// Multi-row history graph (shared by the CPU and GPU halves)
+// ---------------------------------------------------------------------------
+
+/// Draw the 3-row CPU total-utilization history graph (fixed 0..100 axis) into
+/// the panel, emitting exactly [`GRAPH_ROWS`] lines each terminated by "\r\n".
+fn draw_cpu_history_graph<W: Write>(stdout: &mut W, cpu_history: &[f64], panel_width: usize) {
+    let content_width = panel_width.saturating_sub(6);
+    let latest = cpu_history.last().copied().unwrap_or(0.0);
+    let value_str = format!("{latest:.1}%");
+    let lines = multirow_graph_lines(
+        cpu_history,
+        (0.0, 100.0),
+        ThemeConfig::cpu_color(),
+        Color::Cyan,
+        "  ",
+        content_width,
+        &value_str,
+        "0-100",
+    );
+    for line in lines {
+        stdout.write_all(line.as_bytes()).unwrap();
+        queue!(stdout, Print("\r\n")).unwrap();
+    }
+}
+
+/// Compose the lines of a stacked multi-row braille history graph with
+/// btop-style right-aligned annotations. Returns exactly [`GRAPH_ROWS`]
+/// strings, top row first, each WITHOUT a trailing newline.
+///
+/// Layout of every row: `<left_margin>│ <sparkline><annotation> │`. The
+/// sparkline occupies the same width on all rows (so the stacked dots stay
+/// vertically aligned); the annotation column shows `value_str` right-aligned
+/// on the top row and `axis_str` right-aligned on the bottom row. `content_width`
+/// is the width available between the `│ ` and ` │` borders, so the total row
+/// width is always `left_margin.len() + 4 + content_width`.
+///
+/// All width math uses saturating arithmetic and stays panic-free down to
+/// pathologically narrow panels.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn multirow_graph_lines(
+    history: &[f64],
+    range: (f64, f64),
+    spark_color: Color,
+    border_color: Color,
+    left_margin: &str,
+    content_width: usize,
+    value_str: &str,
+    axis_str: &str,
+) -> Vec<String> {
+    let annot_width = value_str.chars().count().max(axis_str.chars().count());
+    let spark_width = content_width.saturating_sub(annot_width + 1).max(1);
+    // The annotation region absorbs whatever columns the sparkline did not use,
+    // so `left_margin + "│ " + spark + annot_region + " │"` fills the panel.
+    let annot_region = content_width.saturating_sub(spark_width);
+    let sparks = sparkline_braille_rows(history, spark_width, GRAPH_ROWS, Some(range));
+
+    sparks
+        .iter()
+        .enumerate()
+        .map(|(i, spark)| {
+            let (annot, annot_color): (&str, Color) = if i == 0 {
+                (value_str, Color::White)
+            } else if i + 1 == GRAPH_ROWS {
+                (axis_str, Color::DarkGrey)
+            } else {
+                ("", Color::White)
+            };
+
+            let mut buf = BufferWriter::new();
+            if !left_margin.is_empty() {
+                print_colored_text(&mut buf, left_margin, Color::White, None, None);
+            }
+            print_colored_text(&mut buf, "\u{2502} ", border_color, None, None);
+            print_colored_text(&mut buf, spark, spark_color, None, None);
+
+            // Right-align the annotation within its reserved region.
+            let annot: String = if annot.chars().count() > annot_region {
+                annot.chars().take(annot_region).collect()
+            } else {
+                annot.to_string()
+            };
+            let pad = annot_region.saturating_sub(annot.chars().count());
+            if pad > 0 {
+                print_colored_text(&mut buf, &" ".repeat(pad), Color::White, None, None);
+            }
+            if !annot.is_empty() {
+                print_colored_text(&mut buf, &annot, annot_color, None, None);
+            }
+            print_colored_text(&mut buf, " \u{2502}", border_color, None, None);
+            buf.get_buffer().to_string()
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -698,47 +848,163 @@ mod tests {
         assert!(should_show_panel(120));
     }
 
+    /// Fallback (short-terminal) height and a ramp history for the multirow
+    /// tests below.
+    const SHORT_ROWS: u16 = 24;
+    const TALL_ROWS: u16 = 50;
+
+    fn ramp_history(n: usize) -> Vec<f64> {
+        (0..n).map(|i| (i as f64 * 3.0) % 100.0).collect()
+    }
+
+    /// Count the terminal lines actually rendered by `render_activity_panel`,
+    /// mirroring the `\r\n`-split logic used by the combined panel renderer.
+    fn cpu_rendered_lines(cpu: &[CpuInfo], history: &[f64], width: usize, rows: u16) -> usize {
+        let mut buf: Vec<u8> = Vec::new();
+        render_activity_panel(&mut buf, cpu, history, width, rows);
+        String::from_utf8(buf)
+            .unwrap()
+            .split("\r\n")
+            .filter(|l| !l.is_empty())
+            .count()
+    }
+
     #[test]
     fn test_panel_height_narrow_terminal() {
         let cpu = vec![make_standard_cpu(8)];
-        assert_eq!(panel_height(&cpu, 79), 0);
+        assert_eq!(panel_height(&cpu, 79, TALL_ROWS), 0);
     }
 
     #[test]
     fn test_panel_height_empty_cpu() {
         let cpu: Vec<CpuInfo> = Vec::new();
-        assert_eq!(panel_height(&cpu, 120), 0);
+        assert_eq!(panel_height(&cpu, 120, TALL_ROWS), 0);
     }
 
     #[test]
     fn test_panel_height_standard_cores() {
         let cpu = vec![make_standard_cpu(8)];
-        let height = panel_height(&cpu, 120);
+        let height = panel_height(&cpu, 120, SHORT_ROWS);
         // Should be > 0 (top border + at least 1 bar line + bottom border)
         assert!(height >= 3, "Expected height >= 3, got {height}");
+    }
+
+    #[test]
+    fn test_use_multirow_graphs_threshold() {
+        assert!(!use_multirow_graphs(24));
+        assert!(!use_multirow_graphs(MULTIROW_MIN_TERMINAL_ROWS - 1));
+        assert!(use_multirow_graphs(MULTIROW_MIN_TERMINAL_ROWS));
+        assert!(use_multirow_graphs(50));
+    }
+
+    // --- height: fallback (today's values) vs multirow across strategies ---
+
+    #[test]
+    fn test_panel_height_individual_both_modes() {
+        // 8 cores at width 120 -> Individual strategy, 3 bar lines.
+        let cpu = vec![make_standard_cpu(8)];
+        // Fallback: top + 3 bars + bottom = 5 (unchanged from today).
+        assert_eq!(panel_height(&cpu, 120, SHORT_ROWS), 5);
+        // Multirow: top + 3 graph + 3 bars + bottom = 8.
+        assert_eq!(panel_height(&cpu, 120, TALL_ROWS), 8);
+    }
+
+    #[test]
+    fn test_panel_height_pe_cluster_both_modes() {
+        // 24-core Apple Silicon at width 120 -> PECluster (24 > threshold 16).
+        let cpu = vec![make_apple_silicon_cpu(16, 8)];
+        assert_eq!(
+            core_collapse_strategy(&cpu[0], 120),
+            CollapseStrategy::PECluster
+        );
+        // Fallback: top + 2 cluster bars + bottom = 4 (unchanged from today).
+        assert_eq!(panel_height(&cpu, 120, SHORT_ROWS), 4);
+        // Multirow target: top + 3 graph + 2 cluster bars + bottom = 7.
+        assert_eq!(panel_height(&cpu, 120, TALL_ROWS), 7);
+    }
+
+    #[test]
+    fn test_panel_height_socket_group_both_modes() {
+        // 64 cores, 2 sockets at width 120 -> SocketGroup, 2 bar lines.
+        let mut cpu = make_standard_cpu(64);
+        cpu.socket_count = 2;
+        let cpu = vec![cpu];
+        assert_eq!(
+            core_collapse_strategy(&cpu[0], 120),
+            CollapseStrategy::SocketGroup
+        );
+        // Fallback: top + 2 socket bars + bottom = 4 (unchanged from today).
+        assert_eq!(panel_height(&cpu, 120, SHORT_ROWS), 4);
+        // Multirow: top + 3 graph + 2 socket bars + bottom = 7.
+        assert_eq!(panel_height(&cpu, 120, TALL_ROWS), 7);
+    }
+
+    // --- rendered line count == panel_height, both modes, all strategies ---
+
+    #[test]
+    fn test_render_line_count_matches_height_individual() {
+        let cpu = vec![make_standard_cpu(8)];
+        let history = ramp_history(40);
+        for &rows in &[SHORT_ROWS, TALL_ROWS] {
+            let expected = panel_height(&cpu, 120, rows) as usize;
+            let actual = cpu_rendered_lines(&cpu, &history, 120, rows);
+            assert_eq!(actual, expected, "individual mismatch at rows={rows}");
+        }
+    }
+
+    #[test]
+    fn test_render_line_count_matches_height_pe_cluster() {
+        let cpu = vec![make_apple_silicon_cpu(16, 8)];
+        let history = ramp_history(40);
+        for &rows in &[SHORT_ROWS, TALL_ROWS] {
+            let expected = panel_height(&cpu, 120, rows) as usize;
+            let actual = cpu_rendered_lines(&cpu, &history, 120, rows);
+            assert_eq!(actual, expected, "pe-cluster mismatch at rows={rows}");
+        }
+    }
+
+    #[test]
+    fn test_render_line_count_matches_height_socket_group() {
+        let mut cpu = make_standard_cpu(64);
+        cpu.socket_count = 2;
+        let cpu = vec![cpu];
+        let history = ramp_history(40);
+        for &rows in &[SHORT_ROWS, TALL_ROWS] {
+            let expected = panel_height(&cpu, 120, rows) as usize;
+            let actual = cpu_rendered_lines(&cpu, &history, 120, rows);
+            assert_eq!(actual, expected, "socket-group mismatch at rows={rows}");
+        }
+    }
+
+    #[test]
+    fn test_render_line_count_matches_height_empty_history() {
+        // Empty CPU history still renders the fixed-height graph rows.
+        let cpu = vec![make_apple_silicon_cpu(16, 8)];
+        let expected = panel_height(&cpu, 120, TALL_ROWS) as usize;
+        let actual = cpu_rendered_lines(&cpu, &[], 120, TALL_ROWS);
+        assert_eq!(actual, expected);
     }
 
     #[test]
     fn test_render_activity_panel_does_not_panic_empty() {
         let cpu: Vec<CpuInfo> = Vec::new();
         let mut buf: Vec<u8> = Vec::new();
-        render_activity_panel(&mut buf, &cpu, 120);
+        render_activity_panel(&mut buf, &cpu, &ramp_history(20), 120, TALL_ROWS);
     }
 
     #[test]
     fn test_render_activity_panel_individual() {
         let cpu = vec![make_standard_cpu(8)];
         let mut buf: Vec<u8> = Vec::new();
-        render_activity_panel(&mut buf, &cpu, 120);
+        render_activity_panel(&mut buf, &cpu, &ramp_history(20), 120, TALL_ROWS);
         assert!(!buf.is_empty());
     }
 
     #[test]
     fn test_render_activity_panel_pe_cluster() {
-        let cpu = vec![make_apple_silicon_cpu(8, 4)];
+        let cpu = vec![make_apple_silicon_cpu(16, 8)];
         let mut buf: Vec<u8> = Vec::new();
-        // Width 30 triggers PECluster strategy for 12 cores
-        render_activity_panel(&mut buf, &cpu, 80);
+        render_activity_panel(&mut buf, &cpu, &ramp_history(20), 120, TALL_ROWS);
         assert!(!buf.is_empty());
     }
 
@@ -748,8 +1014,19 @@ mod tests {
         cpu.socket_count = 2;
         let cpu_vec = vec![cpu];
         let mut buf: Vec<u8> = Vec::new();
-        render_activity_panel(&mut buf, &cpu_vec, 120);
+        render_activity_panel(&mut buf, &cpu_vec, &ramp_history(20), 120, TALL_ROWS);
         assert!(!buf.is_empty());
+    }
+
+    #[test]
+    fn test_render_activity_panel_no_panic_narrow_and_sizes() {
+        // Narrow (81 cols), short (24 rows), tall (50 rows), empty history.
+        let cpu = vec![make_apple_silicon_cpu(16, 8)];
+        for &(w, r) in &[(81usize, SHORT_ROWS), (81, TALL_ROWS), (200, TALL_ROWS)] {
+            let mut buf: Vec<u8> = Vec::new();
+            render_activity_panel(&mut buf, &cpu, &[], w, r);
+            render_activity_panel(&mut buf, &cpu, &ramp_history(60), w, r);
+        }
     }
 
     #[test]
