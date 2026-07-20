@@ -29,7 +29,9 @@ use crate::common::config::ThemeConfig;
 use crate::device::{CoreType, CoreUtilization, CpuInfo};
 use crate::ui::braille::sparkline_braille_rows;
 use crate::ui::buffer::BufferWriter;
-use crate::ui::renderers::widgets::gauges::get_utilization_block;
+use crate::ui::renderers::widgets::gauges::{
+    GAUGE_HIGH_COLOR, GAUGE_MEDIUM_COLOR, get_utilization_block,
+};
 use crate::ui::text::print_colored_text;
 use crate::ui::widgets::draw_bar;
 
@@ -246,6 +248,12 @@ fn draw_cpu_history_graph<W: Write>(stdout: &mut W, cpu_history: &[f64], panel_w
 /// is the width available between the `│ ` and ` │` borders, so the total row
 /// width is always `left_margin.len() + 4 + content_width`.
 ///
+/// Each row's sparkline segment is colored by height, btop-style: the bottom
+/// row keeps `spark_color` (the metric's base theme color) and rows above it
+/// shift toward warmer colors, computed per row by [`graph_row_color`]. Only
+/// the sparkline segment is affected; the annotation, borders, and left
+/// margin keep their existing colors regardless of row.
+///
 /// All width math uses saturating arithmetic and stays panic-free down to
 /// pathologically narrow panels.
 #[allow(clippy::too_many_arguments)]
@@ -265,6 +273,7 @@ pub(crate) fn multirow_graph_lines(
     // so `left_margin + "│ " + spark + annot_region + " │"` fills the panel.
     let annot_region = content_width.saturating_sub(spark_width);
     let sparks = sparkline_braille_rows(history, spark_width, GRAPH_ROWS, Some(range));
+    let rows = sparks.len();
 
     sparks
         .iter()
@@ -277,13 +286,18 @@ pub(crate) fn multirow_graph_lines(
             } else {
                 ("", Color::White)
             };
+            // `sparks` is top row first (see `sparkline_braille_rows`), so
+            // convert the top-first index `i` to a bottom-based row index
+            // before looking up the height-gradient color.
+            let row_from_bottom = rows - 1 - i;
+            let row_color = graph_row_color(row_from_bottom, rows, spark_color);
 
             let mut buf = BufferWriter::new();
             if !left_margin.is_empty() {
                 print_colored_text(&mut buf, left_margin, Color::White, None, None);
             }
             print_colored_text(&mut buf, "\u{2502} ", border_color, None, None);
-            print_colored_text(&mut buf, spark, spark_color, None, None);
+            print_colored_text(&mut buf, spark, row_color, None, None);
 
             // Right-align the annotation within its reserved region.
             let annot: String = if annot.chars().count() > annot_region {
@@ -302,6 +316,27 @@ pub(crate) fn multirow_graph_lines(
             buf.get_buffer().to_string()
         })
         .collect()
+}
+
+/// btop-style height gradient: pick the color for one terminal row of a
+/// multi-row sparkline based on its position, bottom to top.
+///
+/// `row_from_bottom` is 0 for the bottom-most row and `rows - 1` for the
+/// top-most row. The mapping uses a 3-anchor palette `[base,
+/// GAUGE_MEDIUM_COLOR, GAUGE_HIGH_COLOR]` (Yellow and Red): row
+/// `row_from_bottom` of `rows` picks `palette[row_from_bottom * 3 / rows]`.
+/// For the current [`GRAPH_ROWS`]`== 3` graphs this yields exactly
+/// base / Yellow / Red bottom-to-top; a single-row graph (`rows == 1`) stays
+/// entirely `base`; a two-row graph (`rows == 2`) yields base / Yellow.
+/// `rows == 0` returns `base` rather than dividing by zero.
+#[must_use]
+pub(crate) fn graph_row_color(row_from_bottom: usize, rows: usize, base: Color) -> Color {
+    if rows == 0 {
+        return base;
+    }
+    let palette = [base, GAUGE_MEDIUM_COLOR, GAUGE_HIGH_COLOR];
+    let idx = (row_from_bottom * palette.len() / rows).min(palette.len() - 1);
+    palette[idx]
 }
 
 // ---------------------------------------------------------------------------
@@ -1030,6 +1065,157 @@ mod tests {
             render_activity_panel(&mut buf, &cpu, &[], w, r);
             render_activity_panel(&mut buf, &cpu, &ramp_history(60), w, r);
         }
+    }
+
+    // --- graph_row_color: btop-style height gradient ---
+
+    #[test]
+    fn test_graph_row_color_rows_zero_does_not_panic() {
+        let base = Color::Green;
+        assert_eq!(graph_row_color(0, 0, base), base);
+        assert_eq!(graph_row_color(5, 0, base), base);
+    }
+
+    #[test]
+    fn test_graph_row_color_rows_1_always_base() {
+        let base = Color::Green;
+        assert_eq!(graph_row_color(0, 1, base), base);
+    }
+
+    #[test]
+    fn test_graph_row_color_rows_2() {
+        let base = Color::Green;
+        assert_eq!(graph_row_color(0, 2, base), base);
+        assert_eq!(graph_row_color(1, 2, base), GAUGE_MEDIUM_COLOR);
+    }
+
+    #[test]
+    fn test_graph_row_color_rows_3() {
+        let base = Color::Green;
+        assert_eq!(graph_row_color(0, 3, base), base);
+        assert_eq!(graph_row_color(1, 3, base), GAUGE_MEDIUM_COLOR);
+        assert_eq!(graph_row_color(2, 3, base), GAUGE_HIGH_COLOR);
+    }
+
+    #[test]
+    fn test_graph_row_color_rows_4() {
+        let base = Color::Green;
+        // Bottom row always base, top row always red once rows >= 3.
+        assert_eq!(graph_row_color(0, 4, base), base);
+        assert_eq!(graph_row_color(3, 4, base), GAUGE_HIGH_COLOR);
+    }
+
+    #[test]
+    fn test_graph_row_color_rows_6() {
+        let base = Color::Green;
+        assert_eq!(graph_row_color(0, 6, base), base);
+        assert_eq!(graph_row_color(5, 6, base), GAUGE_HIGH_COLOR);
+    }
+
+    #[test]
+    fn test_graph_row_color_bottom_always_base_top_always_red_for_3_plus() {
+        let base = Color::Green;
+        for rows in [1usize, 2, 3, 4, 5, 6, 10, 32] {
+            assert_eq!(
+                graph_row_color(0, rows, base),
+                base,
+                "bottom row must stay the base color at rows={rows}"
+            );
+            if rows >= 3 {
+                assert_eq!(
+                    graph_row_color(rows - 1, rows, base),
+                    GAUGE_HIGH_COLOR,
+                    "top row must be red once rows >= 3 (rows={rows})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_graph_row_color_monotonic_band_order() {
+        // Rank a color by how "hot" its band is; the band must never cool
+        // down as `row_from_bottom` increases (bottom-to-top).
+        let base = Color::Green;
+        let band = |c: Color| -> u8 {
+            if c == base {
+                0
+            } else if c == GAUGE_MEDIUM_COLOR {
+                1
+            } else if c == GAUGE_HIGH_COLOR {
+                2
+            } else {
+                panic!("unexpected color {c:?} outside the 3-anchor palette")
+            }
+        };
+
+        for rows in [1usize, 2, 3, 4, 5, 6, 10, 32] {
+            let mut prev_band = 0u8;
+            for row_from_bottom in 0..rows {
+                let cur_band = band(graph_row_color(row_from_bottom, rows, base));
+                assert!(
+                    cur_band >= prev_band,
+                    "band cooled going up at rows={rows}, row_from_bottom={row_from_bottom}"
+                );
+                prev_band = cur_band;
+            }
+        }
+    }
+
+    // --- multirow_graph_lines: rendered rows carry the height gradient ---
+
+    /// Render the exact SGR (Select Graphic Rendition) escape sequence
+    /// crossterm emits for a foreground color, so tests can assert on the
+    /// literal bytes that end up in a rendered line.
+    fn foreground_sgr(color: Color) -> String {
+        let mut buf: Vec<u8> = Vec::new();
+        queue!(buf, crossterm::style::SetForegroundColor(color)).unwrap();
+        String::from_utf8(buf).unwrap()
+    }
+
+    #[test]
+    fn test_multirow_graph_lines_rows_carry_distinct_gradient_colors() {
+        let base = Color::Green;
+        let history = ramp_history(40);
+        let lines = multirow_graph_lines(
+            &history,
+            (0.0, 100.0),
+            base,
+            Color::Magenta,
+            "  ",
+            40,
+            "50.0%",
+            "0-100",
+        );
+        assert_eq!(lines.len(), GRAPH_ROWS);
+
+        let base_sgr = foreground_sgr(base);
+        let medium_sgr = foreground_sgr(GAUGE_MEDIUM_COLOR);
+        let high_sgr = foreground_sgr(GAUGE_HIGH_COLOR);
+
+        // Top row (index 0, top-most terminal row) is farthest from the
+        // bottom -> highest band -> red.
+        assert!(
+            lines[0].contains(&high_sgr),
+            "top row must carry the red gradient escape: {:?}",
+            lines[0]
+        );
+        // Middle row -> yellow.
+        assert!(
+            lines[1].contains(&medium_sgr),
+            "middle row must carry the yellow gradient escape: {:?}",
+            lines[1]
+        );
+        // Bottom row (last index) -> base theme color, unchanged from today.
+        assert!(
+            lines[GRAPH_ROWS - 1].contains(&base_sgr),
+            "bottom row must carry the base theme color escape: {:?}",
+            lines[GRAPH_ROWS - 1]
+        );
+
+        // The three rows must carry mutually distinct color escapes.
+        assert_ne!(lines[0], lines[1]);
+        assert_ne!(lines[1], lines[GRAPH_ROWS - 1]);
+        assert_ne!(lines[0], lines[GRAPH_ROWS - 1]);
     }
 
     #[test]
