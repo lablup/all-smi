@@ -486,4 +486,23 @@ mod tests {
         assert!(sparkline_braille_rows(&[], 8, 0, None).is_empty());
         assert!(sparkline_braille_rows(&[1.0], 0, 0, None).is_empty());
     }
+
+    // 18. Bucket stretching: when `data.len() < width * 2`, a bucket's
+    //     natural (possibly empty) span is pushed up to at least one sample,
+    //     so a sample is repeated across multiple sub-columns. The rightmost
+    //     sub-column must still cover the most recent sample.
+    #[test]
+    fn bucket_stretching_when_fewer_samples_than_subcolumns() {
+        // 2 samples, width = 2 -> 4 sub-columns, so each sample is stretched
+        // across 2 sub-columns: sub-columns 0,1 own data[0] = 0.0 (bottom
+        // dot only), sub-columns 2,3 own data[1] = 10.0 (fully filled, the
+        // most recent sample).
+        let data = [0.0, 10.0];
+        let result = sparkline_braille(&data, 2, Some((0.0, 10.0)));
+        assert_eq!(
+            result, "\u{28C0}\u{28FF}",
+            "stretched buckets should repeat data[0] into the first cell (bottom dot only) \
+             and data[1] into the second cell (fully filled, most recent sample)"
+        );
+    }
 }
