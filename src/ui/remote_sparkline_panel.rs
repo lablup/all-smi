@@ -23,6 +23,10 @@
 //! ```text
 //! <label>  <braille sparkline>  <latest value>
 //! ```
+//!
+//! Each sparkline uses a per-metric [`soft_range`](crate::ui::scale::soft_range)
+//! auto-axis (zoomed into the visible window with a minimum span, coarse-grid
+//! hysteresis, and hard-domain clamping) so small variations stay visible.
 
 use std::io::Write;
 
@@ -30,7 +34,10 @@ use crossterm::{queue, style::Color, style::Print};
 
 use crate::app_state::AppState;
 use crate::ui::braille::sparkline_braille;
-use crate::ui::scale::temp_range;
+use crate::ui::scale::{
+    PERCENT_DOMAIN, PERCENT_SOFT_GRID, PERCENT_SOFT_MIN_SPAN, TEMP_SOFT_GRID, TEMP_SOFT_MIN_SPAN,
+    soft_range, temp_range,
+};
 use crate::ui::text::print_colored_text;
 
 /// Width reserved for the label column (e.g. "GPU Util.").
@@ -70,63 +77,81 @@ pub fn draw_remote_sparkline_panel<W: Write>(stdout: &mut W, state: &AppState, c
 
     let has_gpu = !state.gpu_info.is_empty();
 
-    // Row 1: Utilization
+    // Row 1: Utilization — soft axis over each window (clamped to 0..100).
+    let gpu_util = history_vec(&state.utilization_history);
+    let cpu_util = history_vec(&state.cpu_utilization_history);
     draw_sparkline_pair(
         stdout,
         SparklinePairParams {
             left_label: "GPU Util.",
             left_color: Color::Yellow,
-            left_history: &history_vec(&state.utilization_history),
+            left_history: &gpu_util,
             left_value: avg_str(&state.utilization_history, "%"),
-            left_range: Some((0.0, 100.0)),
+            left_range: Some(percent_soft_range(&gpu_util)),
             left_available: has_gpu,
             right_label: "CPU Util.",
             right_color: Color::Cyan,
-            right_history: &history_vec(&state.cpu_utilization_history),
+            right_history: &cpu_util,
             right_value: avg_str(&state.cpu_utilization_history, "%"),
-            right_range: Some((0.0, 100.0)),
+            right_range: Some(percent_soft_range(&cpu_util)),
             half_width,
         },
     );
     queue!(stdout, Print("\r\n")).unwrap();
 
-    // Row 2: Memory
+    // Row 2: Memory — soft axis over each window (clamped to 0..100).
+    let gpu_mem = history_vec(&state.memory_history);
+    let host_mem = history_vec(&state.system_memory_history);
     draw_sparkline_pair(
         stdout,
         SparklinePairParams {
             left_label: "GPU Mem. ",
             left_color: Color::Yellow,
-            left_history: &history_vec(&state.memory_history),
+            left_history: &gpu_mem,
             left_value: avg_str(&state.memory_history, "%"),
-            left_range: Some((0.0, 100.0)),
+            left_range: Some(percent_soft_range(&gpu_mem)),
             left_available: has_gpu,
             right_label: "Host Mem.",
             right_color: Color::Cyan,
-            right_history: &history_vec(&state.system_memory_history),
+            right_history: &host_mem,
             right_value: avg_str(&state.system_memory_history, "%"),
-            right_range: Some((0.0, 100.0)),
+            right_range: Some(percent_soft_range(&host_mem)),
             half_width,
         },
     );
     queue!(stdout, Print("\r\n")).unwrap();
 
-    // Row 3: Temperature
+    // Row 3: Temperature — soft axis clamped to (0, thermal-threshold ceiling);
+    // the GPU ceiling comes from its reported threshold, the CPU from the
+    // 100°C fallback. The floor is 0 so a cool sensor can zoom below 30°C.
+    let gpu_temp = history_vec(&state.temperature_history);
+    let cpu_temp = history_vec(&state.cpu_temperature_history);
+    let gpu_temp_ceiling = temp_range(state.gpu_info.first()).1;
+    let cpu_temp_ceiling = temp_range(None).1;
     draw_sparkline_pair(
         stdout,
         SparklinePairParams {
             left_label: "GPU Temp.",
             left_color: Color::Yellow,
-            left_history: &history_vec(&state.temperature_history),
+            left_history: &gpu_temp,
             left_value: avg_temp_str(&state.temperature_history),
-            // Fixed axis anchored to the GPU thermal threshold (100°C fallback).
-            left_range: Some(temp_range(state.gpu_info.first())),
+            left_range: Some(soft_range(
+                &gpu_temp,
+                TEMP_SOFT_MIN_SPAN,
+                TEMP_SOFT_GRID,
+                (0.0, gpu_temp_ceiling),
+            )),
             left_available: has_gpu,
             right_label: "CPU Temp.",
             right_color: Color::Cyan,
-            right_history: &history_vec(&state.cpu_temperature_history),
+            right_history: &cpu_temp,
             right_value: avg_temp_str(&state.cpu_temperature_history),
-            // CPU sensors report no threshold -> fixed 30..100°C axis.
-            right_range: Some(temp_range(None)),
+            right_range: Some(soft_range(
+                &cpu_temp,
+                TEMP_SOFT_MIN_SPAN,
+                TEMP_SOFT_GRID,
+                (0.0, cpu_temp_ceiling),
+            )),
             half_width,
         },
     );
@@ -233,6 +258,17 @@ fn history_vec(history: &std::collections::VecDeque<f64>) -> Vec<f64> {
     history.iter().copied().collect()
 }
 
+/// Soft auto-axis for a percentage metric (utilization / memory), clamped to
+/// `0..100`.
+fn percent_soft_range(history: &[f64]) -> (f64, f64) {
+    soft_range(
+        history,
+        PERCENT_SOFT_MIN_SPAN,
+        PERCENT_SOFT_GRID,
+        PERCENT_DOMAIN,
+    )
+}
+
 fn avg_str(history: &std::collections::VecDeque<f64>, suffix: &str) -> String {
     if history.is_empty() {
         return "N/A".to_string();
@@ -317,5 +353,22 @@ mod tests {
         h.push_back(60.0);
         h.push_back(70.0);
         assert_eq!(avg_temp_str(&h), " 65\u{00B0}C");
+    }
+
+    #[test]
+    fn test_percent_soft_range_zooms_and_clamps() {
+        // A near-constant window is expanded to the minimum span and rounded
+        // outward, while staying inside the 0..100 domain.
+        let (lo, hi) = percent_soft_range(&[41.0, 42.0, 41.0]);
+        assert!(hi - lo >= PERCENT_SOFT_MIN_SPAN);
+        assert!(lo >= 0.0 && hi <= 100.0);
+        // center 41.5 -> [31.5, 51.5] -> grid [30, 55].
+        assert_eq!((lo, hi), (30.0, 55.0));
+    }
+
+    #[test]
+    fn test_percent_soft_range_empty_history() {
+        // Empty history anchors a min-span window at the domain floor.
+        assert_eq!(percent_soft_range(&[]), (0.0, 20.0));
     }
 }

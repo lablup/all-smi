@@ -21,8 +21,11 @@
 //! <label>  <braille sparkline>  <latest>  <scale badge>
 //! ```
 //!
-//! The scale badge shows the row's fixed Y-axis range (e.g. `30-83`), not a
-//! per-frame observed min/max, so it reads as a stable legend for the height.
+//! The scale badge shows the row's soft-zoom Y-axis range actually in use
+//! (e.g. `40-60`), computed by [`soft_range`](crate::ui::scale::soft_range)
+//! from the visible history window with a per-metric minimum span, coarse-grid
+//! hysteresis, and hard-domain clamping. It keeps the axis honest: the badge
+//! always reports the exact bounds the sparkline is drawn against.
 //!
 //! Rows rendered (platform-dependent):
 //!
@@ -53,7 +56,11 @@ use crate::device::CpuInfo;
 use crate::ui::activity_panel;
 use crate::ui::braille::sparkline_braille;
 use crate::ui::buffer::BufferWriter;
-use crate::ui::scale::{ane_range, power_range, scale_badge, temp_range};
+use crate::ui::scale::{
+    ANE_SOFT_GRID, ANE_SOFT_MIN_SPAN, PERCENT_DOMAIN, PERCENT_SOFT_GRID, PERCENT_SOFT_MIN_SPAN,
+    TEMP_SOFT_GRID, TEMP_SOFT_MIN_SPAN, ane_range, power_range, power_soft_grid,
+    power_soft_min_span, scale_badge, soft_range, temp_range,
+};
 use crate::ui::text::print_colored_text;
 
 /// Width reserved for the label column (e.g. "GPU Util").
@@ -220,10 +227,16 @@ fn build_rows(state: &AppState, is_apple: bool, has_ane: bool, has_npu: bool) ->
     let mut rows = Vec::with_capacity(6);
     let gpu = state.gpu_info.first();
 
-    // 1. GPU Utilization
+    // 1. GPU Utilization — soft axis zoomed into the visible window (clamped to
+    //    0..100) so small variations around a typical load stay visible.
     let gpu_util: Vec<f64> = state.utilization_history.iter().copied().collect();
     let latest_util = gpu_util.last().copied().unwrap_or(0.0);
-    let util_range = (0.0, 100.0);
+    let util_range = soft_range(
+        &gpu_util,
+        PERCENT_SOFT_MIN_SPAN,
+        PERCENT_SOFT_GRID,
+        PERCENT_DOMAIN,
+    );
     rows.push(SparklineRow {
         label: "GPU Util",
         color: ThemeConfig::gpu_color(),
@@ -234,10 +247,15 @@ fn build_rows(state: &AppState, is_apple: bool, has_ane: bool, has_npu: bool) ->
         badge: None,
     });
 
-    // 2. GPU Memory
+    // 2. GPU Memory — soft axis over the memory-utilization (%) window.
     let gpu_mem: Vec<f64> = state.memory_history.iter().copied().collect();
     let latest_mem = gpu_mem.last().copied().unwrap_or(0.0);
-    let mem_range = (0.0, 100.0);
+    let mem_range = soft_range(
+        &gpu_mem,
+        PERCENT_SOFT_MIN_SPAN,
+        PERCENT_SOFT_GRID,
+        PERCENT_DOMAIN,
+    );
     rows.push(SparklineRow {
         label: "GPU Mem",
         color: ThemeConfig::memory_color(),
@@ -248,12 +266,18 @@ fn build_rows(state: &AppState, is_apple: bool, has_ane: bool, has_npu: bool) ->
         badge: None,
     });
 
-    // 3. GPU Temperature — fixed axis anchored to the reported thermal
-    //    threshold (or a 100°C fallback). The height then tracks how close the
-    //    GPU is to throttling instead of rescaling to per-window noise.
+    // 3. GPU Temperature — soft axis clamped to (0, thermal-threshold ceiling)
+    //    (100°C fallback). The floor is 0 so a cool GPU can zoom below 30°C
+    //    while the window still tracks small changes.
     let gpu_temp: Vec<f64> = state.temperature_history.iter().copied().collect();
     let latest_temp = gpu_temp.last().copied().unwrap_or(0.0);
-    let temp_rng = temp_range(gpu);
+    let temp_ceiling = temp_range(gpu).1;
+    let temp_rng = soft_range(
+        &gpu_temp,
+        TEMP_SOFT_MIN_SPAN,
+        TEMP_SOFT_GRID,
+        (0.0, temp_ceiling),
+    );
     rows.push(SparklineRow {
         label: "GPU Temp",
         color: ThemeConfig::thermal_color(),
@@ -278,7 +302,15 @@ fn build_rows(state: &AppState, is_apple: bool, has_ane: bool, has_npu: bool) ->
         } else {
             state.ane_power_history.iter().copied().collect()
         };
-        let ane_rng = ane_range(&ane_history);
+        // Soft axis clamped to (0, ane ceiling); the ceiling still comes from
+        // ane_range so a busy Neural Engine keeps a comparable top.
+        let ane_ceiling = ane_range(&ane_history).1;
+        let ane_rng = soft_range(
+            &ane_history,
+            ANE_SOFT_MIN_SPAN,
+            ANE_SOFT_GRID,
+            (0.0, ane_ceiling),
+        );
         rows.push(SparklineRow {
             label: "ANE",
             color: ThemeConfig::accelerator_color(),
@@ -303,17 +335,23 @@ fn build_rows(state: &AppState, is_apple: bool, has_ane: bool, has_npu: bool) ->
         });
     }
 
-    // 5. Pkg Power — fixed axis anchored to the enforced power limit when the
-    //    driver reports one, else a nice-rounded ceiling over the observed peak.
+    // 5. Pkg Power — soft axis clamped to (0, power ceiling), where the ceiling
+    //    is the summed enforced per-GPU limits (package power is summed across
+    //    all GPUs), else a nice-rounded peak. The soft min span and grid step
+    //    scale with that ceiling.
     let power_w = package_power(state, is_apple);
     let power_history: Vec<f64> = if state.package_power_history.is_empty() {
         vec![power_w]
     } else {
         state.package_power_history.iter().copied().collect()
     };
-    // Aggregate axis: package power is summed across all GPUs, so anchor the
-    // ceiling to the summed per-GPU limits (not just the first GPU's).
-    let power_rng = power_range(&state.gpu_info, &power_history);
+    let power_ceiling = power_range(&state.gpu_info, &power_history).1;
+    let power_rng = soft_range(
+        &power_history,
+        power_soft_min_span(power_ceiling),
+        power_soft_grid(power_ceiling),
+        (0.0, power_ceiling),
+    );
     rows.push(SparklineRow {
         label: "Pkg Power",
         color: ThemeConfig::power_color(),
@@ -749,13 +787,18 @@ mod tests {
         assert_eq!(rows[3].label, "ANE");
         assert_eq!(rows[4].label, "Pkg Power");
         assert!(rows[2].badge.is_none());
-        // Scale badges now show the fixed axis, not the observed window:
-        //   ANE  peak 3.8 W -> floored to 8 W -> nice_ceil 10 W
-        //   Pkg  peak 17.5 W (no power limit) -> nice_ceil 20 W
-        assert_eq!(rows[3].min_max_str, "0-10");
-        assert_eq!(rows[4].min_max_str, "0-20");
-        // GPU Temp uses the 30°C floor + 100°C fallback (no thresholds set).
-        assert_eq!(rows[2].min_max_str, "30-100");
+        // Scale badges now show the soft-zoom axis actually in use, computed by
+        // hand from the fixture histories (see make_apple_silicon_state):
+        //   GPU Util  data [0..76]   -> grid [0, 80]
+        //   GPU Mem   data [0..47.5] -> grid [0, 50]
+        //   GPU Temp  data [40..59]  -> grid [40, 60]  (domain 0..100)
+        //   ANE       data [0..3.8]  -> grid [0, 4]    (ceiling 10, min span 2)
+        //   Pkg Power data [8..17.5] -> grid [8, 18]   (ceiling 20, min span 4, grid 1)
+        assert_eq!(rows[0].min_max_str, "0-80");
+        assert_eq!(rows[1].min_max_str, "0-50");
+        assert_eq!(rows[2].min_max_str, "40-60");
+        assert_eq!(rows[3].min_max_str, "0-4");
+        assert_eq!(rows[4].min_max_str, "8-18");
     }
 
     #[test]
