@@ -621,4 +621,75 @@ mod tests {
         // Buffer must be non-empty
         assert!(!buf.is_empty());
     }
+
+    /// [`trend_glyph`] is covered in isolation above, but nothing previously
+    /// checked that its result actually reaches the rendered byte stream in
+    /// the right column. Six-sample histories are used so `TREND_LOOKBACK`
+    /// (5) always compares against the oldest sample, and each metric is
+    /// engineered to land in a distinct classification bucket so the test can
+    /// pin down exactly which glyph is expected in which metric's segment of
+    /// the output.
+    #[test]
+    fn test_draw_local_header_bar_renders_trend_glyphs() {
+        use crate::app_state::AppState;
+        let mut state = AppState::new();
+        for v in [10.0, 10.0, 10.0, 10.0, 10.0, 60.0] {
+            state.cpu_utilization_history.push_back(v); // delta 50 -> steep rise
+        }
+        for v in [80.0, 80.0, 80.0, 80.0, 80.0, 20.0] {
+            state.utilization_history.push_back(v); // delta -60 -> steep fall
+        }
+        for v in [50.0, 50.0, 50.0, 50.0, 50.0, 50.5] {
+            state.system_memory_history.push_back(v); // delta 0.5 -> flat
+        }
+        for v in [10.0, 10.0, 10.0, 10.0, 10.0, 10.5] {
+            state.package_power_history.push_back(v); // delta 0.5 -> gentle rise
+        }
+        for v in [50.0, 50.0, 50.0, 50.0, 50.0, 49.0] {
+            state.cpu_temperature_history.push_back(v); // delta -1.0 -> gentle fall
+        }
+
+        let mut buf: Vec<u8> = Vec::new();
+        draw_local_header_bar(&mut buf, &state, 120);
+        let out = String::from_utf8_lossy(&buf);
+
+        // Locate each metric's label so the glyph search can be scoped to
+        // that metric's segment of line 2, confirming both the glyph value
+        // and that it lands in the correct column.
+        let cpu = out.find("CPU").expect("CPU label rendered");
+        let gpu = out.find("GPU").expect("GPU label rendered");
+        let ram = out.find("RAM").expect("RAM label rendered");
+        let pwr = out.find("Pwr").expect("Pwr label rendered");
+        let tmp = out.find("Tmp").expect("Tmp label rendered");
+        assert!(
+            cpu < gpu && gpu < ram && ram < pwr && pwr < tmp,
+            "metric labels rendered out of order: {out:?}"
+        );
+
+        assert!(
+            out[cpu..gpu].contains('\u{2191}'), // ↑
+            "CPU segment should contain the steep-rise glyph: {:?}",
+            &out[cpu..gpu]
+        );
+        assert!(
+            out[gpu..ram].contains('\u{2193}'), // ↓
+            "GPU segment should contain the steep-fall glyph: {:?}",
+            &out[gpu..ram]
+        );
+        assert!(
+            out[ram..pwr].contains('\u{2192}'), // →
+            "RAM segment should contain the level glyph: {:?}",
+            &out[ram..pwr]
+        );
+        assert!(
+            out[pwr..tmp].contains('\u{2197}'), // ↗
+            "Pwr segment should contain the gentle-rise glyph: {:?}",
+            &out[pwr..tmp]
+        );
+        assert!(
+            out[tmp..].contains('\u{2198}'), // ↘
+            "Tmp segment should contain the gentle-fall glyph: {:?}",
+            &out[tmp..]
+        );
+    }
 }
