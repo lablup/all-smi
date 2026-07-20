@@ -296,7 +296,9 @@ pub fn power_soft_grid(ceiling: f64) -> f64 {
 /// storing anything in `AppState`.
 ///
 /// The algorithm, in order:
-/// 1. Take the finite min/max of `history`. Empty history or all-non-finite
+/// 1. Take the finite min/max of `history`, clamped into the hard `domain`
+///    (a sample can stray outside it, e.g. a mis-scaled remote reading, and
+///    must not drag the axis out with it). Empty history or all-non-finite
 ///    input yields a `min_span`-wide window anchored at the domain floor.
 /// 2. Enforce `min_span`: if the window is narrower, expand it symmetrically
 ///    around the data center, then slide it back inside the domain (preserving
@@ -349,6 +351,17 @@ pub fn soft_range(history: &[f64], min_span: f64, grid: f64, domain: (f64, f64))
         let base = if dlo.is_finite() { dlo } else { 0.0 };
         lo = base;
         hi = base + span;
+    }
+
+    // Clamp the raw extrema into the domain before span enforcement: when
+    // every sample lies outside the domain and the raw span already meets
+    // `min_span`, step 2 would be skipped and step 4 alone would collapse
+    // the axis to a zero-width range *outside* the domain (e.g. samples
+    // [95, 105] against a 0-90 domain). Clamping here keeps the axis
+    // in-domain and lets step 2 rebuild a min-span window from the edge.
+    if domain_valid {
+        lo = lo.clamp(dlo, dhi);
+        hi = hi.clamp(dlo, dhi);
     }
 
     // 2. Minimum-span enforcement.
@@ -785,7 +798,9 @@ mod tests {
 
     #[test]
     fn soft_range_clamps_to_temperature_domain() {
-        // Ceiling 90°C: span 10 (no expansion), grid [85, 95], clamp hi to 90.
+        // Ceiling 90°C: the 95°C sample is first clamped into the domain
+        // ([85, 90], span 5), then the min span (10) is rebuilt from the edge
+        // ([80, 90]), so clamping never shrinks the span below the minimum.
         let (lo, hi) = soft_range(
             &[85.0, 95.0],
             TEMP_SOFT_MIN_SPAN,
@@ -793,7 +808,7 @@ mod tests {
             (0.0, 90.0),
         );
         assert!(hi <= 90.0);
-        assert_eq!((lo, hi), (85.0, 90.0));
+        assert_eq!((lo, hi), (80.0, 90.0));
     }
 
     #[test]
@@ -874,6 +889,29 @@ mod tests {
         let (lo, hi) = soft_range(&[10.0, 20.0], 5.0, 5.0, (0.0, f64::INFINITY));
         assert!(lo.is_finite() && hi.is_finite());
         assert!(hi >= lo);
+    }
+
+    #[test]
+    fn soft_range_out_of_domain_data_stays_inside_domain() {
+        // All samples above the domain ceiling with a raw span already >=
+        // min_span: without the pre-clamp, span enforcement is skipped and
+        // the final clamp collapses to a zero-width axis outside the domain
+        // ((95, 95) here). The axis must instead land inside the domain with
+        // its minimum span rebuilt from the edge.
+        assert_eq!(
+            soft_range(&[95.0, 105.0], 10.0, 5.0, (0.0, 90.0)),
+            (80.0, 90.0)
+        );
+        // Symmetric case below the domain floor.
+        assert_eq!(
+            soft_range(&[-20.0, -5.0], 10.0, 5.0, (0.0, 90.0)),
+            (0.0, 10.0)
+        );
+        // Mixed in/out-of-domain samples keep the in-domain part.
+        assert_eq!(
+            soft_range(&[85.0, 105.0], 10.0, 5.0, (0.0, 90.0)),
+            (80.0, 90.0)
+        );
     }
 
     // --- badge formatting for soft ranges ----------------------------------
