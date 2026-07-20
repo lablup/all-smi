@@ -44,7 +44,7 @@ use crate::device::readers::intel_gpu_engine::{
     EngineState, apply_engine_readout, refresh_with_lock,
 };
 use crate::device::readers::intel_gpu_fdinfo::{
-    build_intel_drm_basenames, build_intel_process_infos,
+    build_intel_drm_basenames, build_intel_process_infos, sum_card_vram_from_fdinfo,
 };
 use crate::device::readers::intel_gpu_gtidle::{
     GtidleState, apply_fallback as apply_gtidle_fallback,
@@ -54,7 +54,7 @@ use crate::device::readers::intel_gpu_names::{
 };
 use crate::device::readers::intel_gpu_sysfs::{
     MemoryVariant, has_nonzero_u64, read_fan_rpm, read_frequency_mhz, read_memory_bytes,
-    read_power_watts, read_temperature_celsius,
+    read_power_watts, read_resource2_total_bytes, read_temperature_celsius,
 };
 use crate::device::types::{GpuInfo, ProcessInfo};
 use crate::utils::get_hostname;
@@ -222,12 +222,12 @@ impl GpuReader for IntelGpuReader {
         let time = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
         let mut out = Vec::with_capacity(self.cards.len());
 
-        for card in &self.cards {
+        for (card_index, card) in self.cards.iter().enumerate() {
             let static_info = self.ensure_static_info(card);
             let mut detail = static_info.detail.clone();
 
             let device_dir = card.card_path.join("device");
-            let (used_memory, total_memory) = read_memory_bytes(&device_dir, card.variant);
+            let (mut used_memory, total_memory) = read_memory_bytes(&device_dir, card.variant);
             let frequency = read_frequency_mhz(&device_dir);
             let temperature = read_temperature_celsius(&device_dir);
             let power_consumption = read_power_watts(&device_dir);
@@ -241,7 +241,7 @@ impl GpuReader for IntelGpuReader {
             let frequency = frequency.min(MAX_GPU_FREQ_MHZ);
             let power_consumption = power_consumption.clamp(0.0, MAX_GPU_POWER_WATTS);
             let total_memory = total_memory.min(MAX_GPU_MEMORY_BYTES);
-            let used_memory = used_memory.min(total_memory);
+            used_memory = used_memory.min(total_memory);
 
             sources::decorate_static_sources(
                 &mut detail,
@@ -251,6 +251,20 @@ impl GpuReader for IntelGpuReader {
                 frequency,
                 fan_rpm,
             );
+
+            // xe driver: fall back to fdinfo for VRAM usage when
+            // card-level sysfs counters are unavailable.
+            if used_memory == 0 && total_memory > 0 && card.driver == "xe" {
+                let fdinfo_vram = sum_card_vram_from_fdinfo(
+                    card_index,
+                    &self.intel_drm_basenames,
+                    &self.proc_root,
+                );
+                if fdinfo_vram > 0 {
+                    used_memory = fdinfo_vram.min(total_memory);
+                    detail.insert("Source: Memory".to_string(), "fdinfo (xe)".to_string());
+                }
+            }
 
             // Engine-busy refresh — guarded by a per-card mutex.
             let readout = refresh_with_lock(&card.engine_state, &device_dir);
@@ -464,6 +478,7 @@ fn build_uuid(card: &IntelGpuCard, device_dir: &Path) -> String {
 fn classify_variant(device_dir: &Path) -> MemoryVariant {
     if has_nonzero_u64(&device_dir.join("mem_info_vram_total"))
         || has_nonzero_u64(&device_dir.join("tile0").join("vram0").join("total_bytes"))
+        || read_resource2_total_bytes(device_dir) > 0
     {
         MemoryVariant::Discrete
     } else {

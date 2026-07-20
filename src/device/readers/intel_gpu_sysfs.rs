@@ -60,7 +60,29 @@ pub fn read_memory_bytes(device_dir: &Path, variant: MemoryVariant) -> (u64, u64
         used = read_u64(&device_dir.join("tile0").join("vram0").join("used_bytes")).unwrap_or(0);
     }
 
+    // xe driver on Battlemage (kernel 6.12+) does not expose
+    // `tile0/vram0/*`; fall back to PCI BAR2 (VRAM BAR) size.
+    if total == 0 {
+        total = read_resource2_total_bytes(device_dir);
+    }
+
     (used, total)
+}
+
+/// Read the PCI BAR2 (VRAM BAR) resource file size in bytes. Returns 0
+/// when the file is absent or the size is not a plausible VRAM BAR (less
+/// than 256 MiB). Used as a last-resort fallback when the xe driver does
+/// not expose `tile0/vram0/total_bytes` (Battlemage on kernels < 6.14).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn read_resource2_total_bytes(device_dir: &Path) -> u64 {
+    let path = device_dir.join("resource2");
+    match std::fs::metadata(&path) {
+        Ok(meta) => {
+            let size = meta.len();
+            if size >= 256 * 1024 * 1024 { size } else { 0 }
+        }
+        Err(_) => 0,
+    }
 }
 
 /// Read the current GT0 frequency in MHz.

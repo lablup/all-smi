@@ -474,6 +474,81 @@ pub fn collect_intel_gpu_processes(
     out
 }
 
+/// Sum `drm-resident-vram0` bytes across all processes for a given
+/// card. Used as a fallback when the xe driver does not expose
+/// card-level VRAM usage counters in sysfs.
+///
+/// Deduplication: when a process holds multiple fds pointing at the
+/// same DRM client (same `drm-client-id`), the VRAM block is counted
+/// only once (max-wins). Distinct client ids within the same process
+/// do sum.
+pub fn sum_card_vram_from_fdinfo(
+    card_index: usize,
+    intel_drm_basenames: &HashMap<String, usize>,
+    proc_root: &Path,
+) -> u64 {
+    if intel_drm_basenames.is_empty() {
+        return 0;
+    }
+    let Ok(entries) = std::fs::read_dir(proc_root) else {
+        return 0;
+    };
+
+    let mut seen: HashMap<(u32, u64), u64> = HashMap::new();
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let Ok(pid) = name.parse::<u32>() else {
+            continue;
+        };
+
+        let fds = intel_drm_fds_for_pid(pid, intel_drm_basenames, proc_root);
+        for fd in fds {
+            if fd.card_index != card_index {
+                continue;
+            }
+            let Some(content) = read_fdinfo_to_string(&fd.fdinfo_path) else {
+                continue;
+            };
+            let mut vram_bytes: u64 = 0;
+            let mut drm_client_id: Option<u64> = None;
+            let mut is_drm = false;
+            for line in content.lines() {
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                let Some((key, value)) = line.split_once(':') else {
+                    continue;
+                };
+                match key.trim() {
+                    "drm-driver" => is_drm = true,
+                    "drm-client-id" => drm_client_id = value.trim().parse::<u64>().ok(),
+                    "drm-resident-vram0" => {
+                        if let Some(bytes) = parse_memory_value(value.trim()) {
+                            vram_bytes = bytes;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if !is_drm {
+                continue;
+            }
+            let key = (pid, drm_client_id.unwrap_or(0));
+            let entry = seen.entry(key).or_insert(0);
+            if vram_bytes > *entry {
+                *entry = vram_bytes;
+            }
+        }
+    }
+
+    seen.values().sum()
+}
+
 #[path = "intel_gpu_fdinfo/enrichment.rs"]
 mod enrichment;
 pub use enrichment::build_intel_process_infos;
