@@ -100,8 +100,11 @@ pub fn should_show_panel(cols: u16) -> bool {
 /// Number of core-bar content lines the CPU panel renders for the given
 /// strategy (excludes the optional history graph and the borders).
 ///
-/// Shared by [`panel_height`] and the rendering path so the reported height
-/// and the emitted line count can never drift apart.
+/// Used by [`panel_height`] only; the rendering path computes the same line
+/// count independently (see `calculate_cores_per_line` and friends) rather
+/// than calling this function. The two are kept in sync by construction
+/// (identical math on both sides) and tests assert that `panel_height`'s
+/// result matches the actual emitted line count.
 fn bar_line_count(info: &CpuInfo, strategy: &CollapseStrategy, width: usize) -> usize {
     match strategy {
         CollapseStrategy::Individual => {
