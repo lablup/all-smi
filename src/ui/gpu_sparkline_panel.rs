@@ -421,7 +421,7 @@ fn build_rows(state: &AppState, is_apple: bool, has_ane: bool, has_npu: bool) ->
 
 fn draw_top_border<W: Write>(stdout: &mut W, panel_width: usize) {
     let title = "GPU Metrics";
-    let inner_width = panel_width.saturating_sub(2); // 2 corner chars (no left margin unlike CPU panel)
+    let inner_width = panel_width.saturating_sub(2); // 2 corner chars (no left margin, same as the CPU panel)
     let title_space = 1 + title.len() + 1;
     let dashes = inner_width.saturating_sub(title_space + 1);
 
@@ -518,7 +518,6 @@ fn draw_gpu_util_graph(util: &SparklineRow, panel_width: usize) -> Vec<String> {
         (0.0, 100.0),
         util.color,
         ThemeConfig::accent_color(),
-        "",
         content_width,
         &util.latest_str,
         "0-100",
