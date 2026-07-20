@@ -1,3 +1,10 @@
+all-smi (0.24.1-0) jammy; urgency=medium
+
+  * Replace the yanked aes and crypto-bigint crates (pulled in transitively through russh) with their latest non-yanked releases (aes 0.9.1, crypto-bigint 0.7.5)
+  * Bump russh from 0.61 to 0.62 and tower-http from 0.6 to 0.7, moving several transitive crypto crates (ecdsa, elliptic-curve, primeorder, ssh-cipher, ssh-encoding) from prerelease to stable
+
+ -- Jeongkyu Shin <inureyes@gmail.com>  Mon, 20 Jul 2026 08:12:59 +0000
+
 all-smi (0.24.0-0) jammy; urgency=medium
 
   * Add btop-style multi-row braille history graphs to the local Activity panel on tall terminals (35+ rows) for CPU and GPU utilization, keeping the compact single-row layout on shorter terminals
