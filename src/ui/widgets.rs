@@ -19,6 +19,10 @@ use crossterm::style::Color;
 use crate::common::config::ThemeConfig;
 use crate::ui::text::print_colored_text;
 
+/// Minimum width at which [`draw_bar`] can render its full label, frame, and
+/// eight-column value overlay.
+pub const MIN_BAR_WIDTH: usize = 17;
+
 pub struct BarSegment {
     pub value: f64,
     pub color: Color,
@@ -48,6 +52,25 @@ pub fn draw_bar<W: Write>(
     width: usize,
     show_text: Option<String>,
 ) {
+    let fill_ratio = (value / max_value).min(1.0);
+
+    // The full gauge has 9 columns of chrome and an eight-column value field.
+    // Callers that are squeezed below that minimum still need a strict width
+    // contract: leaking extra columns can move or wrap a surrounding border.
+    // Fall back to a compact textual gauge rather than emitting the 17-column
+    // full representation into a smaller budget.
+    if width < MIN_BAR_WIDTH {
+        if width == 0 {
+            return;
+        }
+        let value_text = show_text.unwrap_or_else(|| format!("{:.1}%", fill_ratio * 100.0));
+        let compact = format!("{label}: {value_text}");
+        let mut fitted: String = compact.chars().take(width).collect();
+        fitted.push_str(&" ".repeat(width.saturating_sub(fitted.chars().count())));
+        print_colored_text(stdout, &fitted, Color::White, None, None);
+        return;
+    }
+
     // Format label to exactly 5 characters for consistent alignment
     let formatted_label = if label.len() > 5 {
         // Trim to 5 characters if too long
@@ -59,7 +82,6 @@ pub fn draw_bar<W: Write>(
     let available_bar_width = width.saturating_sub(9); // 9 for "LABEL: [" and "] " (5 + 4)
 
     // Calculate the filled portion
-    let fill_ratio = (value / max_value).min(1.0);
     let filled_width = (available_bar_width as f64 * fill_ratio) as usize;
 
     // Choose color based on usage using ThemeConfig
@@ -424,6 +446,27 @@ mod tests {
             !visible.contains("TOOLONG"),
             "Full untrimmed label should not appear; got: {visible:?}"
         );
+    }
+
+    #[test]
+    fn test_draw_bar_respects_narrow_width_budget() {
+        for width in 0..=MIN_BAR_WIDTH {
+            let mut bw = BufferWriter::new();
+            draw_bar(
+                &mut bw,
+                "S-CPU",
+                50.0,
+                100.0,
+                width,
+                Some("50.0%".to_string()),
+            );
+            let visible = strip_ansi(bw.get_buffer());
+            assert_eq!(
+                visible.chars().count(),
+                width,
+                "draw_bar must emit exactly its requested width at width={width}: {visible:?}"
+            );
+        }
     }
 
     // -----------------------------------------------------------------------

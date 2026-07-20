@@ -33,7 +33,7 @@ use crate::ui::renderers::widgets::gauges::{
     GAUGE_HIGH_COLOR, GAUGE_MEDIUM_COLOR, get_utilization_block,
 };
 use crate::ui::text::print_colored_text;
-use crate::ui::widgets::draw_bar;
+use crate::ui::widgets::{MIN_BAR_WIDTH, draw_bar};
 
 /// Minimum terminal width required to show the Activity panel.
 /// Below this threshold the panel is omitted entirely.
@@ -250,8 +250,8 @@ fn draw_cpu_history_graph<W: Write>(stdout: &mut W, cpu_history: &[f64], panel_w
 /// Each row's sparkline segment is colored by height, btop-style: the bottom
 /// row keeps `spark_color` (the metric's base theme color) and rows above it
 /// shift toward warmer colors, computed per row by [`graph_row_color`]. Only
-/// the sparkline segment is affected; the annotation, borders, and left
-/// margin keep their existing colors regardless of row.
+/// the sparkline segment is affected; the annotations and borders keep their
+/// existing colors regardless of row.
 ///
 /// All width math uses saturating arithmetic and stays panic-free down to
 /// pathologically narrow panels.
@@ -378,9 +378,15 @@ fn draw_panel_top_border<W: Write>(
         }
     };
 
+    // Keep even the longest strategy-specific title inside the panel. At the
+    // minimum supported terminal width, socket metadata can otherwise push
+    // the right corner several columns past the GPU panel boundary.
+    let max_title_width = panel_width.saturating_sub(5);
+    let title = truncate_with_ellipsis(&title, max_title_width);
+
     // "+-" + " title " + "---..." + "-+"
     let inner_width = panel_width.saturating_sub(2); // 2 corners
-    let title_space = 1 + title.len() + 1; // space + title + space
+    let title_space = 1 + title.chars().count() + 1; // space + title + space
     let dashes = inner_width.saturating_sub(title_space + 1); // +1 for the initial dash
 
     print_colored_text(stdout, "\u{256d}\u{2500}", Color::Cyan, None, None);
@@ -415,9 +421,10 @@ fn calculate_cores_per_line(panel_width: usize) -> usize {
     // When we have enough width, show progress bars (4 per line for <=16 cores)
     let content_width = panel_width.saturating_sub(4); // 2 border chars + 2 inner padding
     let spacing = 2;
-    // Minimum bar width per core: label(3) + ": [" + bar(8) + "]" = ~15 chars
-    let min_core_width = 15;
-    let cores = content_width / (min_core_width + spacing);
+    // `draw_bar` needs MIN_BAR_WIDTH columns for its full representation.
+    // Add one spacing allowance before dividing so the final core does not
+    // pay for a separator that is only rendered between adjacent cores.
+    let cores = content_width.saturating_add(spacing) / (MIN_BAR_WIDTH + spacing);
     cores.clamp(1, 4)
 }
 
@@ -515,18 +522,11 @@ fn draw_individual_cores<W: Write>(
 
     // Handle last partial line
     if cores_on_line > 0 {
-        let remaining = cores_per_line - cores_on_line;
-        let remaining_width = remaining * core_bar_width + remaining * spacing;
-        if remaining_width > 0 {
-            print_colored_text(
-                stdout,
-                &" ".repeat(remaining_width),
-                Color::White,
-                None,
-                None,
-            );
-        }
-        let used = 2 + cores_per_line * core_bar_width + (cores_per_line - 1) * spacing;
+        // The loop has already emitted one separator after each core on a
+        // partial line, including the last rendered core. Account for those
+        // actual columns directly; padding as though all core slots had been
+        // rendered used to add one extra separator and overflow by 2 columns.
+        let used = 2 + cores_on_line * core_bar_width + cores_on_line * spacing;
         let pad = panel_width.saturating_sub(used + 2);
         if pad > 0 {
             print_colored_text(stdout, &" ".repeat(pad), Color::White, None, None);
@@ -572,9 +572,9 @@ fn draw_pe_cluster_bars<W: Write>(
 
     if apple.s_core_count > 0 {
         // M5 Pro/Max: S-CPU + P-CPU gauges
-        let s_block_width = s_cores.len() + (s_cores.len() / 4);
-        let p_block_width = p_cores.len() + (p_cores.len() / 4);
-        let shared_bar_width = content_width.saturating_sub(s_block_width.max(p_block_width) + 2);
+        let shared_block_width =
+            bounded_block_width(s_cores.len().max(p_cores.len()), content_width);
+        let shared_bar_width = content_width.saturating_sub(shared_block_width + 1);
 
         // S-cluster line: bar + utilization blocks
         draw_cluster_line(
@@ -583,6 +583,7 @@ fn draw_pe_cluster_bars<W: Write>(
             apple.s_core_utilization,
             &s_cores,
             shared_bar_width,
+            shared_block_width,
             panel_width,
         );
 
@@ -593,15 +594,16 @@ fn draw_pe_cluster_bars<W: Write>(
             apple.p_core_utilization,
             &p_cores,
             shared_bar_width,
+            shared_block_width,
             panel_width,
         );
     } else {
         // M1-M4: P-CPU + E-CPU gauges
         // Compute one shared bar_width using the larger block section so that
         // P-CPU and E-CPU gauges end at the same column.
-        let p_block_width = p_cores.len() + (p_cores.len() / 4);
-        let e_block_width = e_cores.len() + (e_cores.len() / 4);
-        let shared_bar_width = content_width.saturating_sub(p_block_width.max(e_block_width) + 2);
+        let shared_block_width =
+            bounded_block_width(p_cores.len().max(e_cores.len()), content_width);
+        let shared_bar_width = content_width.saturating_sub(shared_block_width + 1);
 
         // P-cluster line: bar + utilization blocks
         draw_cluster_line(
@@ -610,6 +612,7 @@ fn draw_pe_cluster_bars<W: Write>(
             apple.p_core_utilization,
             &p_cores,
             shared_bar_width,
+            shared_block_width,
             panel_width,
         );
 
@@ -620,6 +623,7 @@ fn draw_pe_cluster_bars<W: Write>(
             apple.e_core_utilization,
             &e_cores,
             shared_bar_width,
+            shared_block_width,
             panel_width,
         );
     }
@@ -631,6 +635,7 @@ fn draw_cluster_line<W: Write>(
     utilization: f64,
     cores: &[&CoreUtilization],
     bar_width: usize,
+    block_width: usize,
     panel_width: usize,
 ) {
     print_colored_text(stdout, "\u{2502} ", Color::Cyan, None, None);
@@ -639,22 +644,11 @@ fn draw_cluster_line<W: Write>(
     draw_bar(stdout, label, utilization, 100.0, bar_width, None);
     print_colored_text(stdout, " ", Color::White, None, None);
 
-    // Draw per-core utilization blocks
-    for (i, core) in cores.iter().enumerate() {
-        let (block, color) = get_utilization_block(core.utilization);
-        print_colored_text(stdout, block, color, None, None);
-        if (i + 1) % 4 == 0 && i + 1 < cores.len() {
-            print_colored_text(stdout, " ", Color::White, None, None);
-        }
-    }
+    // Draw as many per-core utilization blocks as fit after preserving the
+    // full gauge. High-core-count CPUs previously pushed the right border out.
+    let blocks_printed = draw_utilization_blocks(stdout, cores.iter().copied(), block_width);
 
     // Pad to panel width
-    let blocks_printed = cores.len() + cores.len() / 4
-        - if cores.len().is_multiple_of(4) && !cores.is_empty() {
-            1
-        } else {
-            0
-        };
     let used = 2 + bar_width + 1 + blocks_printed;
     let pad = panel_width.saturating_sub(used + 2);
     if pad > 0 {
@@ -694,30 +688,19 @@ fn draw_socket_group_bars<W: Write>(
 
         // Calculate block section width
         let block_count = socket_cores.len();
-        let group_separators = if block_count > 4 {
-            (block_count - 1) / 4
-        } else {
-            0
-        };
-        let block_section_width = block_count + group_separators;
-        let bar_width = content_width.saturating_sub(block_section_width + 2);
+        let block_width = bounded_block_width(block_count, content_width);
+        let bar_width = content_width.saturating_sub(block_width + 1);
 
         print_colored_text(stdout, "\u{2502} ", Color::Cyan, None, None);
 
         draw_bar(stdout, &label, avg_util, 100.0, bar_width, None);
         print_colored_text(stdout, " ", Color::White, None, None);
 
-        // Draw per-core blocks within this socket
-        for (i, core) in socket_cores.iter().enumerate() {
-            let (block, color) = get_utilization_block(core.utilization);
-            print_colored_text(stdout, block, color, None, None);
-            if (i + 1) % 4 == 0 && i + 1 < block_count {
-                print_colored_text(stdout, " ", Color::White, None, None);
-            }
-        }
+        // Draw per-core blocks within this socket without exceeding the
+        // columns left after the gauge.
+        let blocks_printed = draw_utilization_blocks(stdout, socket_cores.iter(), block_width);
 
         // Pad to panel width
-        let blocks_printed = block_count + group_separators;
         let used = 2 + bar_width + 1 + blocks_printed;
         let pad = panel_width.saturating_sub(used + 2);
         if pad > 0 {
@@ -737,6 +720,57 @@ fn average_utilization(cores: &[CoreUtilization]) -> f64 {
         return 0.0;
     }
     cores.iter().map(|c| c.utilization).sum::<f64>() / cores.len() as f64
+}
+
+/// Width of a grouped per-core block section, capped so the gauge retains its
+/// full representation plus the one-column gap between gauge and blocks.
+fn bounded_block_width(core_count: usize, content_width: usize) -> usize {
+    let natural_width = core_count + core_count.saturating_sub(1) / 4;
+    let available = content_width.saturating_sub(MIN_BAR_WIDTH + 1);
+    natural_width.min(available)
+}
+
+/// Render grouped utilization blocks into at most `max_width` columns and
+/// return the number of columns emitted. Groups are separated every four
+/// cores; a separator is emitted only when another block also fits.
+fn draw_utilization_blocks<'a, W, I>(stdout: &mut W, cores: I, max_width: usize) -> usize
+where
+    W: Write,
+    I: IntoIterator<Item = &'a CoreUtilization>,
+{
+    let mut used = 0usize;
+    for (i, core) in cores.into_iter().enumerate() {
+        let needs_separator = i > 0 && i.is_multiple_of(4);
+        let needed = 1 + usize::from(needs_separator);
+        if used.saturating_add(needed) > max_width {
+            break;
+        }
+        if needs_separator {
+            print_colored_text(stdout, " ", Color::White, None, None);
+            used += 1;
+        }
+        let (block, color) = get_utilization_block(core.utilization);
+        print_colored_text(stdout, block, color, None, None);
+        used += 1;
+    }
+    used
+}
+
+/// Truncate `text` to `max_width` visible characters, using an ellipsis when
+/// there is room, while leaving shorter strings unchanged.
+fn truncate_with_ellipsis(text: &str, max_width: usize) -> String {
+    if text.chars().count() <= max_width {
+        return text.to_string();
+    }
+    match max_width {
+        0 => String::new(),
+        1 => "…".to_string(),
+        _ => {
+            let mut truncated: String = text.chars().take(max_width - 1).collect();
+            truncated.push('…');
+            truncated
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1103,38 +1137,50 @@ mod tests {
         // (no leading margin spaces) and every rendered line must be exactly
         // `panel_width` (= width / 2) display columns wide, in both the
         // fallback and multirow rendering modes, across all three collapse
-        // strategies.
-        // Fixture and width choices avoid three separate, pre-existing
-        // rendering boundary cases that are unrelated to the margin fix
-        // under test (and out of scope to fix here): (1) 12 cores divides
-        // evenly into every `cores_per_line` value produced by the tested
-        // widths below (3 and 4), so every Individual-mode line is a full
-        // line - a trailing partial line exercises a separate padding
-        // computation in `draw_individual_cores`; (2) the PECluster and
-        // SocketGroup core counts are kept low enough that their shared bar
-        // width stays above the 17-column floor `draw_bar` needs to fit its
-        // label and value text without overflowing its requested width; (3)
-        // the narrowest allowed panel width (81 cols, panel_width 40) is
-        // excluded because the SocketGroup title text alone does not fit an
-        // inner width that small, which is a pre-existing title-truncation
-        // gap in `draw_panel_top_border` rather than a margin regression.
-        let individual_cpu = vec![make_standard_cpu(12)];
-        let pe_cluster_cpu = vec![make_apple_silicon_cpu(10, 8)];
-        let mut socket_cpu = make_standard_cpu(24);
-        socket_cpu.socket_count = 2;
-        let socket_cpu = vec![socket_cpu];
+        // strategies. The sweep deliberately includes odd widths, every
+        // individual-core packing transition, trailing partial lines, long
+        // titles, and grouped block sections too large to fit without
+        // truncation.
+        let individual_one = vec![make_standard_cpu(1)];
+        let individual_partial = vec![make_standard_cpu(5)];
+        let individual_max = vec![make_standard_cpu(16)];
+        let pe_cluster_cpu = vec![make_apple_silicon_cpu(18, 18)];
+        let mut socket_24 = make_standard_cpu(24);
+        socket_24.socket_count = 2;
+        let socket_24 = vec![socket_24];
+        let mut socket_64 = make_standard_cpu(64);
+        socket_64.socket_count = 2;
+        let socket_64 = vec![socket_64];
+        let mut socket_128 = make_standard_cpu(128);
+        socket_128.socket_count = 4;
+        let socket_128 = vec![socket_128];
+        let cases = [
+            &individual_one,
+            &individual_partial,
+            &individual_max,
+            &pe_cluster_cpu,
+            &socket_24,
+            &socket_64,
+            &socket_128,
+        ];
 
         let history = ramp_history(40);
         let border_chars = ['\u{256d}', '\u{2502}', '\u{2570}']; // ╭ │ ╰
 
-        for cpu in [&individual_cpu, &pe_cluster_cpu, &socket_cpu] {
-            for &width in &[120usize, 200] {
+        for cpu in cases {
+            for width in 81usize..=200 {
                 let panel_width = width / 2;
                 for &rows in &[SHORT_ROWS, TALL_ROWS] {
                     let mut buf: Vec<u8> = Vec::new();
                     render_activity_panel(&mut buf, cpu, &history, width, rows);
                     let text = String::from_utf8(buf).unwrap();
-                    for line in text.split("\r\n").filter(|l| !l.is_empty()) {
+                    let lines: Vec<_> = text.split("\r\n").filter(|l| !l.is_empty()).collect();
+                    assert_eq!(
+                        lines.len(),
+                        panel_height(cpu, width as u16, rows) as usize,
+                        "rendered height must match reserved height at width={width} rows={rows}"
+                    );
+                    for line in lines {
                         let first = first_visible_char(line);
                         assert!(
                             first.is_some_and(|c| border_chars.contains(&c)),
