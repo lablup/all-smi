@@ -162,6 +162,25 @@ pub fn read_power_watts(device_dir: &Path) -> f64 {
     0.0
 }
 
+/// Walk `device/hwmon/hwmon*/energy1_input` (microjoules). Returns the
+/// first parseable value. The xe driver exposes cumulative energy
+/// counters instead of instantaneous power — the caller delta-tracks
+/// across samples to derive watts.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn read_energy_uj(device_dir: &Path) -> u64 {
+    let hwmon_root = device_dir.join("hwmon");
+    let iter = match std::fs::read_dir(&hwmon_root) {
+        Ok(i) => i,
+        Err(_) => return 0,
+    };
+    for entry in iter.flatten() {
+        if let Some(uj) = read_u64(&entry.path().join("energy1_input")) {
+            return uj;
+        }
+    }
+    0
+}
+
 /// Walk `device/hwmon/hwmon*/fan1_input` (RPM). Returns the first
 /// parseable non-zero value.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]

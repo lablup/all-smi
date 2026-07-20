@@ -53,8 +53,8 @@ use crate::device::readers::intel_gpu_names::{
     classify_intel_architecture, resolve_intel_gpu_name,
 };
 use crate::device::readers::intel_gpu_sysfs::{
-    MemoryVariant, has_nonzero_u64, read_fan_rpm, read_frequency_mhz, read_memory_bytes,
-    read_power_watts, read_resource2_total_bytes, read_temperature_celsius,
+    MemoryVariant, has_nonzero_u64, read_energy_uj, read_fan_rpm, read_frequency_mhz,
+    read_memory_bytes, read_power_watts, read_resource2_total_bytes, read_temperature_celsius,
 };
 use crate::device::types::{GpuInfo, ProcessInfo};
 use crate::utils::get_hostname;
@@ -99,6 +99,11 @@ struct IntelGpuCard {
     engine_state: Mutex<EngineState>,
     /// Per-card Xe GT idle-residency delta tracker.
     gtidle_state: Mutex<GtidleState>,
+    /// Per-card energy-counter delta tracker for the xe driver. The xe
+    /// hwmon interface exposes cumulative energy (microjoules) rather
+    /// than instantaneous power on some kernels; power is derived as
+    /// ΔJ / Δs across samples.
+    energy_state: Mutex<EnergyState>,
     /// Per-card Level Zero handle state (issue #248). Mirrors
     /// `engine_state` — delta-tracked behind a `Mutex` for power
     /// readings, only present when `--features level_zero` is active.
@@ -113,6 +118,98 @@ fn variant_label(variant: MemoryVariant) -> &'static str {
         MemoryVariant::Discrete => "Discrete",
         MemoryVariant::Integrated => "Integrated",
     }
+}
+
+/// Per-card energy delta tracker for the xe driver. The xe hwmon
+/// interface exposes cumulative energy counters (microjoules) instead
+/// of instantaneous power — first sample seeds; subsequent samples
+/// compute average watts as ΔJ / Δs.
+struct EnergyState {
+    timestamp: Option<std::time::Instant>,
+    energy_uj: u64,
+}
+
+/// Compute average power (watts) from xe hwmon energy counters. First
+/// call seeds the counter (returns 0.0); subsequent calls return
+/// ΔJ / Δs. A file-based state cache at `/tmp/all-smi-energy-<pci>`
+/// bridges across process invocations so `all-smi snapshot` (one-shot)
+/// also sees power after the first sample.
+fn compute_power_from_energy(state: &Mutex<EnergyState>, device_dir: &Path) -> f64 {
+    let current_uj = read_energy_uj(device_dir);
+    if current_uj == 0 {
+        return 0.0;
+    }
+
+    let cache_path = energy_cache_path(device_dir);
+    let now_instant = std::time::Instant::now();
+    let now_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    let mut guard = match state.lock() {
+        Ok(g) => g,
+        Err(_) => return 0.0,
+    };
+
+    // Use in-memory state when available; otherwise fall back to the
+    // file cache so a one-shot `snapshot` invocation can still delta.
+    let (prev_instant, prev_uj) = match guard.timestamp {
+        Some(ts) => (Some(ts), guard.energy_uj),
+        None => {
+            if let Some((cached_ts, cached_uj)) = read_energy_cache(&cache_path) {
+                let delta_s = now_unix.saturating_sub(cached_ts) as f64;
+                if delta_s > 0.0 && delta_s < 3600.0 {
+                    let delta_j = current_uj.saturating_sub(cached_uj) as f64 / 1_000_000.0;
+                    let power = delta_j / delta_s;
+                    guard.timestamp = Some(now_instant);
+                    guard.energy_uj = current_uj;
+                    write_energy_cache(&cache_path, now_unix, current_uj);
+                    return power;
+                }
+            }
+            (None, 0)
+        }
+    };
+
+    let power = match prev_instant {
+        Some(prev_ts) => {
+            let delta_s = (now_instant - prev_ts).as_secs_f64();
+            if delta_s > 0.0 {
+                let delta_j = current_uj.saturating_sub(prev_uj) as f64 / 1_000_000.0;
+                delta_j / delta_s
+            } else {
+                0.0
+            }
+        }
+        None => 0.0,
+    };
+    guard.timestamp = Some(now_instant);
+    guard.energy_uj = current_uj;
+    write_energy_cache(&cache_path, now_unix, current_uj);
+    power
+}
+
+/// Derive a stable per-card cache path from the canonical PCI device
+/// symlink target (e.g. `/tmp/all-smi-energy-0000:03:00.0`).
+fn energy_cache_path(device_dir: &Path) -> PathBuf {
+    let pci = std::fs::canonicalize(device_dir)
+        .ok()
+        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+        .unwrap_or_else(|| "unknown".to_string());
+    PathBuf::from("/tmp").join(format!("all-smi-energy-{pci}"))
+}
+
+fn read_energy_cache(path: &Path) -> Option<(u64, u64)> {
+    let content = std::fs::read_to_string(path).ok()?;
+    let mut parts = content.split_whitespace();
+    let ts: u64 = parts.next()?.parse().ok()?;
+    let uj: u64 = parts.next()?.parse().ok()?;
+    Some((ts, uj))
+}
+
+fn write_energy_cache(path: &Path, ts: u64, uj: u64) {
+    let _ = std::fs::write(path, format!("{ts} {uj}"));
 }
 
 /// The reader itself. Holds a snapshot of cards discovered at
@@ -230,7 +327,7 @@ impl GpuReader for IntelGpuReader {
             let (mut used_memory, total_memory) = read_memory_bytes(&device_dir, card.variant);
             let frequency = read_frequency_mhz(&device_dir);
             let temperature = read_temperature_celsius(&device_dir);
-            let power_consumption = read_power_watts(&device_dir);
+            let mut power_consumption = read_power_watts(&device_dir);
             let fan_rpm = read_fan_rpm(&device_dir);
 
             // Round-trip values through the validation caps so that a
@@ -239,7 +336,7 @@ impl GpuReader for IntelGpuReader {
             // pattern.
             let temperature = temperature.min(MAX_GPU_TEMP_CELSIUS);
             let frequency = frequency.min(MAX_GPU_FREQ_MHZ);
-            let power_consumption = power_consumption.clamp(0.0, MAX_GPU_POWER_WATTS);
+            power_consumption = power_consumption.clamp(0.0, MAX_GPU_POWER_WATTS);
             let total_memory = total_memory.min(MAX_GPU_MEMORY_BYTES);
             used_memory = used_memory.min(total_memory);
 
@@ -251,6 +348,15 @@ impl GpuReader for IntelGpuReader {
                 frequency,
                 fan_rpm,
             );
+
+            // xe driver: derive power from the hwmon energy counter when
+            // instantaneous power (`power1_average`) is not exposed.
+            if power_consumption == 0.0 && card.driver == "xe" {
+                power_consumption = compute_power_from_energy(&card.energy_state, &device_dir);
+                if power_consumption > 0.0 {
+                    detail.insert("Source: Power".to_string(), "energy delta (xe)".to_string());
+                }
+            }
 
             // xe driver: fall back to fdinfo for VRAM usage when
             // card-level sysfs counters are unavailable.
@@ -395,6 +501,10 @@ fn discover_cards(drm_root: &Path) -> Vec<IntelGpuCard> {
             static_info: OnceLock::new(),
             engine_state: Mutex::new(EngineState::empty()),
             gtidle_state: Mutex::new(GtidleState::empty()),
+            energy_state: Mutex::new(EnergyState {
+                timestamp: None,
+                energy_uj: 0,
+            }),
             #[cfg(feature = "level_zero")]
             level_zero_state: Mutex::new(
                 crate::device::readers::intel_gpu_level_zero::LevelZeroState::empty(),
