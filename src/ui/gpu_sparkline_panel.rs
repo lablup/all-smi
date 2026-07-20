@@ -553,7 +553,11 @@ fn draw_compact_pair<W: Write>(stdout: &mut W, pair: &[SparklineRow], panel_widt
 ///
 /// Cell layout: `<label> <sparkline> <value><badge>`, keeping the #273 soft
 /// range and scale badge. The sparkline absorbs whatever columns the fixed
-/// label/value/badge fields leave, with a 1-column minimum floor.
+/// label/value/badge fields leave, with a 1-column minimum floor. The emitted
+/// width never exceeds `budget`: when the budget cannot hold the minimum
+/// layout (fixed fields + 1 sparkline column), trailing fields are truncated
+/// instead of leaking past the pair's half-width split, which at terminal
+/// widths 81-82 would push the compact row past the panel border and wrap.
 fn draw_compact_cell<W: Write>(stdout: &mut W, row: Option<&SparklineRow>, budget: usize) -> usize {
     let Some(row) = row else {
         if budget > 0 {
@@ -567,17 +571,24 @@ fn draw_compact_cell<W: Write>(stdout: &mut W, row: Option<&SparklineRow>, budge
     let spark_width = budget.saturating_sub(fixed).max(1);
     let spark = sparkline_braille(&row.history, spark_width, row.range);
 
-    let label = fit_field(row.short_label, COMPACT_LABEL_WIDTH);
-    print_colored_text(stdout, &label, row.color, None, None);
-    print_colored_text(stdout, " ", Color::White, None, None);
-    print_colored_text(stdout, &spark, row.color, None, None);
-    print_colored_text(stdout, " ", Color::White, None, None);
-    let value = fit_field(&row.latest_str, COMPACT_VALUE_WIDTH);
-    print_colored_text(stdout, &value, Color::White, None, None);
-    let badge = fit_field(&row.min_max_str, COMPACT_BADGE_WIDTH);
-    print_colored_text(stdout, &badge, Color::DarkGrey, None, None);
-
-    COMPACT_LABEL_WIDTH + 1 + spark_width + 1 + COMPACT_VALUE_WIDTH + COMPACT_BADGE_WIDTH
+    let mut remaining = budget;
+    let segments: [(&str, usize, Color); 6] = [
+        (row.short_label, COMPACT_LABEL_WIDTH, row.color),
+        (" ", 1, Color::White),
+        (&spark, spark_width, row.color),
+        (" ", 1, Color::White),
+        (&row.latest_str, COMPACT_VALUE_WIDTH, Color::White),
+        (&row.min_max_str, COMPACT_BADGE_WIDTH, Color::DarkGrey),
+    ];
+    for (text, width, color) in segments {
+        if remaining == 0 {
+            break;
+        }
+        let w = width.min(remaining);
+        print_colored_text(stdout, &fit_field(text, w), color, None, None);
+        remaining -= w;
+    }
+    budget - remaining
 }
 
 /// Truncate or right-pad `s` to exactly `width` characters (char-based, so the
@@ -1062,6 +1073,48 @@ mod tests {
         for state in [make_nvidia_state(), make_apple_silicon_state()] {
             for &w in &[40usize, 41, 30, 12] {
                 let _ = render_gpu_lines(&state, w, TALL_ROWS);
+            }
+        }
+    }
+
+    /// Display width of a rendered line with ANSI color escapes stripped
+    /// (every payload char, braille included, is one terminal column).
+    fn visible_width(line: &str) -> usize {
+        let mut count = 0usize;
+        let mut in_escape = false;
+        for c in line.chars() {
+            if in_escape {
+                if c == 'm' {
+                    in_escape = false;
+                }
+            } else if c == '\u{1b}' {
+                in_escape = true;
+            } else {
+                count += 1;
+            }
+        }
+        count
+    }
+
+    #[test]
+    fn test_multirow_lines_fit_panel_width_at_narrow_widths() {
+        // Regression: at terminal widths 81-82 the right half is 41 columns
+        // wide, and a compact half-cell whose budget cannot hold the minimum
+        // field layout used to emit one extra column, pushing the row past
+        // the border and wrapping the terminal line. Every rendered line
+        // (borders, graph rows, compact rows) must be exactly panel_width
+        // display columns at any width, in both modes.
+        for state in [make_nvidia_state(), make_apple_silicon_state()] {
+            for &w in &[40usize, 41, 42, 60] {
+                for &rows in &[SHORT_ROWS, TALL_ROWS] {
+                    for (i, line) in render_gpu_lines(&state, w, rows).iter().enumerate() {
+                        assert_eq!(
+                            visible_width(line),
+                            w,
+                            "line {i} must be {w} columns (rows={rows})"
+                        );
+                    }
+                }
             }
         }
     }
