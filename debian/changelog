@@ -1,3 +1,15 @@
+all-smi (0.24.0-0) jammy; urgency=medium
+
+  * Add btop-style multi-row braille history graphs to the local Activity panel on tall terminals (35+ rows) for CPU and GPU utilization, keeping the compact single-row layout on shorter terminals
+  * Color the multi-row Activity graphs with a btop-style bottom-to-top height gradient so spikes stand out
+  * Soft auto-range single-row sparklines into the visible history window with a per-metric minimum span and coarse-grid hysteresis, restoring visible texture without reintroducing axis flapping
+  * Add a per-metric trend glyph after each header sparkline value
+  * Replace nearest-neighbour sparkline resampling with bucket max-pooling so peaks between sampled points are no longer dropped
+  * Remove the hardcoded 2-space left margin from the CPU Activity panel box so its border starts at column 0, matching the GPU box
+  * Keep every Activity panel row inside its width budget by truncating oversized titles, honoring sub-17-column gauge widths, correcting partial-row padding, and bounding grouped per-core blocks
+
+ -- Jeongkyu Shin <inureyes@gmail.com>  Mon, 20 Jul 2026 00:00:00 +0000
+
 all-smi (0.23.1-0) jammy; urgency=medium
 
   * Fully sanitize dynamic Prometheus label names so keys like "Source: Fan" no longer produce invalid exposition that can fail scrapes
