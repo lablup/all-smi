@@ -60,7 +60,38 @@ pub fn read_memory_bytes(device_dir: &Path, variant: MemoryVariant) -> (u64, u64
         used = read_u64(&device_dir.join("tile0").join("vram0").join("used_bytes")).unwrap_or(0);
     }
 
+    // xe driver on Battlemage (kernel 6.12+) does not expose
+    // `tile0/vram0/*`; fall back to PCI BAR2 (VRAM BAR) size.
+    if total == 0 {
+        total = read_resource2_total_bytes(device_dir);
+    }
+
     (used, total)
+}
+
+/// Read the PCI BAR2 (VRAM BAR) resource file size in bytes. Returns 0
+/// when the file is absent or the size is not a plausible VRAM BAR.
+/// Used as a last-resort fallback when the xe driver does not expose
+/// `tile0/vram0/total_bytes` (Battlemage on kernels before 6.14).
+///
+/// The size must be *strictly larger* than 256 MiB. Integrated GPUs
+/// expose BAR2 as the fixed 256 MiB GMADR aperture, and discrete parts
+/// without Resizable BAR also show a 256 MiB window that says nothing
+/// about the actual VRAM size (a 12 GB B580 would report 256 MiB).
+/// BAR2 equals the VRAM size only when Resizable BAR maps the whole
+/// VRAM, so anything at or below the aperture size is rejected rather
+/// than surfaced as a fabricated capacity.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn read_resource2_total_bytes(device_dir: &Path) -> u64 {
+    const BAR2_APERTURE_BYTES: u64 = 256 * 1024 * 1024;
+    let path = device_dir.join("resource2");
+    match std::fs::metadata(&path) {
+        Ok(meta) => {
+            let size = meta.len();
+            if size > BAR2_APERTURE_BYTES { size } else { 0 }
+        }
+        Err(_) => 0,
+    }
 }
 
 /// Read the current GT0 frequency in MHz.
@@ -138,6 +169,25 @@ pub fn read_power_watts(device_dir: &Path) -> f64 {
         }
     }
     0.0
+}
+
+/// Walk `device/hwmon/hwmon*/energy1_input` (microjoules). Returns the
+/// first parseable value. The xe driver exposes cumulative energy
+/// counters instead of instantaneous power — the caller delta-tracks
+/// across samples to derive watts.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn read_energy_uj(device_dir: &Path) -> u64 {
+    let hwmon_root = device_dir.join("hwmon");
+    let iter = match std::fs::read_dir(&hwmon_root) {
+        Ok(i) => i,
+        Err(_) => return 0,
+    };
+    for entry in iter.flatten() {
+        if let Some(uj) = read_u64(&entry.path().join("energy1_input")) {
+            return uj;
+        }
+    }
+    0
 }
 
 /// Walk `device/hwmon/hwmon*/fan1_input` (RPM). Returns the first
@@ -236,6 +286,50 @@ mod tests {
         let (used, total) = read_memory_bytes(dir.path(), MemoryVariant::Discrete);
         assert_eq!(total, 12_884_901_888);
         assert_eq!(used, 536_870_912);
+    }
+
+    #[test]
+    fn read_memory_discrete_via_resource2_rebar() {
+        // Battlemage on kernels without `tile0/vram0/*`: BAR2 spans the
+        // whole VRAM when Resizable BAR is active. A sparse file's
+        // metadata length stands in for the sysfs resource size.
+        let dir = tempdir().unwrap();
+        let bar2 = fs::File::create(dir.path().join("resource2")).unwrap();
+        bar2.set_len(12 * 1024 * 1024 * 1024).unwrap();
+        let (used, total) = read_memory_bytes(dir.path(), MemoryVariant::Discrete);
+        assert_eq!(total, 12 * 1024 * 1024 * 1024);
+        assert_eq!(used, 0);
+    }
+
+    #[test]
+    fn resource2_rejects_256mib_aperture() {
+        // Integrated GPUs (and non-ReBAR discrete parts) expose BAR2 as
+        // a 256 MiB window; that must NOT be reported as a VRAM total.
+        let dir = tempdir().unwrap();
+        let bar2 = fs::File::create(dir.path().join("resource2")).unwrap();
+        bar2.set_len(256 * 1024 * 1024).unwrap();
+        assert_eq!(read_resource2_total_bytes(dir.path()), 0);
+    }
+
+    #[test]
+    fn resource2_missing_returns_zero() {
+        let dir = tempdir().unwrap();
+        assert_eq!(read_resource2_total_bytes(dir.path()), 0);
+    }
+
+    #[test]
+    fn read_energy_uj_reads_hwmon_counter() {
+        let dir = tempdir().unwrap();
+        let hwmon = dir.path().join("hwmon").join("hwmon0");
+        fs::create_dir_all(&hwmon).unwrap();
+        fs::write(hwmon.join("energy1_input"), "123456789\n").unwrap();
+        assert_eq!(read_energy_uj(dir.path()), 123_456_789);
+    }
+
+    #[test]
+    fn read_energy_uj_missing_returns_zero() {
+        let dir = tempdir().unwrap();
+        assert_eq!(read_energy_uj(dir.path()), 0);
     }
 
     #[test]

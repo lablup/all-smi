@@ -37,14 +37,23 @@
 //! (i915) or `device/tile0/vram0/total_bytes` (xe). Integrated GPUs have no
 //! dedicated VRAM, so the reader records `total_memory = 0` and explains that
 //! memory is shared system memory.
+//!
+//! On xe kernels that predate `tile0/vram0/*` (Battlemage before 6.14)
+//! the total falls back to the PCI BAR2 size when Resizable BAR makes
+//! the BAR span the whole VRAM, and `used_memory` falls back to a
+//! per-card sum of `drm-resident-vram0` from process fdinfo.
 
+#[cfg(feature = "cli")]
+use crate::common::paths::cache_dir;
+#[cfg(feature = "cli")]
+use crate::common::secure_write::write_atomic_secure;
 use crate::device::GpuReader;
 use crate::device::readers::common_cache::{DeviceStaticInfo, MAX_DEVICES};
 use crate::device::readers::intel_gpu_engine::{
     EngineState, apply_engine_readout, refresh_with_lock,
 };
 use crate::device::readers::intel_gpu_fdinfo::{
-    build_intel_drm_basenames, build_intel_process_infos,
+    build_intel_drm_basenames, build_intel_process_infos, sum_vram_by_card_from_fdinfo,
 };
 use crate::device::readers::intel_gpu_gtidle::{
     GtidleState, apply_fallback as apply_gtidle_fallback,
@@ -53,8 +62,8 @@ use crate::device::readers::intel_gpu_names::{
     classify_intel_architecture, resolve_intel_gpu_name,
 };
 use crate::device::readers::intel_gpu_sysfs::{
-    MemoryVariant, has_nonzero_u64, read_fan_rpm, read_frequency_mhz, read_memory_bytes,
-    read_power_watts, read_temperature_celsius,
+    MemoryVariant, has_nonzero_u64, read_energy_uj, read_fan_rpm, read_frequency_mhz,
+    read_memory_bytes, read_power_watts, read_resource2_total_bytes, read_temperature_celsius,
 };
 use crate::device::types::{GpuInfo, ProcessInfo};
 use crate::utils::get_hostname;
@@ -72,6 +81,13 @@ const MAX_GPU_TEMP_CELSIUS: u32 = 125; // package max across i915/xe
 const MAX_GPU_FREQ_MHZ: u32 = 5000;
 const MAX_GPU_MEMORY_BYTES: u64 = 96 * 1024 * 1024 * 1024; // 96GB headroom
 const MAX_GPU_UTILIZATION: f64 = 100.0; // Engine-busy is clamped to 100% per engine
+
+/// Minimum interval between energy-cache file writes. The file cache
+/// only bridges one-shot `snapshot` invocations (staleness tolerance is
+/// one hour), so a continuous 1 s sampling loop has no reason to
+/// rewrite and fsync the file on every tick. 60 s matches the energy
+/// WAL flush cadence in [`crate::metrics::energy_wal`].
+const ENERGY_CACHE_WRITE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 
 // Per-card sysfs anchor.  We hold the absolute card path (e.g.
 // `/sys/class/drm/card0`) plus a one-time-cached identity (the name and
@@ -99,6 +115,11 @@ struct IntelGpuCard {
     engine_state: Mutex<EngineState>,
     /// Per-card Xe GT idle-residency delta tracker.
     gtidle_state: Mutex<GtidleState>,
+    /// Per-card energy-counter delta tracker for the xe driver. The xe
+    /// hwmon interface exposes cumulative energy (microjoules) rather
+    /// than instantaneous power on some kernels; power is derived as
+    /// ΔJ / Δs across samples.
+    energy_state: Mutex<EnergyState>,
     /// Per-card Level Zero handle state (issue #248). Mirrors
     /// `engine_state` — delta-tracked behind a `Mutex` for power
     /// readings, only present when `--features level_zero` is active.
@@ -114,6 +135,169 @@ fn variant_label(variant: MemoryVariant) -> &'static str {
         MemoryVariant::Integrated => "Integrated",
     }
 }
+
+/// Per-card energy delta tracker for the xe driver. The xe hwmon
+/// interface exposes cumulative energy counters (microjoules) instead
+/// of instantaneous power: the first sample seeds, subsequent samples
+/// compute average watts as ΔJ / Δs.
+struct EnergyState {
+    timestamp: Option<std::time::Instant>,
+    energy_uj: u64,
+    /// When the file cache was last persisted. Cache writes are
+    /// throttled to [`ENERGY_CACHE_WRITE_INTERVAL`] so a 1 s sampling
+    /// loop does not fsync the cache file on every tick.
+    last_cache_write: Option<std::time::Instant>,
+}
+
+/// Compute average power (watts) from xe hwmon energy counters. The
+/// first call in a process seeds the counter (returns 0.0); subsequent
+/// calls return ΔJ / Δs from the monotonic clock. `cache_path`, when
+/// present, points at a per-card state file (see [`energy_cache_path`])
+/// that bridges across process invocations so `all-smi snapshot`
+/// (one-shot) also sees power after its first run.
+///
+/// Callers must re-apply the power validation cap to the returned
+/// value: the file-cache path trusts wall-clock timestamps, so clock
+/// skew or a corrupted cache could otherwise produce an absurd delta.
+/// Within this function the cache influence is already bounded by the
+/// one-hour staleness window and saturating counter arithmetic.
+fn compute_power_from_energy(
+    state: &Mutex<EnergyState>,
+    device_dir: &Path,
+    cache_path: Option<&Path>,
+) -> f64 {
+    let current_uj = read_energy_uj(device_dir);
+    if current_uj == 0 {
+        return 0.0;
+    }
+
+    let now_instant = std::time::Instant::now();
+    let now_unix_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0);
+
+    let mut guard = match state.lock() {
+        Ok(g) => g,
+        Err(_) => return 0.0,
+    };
+
+    let power = match guard.timestamp {
+        // In-memory state available: monotonic-clock delta.
+        Some(prev_ts) => {
+            let delta_s = now_instant.duration_since(prev_ts).as_secs_f64();
+            if delta_s > 0.0 {
+                let delta_j = current_uj.saturating_sub(guard.energy_uj) as f64 / 1_000_000.0;
+                delta_j / delta_s
+            } else {
+                0.0
+            }
+        }
+        // First sample in this process: bridge via the file cache so a
+        // one-shot `snapshot` invocation can still delta against the
+        // previous run. Entries older than an hour seed instead of
+        // deriving a meaningless average over the whole gap.
+        None => match cache_path.and_then(read_energy_cache) {
+            Some((cached_ts_ms, cached_uj)) => {
+                let delta_s = now_unix_ms.saturating_sub(cached_ts_ms) as f64 / 1000.0;
+                if delta_s > 0.0 && delta_s < 3600.0 {
+                    let delta_j = current_uj.saturating_sub(cached_uj) as f64 / 1_000_000.0;
+                    delta_j / delta_s
+                } else {
+                    0.0
+                }
+            }
+            None => 0.0,
+        },
+    };
+
+    let should_write_cache = match guard.last_cache_write {
+        None => true,
+        Some(last) => now_instant.duration_since(last) >= ENERGY_CACHE_WRITE_INTERVAL,
+    };
+    guard.timestamp = Some(now_instant);
+    guard.energy_uj = current_uj;
+    if should_write_cache && let Some(path) = cache_path {
+        write_energy_cache(path, now_unix_ms, current_uj);
+        guard.last_cache_write = Some(now_instant);
+    }
+    power
+}
+
+/// Derive a stable per-card cache path from the canonical PCI device
+/// symlink target, rooted in the per-user cache directory (e.g.
+/// `~/.cache/all-smi/energy-hwmon-0000:03:00.0`, resolved via
+/// [`crate::common::paths::cache_dir`]). Returns `None` when no
+/// home-like directory exists; the caller then runs with in-memory
+/// state only, mirroring the energy WAL's downgrade behaviour.
+///
+/// The per-user location (instead of a fixed name in world-writable
+/// `/tmp`) is deliberate: a predictable `/tmp` path would let any local
+/// user pre-plant a symlink for a root-run all-smi to clobber, or
+/// poison the cached counter to skew the reported power.
+///
+/// `cli`-gated because `common::paths` / `common::secure_write` sit
+/// behind the `cli` feature (the optional `dirs` dependency); see the
+/// `cfg(not(feature = "cli"))` stubs below for the library-only build.
+#[cfg(feature = "cli")]
+fn energy_cache_path(device_dir: &Path) -> Option<PathBuf> {
+    let pci = std::fs::canonicalize(device_dir)
+        .ok()
+        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+        .unwrap_or_else(|| "unknown".to_string());
+    cache_dir().map(|d| d.join(format!("energy-hwmon-{pci}")))
+}
+
+/// Read `<unix_ms> <microjoules>` from the cache file. Refuses to read
+/// through a symlink, mirroring the energy WAL replay hardening in
+/// [`crate::metrics::energy_wal`], so a planted link cannot redirect
+/// the read. Any I/O or parse failure degrades to `None` (the caller
+/// seeds instead).
+#[cfg(feature = "cli")]
+fn read_energy_cache(path: &Path) -> Option<(u64, u64)> {
+    let meta = std::fs::symlink_metadata(path).ok()?;
+    if meta.file_type().is_symlink() {
+        return None;
+    }
+    let content = std::fs::read_to_string(path).ok()?;
+    let mut parts = content.split_whitespace();
+    let ts_ms: u64 = parts.next()?.parse().ok()?;
+    let uj: u64 = parts.next()?.parse().ok()?;
+    Some((ts_ms, uj))
+}
+
+/// Persist `<unix_ms> <microjoules>` through the shared hardened writer
+/// (`O_NOFOLLOW`, mode `0o600`, atomic rename; see
+/// [`crate::common::secure_write`]) so the write can never follow a
+/// symlink and concurrent snapshot invocations never observe a torn
+/// file. Best-effort: a failure only costs the one-shot bridging, never
+/// the in-memory delta.
+#[cfg(feature = "cli")]
+fn write_energy_cache(path: &Path, ts_ms: u64, uj: u64) {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = write_atomic_secure(path, format!("{ts_ms} {uj}").as_bytes());
+}
+
+// Library-only builds (`--no-default-features`) compile without
+// `common::paths` / `common::secure_write`, both gated behind the
+// `cli` feature for the optional `dirs` dependency. These stubs
+// disable the file cache there: library consumers poll continuously
+// and are fully served by the in-memory [`EnergyState`] delta; only
+// the one-shot CLI `snapshot` flow needs cross-invocation bridging.
+#[cfg(not(feature = "cli"))]
+fn energy_cache_path(_device_dir: &Path) -> Option<PathBuf> {
+    None
+}
+
+#[cfg(not(feature = "cli"))]
+fn read_energy_cache(_path: &Path) -> Option<(u64, u64)> {
+    None
+}
+
+#[cfg(not(feature = "cli"))]
+fn write_energy_cache(_path: &Path, _ts_ms: u64, _uj: u64) {}
 
 /// The reader itself. Holds a snapshot of cards discovered at
 /// construction time. Hot-plug is not supported in v1 — matching the AMD
@@ -222,15 +406,27 @@ impl GpuReader for IntelGpuReader {
         let time = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
         let mut out = Vec::with_capacity(self.cards.len());
 
-        for card in &self.cards {
+        // Per-refresh lazy cache for the fdinfo VRAM fallback: one
+        // `/proc` walk serves every xe card that needs it this cycle,
+        // instead of each card re-walking `/proc` on its own.
+        let mut fdinfo_vram_by_card: Option<HashMap<usize, u64>> = None;
+
+        for (card_index, card) in self.cards.iter().enumerate() {
             let static_info = self.ensure_static_info(card);
             let mut detail = static_info.detail.clone();
 
             let device_dir = card.card_path.join("device");
-            let (used_memory, total_memory) = read_memory_bytes(&device_dir, card.variant);
+            let (mut used_memory, total_memory) = read_memory_bytes(&device_dir, card.variant);
+            // Whether the total came from the BAR2 heuristic rather
+            // than a real sysfs VRAM counter; drives the `Source:
+            // Memory` provenance label below. Only xe cards can be
+            // classified Discrete without `tile0/vram0/total_bytes`.
+            let total_from_bar2 = card.driver == "xe"
+                && total_memory > 0
+                && !has_nonzero_u64(&device_dir.join("tile0").join("vram0").join("total_bytes"));
             let frequency = read_frequency_mhz(&device_dir);
             let temperature = read_temperature_celsius(&device_dir);
-            let power_consumption = read_power_watts(&device_dir);
+            let mut power_consumption = read_power_watts(&device_dir);
             let fan_rpm = read_fan_rpm(&device_dir);
 
             // Round-trip values through the validation caps so that a
@@ -239,9 +435,9 @@ impl GpuReader for IntelGpuReader {
             // pattern.
             let temperature = temperature.min(MAX_GPU_TEMP_CELSIUS);
             let frequency = frequency.min(MAX_GPU_FREQ_MHZ);
-            let power_consumption = power_consumption.clamp(0.0, MAX_GPU_POWER_WATTS);
+            power_consumption = power_consumption.clamp(0.0, MAX_GPU_POWER_WATTS);
             let total_memory = total_memory.min(MAX_GPU_MEMORY_BYTES);
-            let used_memory = used_memory.min(total_memory);
+            used_memory = used_memory.min(total_memory);
 
             sources::decorate_static_sources(
                 &mut detail,
@@ -251,6 +447,57 @@ impl GpuReader for IntelGpuReader {
                 frequency,
                 fan_rpm,
             );
+
+            // `decorate_static_sources` labels any non-zero total as
+            // "DRM sysfs"; correct the provenance when the total is in
+            // fact the BAR2 size heuristic.
+            if total_from_bar2 {
+                detail.insert(
+                    "Source: Memory".to_string(),
+                    "PCI BAR2 size (xe)".to_string(),
+                );
+            }
+
+            // xe driver: derive power from the hwmon energy counter when
+            // instantaneous power (`power1_average`) is not exposed. The
+            // derived value goes back through the MAX_GPU_POWER_WATTS
+            // cap because the file-cache bridge trusts wall-clock
+            // timestamps (see `compute_power_from_energy`).
+            if power_consumption == 0.0 && card.driver == "xe" {
+                let cache_path = energy_cache_path(&device_dir);
+                let derived = compute_power_from_energy(
+                    &card.energy_state,
+                    &device_dir,
+                    cache_path.as_deref(),
+                )
+                .clamp(0.0, MAX_GPU_POWER_WATTS);
+                if derived > 0.0 {
+                    power_consumption = derived;
+                    detail.insert("Source: Power".to_string(), "energy delta (xe)".to_string());
+                }
+            }
+
+            // xe driver: fall back to fdinfo for VRAM usage when
+            // card-level sysfs counters are unavailable. The per-card
+            // sums come from one shared `/proc` walk (see above).
+            if used_memory == 0 && total_memory > 0 && card.driver == "xe" {
+                let vram_by_card = fdinfo_vram_by_card.get_or_insert_with(|| {
+                    sum_vram_by_card_from_fdinfo(&self.intel_drm_basenames, &self.proc_root)
+                });
+                if let Some(&fdinfo_vram) = vram_by_card.get(&card_index)
+                    && fdinfo_vram > 0
+                {
+                    used_memory = fdinfo_vram.min(total_memory);
+                    detail.insert(
+                        "Source: Memory".to_string(),
+                        if total_from_bar2 {
+                            "fdinfo used, PCI BAR2 total (xe)".to_string()
+                        } else {
+                            "fdinfo (xe)".to_string()
+                        },
+                    );
+                }
+            }
 
             // Engine-busy refresh — guarded by a per-card mutex.
             let readout = refresh_with_lock(&card.engine_state, &device_dir);
@@ -368,7 +615,7 @@ fn discover_cards(drm_root: &Path) -> Vec<IntelGpuCard> {
         }
 
         let device_id = read_device_id(&device_dir).unwrap_or(0);
-        let variant = classify_variant(&device_dir);
+        let variant = classify_variant(&device_dir, &driver);
 
         let index = parse_card_index(&name);
 
@@ -381,6 +628,11 @@ fn discover_cards(drm_root: &Path) -> Vec<IntelGpuCard> {
             static_info: OnceLock::new(),
             engine_state: Mutex::new(EngineState::empty()),
             gtidle_state: Mutex::new(GtidleState::empty()),
+            energy_state: Mutex::new(EnergyState {
+                timestamp: None,
+                energy_uj: 0,
+                last_cache_write: None,
+            }),
             #[cfg(feature = "level_zero")]
             level_zero_state: Mutex::new(
                 crate::device::readers::intel_gpu_level_zero::LevelZeroState::empty(),
@@ -461,9 +713,17 @@ fn build_uuid(card: &IntelGpuCard, device_dir: &Path) -> String {
     }
 }
 
-fn classify_variant(device_dir: &Path) -> MemoryVariant {
+fn classify_variant(device_dir: &Path, driver: &str) -> MemoryVariant {
+    // The BAR2-size probe is limited to the xe driver: xe is where the
+    // sysfs VRAM counters can be missing (Battlemage on kernels before
+    // 6.14). i915 discrete parts always publish `mem_info_vram_total`,
+    // and i915-era integrated parts may expose GMADR apertures larger
+    // than the 256 MiB cutoff in `read_resource2_total_bytes`, which
+    // would misclassify a laptop iGPU as a discrete card with a
+    // fabricated VRAM total.
     if has_nonzero_u64(&device_dir.join("mem_info_vram_total"))
         || has_nonzero_u64(&device_dir.join("tile0").join("vram0").join("total_bytes"))
+        || (driver == "xe" && read_resource2_total_bytes(device_dir) > 0)
     {
         MemoryVariant::Discrete
     } else {

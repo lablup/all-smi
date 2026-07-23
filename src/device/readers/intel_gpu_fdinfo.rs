@@ -96,6 +96,12 @@ pub struct FdInfo {
     /// ever existed, including freed pages. Resident is what `top` and
     /// `intel_gpu_top -p` report.
     pub resident_bytes: u64,
+    /// Currently-resident device-local VRAM bytes only, a subset of
+    /// [`Self::resident_bytes`]: `drm-resident-vram*` on xe,
+    /// `drm-resident-local*` on i915. Zero on integrated GPUs. Consumed
+    /// by the card-level VRAM fallback, which must not count GTT/system
+    /// pages against the VRAM budget.
+    pub resident_vram_bytes: u64,
 }
 
 /// Parse one fdinfo file's contents.
@@ -115,6 +121,7 @@ pub fn parse_fdinfo(content: &str) -> Option<FdInfo> {
     let mut drm_pdev: Option<String> = None;
     let mut drm_client_id: Option<u64> = None;
     let mut resident_bytes: u64 = 0;
+    let mut resident_vram_bytes: u64 = 0;
 
     for raw_line in content.lines() {
         let line = raw_line.trim();
@@ -143,6 +150,12 @@ pub fn parse_fdinfo(content: &str) -> Option<FdInfo> {
             k if k.starts_with("drm-resident-") => {
                 if let Some(bytes) = parse_memory_value(value) {
                     resident_bytes = resident_bytes.saturating_add(bytes);
+                    // Device-local VRAM subset: xe emits
+                    // `drm-resident-vram<N>`, i915 emits
+                    // `drm-resident-local<N>`.
+                    if k.starts_with("drm-resident-vram") || k.starts_with("drm-resident-local") {
+                        resident_vram_bytes = resident_vram_bytes.saturating_add(bytes);
+                    }
                 }
             }
             _ => {}
@@ -163,6 +176,7 @@ pub fn parse_fdinfo(content: &str) -> Option<FdInfo> {
         drm_pdev,
         drm_client_id,
         resident_bytes,
+        resident_vram_bytes,
     })
 }
 
@@ -471,6 +485,104 @@ pub fn collect_intel_gpu_processes(
     // Stable ordering keeps downstream consumers' output deterministic
     // across refreshes — PID-major, then by card index.
     out.sort_by_key(|u| (u.pid, u.card_index));
+    out
+}
+
+/// Sum resident **VRAM** bytes per card across every Intel-GPU-using
+/// process, in a single `/proc` walk. Used by the Linux reader as a
+/// card-level `used_memory` fallback when the xe driver exposes no
+/// `tile0/vram0/used_bytes` counter in sysfs (Battlemage on kernels
+/// before 6.14).
+///
+/// Reuses [`parse_fdinfo`] (so foreign DRM drivers stay rejected) and
+/// honours the [`MAX_GPU_PROCESSES`] cap, matching
+/// [`collect_intel_gpu_processes`]. One walk covers all cards, so the
+/// caller runs this at most once per refresh regardless of how many
+/// cards need the fallback.
+///
+/// Deduplication intentionally differs from the per-process collector:
+/// `drm-client-id` is unique per DRM device open, so each client is
+/// counted once per **card** (max-wins across every fd referencing it,
+/// in any process). Crediting a fork-inherited fd to both pids is
+/// correct for per-process rows but would double count a card-level
+/// total. Fds without a client id cannot be deduped and are credited
+/// per fdinfo path, matching the collector's safety net.
+pub fn sum_vram_by_card_from_fdinfo(
+    intel_drm_basenames: &HashMap<String, usize>,
+    proc_root: &Path,
+) -> HashMap<usize, u64> {
+    let mut out: HashMap<usize, u64> = HashMap::new();
+    if intel_drm_basenames.is_empty() {
+        return out;
+    }
+    let Ok(entries) = std::fs::read_dir(proc_root) else {
+        return out;
+    };
+
+    // Per-card aggregation: client-id keyed VRAM bytes (max-wins) plus
+    // a per-fdinfo-path bucket for fds whose fdinfo lacks a client id.
+    let mut per_client: HashMap<usize, HashMap<u64, u64>> = HashMap::new();
+    let mut no_client_id: HashMap<usize, HashMap<PathBuf, u64>> = HashMap::new();
+    let mut process_count: usize = 0;
+
+    for entry in entries.flatten() {
+        if process_count >= MAX_GPU_PROCESSES {
+            break;
+        }
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let Ok(pid) = name.parse::<u32>() else {
+            continue;
+        };
+
+        let fds = intel_drm_fds_for_pid(pid, intel_drm_basenames, proc_root);
+        if fds.is_empty() {
+            continue;
+        }
+        process_count += 1;
+
+        for fd in fds {
+            let Some(content) = read_fdinfo_to_string(&fd.fdinfo_path) else {
+                continue;
+            };
+            let Some(info) = parse_fdinfo(&content) else {
+                continue;
+            };
+            match info.drm_client_id {
+                Some(cid) => {
+                    let entry = per_client
+                        .entry(fd.card_index)
+                        .or_default()
+                        .entry(cid)
+                        .or_insert(0);
+                    *entry = (*entry).max(info.resident_vram_bytes);
+                }
+                None => {
+                    let entry = no_client_id
+                        .entry(fd.card_index)
+                        .or_default()
+                        .entry(fd.fdinfo_path)
+                        .or_insert(0);
+                    *entry = (*entry).max(info.resident_vram_bytes);
+                }
+            }
+        }
+    }
+
+    for (card_index, by_client) in &per_client {
+        let slot = out.entry(*card_index).or_insert(0);
+        for bytes in by_client.values() {
+            *slot = slot.saturating_add(*bytes);
+        }
+    }
+    for (card_index, by_fd) in &no_client_id {
+        let slot = out.entry(*card_index).or_insert(0);
+        for bytes in by_fd.values() {
+            *slot = slot.saturating_add(*bytes);
+        }
+    }
     out
 }
 

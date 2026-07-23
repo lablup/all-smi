@@ -48,6 +48,8 @@ drm-engine-render: 1234567890 ns
     assert_eq!(info.drm_client_id, Some(42));
     // 32768 kB + 262144 kB = 294912 kB = 302_039_040 bytes
     assert_eq!(info.resident_bytes, (32_768u64 + 262_144) * 1024);
+    // VRAM subtotal counts only the device-local key (local0 on i915).
+    assert_eq!(info.resident_vram_bytes, 262_144 * 1024);
 }
 
 #[test]
@@ -62,6 +64,8 @@ drm-resident-system: 12288 kB
     let info = parse_fdinfo(content).expect("i915 integrated fdinfo should parse");
     assert_eq!(info.drm_driver, "i915");
     assert_eq!(info.resident_bytes, 12_288 * 1024);
+    // No device-local key on integrated parts: VRAM subtotal stays 0.
+    assert_eq!(info.resident_vram_bytes, 0);
 }
 
 #[test]
@@ -81,6 +85,8 @@ drm-engine-rcs: 9876543210 ns
     assert_eq!(info.drm_driver, "xe");
     assert_eq!(info.drm_client_id, Some(99));
     assert_eq!(info.resident_bytes, (524_288u64 + 32_768) * 1024);
+    // VRAM subtotal counts only vram0, never the GTT pages.
+    assert_eq!(info.resident_vram_bytes, 524_288 * 1024);
 }
 
 #[test]
@@ -489,4 +495,160 @@ fn collect_intel_gpu_processes_tolerates_missing_client_id() {
     let usages = collect_intel_gpu_processes(&basenames, proc_root);
     assert_eq!(usages.len(), 1);
     assert_eq!(usages[0].used_memory_bytes, 16_384 * 1024);
+}
+
+// ----- sum_vram_by_card_from_fdinfo -----
+
+#[test]
+fn sum_vram_by_card_counts_vram_not_gtt() {
+    let dir = tempfile::tempdir().unwrap();
+    let proc_root = dir.path();
+    make_proc_fd(
+        proc_root,
+        1234,
+        3,
+        "renderD128",
+        "drm-driver: xe\ndrm-client-id: 1\ndrm-resident-vram0: 524288 kB\ndrm-resident-gtt: 32768 kB\n",
+    );
+
+    let basenames = HashMap::from([("renderD128".to_string(), 0_usize)]);
+    let by_card = sum_vram_by_card_from_fdinfo(&basenames, proc_root);
+    assert_eq!(
+        by_card.get(&0).copied(),
+        Some(524_288 * 1024),
+        "GTT pages must not count against the VRAM budget"
+    );
+}
+
+#[test]
+fn sum_vram_by_card_dedupes_shared_client_across_pids() {
+    // A DRM client id is unique per device open; a fork-inherited fd
+    // shows the SAME client in two pids. The card-level total must
+    // count it once, unlike the per-process collector which correctly
+    // credits both processes.
+    let dir = tempfile::tempdir().unwrap();
+    let proc_root = dir.path();
+    let fdinfo = "drm-driver: xe\ndrm-client-id: 7\ndrm-resident-vram0: 65536 kB\n";
+    make_proc_fd(proc_root, 4242, 3, "renderD128", fdinfo);
+    make_proc_fd(proc_root, 4243, 3, "renderD128", fdinfo);
+
+    let basenames = HashMap::from([("renderD128".to_string(), 0_usize)]);
+    let by_card = sum_vram_by_card_from_fdinfo(&basenames, proc_root);
+    assert_eq!(by_card.get(&0).copied(), Some(65_536 * 1024));
+}
+
+#[test]
+fn sum_vram_by_card_sums_distinct_clients() {
+    let dir = tempfile::tempdir().unwrap();
+    let proc_root = dir.path();
+    make_proc_fd(
+        proc_root,
+        4242,
+        3,
+        "renderD128",
+        "drm-driver: xe\ndrm-client-id: 7\ndrm-resident-vram0: 16384 kB\n",
+    );
+    make_proc_fd(
+        proc_root,
+        4242,
+        4,
+        "renderD128",
+        "drm-driver: xe\ndrm-client-id: 8\ndrm-resident-vram0: 32768 kB\n",
+    );
+
+    let basenames = HashMap::from([("renderD128".to_string(), 0_usize)]);
+    let by_card = sum_vram_by_card_from_fdinfo(&basenames, proc_root);
+    assert_eq!(by_card.get(&0).copied(), Some((16_384 + 32_768) * 1024));
+}
+
+#[test]
+fn sum_vram_by_card_sums_no_client_id_fds_individually() {
+    // Without drm-client-id there is nothing to dedupe on: distinct
+    // fds are credited individually (same policy as
+    // collect_intel_gpu_processes) instead of collapsing into a single
+    // max-wins bucket that would undercount multi-context processes.
+    let dir = tempfile::tempdir().unwrap();
+    let proc_root = dir.path();
+    make_proc_fd(
+        proc_root,
+        1234,
+        3,
+        "renderD128",
+        "drm-driver: xe\ndrm-resident-vram0: 16384 kB\n",
+    );
+    make_proc_fd(
+        proc_root,
+        1234,
+        4,
+        "renderD128",
+        "drm-driver: xe\ndrm-resident-vram0: 32768 kB\n",
+    );
+
+    let basenames = HashMap::from([("renderD128".to_string(), 0_usize)]);
+    let by_card = sum_vram_by_card_from_fdinfo(&basenames, proc_root);
+    assert_eq!(by_card.get(&0).copied(), Some((16_384 + 32_768) * 1024));
+}
+
+#[test]
+fn sum_vram_by_card_groups_by_card() {
+    let dir = tempfile::tempdir().unwrap();
+    let proc_root = dir.path();
+    make_proc_fd(
+        proc_root,
+        4242,
+        3,
+        "renderD128",
+        "drm-driver: xe\ndrm-client-id: 1\ndrm-resident-vram0: 16384 kB\n",
+    );
+    make_proc_fd(
+        proc_root,
+        4242,
+        4,
+        "renderD129",
+        "drm-driver: xe\ndrm-client-id: 2\ndrm-resident-vram0: 32768 kB\n",
+    );
+
+    let basenames = HashMap::from([
+        ("renderD128".to_string(), 0_usize),
+        ("renderD129".to_string(), 1_usize),
+    ]);
+    let by_card = sum_vram_by_card_from_fdinfo(&basenames, proc_root);
+    assert_eq!(by_card.get(&0).copied(), Some(16_384 * 1024));
+    assert_eq!(by_card.get(&1).copied(), Some(32_768 * 1024));
+}
+
+#[test]
+fn sum_vram_by_card_rejects_foreign_drivers() {
+    // parse_fdinfo gates on i915/xe; an amdgpu fdinfo that somehow
+    // references an Intel node basename must not be counted.
+    let dir = tempfile::tempdir().unwrap();
+    let proc_root = dir.path();
+    make_proc_fd(
+        proc_root,
+        1234,
+        3,
+        "renderD128",
+        "drm-driver: amdgpu\ndrm-client-id: 1\ndrm-resident-vram0: 16384 kB\n",
+    );
+
+    let basenames = HashMap::from([("renderD128".to_string(), 0_usize)]);
+    let by_card = sum_vram_by_card_from_fdinfo(&basenames, proc_root);
+    assert!(by_card.is_empty());
+}
+
+#[test]
+fn sum_vram_by_card_empty_basenames_returns_empty() {
+    let dir = tempfile::tempdir().unwrap();
+    let proc_root = dir.path();
+    make_proc_fd(
+        proc_root,
+        1234,
+        3,
+        "renderD128",
+        "drm-driver: xe\ndrm-client-id: 1\ndrm-resident-vram0: 16384 kB\n",
+    );
+
+    let basenames: HashMap<String, usize> = HashMap::new();
+    let by_card = sum_vram_by_card_from_fdinfo(&basenames, proc_root);
+    assert!(by_card.is_empty());
 }

@@ -93,7 +93,7 @@ fn classify_variant_discrete_via_i915() {
     let device = card.join("device");
     fs::write(device.join("mem_info_vram_total"), "17179869184\n").unwrap();
 
-    assert_eq!(classify_variant(&device), MemoryVariant::Discrete);
+    assert_eq!(classify_variant(&device, "i915"), MemoryVariant::Discrete);
 }
 
 #[test]
@@ -105,7 +105,7 @@ fn classify_variant_discrete_via_xe() {
     fs::create_dir_all(&xe_dir).unwrap();
     fs::write(xe_dir.join("total_bytes"), "12884901888\n").unwrap();
 
-    assert_eq!(classify_variant(&device), MemoryVariant::Discrete);
+    assert_eq!(classify_variant(&device, "xe"), MemoryVariant::Discrete);
 }
 
 #[test]
@@ -114,7 +114,48 @@ fn classify_variant_integrated_when_no_vram() {
     let card = make_card(dir.path(), 0, "0x8086", "i915", "0x7D40");
     let device = card.join("device");
 
-    assert_eq!(classify_variant(&device), MemoryVariant::Integrated);
+    assert_eq!(classify_variant(&device, "i915"), MemoryVariant::Integrated);
+}
+
+#[test]
+fn classify_variant_discrete_via_xe_bar2_rebar() {
+    // Battlemage on kernels without `tile0/vram0/*`: a ReBAR-sized BAR2
+    // (larger than the 256 MiB aperture) marks the card as discrete.
+    let dir = tempdir().unwrap();
+    let card = make_card(dir.path(), 0, "0x8086", "xe", "0xE20B");
+    let device = card.join("device");
+    let bar2 = fs::File::create(device.join("resource2")).unwrap();
+    bar2.set_len(12 * 1024 * 1024 * 1024).unwrap();
+
+    assert_eq!(classify_variant(&device, "xe"), MemoryVariant::Discrete);
+}
+
+#[test]
+fn classify_variant_ignores_256mib_bar2_aperture() {
+    // Integrated xe GPUs (Meteor Lake / Lunar Lake) expose BAR2 as the
+    // fixed 256 MiB GMADR aperture; that must not flip them to
+    // Discrete with a fabricated 256 MiB VRAM total.
+    let dir = tempdir().unwrap();
+    let card = make_card(dir.path(), 0, "0x8086", "xe", "0x7D40");
+    let device = card.join("device");
+    let bar2 = fs::File::create(device.join("resource2")).unwrap();
+    bar2.set_len(256 * 1024 * 1024).unwrap();
+
+    assert_eq!(classify_variant(&device, "xe"), MemoryVariant::Integrated);
+}
+
+#[test]
+fn classify_variant_ignores_bar2_for_i915() {
+    // The BAR2 probe is xe-only: an i915 device with a large aperture
+    // (some BIOSes allow 512 MiB or more of GMADR) stays Integrated
+    // unless the i915 VRAM counter says otherwise.
+    let dir = tempdir().unwrap();
+    let card = make_card(dir.path(), 0, "0x8086", "i915", "0x7D40");
+    let device = card.join("device");
+    let bar2 = fs::File::create(device.join("resource2")).unwrap();
+    bar2.set_len(512 * 1024 * 1024).unwrap();
+
+    assert_eq!(classify_variant(&device, "i915"), MemoryVariant::Integrated);
 }
 
 #[test]
@@ -475,4 +516,124 @@ fn get_process_info_default_filter_keeps_uses_gpu_processes() {
     let (filtered, pids) = reader.get_gpu_processes();
     assert_eq!(filtered.len(), 1);
     assert!(pids.contains(&std::process::id()));
+}
+
+// ----- energy cache (xe power derivation) -----
+
+#[cfg(feature = "cli")]
+#[test]
+fn energy_cache_roundtrip() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("energy-hwmon-0000:03:00.0");
+    write_energy_cache(&path, 1_234_567, 89_000_000);
+    assert_eq!(read_energy_cache(&path), Some((1_234_567, 89_000_000)));
+}
+
+#[cfg(feature = "cli")]
+#[test]
+fn read_energy_cache_refuses_symlink() {
+    // A pre-planted symlink at the cache path must not be read through;
+    // same hardening as the energy WAL replay side.
+    let dir = tempdir().unwrap();
+    let target = dir.path().join("target");
+    fs::write(&target, "0 0").unwrap();
+    let link = dir.path().join("link");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    assert_eq!(read_energy_cache(&link), None);
+}
+
+#[cfg(feature = "cli")]
+#[test]
+fn write_energy_cache_never_clobbers_symlink_target() {
+    // A symlink planted where the cache should live must not cause its
+    // target to be overwritten (the naive `std::fs::write` follows
+    // symlinks; the hardened writer replaces the link itself instead).
+    let dir = tempdir().unwrap();
+    let target = dir.path().join("victim");
+    fs::write(&target, "do-not-clobber").unwrap();
+    let link = dir.path().join("cache");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    write_energy_cache(&link, 1, 2);
+    assert_eq!(fs::read_to_string(&target).unwrap(), "do-not-clobber");
+}
+
+#[test]
+fn compute_power_seeds_then_derives() {
+    let dir = tempdir().unwrap();
+    let device = dir.path();
+    let hwmon = device.join("hwmon").join("hwmon0");
+    fs::create_dir_all(&hwmon).unwrap();
+    fs::write(hwmon.join("energy1_input"), "1000000\n").unwrap();
+
+    let state = Mutex::new(EnergyState {
+        timestamp: None,
+        energy_uj: 0,
+        last_cache_write: None,
+    });
+    // First call seeds (no file cache in play) and reports 0 W.
+    assert_eq!(compute_power_from_energy(&state, device, None), 0.0);
+    // Bump the counter by 1 J and wait so the monotonic delta is > 0.
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    fs::write(hwmon.join("energy1_input"), "2000000\n").unwrap();
+    let power = compute_power_from_energy(&state, device, None);
+    assert!(
+        power > 0.0,
+        "second sample must derive positive power, got {power}"
+    );
+}
+
+#[cfg(feature = "cli")]
+#[test]
+fn compute_power_bridges_via_file_cache() {
+    // One-shot snapshot shape: fresh in-memory state, previous sample
+    // only in the file cache. 10 J over 10 s must read back as ~1 W.
+    let dir = tempdir().unwrap();
+    let device = dir.path();
+    let hwmon = device.join("hwmon").join("hwmon0");
+    fs::create_dir_all(&hwmon).unwrap();
+    fs::write(hwmon.join("energy1_input"), "20000000\n").unwrap();
+
+    let cache = dir.path().join("cache");
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    write_energy_cache(&cache, now_ms - 10_000, 10_000_000);
+
+    let state = Mutex::new(EnergyState {
+        timestamp: None,
+        energy_uj: 0,
+        last_cache_write: None,
+    });
+    let power = compute_power_from_energy(&state, device, Some(&cache));
+    assert!(
+        (0.9..=1.1).contains(&power),
+        "expected roughly 1 W, got {power}"
+    );
+}
+
+#[cfg(feature = "cli")]
+#[test]
+fn compute_power_ignores_stale_file_cache() {
+    // Cache entries older than one hour must seed instead of deriving
+    // a meaningless average over the whole gap.
+    let dir = tempdir().unwrap();
+    let device = dir.path();
+    let hwmon = device.join("hwmon").join("hwmon0");
+    fs::create_dir_all(&hwmon).unwrap();
+    fs::write(hwmon.join("energy1_input"), "20000000\n").unwrap();
+
+    let cache = dir.path().join("cache");
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    write_energy_cache(&cache, now_ms - 2 * 3600 * 1000, 10_000_000);
+
+    let state = Mutex::new(EnergyState {
+        timestamp: None,
+        energy_uj: 0,
+        last_cache_write: None,
+    });
+    assert_eq!(compute_power_from_energy(&state, device, Some(&cache)), 0.0);
 }
