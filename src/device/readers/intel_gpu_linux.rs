@@ -43,7 +43,9 @@
 //! the BAR span the whole VRAM, and `used_memory` falls back to a
 //! per-card sum of `drm-resident-vram0` from process fdinfo.
 
+#[cfg(feature = "cli")]
 use crate::common::paths::cache_dir;
+#[cfg(feature = "cli")]
 use crate::common::secure_write::write_atomic_secure;
 use crate::device::GpuReader;
 use crate::device::readers::common_cache::{DeviceStaticInfo, MAX_DEVICES};
@@ -233,6 +235,11 @@ fn compute_power_from_energy(
 /// `/tmp`) is deliberate: a predictable `/tmp` path would let any local
 /// user pre-plant a symlink for a root-run all-smi to clobber, or
 /// poison the cached counter to skew the reported power.
+///
+/// `cli`-gated because `common::paths` / `common::secure_write` sit
+/// behind the `cli` feature (the optional `dirs` dependency); see the
+/// `cfg(not(feature = "cli"))` stubs below for the library-only build.
+#[cfg(feature = "cli")]
 fn energy_cache_path(device_dir: &Path) -> Option<PathBuf> {
     let pci = std::fs::canonicalize(device_dir)
         .ok()
@@ -246,6 +253,7 @@ fn energy_cache_path(device_dir: &Path) -> Option<PathBuf> {
 /// [`crate::metrics::energy_wal`], so a planted link cannot redirect
 /// the read. Any I/O or parse failure degrades to `None` (the caller
 /// seeds instead).
+#[cfg(feature = "cli")]
 fn read_energy_cache(path: &Path) -> Option<(u64, u64)> {
     let meta = std::fs::symlink_metadata(path).ok()?;
     if meta.file_type().is_symlink() {
@@ -264,12 +272,32 @@ fn read_energy_cache(path: &Path) -> Option<(u64, u64)> {
 /// symlink and concurrent snapshot invocations never observe a torn
 /// file. Best-effort: a failure only costs the one-shot bridging, never
 /// the in-memory delta.
+#[cfg(feature = "cli")]
 fn write_energy_cache(path: &Path, ts_ms: u64, uj: u64) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
     let _ = write_atomic_secure(path, format!("{ts_ms} {uj}").as_bytes());
 }
+
+// Library-only builds (`--no-default-features`) compile without
+// `common::paths` / `common::secure_write`, both gated behind the
+// `cli` feature for the optional `dirs` dependency. These stubs
+// disable the file cache there: library consumers poll continuously
+// and are fully served by the in-memory [`EnergyState`] delta; only
+// the one-shot CLI `snapshot` flow needs cross-invocation bridging.
+#[cfg(not(feature = "cli"))]
+fn energy_cache_path(_device_dir: &Path) -> Option<PathBuf> {
+    None
+}
+
+#[cfg(not(feature = "cli"))]
+fn read_energy_cache(_path: &Path) -> Option<(u64, u64)> {
+    None
+}
+
+#[cfg(not(feature = "cli"))]
+fn write_energy_cache(_path: &Path, _ts_ms: u64, _uj: u64) {}
 
 /// The reader itself. Holds a snapshot of cards discovered at
 /// construction time. Hot-plug is not supported in v1 — matching the AMD

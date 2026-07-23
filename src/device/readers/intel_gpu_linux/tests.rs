@@ -520,6 +520,7 @@ fn get_process_info_default_filter_keeps_uses_gpu_processes() {
 
 // ----- energy cache (xe power derivation) -----
 
+#[cfg(feature = "cli")]
 #[test]
 fn energy_cache_roundtrip() {
     let dir = tempdir().unwrap();
@@ -528,6 +529,7 @@ fn energy_cache_roundtrip() {
     assert_eq!(read_energy_cache(&path), Some((1_234_567, 89_000_000)));
 }
 
+#[cfg(feature = "cli")]
 #[test]
 fn read_energy_cache_refuses_symlink() {
     // A pre-planted symlink at the cache path must not be read through;
@@ -540,6 +542,7 @@ fn read_energy_cache_refuses_symlink() {
     assert_eq!(read_energy_cache(&link), None);
 }
 
+#[cfg(feature = "cli")]
 #[test]
 fn write_energy_cache_never_clobbers_symlink_target() {
     // A symlink planted where the cache should live must not cause its
@@ -579,6 +582,7 @@ fn compute_power_seeds_then_derives() {
     );
 }
 
+#[cfg(feature = "cli")]
 #[test]
 fn compute_power_bridges_via_file_cache() {
     // One-shot snapshot shape: fresh in-memory state, previous sample
@@ -608,6 +612,7 @@ fn compute_power_bridges_via_file_cache() {
     );
 }
 
+#[cfg(feature = "cli")]
 #[test]
 fn compute_power_ignores_stale_file_cache() {
     // Cache entries older than one hour must seed instead of deriving
