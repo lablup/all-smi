@@ -70,16 +70,25 @@ pub fn read_memory_bytes(device_dir: &Path, variant: MemoryVariant) -> (u64, u64
 }
 
 /// Read the PCI BAR2 (VRAM BAR) resource file size in bytes. Returns 0
-/// when the file is absent or the size is not a plausible VRAM BAR (less
-/// than 256 MiB). Used as a last-resort fallback when the xe driver does
-/// not expose `tile0/vram0/total_bytes` (Battlemage on kernels < 6.14).
+/// when the file is absent or the size is not a plausible VRAM BAR.
+/// Used as a last-resort fallback when the xe driver does not expose
+/// `tile0/vram0/total_bytes` (Battlemage on kernels before 6.14).
+///
+/// The size must be *strictly larger* than 256 MiB. Integrated GPUs
+/// expose BAR2 as the fixed 256 MiB GMADR aperture, and discrete parts
+/// without Resizable BAR also show a 256 MiB window that says nothing
+/// about the actual VRAM size (a 12 GB B580 would report 256 MiB).
+/// BAR2 equals the VRAM size only when Resizable BAR maps the whole
+/// VRAM, so anything at or below the aperture size is rejected rather
+/// than surfaced as a fabricated capacity.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub fn read_resource2_total_bytes(device_dir: &Path) -> u64 {
+    const BAR2_APERTURE_BYTES: u64 = 256 * 1024 * 1024;
     let path = device_dir.join("resource2");
     match std::fs::metadata(&path) {
         Ok(meta) => {
             let size = meta.len();
-            if size >= 256 * 1024 * 1024 { size } else { 0 }
+            if size > BAR2_APERTURE_BYTES { size } else { 0 }
         }
         Err(_) => 0,
     }
@@ -277,6 +286,50 @@ mod tests {
         let (used, total) = read_memory_bytes(dir.path(), MemoryVariant::Discrete);
         assert_eq!(total, 12_884_901_888);
         assert_eq!(used, 536_870_912);
+    }
+
+    #[test]
+    fn read_memory_discrete_via_resource2_rebar() {
+        // Battlemage on kernels without `tile0/vram0/*`: BAR2 spans the
+        // whole VRAM when Resizable BAR is active. A sparse file's
+        // metadata length stands in for the sysfs resource size.
+        let dir = tempdir().unwrap();
+        let bar2 = fs::File::create(dir.path().join("resource2")).unwrap();
+        bar2.set_len(12 * 1024 * 1024 * 1024).unwrap();
+        let (used, total) = read_memory_bytes(dir.path(), MemoryVariant::Discrete);
+        assert_eq!(total, 12 * 1024 * 1024 * 1024);
+        assert_eq!(used, 0);
+    }
+
+    #[test]
+    fn resource2_rejects_256mib_aperture() {
+        // Integrated GPUs (and non-ReBAR discrete parts) expose BAR2 as
+        // a 256 MiB window; that must NOT be reported as a VRAM total.
+        let dir = tempdir().unwrap();
+        let bar2 = fs::File::create(dir.path().join("resource2")).unwrap();
+        bar2.set_len(256 * 1024 * 1024).unwrap();
+        assert_eq!(read_resource2_total_bytes(dir.path()), 0);
+    }
+
+    #[test]
+    fn resource2_missing_returns_zero() {
+        let dir = tempdir().unwrap();
+        assert_eq!(read_resource2_total_bytes(dir.path()), 0);
+    }
+
+    #[test]
+    fn read_energy_uj_reads_hwmon_counter() {
+        let dir = tempdir().unwrap();
+        let hwmon = dir.path().join("hwmon").join("hwmon0");
+        fs::create_dir_all(&hwmon).unwrap();
+        fs::write(hwmon.join("energy1_input"), "123456789\n").unwrap();
+        assert_eq!(read_energy_uj(dir.path()), 123_456_789);
+    }
+
+    #[test]
+    fn read_energy_uj_missing_returns_zero() {
+        let dir = tempdir().unwrap();
+        assert_eq!(read_energy_uj(dir.path()), 0);
     }
 
     #[test]
