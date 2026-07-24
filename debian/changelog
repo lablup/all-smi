@@ -1,3 +1,12 @@
+all-smi (0.24.2-0) jammy; urgency=medium
+
+  * Fall back to the PCI BAR2 size for Intel Battlemage VRAM total on the xe driver, which does not expose tile0/vram0 sysfs counters, restricted to BARs above 256 MiB so iGPU GMADR apertures are not misclassified
+  * Derive Battlemage VRAM used from a per-card sum of drm-resident-vram0 in process fdinfo, deduplicated by DRM client id with saturating arithmetic and the MAX_GPU_PROCESSES cap
+  * Derive Battlemage power draw as delta joules over delta seconds from the cumulative hwmon energy1_input counter, clamped to the validation cap, since xe exposes energy instead of instantaneous power
+  * Add a per-user cache under ~/.cache/all-smi that bridges energy readings across one-shot snapshot invocations, using symlink-refusing reads and O_NOFOLLOW atomic writes, gated behind the cli feature so library-only builds stay lean
+
+ -- Jeongkyu Shin <inureyes@gmail.com>  Fri, 24 Jul 2026 00:00:00 +0000
+
 all-smi (0.24.1-0) jammy; urgency=medium
 
   * Replace the yanked aes and crypto-bigint crates (pulled in transitively through russh) with their latest non-yanked releases (aes 0.9.1, crypto-bigint 0.7.5)

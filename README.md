@@ -1344,6 +1344,7 @@ See the [LICENSE](./LICENSE) file for details.
 ## Changelog
 
 ### Recent Updates
+- **v0.24.2 (2026/07/24):** Report VRAM total, VRAM used, and power draw for Intel Battlemage GPUs on the mainline `xe` driver, which does not expose the `tile0/vram0` sysfs counters the `i915` path relies on
 - **v0.24.1 (2026/07/20):** Replace the yanked `aes` and `crypto-bigint` crates (pulled in transitively through `russh`) with their latest non-yanked releases, and bump `russh` to 0.62 and `tower-http` to 0.7, moving several transitive crypto crates from prerelease to stable
 - **v0.24.0 (2026/07/20):** Redesign the local Activity panel history graphs for readability: btop-style multi-row braille graphs with bottom-to-top height-gradient colors on tall terminals, soft auto-ranging and trend glyphs (up/down arrows) for single-row sparklines, bucket max-pooling resampling that preserves peaks, and width-safe panel rendering
 - **v0.23.1 (2026/07/20):** Fix Prometheus scrape failures from unsanitized dynamic label names, add Intel Xe GPU utilization computed from the Xe kernel driver's gtidle idle-residency, support Xe hwmon temperature sensor numbering (temp2-based), and raise the minimum Rust version to 1.96 (MSRV)
