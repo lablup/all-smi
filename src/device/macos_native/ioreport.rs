@@ -547,6 +547,12 @@ const CPU_PERF_STATES: &str = "CPU Core Performance States";
 const GPU_STATS: &str = "GPU Stats";
 const GPU_PERF_STATES: &str = "GPU Performance States";
 
+/// Shortest interval [`IOReport::get_sample_since_last`] will turn into a
+/// delta. Power and residency are counter deltas divided by elapsed time, so a
+/// window this short is dominated by sampling jitter; below it the call
+/// reports "no delta yet" instead of a wild rate.
+const MIN_DELTA_WINDOW: std::time::Duration = std::time::Duration::from_millis(50);
+
 /// IOReport subscription manager
 pub struct IOReport {
     subscription: IOReportSubscriptionRef,
@@ -619,7 +625,14 @@ impl IOReport {
         }
     }
 
-    /// Get a delta sample over the specified duration
+    /// Get a delta sample over the specified duration.
+    ///
+    /// This blocks the calling thread for `duration_ms` to open the delta
+    /// window, so it observes only that window out of however long the caller
+    /// waits between calls. Prefer [`get_sample_since_last`], which deltas
+    /// against the previous call and therefore covers the whole interval
+    /// without sleeping. This variant remains for the first sample of a
+    /// session, where there is no previous sample to delta against.
     pub fn get_sample(
         &mut self,
         duration_ms: u64,
@@ -645,6 +658,66 @@ impl IOReport {
         }
 
         Ok((IOReportIterator::new(delta), duration_ns))
+    }
+
+    /// Get a delta sample covering the time since the previous call, without
+    /// blocking.
+    ///
+    /// Every channel subscribed here is a cumulative counter (energy in the
+    /// Energy Model group, residency ticks in the CPU/GPU stats groups), so a
+    /// delta between two arbitrary samples is exactly the activity that
+    /// occurred between them. Retaining the newest sample and differencing the
+    /// next call against it therefore yields a window equal to the caller's
+    /// polling period, with no `sleep` and a single `IOReportCreateSamples`
+    /// call per poll.
+    ///
+    /// Returns `Ok(None)` when no usable delta is available, which happens in
+    /// two cases: the first call of a session (nothing to delta against yet),
+    /// and a call so soon after the previous one that the window would be
+    /// below [`MIN_DELTA_WINDOW`]. Rates derived from a near-zero window are
+    /// meaningless, so the baseline is left in place for the next call rather
+    /// than consumed. Callers that need a value immediately can fall back to
+    /// [`get_sample`].
+    ///
+    /// [`get_sample`]: Self::get_sample
+    /// [`get_sample_since_last`]: Self::get_sample_since_last
+    pub fn get_sample_since_last(
+        &mut self,
+    ) -> Result<Option<(IOReportIterator, u64)>, &'static str> {
+        let sample = self.take_sample()?;
+        let now = Instant::now();
+
+        // Peek before consuming: a too-short window must not discard a usable
+        // baseline, or a caller polling faster than MIN_DELTA_WINDOW would
+        // never accumulate one.
+        if let Some((_, prev_at)) = self.prev_sample.as_ref()
+            && now.duration_since(*prev_at) < MIN_DELTA_WINDOW
+        {
+            unsafe { CFRelease(sample as *const c_void) };
+            return Ok(None);
+        }
+
+        let Some((prev, prev_at)) = self.prev_sample.replace((sample, now)) else {
+            // First call: `sample` is now retained as the baseline.
+            return Ok(None);
+        };
+
+        let duration_ns = now.duration_since(prev_at).as_nanos() as u64;
+
+        // `IOReportCreateSamplesDelta` does not take ownership of either
+        // argument. `sample` stays retained as the new baseline (it is already
+        // stored in `prev_sample`), so only the old baseline is released here.
+        let delta = unsafe {
+            let d = IOReportCreateSamplesDelta(prev, sample, ptr::null());
+            CFRelease(prev as *const c_void);
+            d
+        };
+
+        if delta.is_null() {
+            return Err("Failed to create sample delta");
+        }
+
+        Ok(Some((IOReportIterator::new(delta), duration_ns)))
     }
 
     /// Take a single sample

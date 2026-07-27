@@ -148,11 +148,14 @@ impl DataCollector {
         let collector = LocalCollector::new();
         let mut first_iteration = true;
 
+        // Local mode has no remote nodes, so the cadence comes from
+        // `local_interval`. Resolved once: `args.interval` is fixed for the
+        // process and the adaptive value is a constant per platform.
+        let interval = args.interval.unwrap_or_else(EnvConfig::local_interval);
+
         loop {
             let mut config = CollectionConfig {
-                interval: args
-                    .interval
-                    .unwrap_or_else(|| EnvConfig::adaptive_interval(1)),
+                interval,
                 first_iteration,
                 hosts: Vec::new(),
             };
@@ -201,10 +204,6 @@ impl DataCollector {
                 config.first_iteration = false;
             }
 
-            // Use adaptive interval for local mode
-            let interval = args
-                .interval
-                .unwrap_or_else(|| EnvConfig::adaptive_interval(1));
             tokio::time::sleep(Duration::from_secs(interval)).await;
         }
     }

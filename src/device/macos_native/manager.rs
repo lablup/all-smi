@@ -90,6 +90,19 @@ pub struct NativeMetricsManager {
 }
 
 impl NativeMetricsManager {
+    /// How long a collected sample is served from cache.
+    ///
+    /// Sized to cover one collection cycle's worth of reader calls without
+    /// reaching the next cycle: the shortest supported poll interval is one
+    /// second, and the readers within a cycle call microseconds apart.
+    ///
+    /// There used to be a 5-second window for the first ten calls, to absorb
+    /// the ~500ms of blocking each collection cost. Collection no longer
+    /// blocks (see `IOReport::get_sample_since_last`), and that window made
+    /// the first ~10 seconds of every history graph a staircase of repeated
+    /// values, so a single duration now applies from the first call.
+    const CACHE_DURATION_MS: u128 = 500;
+
     /// Create a new NativeMetricsManager
     ///
     /// Note: The `_interval_ms` parameter is kept for API compatibility but is not used.
@@ -291,18 +304,16 @@ impl NativeMetricsManager {
 
     /// Collect a single sample synchronously (for testing or one-shot use)
     ///
-    /// This method implements caching: if called within 500ms of a previous collection,
-    /// it returns the cached data instead of collecting new samples.
+    /// This method implements caching: if called within [`CACHE_DURATION_MS`]
+    /// of a previous collection, it returns the cached data instead of
+    /// collecting new samples. That window is what keeps the several readers
+    /// that run per collection cycle (GPU, CPU) from each opening their own
+    /// delta and splitting one interval into slivers.
     /// Uses double-checked locking to prevent concurrent collections.
+    ///
+    /// [`CACHE_DURATION_MS`]: Self::CACHE_DURATION_MS
     pub fn collect_once(&self) -> Result<NativeMetricsData, Box<dyn std::error::Error>> {
-        // Use longer cache duration during startup to handle tokio blocking
-        // After first few calls, use shorter duration for responsiveness
-        static CALL_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-        let call_num = CALL_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
-        // First 10 calls use 5 second cache (startup phase)
-        // After that, use 500ms cache (normal operation)
-        let cache_duration_ms: u128 = if call_num < 10 { 5000 } else { 500 };
+        let cache_duration_ms = Self::CACHE_DURATION_MS;
 
         // First check: quick read-only cache check (no lock)
         if let (Ok(time_guard), Ok(data_guard)) =
@@ -333,26 +344,27 @@ impl NativeMetricsManager {
         let mut ioreport_guard = self.ioreport.lock().map_err(|_| "IOReport lock poisoned")?;
         let ioreport = ioreport_guard.as_mut().ok_or("IOReport not initialized")?;
 
-        // For first collection, use fewer samples for faster startup
-        // Subsequent calls can use full sample count for accuracy
-        static FIRST_COLLECTION: std::sync::atomic::AtomicBool =
-            std::sync::atomic::AtomicBool::new(true);
-
-        let sample_count = if FIRST_COLLECTION.swap(false, std::sync::atomic::Ordering::Relaxed) {
-            1 // First call: single sample for fast startup (~100ms)
-        } else {
-            self.config.sample_count // Subsequent calls: full averaging
+        // Delta against the sample retained by the previous collection. Every
+        // subscribed channel is a cumulative counter, so this covers the whole
+        // interval since that collection rather than a short synthetic window,
+        // and it needs neither a `sleep` nor repeated samples to average: the
+        // long delta already *is* the interval's time average.
+        //
+        // Only the very first collection of a session has no baseline. It pays
+        // one blocking `sample_interval_ms` window so the caller gets data
+        // immediately instead of waiting a full poll for the second call.
+        let avg_metrics = match ioreport.get_sample_since_last()? {
+            Some((iterator, duration_ns)) => IOReportMetrics::from_sample(iterator, duration_ns),
+            None => {
+                // The call above already retained a baseline, so the next
+                // collection deltas against it and this branch runs once per
+                // session. The short window measured here overlaps the start of
+                // that first interval, which is harmless.
+                let (iterator, duration_ns) =
+                    ioreport.get_sample(self.config.sample_interval_ms)?;
+                IOReportMetrics::from_sample(iterator, duration_ns)
+            }
         };
-
-        // Collect samples
-        let mut samples: Vec<IOReportMetrics> = Vec::new();
-        for _ in 0..sample_count {
-            let (iterator, duration_ns) = ioreport.get_sample(self.config.sample_interval_ms)?;
-            samples.push(IOReportMetrics::from_sample(iterator, duration_ns));
-        }
-
-        // Average samples
-        let avg_metrics = Self::average_samples(&samples);
 
         // Collect SMC metrics
         let smc_metrics = SMCMetrics::collect();
