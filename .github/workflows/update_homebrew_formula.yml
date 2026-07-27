@@ -52,46 +52,159 @@ jobs:
       - name: Download release artifacts and calculate SHA256
         run: |
           cd homebrew-tap
+          set -euo pipefail
+
           RAW_VERSION="${{ env.VERSION }}"
           VERSION="${RAW_VERSION#v}"  # Remove leading 'v'
           echo "VERSION_NO_V=$VERSION" >> $GITHUB_ENV  # Export version without 'v' to GitHub env
 
-          MAC_URL="https://github.com/inureyes/all-smi/releases/download/v${VERSION}/all-smi-macos-aarch64.zip"
-          LINUX_ARM_URL="https://github.com/inureyes/all-smi/releases/download/v${VERSION}/all-smi-linux-aarch64.tar.gz"
-          LINUX_X86_URL="https://github.com/inureyes/all-smi/releases/download/v${VERSION}/all-smi-linux-x86_64.tar.gz"
-
+          BASE="https://github.com/inureyes/all-smi/releases/download/v${VERSION}"
           mkdir -p tmp
-          curl -Ls "$MAC_URL" -o tmp/mac.zip
-          curl -Ls "$LINUX_ARM_URL" -o tmp/linux-arm.tar.gz
-          curl -Ls "$LINUX_X86_URL" -o tmp/linux-x86.tar.gz
 
-          echo "mac_url=$MAC_URL" >> $GITHUB_ENV
-          echo "linux_arm_url=$LINUX_ARM_URL" >> $GITHUB_ENV
-          echo "linux_x86_url=$LINUX_X86_URL" >> $GITHUB_ENV
+          # `-f` so a missing or renamed asset fails here rather than leaving a
+          # zero-byte file whose checksum gets committed to the tap, and an
+          # archive integrity check so a truncated download cannot turn into a
+          # valid-looking sha256 either.
+          fetch() {  # name url dest
+            local name="$1" url="$2" dest="$3"
+            curl -fLs --retry 3 "$url" -o "$dest"
+            if [ ! -s "$dest" ]; then
+              echo "::error::Empty download: ${url}"
+              exit 1
+            fi
+            case "$dest" in
+              *.zip)    unzip -qqt "$dest" > /dev/null ;;
+              *.tar.gz) tar -tzf "$dest" > /dev/null ;;
+            esac
+            {
+              echo "${name}_url=${url}"
+              echo "${name}_sha=$(shasum -a 256 "$dest" | awk '{print $1}')"
+            } >> "$GITHUB_ENV"
+          }
 
-          echo "mac_sha=$(shasum -a 256 tmp/mac.zip | awk '{print $1}')" >> $GITHUB_ENV
-          echo "linux_arm_sha=$(shasum -a 256 tmp/linux-arm.tar.gz | awk '{print $1}')" >> $GITHUB_ENV
-          echo "linux_x86_sha=$(shasum -a 256 tmp/linux-x86.tar.gz | awk '{print $1}')" >> $GITHUB_ENV
+          fetch mac       "${BASE}/all-smi-macos-aarch64.zip"    tmp/mac.zip
+          fetch linux_arm "${BASE}/all-smi-linux-aarch64.tar.gz" tmp/linux-arm.tar.gz
+          fetch linux_x86 "${BASE}/all-smi-linux-x86_64.tar.gz"  tmp/linux-x86.tar.gz
 
       - name: Update formula
         run: |
           cd homebrew-tap
+          set -euo pipefail
+
           VERSION="${{ env.VERSION_NO_V }}"  # Use version without 'v'
 
-          gsed -i "s/^  version .*/  version \"${VERSION}\"/" Formula/all-smi.rb
+          # Stanzas are located by name, never by line offset. This step used to
+          # rewrite each checksum with
+          #
+          #     gsed -i "/ARTIFACT\"/!b;n;c\      sha256 \"...\""
+          #
+          # which matched the url line, advanced one line, and replaced whatever
+          # it landed on. That holds only while sha256 sits directly beneath url
+          # inside an on_macos / on_linux block. lablup/mlxcel ran the same
+          # construct against a formula whose url had moved to the top level
+          # with a `version` stanza in between: it overwrote `version` with the
+          # new checksum and left the previous release's sha256 below, so the
+          # formula had no version, two sha256 lines, and failed `brew install`
+          # on checksum mismatch. It sat broken in the tap for three days
+          # (lablup/homebrew-tap 9969ec4). Nothing here depends on layout now,
+          # and the guards abort instead of editing the wrong line.
 
-          gsed -i "s|https://github.com/.*/all-smi-macos-aarch64.zip|${mac_url}|" Formula/all-smi.rb
-          gsed -i "/macos-aarch64.zip\"/!b;n;c\      sha256 \"${mac_sha}\"" Formula/all-smi.rb
+          set_version() {  # file version
+            local file="$1" version="$2" n
+            n=$(grep -c "^[[:space:]]*version " "$file" || true)
+            if [ "$n" -ne 1 ]; then
+              echo "::error::${file}: expected exactly one version stanza, found ${n}."
+              exit 1
+            fi
+            gsed -i "s|^\([[:space:]]*\)version .*|\1version \"${version}\"|" "$file"
+          }
 
-          gsed -i "s|https://github.com/.*/all-smi-linux-aarch64.tar.gz|${linux_arm_url}|" Formula/all-smi.rb
-          gsed -i "/linux-aarch64.tar.gz\"/!b;n;c\      sha256 \"${linux_arm_sha}\"" Formula/all-smi.rb
+          # Rewrites the url stanza whose value contains ARTIFACT, then the
+          # first sha256 stanza below it, preserving each line's indentation.
+          set_artifact() {  # file artifact url sha
+            local file="$1" artifact="$2" url="$3" sha="$4" n
+            n=$(awk -v a="$artifact" '$0 ~ /^[[:space:]]*url / && index($0, a) { c++ } END { print c+0 }' "$file")
+            if [ "$n" -ne 1 ]; then
+              echo "::error::${file}: expected exactly one url stanza for ${artifact}, found ${n}."
+              exit 1
+            fi
+            awk -v a="$artifact" -v u="$url" -v s="$sha" '
+              !seen && $0 ~ /^[[:space:]]*url / && index($0, a) {
+                match($0, /^[[:space:]]*/)
+                printf "%surl \"%s\"\n", substr($0, 1, RLENGTH), u
+                seen = 1
+                next
+              }
+              seen && !hit && $0 ~ /^[[:space:]]*sha256 / {
+                match($0, /^[[:space:]]*/)
+                printf "%ssha256 \"%s\"\n", substr($0, 1, RLENGTH), s
+                hit = 1
+                next
+              }
+              { print }
+              END { exit(hit ? 0 : 1) }
+            ' "$file" > "${file}.new" || {
+              echo "::error::${file}: no sha256 stanza follows the url for ${artifact}."
+              rm -f "${file}.new"
+              exit 1
+            }
+            mv "${file}.new" "$file"
+          }
 
-          gsed -i "s|https://github.com/.*/all-smi-linux-x86_64.tar.gz|${linux_x86_url}|" Formula/all-smi.rb
-          gsed -i "/linux-x86_64.tar.gz\"/!b;n;c\      sha256 \"${linux_x86_sha}\"" Formula/all-smi.rb
+          set_version  Formula/all-smi.rb "$VERSION"
+          set_artifact Formula/all-smi.rb all-smi-macos-aarch64.zip    "$mac_url"       "$mac_sha"
+          set_artifact Formula/all-smi.rb all-smi-linux-aarch64.tar.gz "$linux_arm_url" "$linux_arm_sha"
+          set_artifact Formula/all-smi.rb all-smi-linux-x86_64.tar.gz  "$linux_x86_url" "$linux_x86_sha"
+
+      - name: Validate updated formula
+        run: |
+          cd homebrew-tap
+          set -euo pipefail
+
+          VERSION="${{ env.VERSION_NO_V }}"
+
+          echo "=== Formula/all-smi.rb ==="
+          cat Formula/all-smi.rb
+
+          # `brew style` is the check the tap itself is expected to pass, and it
+          # only applies formula cops to paths under Formula/. `ruby -c` is not
+          # sufficient on its own: the mlxcel corruption described above was
+          # valid Ruby and would have passed a syntax check.
+          ruby -c Formula/all-smi.rb
+          brew style Formula/all-smi.rb
+
+          if ! grep -q "^[[:space:]]*version \"${VERSION}\"$" Formula/all-smi.rb; then
+            echo "::error::Formula/all-smi.rb: version stanza is not ${VERSION}."
+            exit 1
+          fi
+
+          # A substitution that silently no-ops would leave the previous
+          # release's checksum behind, so require the exact expected set.
+          n=$(grep -c "^[[:space:]]*sha256 " Formula/all-smi.rb || true)
+          if [ "$n" -ne 3 ]; then
+            echo "::error::Formula/all-smi.rb: expected 3 sha256 stanzas, found ${n}."
+            exit 1
+          fi
+          for sha in "$mac_sha" "$linux_arm_sha" "$linux_x86_sha"; do
+            if ! grep -q "^[[:space:]]*sha256 \"${sha}\"$" Formula/all-smi.rb; then
+              echo "::error::Formula/all-smi.rb: sha256 ${sha} was not written."
+              exit 1
+            fi
+          done
 
       - name: Commit and push changes to tap
         run: |
           cd homebrew-tap
+          set -euo pipefail
+
           git add Formula/all-smi.rb
+
+          # Re-running the workflow for a version already in the tap is not an
+          # error; `git commit` would fail on an empty index otherwise.
+          if git diff --cached --quiet; then
+            echo "Formula already up to date for v${{ env.VERSION_NO_V }}, nothing to push."
+            exit 0
+          fi
+
           git commit -m "bump: all-smi to v${{ env.VERSION_NO_V }}"
           git push origin main
