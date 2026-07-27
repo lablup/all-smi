@@ -148,7 +148,23 @@ detect_gpu() {
 detect_cpu() {
   case "$OS" in
     Darwin) sysctl -n machdep.cpu.brand_string 2>/dev/null || echo unknown ;;
-    Linux) awk -F': ' '/model name/ { print $2; exit }' /proc/cpuinfo 2>/dev/null || echo unknown ;;
+    Linux)
+      # `model name` is an x86 field. aarch64 /proc/cpuinfo carries
+      # `CPU implementer`/`CPU part` ID pairs instead, so the awk prints an
+      # empty string and still exits 0, which is why a trailing
+      # `|| echo unknown` does not catch it. lscpu decodes those IDs, and on
+      # a heterogeneous part prints one `Model name` per core cluster, so
+      # join them: which clusters exist is itself worth reporting, because
+      # the same work costs different CPU time on each.
+      local name
+      name="$(awk -F': ' '/model name/ { print $2; exit }' /proc/cpuinfo 2>/dev/null)"
+      if [ -z "$name" ]; then
+        name="$(lscpu 2>/dev/null | awk -F': +' '
+          /^Model name/ { if (seen[$2]++) next; n[++c] = $2 }
+          END { for (i = 1; i <= c; i++) printf "%s%s", (i > 1 ? " + " : ""), n[i] }')"
+      fi
+      echo "${name:-unknown}"
+      ;;
   esac
 }
 
