@@ -82,6 +82,11 @@
 #   to average several windows when the effect you are measuring is close to
 #   the spread between repeats.
 #
+#   Run -c on bare metal. Inside a container without a cpuset, all-smi sizes
+#   its own CPU view from sched_getaffinity, so pinning would also shrink the
+#   set of cores it parses and renders, changing the work being measured
+#   instead of only where that work runs.
+#
 # REPORTING
 #
 #   Paste the whole output, environment block included, into issue #288. The
@@ -179,15 +184,23 @@ if [ -n "$CPUSET" ]; then
     Linux)
       command -v taskset >/dev/null 2>&1 ||
         { echo "error: -c requires taskset (util-linux)" >&2; exit 1; }
-      # Let taskset itself validate the list against this machine's CPUs,
-      # rather than reimplementing the range syntax here.
+      # taskset only fails when *no* CPU in the list exists, so it rejects
+      # "99-200" but silently accepts "0,99" and narrows it to CPU 0. Use it
+      # to catch the wholly invalid case, then read back the mask actually in
+      # force so the affinity line reports what ran, not what was asked for.
       taskset -c "$CPUSET" true >/dev/null 2>&1 ||
-        { echo "error: -c '$CPUSET' is not a valid CPU list on this machine" >&2; exit 1; }
+        { echo "error: -c '$CPUSET' matches no CPU on this machine" >&2; exit 1; }
       LAUNCH_PREFIX="taskset -c $CPUSET "
-      AFFINITY_DESC="cpus $CPUSET (taskset)"
+      effective="$(taskset -c "$CPUSET" sh -c 'taskset -pc $$' 2>/dev/null |
+                   sed 's/.*list: *//' || true)"
+      if [ -n "$effective" ] && [ "$effective" != "$CPUSET" ]; then
+        AFFINITY_DESC="cpus $effective (taskset, requested $CPUSET)"
+      else
+        AFFINITY_DESC="cpus $CPUSET (taskset)"
+      fi
       ;;
     Darwin)
-      echo "error: -c is not supported on macOS. The kernel exposes no userspace CPU affinity control, so a run cannot be pinned to P or E cores there." >&2
+      echo "error: -c is not supported on macOS. There is no way to select a specific CPU set: thread_policy_set affinity is a cache-locality hint that Apple Silicon reports as unsupported, and only E-core confinement is reachable at all, via taskpolicy -b, which also changes scheduling priority." >&2
       exit 1
       ;;
   esac
@@ -200,7 +213,7 @@ fi
 # as unknown rather than assumed uniform, because assuming uniform is exactly
 # the error this block exists to prevent.
 linux_topology() {
-  local src file cpu key lines=""
+  local src d file cpu key lines=""
   if [ -r /sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq ]; then
     src=cpufreq
   elif [ -r /sys/devices/system/cpu/cpu0/cpu_capacity ]; then
@@ -225,22 +238,43 @@ linux_topology() {
   done
   [ -n "$lines" ] || { echo "unknown (no cpufreq or cpu_capacity)"; return; }
 
-  # Sort by key descending then CPU ascending, so awk sees whole groups in
-  # order and each group's CPU list is already ascending for range collapsing.
-  printf '%s' "$lines" | sort -k1,1nr -k2,2n | awk -v src="$src" '
-    function ranges(s,   a, n, i, j, out) {
+  # Sort by key descending so awk walks from the fastest core type down and
+  # can bucket by proximity in one pass.
+  #
+  # Cores of one type do not all report an identical key. This machine's
+  # cpu_capacity reads 718, 731, 997, 1017, and 1024 across a two-cluster
+  # part, and Intel parts with per-core turbo binning give favoured P-cores a
+  # higher cpuinfo_max_freq than their siblings. Exact-equality grouping would
+  # report five tiers here, one of them a single CPU, which is worse than
+  # useless on precisely the hosts this exists for. Bucket keys within
+  # TOLERANCE of the group's fastest member instead, comparing against that
+  # fixed representative rather than the previous row so a long run of small
+  # steps cannot drift one bucket across a real cluster boundary.
+  printf '%s' "$lines" | sort -k1,1nr -k2,2n | awk -v src="$src" -v tol=0.05 '
+    function ranges(s,   a, n, i, j, t, out) {
       n = split(s, a, " ")
+      # A bucket can merge several keys, whose CPU runs interleave, so sort
+      # numerically before collapsing rather than trusting the input order.
+      for (i = 2; i <= n; i++) {
+        t = a[i] + 0
+        for (j = i - 1; j >= 1 && a[j] + 0 > t; j--) a[j + 1] = a[j]
+        a[j + 1] = t
+      }
       out = ""
       i = 1
       while (i <= n) {
         j = i
-        while (j + 1 <= n && a[j + 1] == a[j] + 1) j++
+        while (j + 1 <= n && a[j + 1] + 0 == a[j] + 0 + 1) j++
         out = out (out == "" ? "" : ",") (i == j ? a[i] : a[i] "-" a[j])
         i = j + 1
       }
       return out
     }
-    { if ($1 != prev) { g++; gkey[g] = $1; prev = $1 } gcnt[g]++; glist[g] = glist[g] " " $2 }
+    {
+      if (g == 0 || $1 + 0 < rep * (1 - tol)) { g++; rep = $1 + 0; gkey[g] = $1 + 0 }
+      gcnt[g]++
+      glist[g] = glist[g] " " $2
+    }
     END {
       out = ""
       for (i = 1; i <= g; i++) {
@@ -330,10 +364,17 @@ TOPOLOGY="$(detect_topology)"
 
 # On a heterogeneous host an unpinned run is a mix of core types, and the
 # reader needs to know that before comparing the number to another machine's.
+# Only Linux is pointed at -c: every Apple Silicon Mac reports two perflevels
+# and so lands here, and telling those runs to use a flag that macOS rejects
+# would be advice that never works.
 case "$TOPOLOGY" in
   heterogeneous*)
-    [ -n "$CPUSET" ] ||
-      AFFINITY_DESC="unpinned (mixed core types: threads may migrate, see -c)"
+    if [ -z "$CPUSET" ]; then
+      case "$OS" in
+        Linux) AFFINITY_DESC="unpinned (mixed core types: threads may migrate, see -c)" ;;
+        Darwin) AFFINITY_DESC="unpinned (mixed core types: threads may migrate; macOS has no CPU affinity control)" ;;
+      esac
+    fi
     ;;
 esac
 
@@ -370,9 +411,9 @@ measure_once() {
   local before after
   before="$(existing_pids)"
 
-  tmux kill-session -t "$session" 2>/dev/null || true
+  tmux kill-session -t "$session" >/dev/null 2>&1 || true
   tmux new-session -d -s "$session" -x "$TMUX_COLS" -y "$TMUX_ROWS" \
-    "${LAUNCH_PREFIX}$BIN local $*" 2>/dev/null
+    "${LAUNCH_PREFIX}$BIN local $*" >/dev/null 2>&1
 
   local pid=""
   for _ in $(seq 1 20); do
@@ -382,7 +423,7 @@ measure_once() {
     [ -n "$pid" ] && break
   done
   if [ -z "$pid" ]; then
-    tmux kill-session -t "$session" 2>/dev/null || true
+    tmux kill-session -t "$session" >/dev/null 2>&1 || true
     return 1
   fi
 
@@ -390,17 +431,17 @@ measure_once() {
 
   local t0 c0 t1 c1 rss
   c0="$(cpu_time_seconds "$pid")" ||
-    { tmux kill-session -t "$session" 2>/dev/null || true; return 2; }
+    { tmux kill-session -t "$session" >/dev/null 2>&1 || true; return 2; }
   t0="$(date +%s)"
   sleep "$DURATION"
   c1="$(cpu_time_seconds "$pid")" ||
-    { tmux kill-session -t "$session" 2>/dev/null || true; return 3; }
+    { tmux kill-session -t "$session" >/dev/null 2>&1 || true; return 3; }
   t1="$(date +%s)"
 
   rss="$(ps -o rss= -p "$pid" 2>/dev/null | tr -d ' ' || true)"
   [ -n "$rss" ] || rss=0
 
-  tmux kill-session -t "$session" 2>/dev/null || true
+  tmux kill-session -t "$session" >/dev/null 2>&1 || true
 
   awk -v c0="$c0" -v c1="$c1" -v t0="$t0" -v t1="$t1" -v rss="$rss" 'BEGIN {
     wall = t1 - t0
@@ -440,7 +481,7 @@ measure() {
 
   # Averaging percentages per window rather than dividing summed CPU time by
   # summed wall time keeps each window weighted equally even if one ran long.
-  printf '%s' "$samples" | awk -v label="$label" -v want="$REPEATS" '
+  printf '%s' "$samples" | awk -v label="$label" -v want="$REPEATS" -v reasons="$failures" '
     { pct = $1 / $2 * 100; sum += pct; sumsq += pct * pct; ct += $1; wall += $2; rss += $3; n++ }
     END {
       mean = sum / n
@@ -448,12 +489,15 @@ measure() {
         var = (sumsq - n * mean * mean) / (n - 1)
         if (var < 0) var = 0
         printf "  %-14s cpu=%6.2f%% +/- %.2f (n=%d)   cpu_time=%.2fs / %ds   rss=%dMB",
-               label, mean, sqrt(var), n, ct / n, wall / n, rss / n / 1024
+               label, mean, sqrt(var), n, ct / n, wall / n + 0.5, rss / n / 1024
       } else {
         printf "  %-14s cpu=%6.2f%%   cpu_time=%.2fs / %ds   rss=%dMB",
                label, mean, ct, wall, rss / 1024
       }
-      if (n < want) printf "   [%d/%d windows ok]", n, want
+      # Name the failures here too, not only when every window failed: a
+      # partial run that silently reported a smaller n would look like a
+      # deliberately shorter measurement.
+      if (n < want) printf "   [%d/%d windows ok: %s]", n, want, reasons
       printf "\n"
     }'
 }

@@ -247,7 +247,7 @@ The script prints an environment block (OS, CPU, core topology, affinity, GPU, c
 
 So the durable number is the **ratio between two intervals measured on one host**, not the absolute percentage. Compare absolute percentages across machines only when both reports state their core placement. The `topology` and `affinity` lines in the environment block carry that context automatically.
 
-On a heterogeneous host, prefer `-c` to pin one cluster and say which one you pinned; it also cuts run-to-run variance substantially. Use `-r` to average several windows when the effect you are chasing is close to the spread between repeats. `-c` is Linux only, since macOS exposes no userspace CPU affinity control and a run cannot be pinned to P or E cores there. Background and measurements are in issue #290.
+On a heterogeneous host, prefer `-c` to pin one cluster and say which one you pinned; it also cuts run-to-run variance substantially. Use `-r` to average several windows when the effect you are chasing is close to the spread between repeats. Two limits on `-c`: it is Linux only, since macOS offers no way to select a specific CPU set (only E-core confinement is reachable at all, via `taskpolicy -b`, which also changes scheduling priority); and it should be run on bare metal, because inside a container without a cpuset `all-smi` sizes its own CPU view from `sched_getaffinity`, so pinning would shrink the set of cores it parses and renders rather than only relocating the same work. Background and measurements are in issue #290.
 
 Coverage is currently thin outside Apple Silicon. See issue #288 if you have Linux or Windows hardware and can contribute measurements.
 
