@@ -24,16 +24,19 @@
 # USAGE
 #
 #   scripts/bench-local-interval.sh [-d SECONDS] [-b PATH] [-i "LIST"]
-#                                   [-c CPUS] [-r COUNT]
+#                                   [-c CPUS] [-r COUNT] [-h]
 #
-#     -d SECONDS   measurement window per configuration (default 60)
+#     -d SECONDS   measurement window per configuration, whole seconds
+#                  (default 60)
 #     -b PATH      all-smi binary (default ./target/release/all-smi)
-#     -i "LIST"    space-separated intervals to test (default "1 2 3");
-#                  the no-flag default configuration is always measured
+#     -i "LIST"    space-separated intervals to test, whole seconds
+#                  (default "1 2 3"); the no-flag default configuration is
+#                  always measured
 #     -c CPUS      pin the run to a CPU list, e.g. "5-9,15-19" (Linux only).
 #                  On a heterogeneous machine, see COMPARABILITY below
 #     -r COUNT     repeats per configuration (default 1). With more than one,
 #                  the mean and standard deviation are reported
+#     -h           print this text and exit
 #
 #   Build first:  cargo build --release --bin all-smi
 #                 On Linux this needs libdrm-dev: without it the link fails on

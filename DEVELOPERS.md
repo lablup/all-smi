@@ -232,16 +232,17 @@ cargo build --release --bin all-smi
 scripts/bench-local-interval.sh                    # default: 60s window, intervals 1/2/3
 scripts/bench-local-interval.sh -d 120 -i "2 5"    # longer window, custom intervals
 scripts/bench-local-interval.sh -c 5-9,15-19 -r 3  # pin to one core cluster, average 3 windows
-scripts/bench-local-interval.sh -h                 # usage
+scripts/bench-local-interval.sh -b ~/bin/all-smi   # measure a binary built elsewhere
+scripts/bench-local-interval.sh -h                 # full usage and flag list
 ```
 
 It requires `tmux` (macOS and Linux only) so the TUI runs detached at a fixed 200x50 size; terminal size affects render cost, so fixing it is what makes results from different machines comparable. CPU is computed from the process CPU-time delta rather than `ps -o %cpu`, because that column is a decaying recent average on macOS and a lifetime average on Linux. Results are percent of one core.
 
 On Linux, building needs `libdrm-dev`. Without it the link fails on `-ldrm` and `-ldrm_amdgpu` even on a host with no AMD GPU, because `libamdgpu_top` is a hard dependency of the glibc Linux target.
 
-The script prints an environment block (OS, CPU, core topology, affinity, GPU, core count, process count) above the numbers. Include it whenever you report results: collection cost depends heavily on which device readers are active, so numbers without that context cannot be compared.
+The script prints an environment block (all-smi version, OS, CPU model and core topology, affinity, GPU, process count, terminal size, window length) above the numbers. Include it whenever you report results: collection cost depends heavily on which device readers are active, so numbers without that context cannot be compared.
 
-#### Comparing results across machines
+#### Comparing Results Across Machines
 
 "Percent of one core" is not a single quantity on a heterogeneous CPU. ARM big.LITTLE parts, Intel P/E hybrids, and Apple Silicon all mix core types, and identical work costs a different amount of CPU time on each type. On an NVIDIA GB10 (Cortex-X925 at 3.9 GHz plus Cortex-A725 at 2.8 GHz), pinning the same run to one cluster or the other moves the result by about 1.5x, which is larger than the interval effect the script is usually being used to measure. Unpinned runs land somewhere between the two depending on where the scheduler put the threads, which is also why they vary more between repeats.
 
