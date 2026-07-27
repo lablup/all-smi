@@ -282,6 +282,14 @@ impl EnergyConfig {
 pub struct EnvConfig;
 
 impl EnvConfig {
+    /// Collection interval for the given number of *remote* nodes.
+    ///
+    /// Local monitoring is `node_count == 0`. Call [`local_interval`] rather
+    /// than passing a literal there: passing `1` reads as "one host" but
+    /// selects the 1-to-10-remote-nodes arm, which is how local mode ended up
+    /// polling at the remote cadence.
+    ///
+    /// [`local_interval`]: Self::local_interval
     pub fn adaptive_interval(node_count: usize) -> u64 {
         match node_count {
             0 => {
@@ -298,6 +306,14 @@ impl EnvConfig {
             51..=100 => 5,
             _ => 6,
         }
+    }
+
+    /// Collection interval for local monitoring (no remote nodes).
+    ///
+    /// The single name every local-mode call site uses, so the node count is
+    /// never spelled out as a literal there.
+    pub fn local_interval() -> u64 {
+        Self::adaptive_interval(0)
     }
 
     #[allow(dead_code)] // Future connection management
@@ -406,6 +422,26 @@ mod tests {
         assert_eq!(EnvConfig::adaptive_interval(200), 6);
         assert_eq!(EnvConfig::adaptive_interval(500), 6);
         assert_eq!(EnvConfig::adaptive_interval(1000), 6);
+    }
+
+    /// Local mode must use the no-remote-nodes cadence, not the arm for a
+    /// small remote cluster. `run_local_mode` used to call
+    /// `adaptive_interval(1)`, which reads as "one host" but selects the
+    /// 1-to-10-remote-nodes arm, so local polling ran at 3s instead of the
+    /// documented 1s / 2s.
+    #[test]
+    fn test_local_interval_is_the_no_remote_nodes_arm() {
+        assert_eq!(EnvConfig::local_interval(), EnvConfig::adaptive_interval(0));
+        assert_ne!(
+            EnvConfig::local_interval(),
+            EnvConfig::adaptive_interval(1),
+            "local cadence must differ from the 1-to-10-remote-nodes cadence"
+        );
+        assert!(
+            EnvConfig::local_interval() <= 2,
+            "local monitoring polls at 1s (Apple Silicon) or 2s, got {}",
+            EnvConfig::local_interval()
+        );
     }
 
     #[test]

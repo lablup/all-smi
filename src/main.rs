@@ -329,7 +329,9 @@ async fn run_command(cli: Cli, settings: Settings) {
             // Initialize native metrics manager (no sudo required)
             #[cfg(target_os = "macos")]
             if is_apple_silicon() {
-                let interval = args.interval.unwrap_or(2);
+                let interval = args
+                    .interval
+                    .unwrap_or_else(common::config::EnvConfig::local_interval);
                 if let Err(e) = initialize_native_metrics_manager(interval * 1000) {
                     eprintln!("Warning: Failed to initialize native metrics manager: {e}");
                 } else {
@@ -341,7 +343,9 @@ async fn run_command(cli: Cli, settings: Settings) {
             // Initialize hlsmi manager for Intel Gaudi on Linux
             #[cfg(target_os = "linux")]
             if has_gaudi() {
-                let interval = args.interval.unwrap_or(2);
+                let interval = args
+                    .interval
+                    .unwrap_or_else(common::config::EnvConfig::local_interval);
                 std::thread::spawn(move || match initialize_hlsmi_manager(interval) {
                     Err(e) => {
                         eprintln!("Warning: Failed to initialize hlsmi manager: {e}");
