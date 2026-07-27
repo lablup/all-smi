@@ -24,13 +24,25 @@
 # USAGE
 #
 #   scripts/bench-local-interval.sh [-d SECONDS] [-b PATH] [-i "LIST"]
+#                                   [-c CPUS] [-r COUNT] [-h]
 #
-#     -d SECONDS   measurement window per configuration (default 60)
+#     -d SECONDS   measurement window per configuration, whole seconds
+#                  (default 60)
 #     -b PATH      all-smi binary (default ./target/release/all-smi)
-#     -i "LIST"    space-separated intervals to test (default "1 2 3");
-#                  the no-flag default configuration is always measured
+#     -i "LIST"    space-separated intervals to test, whole seconds
+#                  (default "1 2 3"); the no-flag default configuration is
+#                  always measured
+#     -c CPUS      pin the run to a CPU list, e.g. "5-9,15-19" (Linux only).
+#                  On a heterogeneous machine, see COMPARABILITY below
+#     -r COUNT     repeats per configuration (default 1). With more than one,
+#                  the mean and standard deviation are reported
+#     -h           print this text and exit
 #
 #   Build first:  cargo build --release --bin all-smi
+#                 On Linux this needs libdrm-dev: without it the link fails on
+#                 -ldrm and -ldrm_amdgpu even on a host with no AMD GPU,
+#                 because libamdgpu_top is a hard dependency of the glibc
+#                 Linux target
 #
 # REQUIREMENTS
 #
@@ -51,6 +63,33 @@
 #   (reader initialisation, first collection, first render) does not land in
 #   the window.
 #
+# COMPARABILITY ACROSS MACHINES
+#
+#   Percent of one core is not a single quantity on a heterogeneous CPU. ARM
+#   big.LITTLE parts, Intel P/E hybrids, and Apple Silicon all mix core types,
+#   and identical work costs a different amount of CPU time on each type. On an
+#   NVIDIA GB10 (Cortex-X925 at 3.9GHz plus Cortex-A725 at 2.8GHz), pinning the
+#   same run to one cluster or the other moves the result by about 1.5x, which
+#   is larger than the interval effect this script exists to measure. Unpinned
+#   runs land somewhere between the two, wherever the scheduler happened to put
+#   the threads, which is also why they vary more between repeats.
+#
+#   The durable number is therefore the ratio between two intervals measured on
+#   one host, not the absolute percentage. An absolute percentage is comparable
+#   to another machine's only when both state their core placement. The
+#   environment block prints the detected topology and the affinity in use so
+#   that context travels with the numbers.
+#
+#   On a heterogeneous host, prefer pinning one cluster with -c and say which
+#   one you pinned. Pinning also cuts run-to-run variance substantially. Use -r
+#   to average several windows when the effect you are measuring is close to
+#   the spread between repeats.
+#
+#   Run -c on bare metal. Inside a container without a cpuset, all-smi sizes
+#   its own CPU view from sched_getaffinity, so pinning would also shrink the
+#   set of cores it parses and renders, changing the work being measured
+#   instead of only where that work runs.
+#
 # REPORTING
 #
 #   Paste the whole output, environment block included, into issue #288. The
@@ -62,6 +101,8 @@ set -euo pipefail
 DURATION=60
 BIN="./target/release/all-smi"
 INTERVALS="1 2 3"
+CPUSET=""
+REPEATS=1
 WARMUP_SECS=8
 TMUX_COLS=200
 TMUX_ROWS=50
@@ -78,11 +119,13 @@ usage() {
   ' "$0"
 }
 
-while getopts "d:b:i:h" opt; do
+while getopts "d:b:i:c:r:h" opt; do
   case "$opt" in
     d) DURATION="$OPTARG" ;;
     b) BIN="$OPTARG" ;;
     i) INTERVALS="$OPTARG" ;;
+    c) CPUSET="$OPTARG" ;;
+    r) REPEATS="$OPTARG" ;;
     h) usage; exit 0 ;;
     *) echo "run '$0 -h' for usage" >&2; exit 2 ;;
   esac
@@ -90,6 +133,63 @@ done
 
 command -v tmux >/dev/null 2>&1 || { echo "error: tmux is required" >&2; exit 1; }
 [ -x "$BIN" ] || { echo "error: no executable at $BIN (cargo build --release --bin all-smi)" >&2; exit 1; }
+
+case "$REPEATS" in
+  ''|*[!0-9]*) echo "error: -r takes a positive integer, got '$REPEATS'" >&2; exit 2 ;;
+esac
+[ "$REPEATS" -ge 1 ] || { echo "error: -r must be at least 1" >&2; exit 2; }
+
+case "$DURATION" in
+  ''|*[!0-9]*) echo "error: -d takes whole seconds, got '$DURATION'" >&2; exit 2 ;;
+esac
+# A fractional -d is worse than a rejected one: GNU sleep accepts 0.5, but the
+# window is then shorter than the clock's usable resolution and the result is
+# silently wrong rather than absent.
+[ "$DURATION" -ge 1 ] || { echo "error: -d must be at least 1 second" >&2; exit 2; }
+
+# Intervals are whole seconds because that is what all-smi's -i takes. Checking
+# them here also keeps a value out of the command string tmux hands to a shell,
+# and globbing is disabled for the walk so a bare -i '*' cannot turn filenames
+# in the working directory into intervals.
+set -f
+for iv in $INTERVALS; do
+  case "$iv" in
+    ''|*[!0-9]*) echo "error: -i takes whole seconds, got '$iv'" >&2; exit 2 ;;
+  esac
+  [ "$iv" -ge 1 ] || { echo "error: -i values must be at least 1, got '$iv'" >&2; exit 2; }
+done
+set +f
+
+# Wall clock for the window. `date +%s` truncates at both ends, so a 60s window
+# can measure as 59 or 61: a 1.7% error sitting on top of the very spread that
+# -r exists to expose. bash 5's EPOCHREALTIME avoids it where available, and
+# normalises the comma some locales use as the decimal separator.
+now_seconds() {
+  if [ -n "${EPOCHREALTIME:-}" ]; then
+    printf '%s\n' "${EPOCHREALTIME/,/.}"
+  else
+    date +%s
+  fi
+}
+
+# Kill only the sessions this invocation created. Without this an interrupt
+# during a window leaves an orphan rendering a 200x50 TUI forever, which then
+# competes for CPU with the operator's next run, and under -c for exactly the
+# cluster they pinned, biasing the numbers silently.
+cleanup() {
+  local s
+  for s in $(tmux list-sessions -F '#{session_name}' 2>/dev/null |
+             grep "^all_smi_bench_$$_" || true); do
+    tmux kill-session -t "$s" >/dev/null 2>&1 || true
+  done
+}
+# INT and TERM must exit, not merely clean up: a bash trap handler returns to
+# the point of interruption, so cleaning up without exiting would kill the
+# window in flight and then cheerfully open the next one. cleanup is idempotent,
+# so the EXIT trap running it a second time is harmless.
+trap cleanup EXIT
+trap 'cleanup; exit 130' INT
+trap 'cleanup; exit 143' TERM
 
 OS="$(uname -s)"
 case "$OS" in
@@ -127,6 +227,146 @@ case "$OS" in
     exit 1
     ;;
 esac
+
+# Prefix prepended to the launch command when -c is given. taskset execs the
+# target in place, so the running process keeps the binary's name and the
+# pgrep -x detection in measure_once() is unaffected; a wrapper that forked
+# instead would break it.
+LAUNCH_PREFIX=""
+AFFINITY_DESC="unpinned"
+if [ -n "$CPUSET" ]; then
+  case "$OS" in
+    Linux)
+      command -v taskset >/dev/null 2>&1 ||
+        { echo "error: -c requires taskset (util-linux)" >&2; exit 1; }
+      # taskset only fails when *no* CPU in the list exists, so it rejects
+      # "99-200" but silently accepts "0,99" and narrows it to CPU 0. Use it
+      # to catch the wholly invalid case, then read back the mask actually in
+      # force so the affinity line reports what ran, not what was asked for.
+      taskset -c "$CPUSET" true >/dev/null 2>&1 ||
+        { echo "error: -c '$CPUSET' matches no CPU on this machine" >&2; exit 1; }
+      LAUNCH_PREFIX="taskset -c $CPUSET "
+      effective="$(taskset -c "$CPUSET" sh -c 'taskset -pc $$' 2>/dev/null |
+                   sed 's/.*list: *//' || true)"
+      if [ -n "$effective" ] && [ "$effective" != "$CPUSET" ]; then
+        AFFINITY_DESC="cpus $effective (taskset, requested $CPUSET)"
+      else
+        AFFINITY_DESC="cpus $CPUSET (taskset)"
+      fi
+      ;;
+    Darwin)
+      echo "error: -c is not supported on macOS. There is no way to select a specific CPU set: thread_policy_set affinity is a cache-locality hint that Apple Silicon reports as unsupported, and only E-core confinement is reachable at all, via taskpolicy -b, which also changes scheduling priority." >&2
+      exit 1
+      ;;
+  esac
+fi
+
+# Report core types, so a reader can tell a heterogeneous host from a uniform
+# one. Grouping by maximum frequency separates ARM big.LITTLE clusters and
+# Intel P/E cores alike; cpu_capacity is the device-tree fallback for ARM
+# systems without cpufreq. When neither is readable the topology is reported
+# as unknown rather than assumed uniform, because assuming uniform is exactly
+# the error this block exists to prevent.
+linux_topology() {
+  local src d file cpu key lines=""
+  if [ -r /sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq ]; then
+    src=cpufreq
+  elif [ -r /sys/devices/system/cpu/cpu0/cpu_capacity ]; then
+    src=capacity
+  else
+    echo "unknown (no cpufreq or cpu_capacity)"
+    return
+  fi
+
+  for d in /sys/devices/system/cpu/cpu[0-9]*; do
+    cpu="${d##*/cpu}"
+    case "$cpu" in ''|*[!0-9]*) continue ;; esac
+    if [ "$src" = cpufreq ]; then
+      file="$d/cpufreq/cpuinfo_max_freq"
+    else
+      file="$d/cpu_capacity"
+    fi
+    key="$(cat "$file" 2>/dev/null || true)"
+    [ -n "$key" ] || continue
+    lines="${lines}${key} ${cpu}
+"
+  done
+  [ -n "$lines" ] || { echo "unknown (no cpufreq or cpu_capacity)"; return; }
+
+  # Sort by key descending so awk walks from the fastest core type down and
+  # can bucket by proximity in one pass.
+  #
+  # Cores of one type do not all report an identical key. This machine's
+  # cpu_capacity reads 718, 731, 997, 1017, and 1024 across a two-cluster
+  # part, and Intel parts with per-core turbo binning give favoured P-cores a
+  # higher cpuinfo_max_freq than their siblings. Exact-equality grouping would
+  # report five tiers here, one of them a single CPU, which is worse than
+  # useless on precisely the hosts this exists for. Bucket keys within
+  # TOLERANCE of the group's fastest member instead, comparing against that
+  # fixed representative rather than the previous row so a long run of small
+  # steps cannot drift one bucket across a real cluster boundary.
+  printf '%s' "$lines" | sort -k1,1nr -k2,2n | awk -v src="$src" -v tol=0.05 '
+    function ranges(s,   a, n, i, j, t, out) {
+      n = split(s, a, " ")
+      # A bucket can merge several keys, whose CPU runs interleave, so sort
+      # numerically before collapsing rather than trusting the input order.
+      for (i = 2; i <= n; i++) {
+        t = a[i] + 0
+        for (j = i - 1; j >= 1 && a[j] + 0 > t; j--) a[j + 1] = a[j]
+        a[j + 1] = t
+      }
+      out = ""
+      i = 1
+      while (i <= n) {
+        j = i
+        while (j + 1 <= n && a[j + 1] + 0 == a[j] + 0 + 1) j++
+        out = out (out == "" ? "" : ",") (i == j ? a[i] : a[i] "-" a[j])
+        i = j + 1
+      }
+      return out
+    }
+    {
+      if (g == 0 || $1 + 0 < rep * (1 - tol)) { g++; rep = $1 + 0; gkey[g] = $1 + 0 }
+      gcnt[g]++
+      glist[g] = glist[g] " " $2
+    }
+    END {
+      out = ""
+      for (i = 1; i <= g; i++) {
+        lbl = (src == "cpufreq") ? sprintf("%.2fGHz", gkey[i] / 1000000) : sprintf("capacity %d", gkey[i])
+        out = out (i > 1 ? ", " : "") gcnt[i] "x " lbl
+        if (g > 1) out = out " (cpus " ranges(glist[i]) ")"
+      }
+      printf "%s: %s\n", (g > 1 ? "heterogeneous" : "uniform"), out
+    }'
+}
+
+# macOS exposes perflevels rather than per-CPU frequencies, and gives no way
+# to address individual cores, so no CPU lists are printed here.
+darwin_topology() {
+  local levels i name count out=""
+  levels="$(sysctl -n hw.nperflevels 2>/dev/null || echo 1)"
+  case "$levels" in ''|*[!0-9]*) levels=1 ;; esac
+  if [ "$levels" -le 1 ]; then
+    echo "uniform: $(sysctl -n hw.logicalcpu 2>/dev/null || echo '?') logical cores"
+    return
+  fi
+  i=0
+  while [ "$i" -lt "$levels" ]; do
+    name="$(sysctl -n "hw.perflevel${i}.name" 2>/dev/null || echo "level${i}")"
+    count="$(sysctl -n "hw.perflevel${i}.logicalcpu" 2>/dev/null || echo '?')"
+    out="${out}${out:+, }${count}x ${name}"
+    i=$((i + 1))
+  done
+  echo "heterogeneous: $out"
+}
+
+detect_topology() {
+  case "$OS" in
+    Linux) linux_topology ;;
+    Darwin) darwin_topology ;;
+  esac
+}
 
 detect_gpu() {
   if command -v nvidia-smi >/dev/null 2>&1; then
@@ -175,71 +415,168 @@ core_count() {
   esac
 }
 
+TOPOLOGY="$(detect_topology)"
+
+# On a heterogeneous host an unpinned run is a mix of core types, and the
+# reader needs to know that before comparing the number to another machine's.
+# Only Linux is pointed at -c: every Apple Silicon Mac reports two perflevels
+# and so lands here, and telling those runs to use a flag that macOS rejects
+# would be advice that never works.
+case "$TOPOLOGY" in
+  heterogeneous*)
+    if [ -z "$CPUSET" ]; then
+      case "$OS" in
+        Linux) AFFINITY_DESC="unpinned (mixed core types: threads may migrate, see -c)" ;;
+        Darwin) AFFINITY_DESC="unpinned (mixed core types: threads may migrate; macOS has no CPU affinity control)" ;;
+      esac
+    fi
+    ;;
+esac
+
 echo "=== environment ==="
 printf '  all-smi       %s\n' "$("$BIN" --version 2>/dev/null | head -1 || echo unknown)"
 printf '  binary        %s\n' "$BIN"
 printf '  os            %s %s (%s)\n' "$OS" "$(uname -r)" "$(uname -m)"
 printf '  cpu           %s (%s cores)\n' "$(detect_cpu)" "$(core_count)"
+printf '  topology      %s\n' "$TOPOLOGY"
+printf '  affinity      %s\n' "$AFFINITY_DESC"
 printf '  gpu           %s\n' "$(detect_gpu)"
 printf '  processes     %s\n' "$(($(ps -A 2>/dev/null | wc -l) - 1))"
 printf '  terminal      %sx%s (tmux)\n' "$TMUX_COLS" "$TMUX_ROWS"
-printf '  window        %ss measured after %ss warmup\n' "$DURATION" "$WARMUP_SECS"
+printf '  window        %ss measured after %ss warmup%s\n' "$DURATION" "$WARMUP_SECS" \
+  "$([ "$REPEATS" -gt 1 ] && printf ', %s repeats' "$REPEATS" || true)"
 echo
 
 BIN_NAME="$(basename "$BIN")"
 
-# PIDs of every already-running process named like the binary. Used to tell our
-# own child apart from an all-smi the operator happens to be running, and from
-# the shell tmux wraps the command in. Matching on the command line instead
-# would pick up that wrapper shell, whose CPU and RSS are not what we want.
-existing_pids() { pgrep -x "$BIN_NAME" 2>/dev/null | sort || true; }
+# Basename of a running process, portably: Linux `ps -o comm=` gives the bare
+# name, macOS can give a full path.
+process_name() { ps -o comm= -p "$1" 2>/dev/null | tr -d ' ' | sed 's#.*/##'; }
 
-# Measure one configuration. $1 is a label, the rest are extra binary args.
-measure() {
-  local label="$1"; shift
-  local session="all_smi_bench_$$_${label//[^0-9a-zA-Z]/_}"
+# The PID running in the session's pane. tmux execs the command in place, so
+# for both `all-smi ...` and `taskset -c LIST all-smi ...` this is the binary
+# itself, verified on both forms. If tmux ever wraps the command in a shell,
+# the binary is that shell's child, so fall back to looking one level down.
+#
+# Asking tmux which process it started is what makes the measurement immune to
+# a second all-smi appearing meanwhile. Diffing `pgrep` snapshots, as this did
+# before, would silently attach to whichever new PID sorted first, and this
+# script now actively invites concurrent runs by telling operators to pin one
+# cluster at a time.
+session_pid() {
+  local session="$1" pane child
+  pane="$(tmux list-panes -t "$session" -F '#{pane_pid}' 2>/dev/null | head -1)"
+  [ -n "$pane" ] || return 1
+  if [ "$(process_name "$pane")" = "$BIN_NAME" ]; then
+    printf '%s\n' "$pane"
+    return 0
+  fi
+  child="$(pgrep -P "$pane" -x "$BIN_NAME" 2>/dev/null | head -1)"
+  [ -n "$child" ] || return 1
+  printf '%s\n' "$child"
+}
 
-  local before after
-  before="$(existing_pids)"
+# Run one measurement window. Echoes "cpu_seconds wall_seconds rss_kb" on
+# success. Failures are reported through the exit code so the caller can name
+# the reason after all repeats have run: 1 could not start, 2 could not read
+# CPU time, 3 exited early, 4 window was not positive.
+measure_once() {
+  local label="$1" rep="$2"; shift 2
+  local session="all_smi_bench_$$_${label//[^0-9a-zA-Z]/_}_${rep}"
 
-  tmux kill-session -t "$session" 2>/dev/null || true
-  tmux new-session -d -s "$session" -x "$TMUX_COLS" -y "$TMUX_ROWS" \
-    "$BIN local $*" 2>/dev/null
+  tmux kill-session -t "$session" >/dev/null 2>&1 || true
+  # Keep stderr: a failure to launch is otherwise reported as a bare "could not
+  # start" after 10s of polling, with the actual reason discarded. stdout is
+  # dropped because this function's stdout is parsed as numbers by the caller.
+  local launch_err
+  launch_err="$(tmux new-session -d -s "$session" -x "$TMUX_COLS" -y "$TMUX_ROWS" \
+    "${LAUNCH_PREFIX}$BIN local $*" 2>&1 >/dev/null)" || true
 
   local pid=""
   for _ in $(seq 1 20); do
     sleep 0.5
-    after="$(existing_pids)"
-    pid="$(comm -13 <(printf '%s\n' "$before") <(printf '%s\n' "$after") | head -1)"
+    pid="$(session_pid "$session" || true)"
     [ -n "$pid" ] && break
   done
   if [ -z "$pid" ]; then
-    printf '  %-14s FAILED to start\n' "$label"
-    tmux kill-session -t "$session" 2>/dev/null || true
-    return
+    [ -n "$launch_err" ] && printf 'note: tmux: %s\n' "$launch_err" >&2
+    tmux kill-session -t "$session" >/dev/null 2>&1 || true
+    return 1
   fi
 
   sleep "$WARMUP_SECS"
 
-  local t0 c0 t1 c1
-  c0="$(cpu_time_seconds "$pid")" || { printf '  %-14s FAILED to read cpu time\n' "$label"; return; }
-  t0="$(date +%s)"
+  local t0 c0 t1 c1 rss
+  c0="$(cpu_time_seconds "$pid")" ||
+    { tmux kill-session -t "$session" >/dev/null 2>&1 || true; return 2; }
+  t0="$(now_seconds)"
   sleep "$DURATION"
-  c1="$(cpu_time_seconds "$pid")" || { printf '  %-14s process exited early\n' "$label"; return; }
-  t1="$(date +%s)"
+  c1="$(cpu_time_seconds "$pid")" ||
+    { tmux kill-session -t "$session" >/dev/null 2>&1 || true; return 3; }
+  t1="$(now_seconds)"
 
-  local rss
-  rss="$(ps -o rss= -p "$pid" 2>/dev/null | tr -d ' ' || echo 0)"
+  rss="$(ps -o rss= -p "$pid" 2>/dev/null | tr -d ' ' || true)"
+  [ -n "$rss" ] || rss=0
 
-  awk -v label="$label" -v c0="$c0" -v c1="$c1" -v t0="$t0" -v t1="$t1" -v rss="$rss" 'BEGIN {
+  tmux kill-session -t "$session" >/dev/null 2>&1 || true
+
+  awk -v c0="$c0" -v c1="$c1" -v t0="$t0" -v t1="$t1" -v rss="$rss" 'BEGIN {
     wall = t1 - t0
-    if (wall <= 0) { printf "  %-14s invalid window\n", label; exit }
-    printf "  %-14s cpu=%6.2f%%   cpu_time=%.2fs / %ds   rss=%dMB\n",
-           label, (c1 - c0) / wall * 100, c1 - c0, wall, rss / 1024
-  }'
+    if (wall <= 0) exit 1
+    printf "%.6f %.3f %d\n", c1 - c0, wall, rss
+  }' || return 4
+}
 
-  tmux kill-session -t "$session" 2>/dev/null || true
-  sleep 2
+# Measure one configuration REPEATS times and print a single summary line.
+# $1 is a label, the rest are extra binary args.
+measure() {
+  local label="$1"; shift
+  local samples="" failures="" sample rep=1 rc
+
+  while [ "$rep" -le "$REPEATS" ]; do
+    rc=0
+    sample="$(measure_once "$label" "$rep" "$@")" || rc=$?
+    if [ "$rc" -eq 0 ]; then
+      samples="${samples}${sample}
+"
+    else
+      case "$rc" in
+        1) failures="${failures}${failures:+, }could not start" ;;
+        2) failures="${failures}${failures:+, }could not read cpu time" ;;
+        3) failures="${failures}${failures:+, }exited early" ;;
+        *) failures="${failures}${failures:+, }invalid window" ;;
+      esac
+    fi
+    rep=$((rep + 1))
+    sleep 2
+  done
+
+  if [ -z "$samples" ]; then
+    printf '  %-14s FAILED (%s)\n' "$label" "$failures"
+    return
+  fi
+
+  # Averaging percentages per window rather than dividing summed CPU time by
+  # summed wall time keeps each window weighted equally even if one ran long.
+  printf '%s' "$samples" | awk -v label="$label" -v want="$REPEATS" -v reasons="$failures" '
+    { pct = $1 / $2 * 100; sum += pct; sumsq += pct * pct; ct += $1; wall += $2; rss += $3; n++ }
+    END {
+      mean = sum / n
+      if (n > 1) {
+        var = (sumsq - n * mean * mean) / (n - 1)
+        if (var < 0) var = 0
+        printf "  %-14s cpu=%6.2f%% +/- %.2f (n=%d)   cpu_time=%.2fs / %ds   rss=%dMB",
+               label, mean, sqrt(var), n, ct / n, wall / n + 0.5, rss / n / 1024
+      } else {
+        printf "  %-14s cpu=%6.2f%%   cpu_time=%.2fs / %ds   rss=%dMB",
+               label, mean, ct, wall + 0.5, rss / 1024
+      }
+      # Name the failures here too, not only when every window failed: a
+      # partial run that silently reported a smaller n would look like a
+      # deliberately shorter measurement.
+      if (n < want) printf "   [%d/%d windows ok: %s]", n, want, reasons
+      printf "\n"
+    }'
 }
 
 echo "=== results (percent of one core) ==="
