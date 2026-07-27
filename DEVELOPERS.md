@@ -223,6 +223,23 @@ SKIP_SUDO_TESTS=1 cargo test
 
 For comprehensive testing documentation, see [TESTING.md](TESTING.md).
 
+### Benchmarking Local-Mode Collection Cost
+
+`scripts/bench-local-interval.sh` measures how much CPU `all-smi local` uses at different collection intervals. Use it when changing the collection cadence, the sampling strategy, or anything a device reader does on every poll.
+
+```bash
+cargo build --release --bin all-smi
+scripts/bench-local-interval.sh                 # default: 60s window, intervals 1/2/3
+scripts/bench-local-interval.sh -d 120 -i "2 5" # longer window, custom intervals
+scripts/bench-local-interval.sh -h              # usage
+```
+
+It requires `tmux` (macOS and Linux only) so the TUI runs detached at a fixed 200x50 size; terminal size affects render cost, so fixing it is what makes results from different machines comparable. CPU is computed from the process CPU-time delta rather than `ps -o %cpu`, because that column is a decaying recent average on macOS and a lifetime average on Linux. Results are percent of one core.
+
+The script prints an environment block (OS, CPU, GPU, core count, process count) above the numbers. Include it whenever you report results: collection cost depends heavily on which device readers are active, so numbers without that context cannot be compared.
+
+Coverage is currently thin outside Apple Silicon. See issue #288 if you have Linux or Windows hardware and can contribute measurements.
+
 ## Code Style and Standards
 
 ### Formatting
