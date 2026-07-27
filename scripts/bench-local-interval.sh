@@ -136,6 +136,58 @@ case "$REPEATS" in
 esac
 [ "$REPEATS" -ge 1 ] || { echo "error: -r must be at least 1" >&2; exit 2; }
 
+case "$DURATION" in
+  ''|*[!0-9]*) echo "error: -d takes whole seconds, got '$DURATION'" >&2; exit 2 ;;
+esac
+# A fractional -d is worse than a rejected one: GNU sleep accepts 0.5, but the
+# window is then shorter than the clock's usable resolution and the result is
+# silently wrong rather than absent.
+[ "$DURATION" -ge 1 ] || { echo "error: -d must be at least 1 second" >&2; exit 2; }
+
+# Intervals are whole seconds because that is what all-smi's -i takes. Checking
+# them here also keeps a value out of the command string tmux hands to a shell,
+# and globbing is disabled for the walk so a bare -i '*' cannot turn filenames
+# in the working directory into intervals.
+set -f
+for iv in $INTERVALS; do
+  case "$iv" in
+    ''|*[!0-9]*) echo "error: -i takes whole seconds, got '$iv'" >&2; exit 2 ;;
+  esac
+  [ "$iv" -ge 1 ] || { echo "error: -i values must be at least 1, got '$iv'" >&2; exit 2; }
+done
+set +f
+
+# Wall clock for the window. `date +%s` truncates at both ends, so a 60s window
+# can measure as 59 or 61: a 1.7% error sitting on top of the very spread that
+# -r exists to expose. bash 5's EPOCHREALTIME avoids it where available, and
+# normalises the comma some locales use as the decimal separator.
+now_seconds() {
+  if [ -n "${EPOCHREALTIME:-}" ]; then
+    printf '%s\n' "${EPOCHREALTIME/,/.}"
+  else
+    date +%s
+  fi
+}
+
+# Kill only the sessions this invocation created. Without this an interrupt
+# during a window leaves an orphan rendering a 200x50 TUI forever, which then
+# competes for CPU with the operator's next run, and under -c for exactly the
+# cluster they pinned, biasing the numbers silently.
+cleanup() {
+  local s
+  for s in $(tmux list-sessions -F '#{session_name}' 2>/dev/null |
+             grep "^all_smi_bench_$$_" || true); do
+    tmux kill-session -t "$s" >/dev/null 2>&1 || true
+  done
+}
+# INT and TERM must exit, not merely clean up: a bash trap handler returns to
+# the point of interruption, so cleaning up without exiting would kill the
+# window in flight and then cheerfully open the next one. cleanup is idempotent,
+# so the EXIT trap running it a second time is harmless.
+trap cleanup EXIT
+trap 'cleanup; exit 130' INT
+trap 'cleanup; exit 143' TERM
+
 OS="$(uname -s)"
 case "$OS" in
   Linux)
@@ -394,11 +446,32 @@ echo
 
 BIN_NAME="$(basename "$BIN")"
 
-# PIDs of every already-running process named like the binary. Used to tell our
-# own child apart from an all-smi the operator happens to be running, and from
-# the shell tmux wraps the command in. Matching on the command line instead
-# would pick up that wrapper shell, whose CPU and RSS are not what we want.
-existing_pids() { pgrep -x "$BIN_NAME" 2>/dev/null | sort || true; }
+# Basename of a running process, portably: Linux `ps -o comm=` gives the bare
+# name, macOS can give a full path.
+process_name() { ps -o comm= -p "$1" 2>/dev/null | tr -d ' ' | sed 's#.*/##'; }
+
+# The PID running in the session's pane. tmux execs the command in place, so
+# for both `all-smi ...` and `taskset -c LIST all-smi ...` this is the binary
+# itself, verified on both forms. If tmux ever wraps the command in a shell,
+# the binary is that shell's child, so fall back to looking one level down.
+#
+# Asking tmux which process it started is what makes the measurement immune to
+# a second all-smi appearing meanwhile. Diffing `pgrep` snapshots, as this did
+# before, would silently attach to whichever new PID sorted first, and this
+# script now actively invites concurrent runs by telling operators to pin one
+# cluster at a time.
+session_pid() {
+  local session="$1" pane child
+  pane="$(tmux list-panes -t "$session" -F '#{pane_pid}' 2>/dev/null | head -1)"
+  [ -n "$pane" ] || return 1
+  if [ "$(process_name "$pane")" = "$BIN_NAME" ]; then
+    printf '%s\n' "$pane"
+    return 0
+  fi
+  child="$(pgrep -P "$pane" -x "$BIN_NAME" 2>/dev/null | head -1)"
+  [ -n "$child" ] || return 1
+  printf '%s\n' "$child"
+}
 
 # Run one measurement window. Echoes "cpu_seconds wall_seconds rss_kb" on
 # success. Failures are reported through the exit code so the caller can name
@@ -408,21 +481,22 @@ measure_once() {
   local label="$1" rep="$2"; shift 2
   local session="all_smi_bench_$$_${label//[^0-9a-zA-Z]/_}_${rep}"
 
-  local before after
-  before="$(existing_pids)"
-
   tmux kill-session -t "$session" >/dev/null 2>&1 || true
-  tmux new-session -d -s "$session" -x "$TMUX_COLS" -y "$TMUX_ROWS" \
-    "${LAUNCH_PREFIX}$BIN local $*" >/dev/null 2>&1
+  # Keep stderr: a failure to launch is otherwise reported as a bare "could not
+  # start" after 10s of polling, with the actual reason discarded. stdout is
+  # dropped because this function's stdout is parsed as numbers by the caller.
+  local launch_err
+  launch_err="$(tmux new-session -d -s "$session" -x "$TMUX_COLS" -y "$TMUX_ROWS" \
+    "${LAUNCH_PREFIX}$BIN local $*" 2>&1 >/dev/null)" || true
 
   local pid=""
   for _ in $(seq 1 20); do
     sleep 0.5
-    after="$(existing_pids)"
-    pid="$(comm -13 <(printf '%s\n' "$before") <(printf '%s\n' "$after") | head -1)"
+    pid="$(session_pid "$session" || true)"
     [ -n "$pid" ] && break
   done
   if [ -z "$pid" ]; then
+    [ -n "$launch_err" ] && printf 'note: tmux: %s\n' "$launch_err" >&2
     tmux kill-session -t "$session" >/dev/null 2>&1 || true
     return 1
   fi
@@ -432,11 +506,11 @@ measure_once() {
   local t0 c0 t1 c1 rss
   c0="$(cpu_time_seconds "$pid")" ||
     { tmux kill-session -t "$session" >/dev/null 2>&1 || true; return 2; }
-  t0="$(date +%s)"
+  t0="$(now_seconds)"
   sleep "$DURATION"
   c1="$(cpu_time_seconds "$pid")" ||
     { tmux kill-session -t "$session" >/dev/null 2>&1 || true; return 3; }
-  t1="$(date +%s)"
+  t1="$(now_seconds)"
 
   rss="$(ps -o rss= -p "$pid" 2>/dev/null | tr -d ' ' || true)"
   [ -n "$rss" ] || rss=0
@@ -446,7 +520,7 @@ measure_once() {
   awk -v c0="$c0" -v c1="$c1" -v t0="$t0" -v t1="$t1" -v rss="$rss" 'BEGIN {
     wall = t1 - t0
     if (wall <= 0) exit 1
-    printf "%.6f %d %d\n", c1 - c0, wall, rss
+    printf "%.6f %.3f %d\n", c1 - c0, wall, rss
   }' || return 4
 }
 
@@ -492,7 +566,7 @@ measure() {
                label, mean, sqrt(var), n, ct / n, wall / n + 0.5, rss / n / 1024
       } else {
         printf "  %-14s cpu=%6.2f%%   cpu_time=%.2fs / %ds   rss=%dMB",
-               label, mean, ct, wall, rss / 1024
+               label, mean, ct, wall + 0.5, rss / 1024
       }
       # Name the failures here too, not only when every window failed: a
       # partial run that silently reported a smaller n would look like a
