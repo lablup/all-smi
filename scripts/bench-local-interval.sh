@@ -24,13 +24,22 @@
 # USAGE
 #
 #   scripts/bench-local-interval.sh [-d SECONDS] [-b PATH] [-i "LIST"]
+#                                   [-c CPUS] [-r COUNT]
 #
 #     -d SECONDS   measurement window per configuration (default 60)
 #     -b PATH      all-smi binary (default ./target/release/all-smi)
 #     -i "LIST"    space-separated intervals to test (default "1 2 3");
 #                  the no-flag default configuration is always measured
+#     -c CPUS      pin the run to a CPU list, e.g. "5-9,15-19" (Linux only).
+#                  On a heterogeneous machine, see COMPARABILITY below
+#     -r COUNT     repeats per configuration (default 1). With more than one,
+#                  the mean and standard deviation are reported
 #
 #   Build first:  cargo build --release --bin all-smi
+#                 On Linux this needs libdrm-dev: without it the link fails on
+#                 -ldrm and -ldrm_amdgpu even on a host with no AMD GPU,
+#                 because libamdgpu_top is a hard dependency of the glibc
+#                 Linux target
 #
 # REQUIREMENTS
 #
@@ -51,6 +60,28 @@
 #   (reader initialisation, first collection, first render) does not land in
 #   the window.
 #
+# COMPARABILITY ACROSS MACHINES
+#
+#   Percent of one core is not a single quantity on a heterogeneous CPU. ARM
+#   big.LITTLE parts, Intel P/E hybrids, and Apple Silicon all mix core types,
+#   and identical work costs a different amount of CPU time on each type. On an
+#   NVIDIA GB10 (Cortex-X925 at 3.9GHz plus Cortex-A725 at 2.8GHz), pinning the
+#   same run to one cluster or the other moves the result by about 1.5x, which
+#   is larger than the interval effect this script exists to measure. Unpinned
+#   runs land somewhere between the two, wherever the scheduler happened to put
+#   the threads, which is also why they vary more between repeats.
+#
+#   The durable number is therefore the ratio between two intervals measured on
+#   one host, not the absolute percentage. An absolute percentage is comparable
+#   to another machine's only when both state their core placement. The
+#   environment block prints the detected topology and the affinity in use so
+#   that context travels with the numbers.
+#
+#   On a heterogeneous host, prefer pinning one cluster with -c and say which
+#   one you pinned. Pinning also cuts run-to-run variance substantially. Use -r
+#   to average several windows when the effect you are measuring is close to
+#   the spread between repeats.
+#
 # REPORTING
 #
 #   Paste the whole output, environment block included, into issue #288. The
@@ -62,6 +93,8 @@ set -euo pipefail
 DURATION=60
 BIN="./target/release/all-smi"
 INTERVALS="1 2 3"
+CPUSET=""
+REPEATS=1
 WARMUP_SECS=8
 TMUX_COLS=200
 TMUX_ROWS=50
@@ -78,11 +111,13 @@ usage() {
   ' "$0"
 }
 
-while getopts "d:b:i:h" opt; do
+while getopts "d:b:i:c:r:h" opt; do
   case "$opt" in
     d) DURATION="$OPTARG" ;;
     b) BIN="$OPTARG" ;;
     i) INTERVALS="$OPTARG" ;;
+    c) CPUSET="$OPTARG" ;;
+    r) REPEATS="$OPTARG" ;;
     h) usage; exit 0 ;;
     *) echo "run '$0 -h' for usage" >&2; exit 2 ;;
   esac
@@ -90,6 +125,11 @@ done
 
 command -v tmux >/dev/null 2>&1 || { echo "error: tmux is required" >&2; exit 1; }
 [ -x "$BIN" ] || { echo "error: no executable at $BIN (cargo build --release --bin all-smi)" >&2; exit 1; }
+
+case "$REPEATS" in
+  ''|*[!0-9]*) echo "error: -r takes a positive integer, got '$REPEATS'" >&2; exit 2 ;;
+esac
+[ "$REPEATS" -ge 1 ] || { echo "error: -r must be at least 1" >&2; exit 2; }
 
 OS="$(uname -s)"
 case "$OS" in
@@ -127,6 +167,117 @@ case "$OS" in
     exit 1
     ;;
 esac
+
+# Prefix prepended to the launch command when -c is given. taskset execs the
+# target in place, so the running process keeps the binary's name and the
+# pgrep -x detection in measure_once() is unaffected; a wrapper that forked
+# instead would break it.
+LAUNCH_PREFIX=""
+AFFINITY_DESC="unpinned"
+if [ -n "$CPUSET" ]; then
+  case "$OS" in
+    Linux)
+      command -v taskset >/dev/null 2>&1 ||
+        { echo "error: -c requires taskset (util-linux)" >&2; exit 1; }
+      # Let taskset itself validate the list against this machine's CPUs,
+      # rather than reimplementing the range syntax here.
+      taskset -c "$CPUSET" true >/dev/null 2>&1 ||
+        { echo "error: -c '$CPUSET' is not a valid CPU list on this machine" >&2; exit 1; }
+      LAUNCH_PREFIX="taskset -c $CPUSET "
+      AFFINITY_DESC="cpus $CPUSET (taskset)"
+      ;;
+    Darwin)
+      echo "error: -c is not supported on macOS. The kernel exposes no userspace CPU affinity control, so a run cannot be pinned to P or E cores there." >&2
+      exit 1
+      ;;
+  esac
+fi
+
+# Report core types, so a reader can tell a heterogeneous host from a uniform
+# one. Grouping by maximum frequency separates ARM big.LITTLE clusters and
+# Intel P/E cores alike; cpu_capacity is the device-tree fallback for ARM
+# systems without cpufreq. When neither is readable the topology is reported
+# as unknown rather than assumed uniform, because assuming uniform is exactly
+# the error this block exists to prevent.
+linux_topology() {
+  local src file cpu key lines=""
+  if [ -r /sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq ]; then
+    src=cpufreq
+  elif [ -r /sys/devices/system/cpu/cpu0/cpu_capacity ]; then
+    src=capacity
+  else
+    echo "unknown (no cpufreq or cpu_capacity)"
+    return
+  fi
+
+  for d in /sys/devices/system/cpu/cpu[0-9]*; do
+    cpu="${d##*/cpu}"
+    case "$cpu" in ''|*[!0-9]*) continue ;; esac
+    if [ "$src" = cpufreq ]; then
+      file="$d/cpufreq/cpuinfo_max_freq"
+    else
+      file="$d/cpu_capacity"
+    fi
+    key="$(cat "$file" 2>/dev/null || true)"
+    [ -n "$key" ] || continue
+    lines="${lines}${key} ${cpu}
+"
+  done
+  [ -n "$lines" ] || { echo "unknown (no cpufreq or cpu_capacity)"; return; }
+
+  # Sort by key descending then CPU ascending, so awk sees whole groups in
+  # order and each group's CPU list is already ascending for range collapsing.
+  printf '%s' "$lines" | sort -k1,1nr -k2,2n | awk -v src="$src" '
+    function ranges(s,   a, n, i, j, out) {
+      n = split(s, a, " ")
+      out = ""
+      i = 1
+      while (i <= n) {
+        j = i
+        while (j + 1 <= n && a[j + 1] == a[j] + 1) j++
+        out = out (out == "" ? "" : ",") (i == j ? a[i] : a[i] "-" a[j])
+        i = j + 1
+      }
+      return out
+    }
+    { if ($1 != prev) { g++; gkey[g] = $1; prev = $1 } gcnt[g]++; glist[g] = glist[g] " " $2 }
+    END {
+      out = ""
+      for (i = 1; i <= g; i++) {
+        lbl = (src == "cpufreq") ? sprintf("%.2fGHz", gkey[i] / 1000000) : sprintf("capacity %d", gkey[i])
+        out = out (i > 1 ? ", " : "") gcnt[i] "x " lbl
+        if (g > 1) out = out " (cpus " ranges(glist[i]) ")"
+      }
+      printf "%s: %s\n", (g > 1 ? "heterogeneous" : "uniform"), out
+    }'
+}
+
+# macOS exposes perflevels rather than per-CPU frequencies, and gives no way
+# to address individual cores, so no CPU lists are printed here.
+darwin_topology() {
+  local levels i name count out=""
+  levels="$(sysctl -n hw.nperflevels 2>/dev/null || echo 1)"
+  case "$levels" in ''|*[!0-9]*) levels=1 ;; esac
+  if [ "$levels" -le 1 ]; then
+    echo "uniform: $(sysctl -n hw.logicalcpu 2>/dev/null || echo '?') logical cores"
+    return
+  fi
+  i=0
+  while [ "$i" -lt "$levels" ]; do
+    name="$(sysctl -n "hw.perflevel${i}.name" 2>/dev/null || echo "level${i}")"
+    count="$(sysctl -n "hw.perflevel${i}.logicalcpu" 2>/dev/null || echo '?')"
+    out="${out}${out:+, }${count}x ${name}"
+    i=$((i + 1))
+  done
+  echo "heterogeneous: $out"
+}
+
+detect_topology() {
+  case "$OS" in
+    Linux) linux_topology ;;
+    Darwin) darwin_topology ;;
+  esac
+}
 
 detect_gpu() {
   if command -v nvidia-smi >/dev/null 2>&1; then
@@ -175,15 +326,29 @@ core_count() {
   esac
 }
 
+TOPOLOGY="$(detect_topology)"
+
+# On a heterogeneous host an unpinned run is a mix of core types, and the
+# reader needs to know that before comparing the number to another machine's.
+case "$TOPOLOGY" in
+  heterogeneous*)
+    [ -n "$CPUSET" ] ||
+      AFFINITY_DESC="unpinned (mixed core types: threads may migrate, see -c)"
+    ;;
+esac
+
 echo "=== environment ==="
 printf '  all-smi       %s\n' "$("$BIN" --version 2>/dev/null | head -1 || echo unknown)"
 printf '  binary        %s\n' "$BIN"
 printf '  os            %s %s (%s)\n' "$OS" "$(uname -r)" "$(uname -m)"
 printf '  cpu           %s (%s cores)\n' "$(detect_cpu)" "$(core_count)"
+printf '  topology      %s\n' "$TOPOLOGY"
+printf '  affinity      %s\n' "$AFFINITY_DESC"
 printf '  gpu           %s\n' "$(detect_gpu)"
 printf '  processes     %s\n' "$(($(ps -A 2>/dev/null | wc -l) - 1))"
 printf '  terminal      %sx%s (tmux)\n' "$TMUX_COLS" "$TMUX_ROWS"
-printf '  window        %ss measured after %ss warmup\n' "$DURATION" "$WARMUP_SECS"
+printf '  window        %ss measured after %ss warmup%s\n' "$DURATION" "$WARMUP_SECS" \
+  "$([ "$REPEATS" -gt 1 ] && printf ', %s repeats' "$REPEATS" || true)"
 echo
 
 BIN_NAME="$(basename "$BIN")"
@@ -194,17 +359,20 @@ BIN_NAME="$(basename "$BIN")"
 # would pick up that wrapper shell, whose CPU and RSS are not what we want.
 existing_pids() { pgrep -x "$BIN_NAME" 2>/dev/null | sort || true; }
 
-# Measure one configuration. $1 is a label, the rest are extra binary args.
-measure() {
-  local label="$1"; shift
-  local session="all_smi_bench_$$_${label//[^0-9a-zA-Z]/_}"
+# Run one measurement window. Echoes "cpu_seconds wall_seconds rss_kb" on
+# success. Failures are reported through the exit code so the caller can name
+# the reason after all repeats have run: 1 could not start, 2 could not read
+# CPU time, 3 exited early, 4 window was not positive.
+measure_once() {
+  local label="$1" rep="$2"; shift 2
+  local session="all_smi_bench_$$_${label//[^0-9a-zA-Z]/_}_${rep}"
 
   local before after
   before="$(existing_pids)"
 
   tmux kill-session -t "$session" 2>/dev/null || true
   tmux new-session -d -s "$session" -x "$TMUX_COLS" -y "$TMUX_ROWS" \
-    "$BIN local $*" 2>/dev/null
+    "${LAUNCH_PREFIX}$BIN local $*" 2>/dev/null
 
   local pid=""
   for _ in $(seq 1 20); do
@@ -214,32 +382,80 @@ measure() {
     [ -n "$pid" ] && break
   done
   if [ -z "$pid" ]; then
-    printf '  %-14s FAILED to start\n' "$label"
     tmux kill-session -t "$session" 2>/dev/null || true
-    return
+    return 1
   fi
 
   sleep "$WARMUP_SECS"
 
-  local t0 c0 t1 c1
-  c0="$(cpu_time_seconds "$pid")" || { printf '  %-14s FAILED to read cpu time\n' "$label"; return; }
+  local t0 c0 t1 c1 rss
+  c0="$(cpu_time_seconds "$pid")" ||
+    { tmux kill-session -t "$session" 2>/dev/null || true; return 2; }
   t0="$(date +%s)"
   sleep "$DURATION"
-  c1="$(cpu_time_seconds "$pid")" || { printf '  %-14s process exited early\n' "$label"; return; }
+  c1="$(cpu_time_seconds "$pid")" ||
+    { tmux kill-session -t "$session" 2>/dev/null || true; return 3; }
   t1="$(date +%s)"
 
-  local rss
-  rss="$(ps -o rss= -p "$pid" 2>/dev/null | tr -d ' ' || echo 0)"
-
-  awk -v label="$label" -v c0="$c0" -v c1="$c1" -v t0="$t0" -v t1="$t1" -v rss="$rss" 'BEGIN {
-    wall = t1 - t0
-    if (wall <= 0) { printf "  %-14s invalid window\n", label; exit }
-    printf "  %-14s cpu=%6.2f%%   cpu_time=%.2fs / %ds   rss=%dMB\n",
-           label, (c1 - c0) / wall * 100, c1 - c0, wall, rss / 1024
-  }'
+  rss="$(ps -o rss= -p "$pid" 2>/dev/null | tr -d ' ' || true)"
+  [ -n "$rss" ] || rss=0
 
   tmux kill-session -t "$session" 2>/dev/null || true
-  sleep 2
+
+  awk -v c0="$c0" -v c1="$c1" -v t0="$t0" -v t1="$t1" -v rss="$rss" 'BEGIN {
+    wall = t1 - t0
+    if (wall <= 0) exit 1
+    printf "%.6f %d %d\n", c1 - c0, wall, rss
+  }' || return 4
+}
+
+# Measure one configuration REPEATS times and print a single summary line.
+# $1 is a label, the rest are extra binary args.
+measure() {
+  local label="$1"; shift
+  local samples="" failures="" sample rep=1 rc
+
+  while [ "$rep" -le "$REPEATS" ]; do
+    rc=0
+    sample="$(measure_once "$label" "$rep" "$@")" || rc=$?
+    if [ "$rc" -eq 0 ]; then
+      samples="${samples}${sample}
+"
+    else
+      case "$rc" in
+        1) failures="${failures}${failures:+, }could not start" ;;
+        2) failures="${failures}${failures:+, }could not read cpu time" ;;
+        3) failures="${failures}${failures:+, }exited early" ;;
+        *) failures="${failures}${failures:+, }invalid window" ;;
+      esac
+    fi
+    rep=$((rep + 1))
+    sleep 2
+  done
+
+  if [ -z "$samples" ]; then
+    printf '  %-14s FAILED (%s)\n' "$label" "$failures"
+    return
+  fi
+
+  # Averaging percentages per window rather than dividing summed CPU time by
+  # summed wall time keeps each window weighted equally even if one ran long.
+  printf '%s' "$samples" | awk -v label="$label" -v want="$REPEATS" '
+    { pct = $1 / $2 * 100; sum += pct; sumsq += pct * pct; ct += $1; wall += $2; rss += $3; n++ }
+    END {
+      mean = sum / n
+      if (n > 1) {
+        var = (sumsq - n * mean * mean) / (n - 1)
+        if (var < 0) var = 0
+        printf "  %-14s cpu=%6.2f%% +/- %.2f (n=%d)   cpu_time=%.2fs / %ds   rss=%dMB",
+               label, mean, sqrt(var), n, ct / n, wall / n, rss / n / 1024
+      } else {
+        printf "  %-14s cpu=%6.2f%%   cpu_time=%.2fs / %ds   rss=%dMB",
+               label, mean, ct, wall, rss / 1024
+      }
+      if (n < want) printf "   [%d/%d windows ok]", n, want
+      printf "\n"
+    }'
 }
 
 echo "=== results (percent of one core) ==="
