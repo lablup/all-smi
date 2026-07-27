@@ -48,7 +48,15 @@ impl AppConfig {
     // Data Collection
     #[allow(dead_code)] // Future configuration option
     pub const DEFAULT_UPDATE_INTERVAL_SECS: u64 = 2;
-    pub const HISTORY_MAX_ENTRIES: usize = 100;
+    /// Samples retained per history series.
+    ///
+    /// The braille graphs plot one sample per sub-column and hold a scrolling
+    /// window of `graph_width * 2` samples, so this has to cover the widest
+    /// graph the TUI can draw or the plot never fills. The Activity panel
+    /// graph is the widest one: it takes roughly `terminal_cols / 2 - 10`
+    /// columns, i.e. `terminal_cols - 20` samples. 1024 therefore covers
+    /// terminals past 1000 columns, at 8 KiB per series.
+    pub const HISTORY_MAX_ENTRIES: usize = 1024;
     pub const CONNECTION_STAGGER_BASE_MS: u64 = 500;
 
     // UI Layout Constants

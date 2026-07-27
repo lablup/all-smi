@@ -40,20 +40,26 @@
 //! the stack. [`sparkline_braille`] is a thin `rows == 1` wrapper over this
 //! shared core, so single-row callers are unaffected by the multi-row API.
 //!
-//! ## Resampling: bucket max-pooling
+//! ## Horizontal mapping: scrolling window
 //!
-//! Horizontal resampling maps `width * 2` braille sub-columns onto the input
-//! time series using bucket max-pooling rather than nearest-neighbour
-//! sampling. Each sub-column owns a contiguous bucket of input samples, and
-//! the rendered level is derived from the bucket's maximum finite value.
-//! Every input sample belongs to at least one bucket, every bucket is
-//! non-empty, and the rightmost sub-column always covers the most recent
-//! sample. When there are fewer samples than sub-columns, buckets are
-//! stretched (a sample is repeated across multiple sub-columns) so every
-//! sub-column still owns at least one sample. An all-non-finite bucket
-//! clamps to the range minimum. This keeps transient spikes visible at any
-//! output width, unlike nearest-neighbour resampling, which can skip a spike
-//! entirely if it does not land on a sampled index.
+//! The horizontal axis is time, and one sub-column is always exactly one
+//! sample. The rendered window is the most recent `width * 2` samples,
+//! right-anchored: the newest sample owns the rightmost sub-column and each
+//! new sample shifts the whole plot one sub-column to the left, dropping the
+//! oldest sample off the left edge. The time scale is therefore constant, and
+//! a feature keeps its on-screen width for as long as it stays in the window.
+//!
+//! When the series is shorter than the window (right after startup, before
+//! the history buffer has filled), the leading sub-columns carry no sample and
+//! are left blank, so the plot grows in from the right edge at its final
+//! scale. Resampling the whole series to fill the width instead would make
+//! every feature drift left *and* shrink as history accumulated, which reads
+//! as the graph zooming out rather than scrolling.
+//!
+//! Callers are responsible for keeping enough history to fill the widest
+//! graph they render; see [`AppConfig::HISTORY_MAX_ENTRIES`].
+//!
+//! [`AppConfig::HISTORY_MAX_ENTRIES`]: crate::common::config::AppConfig::HISTORY_MAX_ENTRIES
 
 /// Row bit masks for the left sub-column, ordered bottom→top.
 /// dots=1 fills only the bottom row; dots=4 fills all four rows.
@@ -76,7 +82,7 @@ const RIGHT_BITS: [u32; 4] = [
 ///
 /// This is a thin wrapper over [`sparkline_braille_rows`] with `rows == 1`;
 /// see that function for the full behaviour contract (range handling,
-/// bucket max-pooling resampling, and edge cases).
+/// the scrolling window, and edge cases).
 ///
 /// # Arguments
 /// - `data`: time-series samples, most-recent sample last.
@@ -111,18 +117,19 @@ pub fn sparkline_braille(data: &[f64], width: usize, range: Option<(f64, f64)>) 
 /// - Empty `data` → returns `rows` copies of `" ".repeat(width)` (ASCII
 ///   spaces, preserves layout).
 /// - `width == 0` → returns `rows` empty strings.
+/// - Only the most recent `width * 2` samples are drawn, one per sub-column,
+///   right-anchored (see the module docs). A shorter series leaves the
+///   leading sub-columns blank; cells with no sample in either sub-column
+///   render as an ASCII space, so the layout width is unaffected.
+/// - With `range == None` the auto-range is derived from the samples actually
+///   drawn, not from the whole series, so a spike that has scrolled off the
+///   left edge no longer compresses the visible scale.
 /// - Constant input with auto-range → only the single bottom-most dot row of
 ///   the bottom terminal row is filled (`⣀` U+28C0 when `rows == 1`); all
 ///   rows above stay blank, so callers can still see that data is present.
 /// - NaN / non-finite values are clamped to the minimum of the range.
 /// - Degenerate explicit range `(lo, hi)` where `hi <= lo` → treated as
 ///   constant; only the bottom-most dot row is filled.
-///
-/// Resampling uses bucket max-pooling: see the module documentation for
-/// details. In short, each of the `width * 2` sub-columns owns a contiguous,
-/// non-empty bucket of `data`, and its level is derived from the bucket's
-/// maximum finite value, so a single-sample spike remains visible at any
-/// output width.
 #[must_use]
 pub fn sparkline_braille_rows(
     data: &[f64],
@@ -140,7 +147,21 @@ pub fn sparkline_braille_rows(
         return vec![String::new(); rows];
     }
 
-    // Determine effective min/max.
+    // Total sub-columns = width * 2 (each braille cell has 2 horizontal sub-pixels).
+    let n_sub = width * 2;
+    let len = data.len();
+
+    // Scrolling window: the plot shows the most recent `n_sub` samples, one
+    // per sub-column, with the newest sample pinned to the rightmost
+    // sub-column. `window` is that tail; when the series is shorter than the
+    // window it is the whole series, and the leading `n_sub - len`
+    // sub-columns stay blank so the plot grows in from the right instead of
+    // being stretched across the full width.
+    let window = &data[len.saturating_sub(n_sub)..];
+    let blank_subs = n_sub - window.len();
+
+    // Determine effective min/max. The auto-range covers only the window, so
+    // a spike that has already scrolled off no longer flattens the plot.
     let (min, max) = match range {
         Some((lo, hi)) if !lo.is_finite() || !hi.is_finite() => {
             // Non-finite range bounds are treated as a degenerate (constant) range.
@@ -150,7 +171,7 @@ pub fn sparkline_braille_rows(
         None => {
             let mut lo = f64::INFINITY;
             let mut hi = f64::NEG_INFINITY;
-            for &v in data {
+            for &v in window {
                 if v.is_finite() {
                     if v < lo {
                         lo = v;
@@ -171,32 +192,6 @@ pub fn sparkline_braille_rows(
         }
     };
 
-    // Total sub-columns = width * 2 (each braille cell has 2 horizontal sub-pixels).
-    let n_sub = width * 2;
-    let len = data.len();
-
-    // Bucket max-pooling: sub-column `i` owns `data[start..end)`.
-    //
-    // `start`/`end` form a standard floor partition of `data` into `n_sub`
-    // buckets, which is already non-empty for every bucket when
-    // `len >= n_sub`. When `len < n_sub`, the natural `end` can equal
-    // `start`, so it is pushed up to at least `start + 1` (stretching,
-    // i.e. repeating a sample across multiple sub-columns) to guarantee
-    // every sub-column owns at least one sample. The last sub-column's
-    // natural `end` is always exactly `len`, so it always covers the most
-    // recent sample regardless of stretching.
-    let bucket_max = |i: usize| -> f64 {
-        let start = i * len / n_sub;
-        let end = ((i + 1) * len / n_sub).max(start + 1).min(len);
-        let mut m = f64::NEG_INFINITY;
-        for &v in &data[start..end] {
-            if v.is_finite() && v > m {
-                m = v;
-            }
-        }
-        if m.is_finite() { m } else { min }
-    };
-
     // Compute vertical level (0..rows*4, bottom→top) for a value.
     // When max <= min (constant / degenerate range) always returns 0.
     let total_levels = rows * 4;
@@ -204,15 +199,23 @@ pub fn sparkline_braille_rows(
         if max <= min {
             return 0;
         }
-        let clamped = v.clamp(min, max);
+        // Non-finite samples clamp to the bottom of the range.
+        let clamped = if v.is_finite() {
+            v.clamp(min, max)
+        } else {
+            min
+        };
         let norm = (clamped - min) / (max - min);
         // norm ∈ [0.0, 1.0]; multiply by total_levels and floor, clamped to
         // [0, total_levels - 1].
         ((norm * total_levels as f64).floor() as usize).min(total_levels - 1)
     };
 
-    // Number of dots filled (1..=total_levels), bottom-up, for each sub-column.
-    let dots_filled: Vec<usize> = (0..n_sub).map(|i| level_of(bucket_max(i)) + 1).collect();
+    // Dots filled (1..=total_levels), bottom-up, per sub-column. `None` marks
+    // a sub-column that predates the series and carries no sample.
+    let dots_filled: Vec<Option<usize>> = (0..n_sub)
+        .map(|i| i.checked_sub(blank_subs).map(|w| level_of(window[w]) + 1))
+        .collect();
 
     // Build one output string per terminal row, top row first. Each row's
     // fill is derived by slicing the per-sub-column dot count into this
@@ -223,8 +226,19 @@ pub fn sparkline_braille_rows(
         let row_base = row_from_bottom * 4;
         let mut row = String::with_capacity(width * 3); // braille chars are 3 bytes in UTF-8
         for cell in 0..width {
-            let left_dots = dots_filled[cell * 2].saturating_sub(row_base).min(4);
-            let right_dots = dots_filled[cell * 2 + 1].saturating_sub(row_base).min(4);
+            let left = dots_filled[cell * 2];
+            let right = dots_filled[cell * 2 + 1];
+
+            // A cell with no sample on either side renders as a space, so the
+            // not-yet-filled part of the window stays visually empty while
+            // still occupying its column.
+            if left.is_none() && right.is_none() {
+                row.push(' ');
+                continue;
+            }
+
+            let left_dots = left.map_or(0, |d| d.saturating_sub(row_base).min(4));
+            let right_dots = right.map_or(0, |d| d.saturating_sub(row_base).min(4));
 
             // Bar-fill: fill this row's dots from bottom up to the computed count.
             let mut bits: u32 = 0;
@@ -431,27 +445,28 @@ mod tests {
         }
     }
 
-    // 14. Max-pooling correctness: a bucket's maximum, not its last or
-    //     nearest sample, determines the rendered level.
+    // 14. Windowing: samples older than the window are dropped off the left
+    //     edge, and the newest sample owns the rightmost sub-column.
     #[test]
-    fn bucket_max_pooling_uses_bucket_maximum() {
-        // 4 samples, width=1 -> 2 sub-columns, so each bucket holds 2 samples:
-        // left sub-column owns data[0..2] = {0.0, 0.0} (max 0.0),
-        // right sub-column owns data[2..4] = {5.0, 0.0} (max 5.0, not the
-        // trailing 0.0 that nearest-neighbour / last-sample would pick).
+    fn window_keeps_the_most_recent_samples() {
+        // 4 samples, width=1 -> 2 sub-columns, so only the last 2 samples
+        // ({5.0, 0.0}) are drawn: left sub-column = 5.0 (full), right
+        // sub-column = 0.0 (bottom dot only). The leading zeros scrolled off.
         let data = [0.0, 0.0, 5.0, 0.0];
         let result = sparkline_braille(&data, 1, Some((0.0, 5.0)));
         assert_eq!(char_count(&result), 1);
         let ch = result.chars().next().expect("single char");
         let bits = ch as u32 - 0x2800;
-        // Left sub-column: bottom dot only (level 0 -> 1 dot, bucket max 0.0).
-        assert_eq!(bits & 0x40, 0x40, "left bottom dot should be set");
-        assert_eq!(bits & 0x01, 0, "left top dot should be clear");
-        // Right sub-column: fully filled (level 3 -> 4 dots, bucket max 5.0).
         assert_eq!(
-            bits & (0x80 | 0x20 | 0x10 | 0x08),
-            0x80 | 0x20 | 0x10 | 0x08,
-            "right sub-column should be fully filled by the bucket maximum"
+            bits & (0x40 | 0x04 | 0x02 | 0x01),
+            0x40 | 0x04 | 0x02 | 0x01,
+            "left sub-column should be fully filled by data[2] = 5.0"
+        );
+        assert_eq!(bits & 0x80, 0x80, "right bottom dot should be set");
+        assert_eq!(
+            bits & 0x08,
+            0,
+            "right top dot should be clear (data[3] = 0.0 is the newest sample)"
         );
     }
 
@@ -487,22 +502,100 @@ mod tests {
         assert!(sparkline_braille_rows(&[1.0], 0, 0, None).is_empty());
     }
 
-    // 18. Bucket stretching: when `data.len() < width * 2`, a bucket's
-    //     natural (possibly empty) span is pushed up to at least one sample,
-    //     so a sample is repeated across multiple sub-columns. The rightmost
-    //     sub-column must still cover the most recent sample.
+    // 18. Right-anchored short history: when `data.len() < width * 2`, the
+    //     plot grows in from the right edge instead of stretching across the
+    //     full width. The leading sub-columns stay blank.
     #[test]
-    fn bucket_stretching_when_fewer_samples_than_subcolumns() {
-        // 2 samples, width = 2 -> 4 sub-columns, so each sample is stretched
-        // across 2 sub-columns: sub-columns 0,1 own data[0] = 0.0 (bottom
-        // dot only), sub-columns 2,3 own data[1] = 10.0 (fully filled, the
-        // most recent sample).
+    fn short_history_is_right_anchored() {
+        // 2 samples, width = 2 -> 4 sub-columns. Sub-columns 0,1 have no
+        // sample (cell 0 is a space); sub-column 2 = data[0] = 0.0 (bottom
+        // dot only) and sub-column 3 = data[1] = 10.0 (fully filled, the
+        // most recent sample) share cell 1.
         let data = [0.0, 10.0];
         let result = sparkline_braille(&data, 2, Some((0.0, 10.0)));
+        // cell 1 bits: left bottom (0x40) + right column filled (0xB8).
         assert_eq!(
-            result, "\u{28C0}\u{28FF}",
-            "stretched buckets should repeat data[0] into the first cell (bottom dot only) \
-             and data[1] into the second cell (fully filled, most recent sample)"
+            result, " \u{28F8}",
+            "a 2-sample series at width 2 should leave the first cell blank and \
+             render both samples right-anchored in the second cell"
+        );
+    }
+
+    // 19. Scrolling: a fixed feature keeps its on-screen width and shifts left
+    //     by exactly one sub-column per new sample. This is the regression
+    //     guard for the "graph zooms out instead of scrolling" bug — with the
+    //     old whole-series resampling the burst narrowed as history grew.
+    #[test]
+    fn window_scrolls_left_without_rescaling() {
+        const WIDTH: usize = 8; // 16 sub-columns
+        let burst_at = |offset: usize| -> Vec<f64> {
+            // A 4-sample burst whose newest sample sits `offset` samples back
+            // from the end, on a full (>= 16 sample) idle series.
+            let mut v = vec![0.0; 40];
+            let end = v.len() - offset;
+            for x in v[end - 4..end].iter_mut() {
+                *x = 100.0;
+            }
+            v
+        };
+
+        // Count sub-columns whose top dot is lit, i.e. the burst's width.
+        let burst_width = |s: &str| -> usize {
+            s.chars()
+                .map(|c| {
+                    let bits = c as u32 - 0x2800;
+                    usize::from(bits & 0x01 != 0) + usize::from(bits & 0x08 != 0)
+                })
+                .sum()
+        };
+        // Index of the leftmost lit sub-column.
+        let burst_start = |s: &str| -> Option<usize> {
+            s.chars().enumerate().find_map(|(cell, c)| {
+                let bits = c as u32 - 0x2800;
+                if bits & 0x01 != 0 {
+                    Some(cell * 2)
+                } else if bits & 0x08 != 0 {
+                    Some(cell * 2 + 1)
+                } else {
+                    None
+                }
+            })
+        };
+
+        let mut prev_start = None;
+        for offset in 0..8 {
+            let s = sparkline_braille(&burst_at(offset), WIDTH, Some((0.0, 100.0)));
+            assert_eq!(
+                burst_width(&s),
+                4,
+                "the burst must keep its width as it scrolls (offset={offset}): {s:?}"
+            );
+            let start = burst_start(&s).expect("burst must be visible");
+            if let Some(prev) = prev_start {
+                assert_eq!(
+                    start + 1,
+                    prev,
+                    "the burst must shift left by exactly one sub-column per sample \
+                     (offset={offset}): {s:?}"
+                );
+            }
+            prev_start = Some(start);
+        }
+    }
+
+    // 20. Auto-range follows the window: a spike that has scrolled out of the
+    //     window must not keep compressing the visible scale.
+    #[test]
+    fn auto_range_uses_only_the_visible_window() {
+        // 1000.0 sits far outside the last 4 sub-columns (width 2), so the
+        // remaining constant tail must render as a constant series rather
+        // than being flattened to the bottom of a 0..1000 scale.
+        let mut data = vec![1000.0];
+        data.extend(std::iter::repeat_n(5.0, 10));
+        let result = sparkline_braille(&data, 2, None);
+        assert_eq!(
+            result, "\u{28C0}\u{28C0}",
+            "the out-of-window spike must not affect the auto-range: {result:?}"
         );
     }
 }
