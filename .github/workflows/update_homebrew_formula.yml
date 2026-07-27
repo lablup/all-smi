@@ -58,7 +58,13 @@ jobs:
           VERSION="${RAW_VERSION#v}"  # Remove leading 'v'
           echo "VERSION_NO_V=$VERSION" >> $GITHUB_ENV  # Export version without 'v' to GitHub env
 
-          BASE="https://github.com/inureyes/all-smi/releases/download/v${VERSION}"
+          # This repository was renamed from inureyes/all-smi to lablup/all-smi.
+          # The old path still resolves through GitHub's rename redirect, but
+          # that redirect is not a guarantee: it disappears the moment anyone
+          # creates a new repository at the old name. The url written here also
+          # lands verbatim in the tap formula, so the redirect was load-bearing
+          # for every `brew install all-smi`, not just for this workflow.
+          BASE="https://github.com/lablup/all-smi/releases/download/v${VERSION}"
           mkdir -p tmp
 
           # `-f` so a missing or renamed asset fails here rather than leaving a
