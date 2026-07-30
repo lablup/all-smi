@@ -88,6 +88,13 @@
 #   is stated as a subset of the online CPUs, and a "cores in use" line names
 #   the core types the mask really covers.
 #
+#   An inherited mask is also re-applied to the launch, because tmux forks the
+#   measured process from the tmux server rather than from this script, and the
+#   server does not carry the mask. Without that, a run started under
+#   `taskset -c 0-2` measured a process spread across every core while the block
+#   certified three. The bare-metal caveat below therefore applies to an
+#   inherited mask exactly as it does to -c.
+#
 #   On a heterogeneous host, prefer pinning one cluster with -c and say which
 #   one you pinned. Pinning also cuts run-to-run variance substantially. Use -r
 #   to average several windows when the effect you are measuring is close to
@@ -497,8 +504,15 @@ detect_cpu() {
       # Whole-machine fallback, for an older lscpu without that column. It
       # over-reports the clusters under a mask, but not silently: the "N of M
       # cores" count printed beside it already says the run is confined.
+      #
+      # LC_ALL=C because this one matches a field label, and lscpu translates
+      # its labels: a de_DE host prints `Modellname`, nothing matches, and the
+      # cpu line reads `unknown`. The -e=CPU,MODELNAME path above is unaffected,
+      # the column name there being an argument rather than output, so without
+      # this the same machine could name its cluster correctly under a mask and
+      # not without one.
       if [ -z "$name" ]; then
-        name="$(lscpu 2>/dev/null | awk -F': +' '
+        name="$(LC_ALL=C lscpu 2>/dev/null | awk -F': +' '
           /^Model name/ { if (seen[$2]++) next; n[++c] = $2 }
           END { for (i = 1; i <= c; i++) printf "%s%s", (i > 1 ? " + " : ""), n[i] }')"
       fi
