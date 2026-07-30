@@ -264,6 +264,27 @@ cpu_list_expand() {
   }'
 }
 
+# Keep the CPU list out of a `taskset -pc` readback, or nothing when what came
+# back is not one.
+#
+# Callers run taskset under LC_ALL=C because util-linux translates this
+# message. Under de_DE or ko_KR nothing matches `list:`, the strip is a no-op,
+# and the whole sentence survives as the mask. Nothing downstream notices:
+# awk reads an unparseable field as 0, so `taskset -c 15` under ko_KR expanded
+# to cpu 0 and described a 3.90GHz X925 run as a 2.81GHz A725 one, on the exact
+# lines this block exists to make trustworthy. The shape test is the same guard
+# from the other side, for a reworded or reformatted readback that LC_ALL=C
+# cannot help with: a value that is not a bare CPU list is dropped, so the mask
+# reads as unreadable rather than as confidently wrong.
+affinity_list() {
+  local list
+  list="$(sed 's/.*list: *//')"
+  case "$list" in
+    ''|*[!0-9,-]*) return 0 ;;
+  esac
+  printf '%s\n' "$list"
+}
+
 # CPUs the kernel has online. nproc cannot answer this: it is itself narrowed
 # by the mask, which is exactly the contradiction being resolved.
 ONLINE_CPUS=""
@@ -273,7 +294,7 @@ EFFECTIVE_CPUS=""
 if [ "$OS" = Linux ]; then
   ONLINE_CPUS="$(cat /sys/devices/system/cpu/online 2>/dev/null || true)"
   if command -v taskset >/dev/null 2>&1; then
-    EFFECTIVE_CPUS="$(taskset -pc $$ 2>/dev/null | sed 's/.*list: *//' || true)"
+    EFFECTIVE_CPUS="$(LC_ALL=C taskset -pc $$ 2>/dev/null | affinity_list || true)"
   fi
 fi
 
@@ -295,8 +316,8 @@ if [ -n "$CPUSET" ]; then
       taskset -c "$CPUSET" true >/dev/null 2>&1 ||
         { echo "error: -c '$CPUSET' matches no CPU on this machine" >&2; exit 1; }
       LAUNCH_PREFIX="taskset -c $CPUSET "
-      effective="$(taskset -c "$CPUSET" sh -c 'taskset -pc $$' 2>/dev/null |
-                   sed 's/.*list: *//' || true)"
+      effective="$(taskset -c "$CPUSET" sh -c 'LC_ALL=C taskset -pc $$' 2>/dev/null |
+                   affinity_list || true)"
       if [ -n "$effective" ] && [ "$effective" != "$CPUSET" ]; then
         AFFINITY_DESC="cpus $effective (taskset, requested $CPUSET)"
       else
@@ -514,7 +535,11 @@ fi
 # a quieter form.
 CPUS_RESTRICTED_OPAQUE=false
 if [ -z "$EFFECTIVE_CPUS" ] && [ -n "$ONLINE_COUNT" ]; then
-  visible_cpus="$(core_count)"
+  # nproc, minus nproc's OpenMP manners: it caps its answer at
+  # OMP_NUM_THREADS/OMP_THREAD_LIMIT, which most ML and HPC images export and
+  # which say nothing about sched_getaffinity. Left in, a thread-count cap on
+  # an entirely unpinned host would be reported below as an affinity mask.
+  visible_cpus="$(unset OMP_NUM_THREADS OMP_THREAD_LIMIT; core_count)"
   case "$visible_cpus" in
     ''|*[!0-9]*) ;;
     *) if [ "$visible_cpus" -lt "$ONLINE_COUNT" ]; then CPUS_RESTRICTED_OPAQUE=true; fi ;;
@@ -559,6 +584,18 @@ if [ -z "$CPUSET" ]; then
       AFFINITY_DESC="$AFFINITY_DESC; mixed core types: threads may migrate"
     fi
     AFFINITY_DESC="$AFFINITY_DESC)"
+    # Re-apply the mask to the launch, or the line above certifies a placement
+    # the measured process does not have. tmux does not fork the pane from this
+    # script: it forks it from the tmux server, which on the shared default
+    # socket was started by some earlier, unrestricted shell and hands the pane
+    # its own mask instead. Verified: against a server already running,
+    # `taskset -c 0-2 tmux new-session` yields a pane whose mask is the
+    # server's 0-19. Under -c the prefix is set for this same reason, which is
+    # why that path never had the problem. Where the pane would have inherited
+    # the mask anyway this is a no-op, and EFFECTIVE_CPUS has been shape-checked
+    # to a bare CPU list before it reaches the command string tmux hands to a
+    # shell.
+    LAUNCH_PREFIX="taskset -c $EFFECTIVE_CPUS "
   elif [ "$CPUS_RESTRICTED_OPAQUE" = true ]; then
     AFFINITY_DESC="restricted, cpus unknown (inherited from the environment; install util-linux taskset to report which)"
   elif [ "$MIXED_CORE_TYPES" = true ]; then
