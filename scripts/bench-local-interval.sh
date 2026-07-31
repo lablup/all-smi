@@ -86,7 +86,9 @@
 #   starts. The environment block reads the mask actually in force rather than
 #   only the flag, so an inherited mask is reported as inherited, the core count
 #   is stated as a subset of the online CPUs, and a "cores in use" line names
-#   the core types the mask really covers.
+#   the core types the mask really covers whenever those differ from the
+#   machine's. On a host whose topology cannot be read at all, they do not
+#   differ and that line is absent.
 #
 #   An inherited mask is also re-applied to the launch, because tmux forks the
 #   measured process from the tmux server rather than from this script, and the
@@ -578,9 +580,22 @@ TOPOLOGY="$(detect_topology)"
 
 # What the mask covers, as opposed to what the machine has. Printed only when
 # those differ, since otherwise it would repeat the line above verbatim.
+#
+# A narrowing mask does not guarantee they differ, because detect_topology is
+# not obliged to vary with it. On a host with neither cpufreq nor cpu_capacity
+# it returns a fixed "unknown" string whatever it is asked to enumerate, and on
+# a host where only some CPUs expose either file, a mask that drops only the
+# CPUs that were never counted leaves the string untouched. Both cases reach
+# the same answer twice, so compare rather than infer.
 TOPOLOGY_IN_USE=""
 if [ -n "$MASK_ARG" ]; then
   TOPOLOGY_IN_USE="$(detect_topology "$MASK_ARG")"
+  # Not `[ ... ] && TOPOLOGY_IN_USE=""`: that form leaves the enclosing if
+  # returning 1 on the common path, which is harmless here and a trap for
+  # whoever later wraps this block in a function under set -e.
+  if [ "$TOPOLOGY_IN_USE" = "$TOPOLOGY" ]; then
+    TOPOLOGY_IN_USE=""
+  fi
 fi
 
 # On a heterogeneous host an unpinned run is a mix of core types, and the
