@@ -577,10 +577,15 @@ fi
 TOPOLOGY="$(detect_topology)"
 
 # What the mask covers, as opposed to what the machine has. Printed only when
-# those differ, since otherwise it would repeat the line above verbatim.
+# those differ, since otherwise it would repeat the line above verbatim. On a
+# host where the topology is unreadable, detect_topology returns the same
+# fixed "unknown" string regardless of which CPUs it was asked to look at, so
+# a narrowing mask alone is not enough to guarantee a difference: clear it
+# back out when it matches TOPOLOGY.
 TOPOLOGY_IN_USE=""
 if [ -n "$MASK_ARG" ]; then
   TOPOLOGY_IN_USE="$(detect_topology "$MASK_ARG")"
+  [ "$TOPOLOGY_IN_USE" = "$TOPOLOGY" ] && TOPOLOGY_IN_USE=""
 fi
 
 # On a heterogeneous host an unpinned run is a mix of core types, and the
