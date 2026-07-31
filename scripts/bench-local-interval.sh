@@ -521,10 +521,16 @@ detect_cpu() {
   esac
 }
 
+# How many cores this process can see, minus nproc's OpenMP manners: it caps its
+# answer at OMP_NUM_THREADS/OMP_THREAD_LIMIT, which most ML and HPC images export
+# and which say nothing about sched_getaffinity. A thread-count cap is not a core
+# count, and printing it as one puts a number beside the topology that
+# contradicts it: OMP_NUM_THREADS=4 on an unpinned GB10 read two 10-core clusters
+# on the topology line and `4 cores` on the line directly above it.
 core_count() {
   case "$OS" in
     Darwin) sysctl -n hw.ncpu 2>/dev/null || echo "?" ;;
-    Linux) nproc 2>/dev/null || echo "?" ;;
+    Linux) (unset OMP_NUM_THREADS OMP_THREAD_LIMIT; nproc 2>/dev/null) || echo "?" ;;
   esac
 }
 
@@ -548,15 +554,15 @@ fi
 # rather than falling back to "unpinned", which would be the same misreport in
 # a quieter form.
 CPUS_RESTRICTED_OPAQUE=false
+VISIBLE_CPUS=""
 if [ -z "$EFFECTIVE_CPUS" ] && [ -n "$ONLINE_COUNT" ]; then
-  # nproc, minus nproc's OpenMP manners: it caps its answer at
-  # OMP_NUM_THREADS/OMP_THREAD_LIMIT, which most ML and HPC images export and
-  # which say nothing about sched_getaffinity. Left in, a thread-count cap on
-  # an entirely unpinned host would be reported below as an affinity mask.
-  visible_cpus="$(unset OMP_NUM_THREADS OMP_THREAD_LIMIT; core_count)"
-  case "$visible_cpus" in
+  # core_count strips the OpenMP cap for the reason given at its definition.
+  # Left in, a thread-count cap on an entirely unpinned host would be reported
+  # below as an affinity mask.
+  VISIBLE_CPUS="$(core_count)"
+  case "$VISIBLE_CPUS" in
     ''|*[!0-9]*) ;;
-    *) if [ "$visible_cpus" -lt "$ONLINE_COUNT" ]; then CPUS_RESTRICTED_OPAQUE=true; fi ;;
+    *) if [ "$VISIBLE_CPUS" -lt "$ONLINE_COUNT" ]; then CPUS_RESTRICTED_OPAQUE=true; fi ;;
   esac
 fi
 
@@ -628,11 +634,17 @@ fi
 # process, which under -c is not the mask the measured process will be launched
 # with. Pinning to ten CPUs from an unrestricted shell would otherwise print
 # "20 of 20 cores" directly above a "cores in use" line reading 10x.
-CPU_COUNT="$(core_count)"
+#
+# Where the mask is real but unreadable, the count is the one the restriction
+# probe already established. Recomputing it here is the same call, and reusing
+# it keeps the number that decides "restricted" and the number printed beside
+# that word from ever being two different numbers.
 if [ "$CPUS_RESTRICTED" = true ]; then
   CPU_COUNT="$(cpu_list_expand "$EFFECTIVE_CPUS" | wc -w | tr -d ' ') of $ONLINE_COUNT"
 elif [ "$CPUS_RESTRICTED_OPAQUE" = true ]; then
-  CPU_COUNT="$CPU_COUNT of $ONLINE_COUNT"
+  CPU_COUNT="$VISIBLE_CPUS of $ONLINE_COUNT"
+else
+  CPU_COUNT="$(core_count)"
 fi
 
 echo "=== environment ==="
