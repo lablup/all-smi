@@ -1,3 +1,18 @@
+all-smi (0.25.0-0) jammy; urgency=medium
+
+  * Dispatch every synchronous reader pass in the local collection pipeline to the blocking pool and join at the end, on both the first-iteration and steady-state paths, cutting wall clock per cycle about 28% on an Apple M5 Max with no increase in process CPU time
+  * Sample Apple Silicon IOReport continuously by differencing against the retained previous sample instead of opening a 100ms measurement window per channel, dropping a local collection from about 495ms to about 24ms and raising observation coverage from 14% of elapsed time to 100%
+  * Give local mode its own polling cadence (EnvConfig::local_interval) instead of asking the remote adaptive interval for one host, which selected 3s; local mode now polls at 1s on Apple Silicon and 2s elsewhere
+  * Scroll Activity panel and header history graphs along a fixed time axis, one sample per braille sub-column with the newest sample pinned right, so a feature keeps its on-screen width instead of shrinking as history accumulates; raise HISTORY_MAX_ENTRIES from 100 to 1024 so the window can fill terminals wider than 1000 columns
+  * Auto-range single-row sparklines over the visible window only, so a spike that has already scrolled off no longer compresses the scale
+  * Add scripts/bench-local-interval.sh, a portable local-mode collection cost benchmark that fixes the terminal at 200x50 and measures process CPU-time delta rather than ps -o %cpu, with an environment block recording OS, kernel, CPU, core count, GPU, process count, and version
+  * Record CPU topology in the benchmark environment block, add -c to pin a run with taskset and -r to repeat a configuration and report mean and standard deviation, and report the affinity mask actually in force including one inherited from a container cpuset, systemd AllowedCPUs, or a bare taskset invocation
+  * Suppress the benchmark's "cores in use" line when a narrowing mask leaves it identical to the "topology" line, which happened on hosts exposing neither cpufreq nor cpu_capacity
+  * Locate url and sha256 stanzas by name in the Homebrew tap bump workflow instead of by line position, fetch assets with curl -f --retry 3 plus empty-file and archive integrity checks, exit cleanly when the version is already in the tap, and validate the result with ruby -c and brew style
+  * Download release assets from github.com/lablup/all-smi instead of the pre-rename github.com/inureyes/all-smi path, which resolved only through GitHub's rename redirect and was written verbatim into the tap formula's url stanzas
+
+ -- Jeongkyu Shin <inureyes@gmail.com>  Fri, 31 Jul 2026 00:00:00 +0000
+
 all-smi (0.24.2-0) jammy; urgency=medium
 
   * Fall back to the PCI BAR2 size for Intel Battlemage VRAM total on the xe driver, which does not expose tile0/vram0 sysfs counters, restricted to BARs above 256 MiB so iGPU GMADR apertures are not misclassified
