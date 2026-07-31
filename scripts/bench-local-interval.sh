@@ -80,6 +80,21 @@
 #   environment block prints the detected topology and the affinity in use so
 #   that context travels with the numbers.
 #
+#   An affinity mask does not have to come from -c. Running under taskset, in a
+#   container with a cpuset, under a systemd unit with AllowedCPUs=, or under a
+#   batch scheduler that pins jobs all narrow the mask before this script
+#   starts. The environment block reads the mask actually in force rather than
+#   only the flag, so an inherited mask is reported as inherited, the core count
+#   is stated as a subset of the online CPUs, and a "cores in use" line names
+#   the core types the mask really covers.
+#
+#   An inherited mask is also re-applied to the launch, because tmux forks the
+#   measured process from the tmux server rather than from this script, and the
+#   server does not carry the mask. Without that, a run started under
+#   `taskset -c 0-2` measured a process spread across every core while the block
+#   certified three. The bare-metal caveat below therefore applies to an
+#   inherited mask exactly as it does to -c.
+#
 #   On a heterogeneous host, prefer pinning one cluster with -c and say which
 #   one you pinned. Pinning also cuts run-to-run variance substantially. Use -r
 #   to average several windows when the effect you are measuring is close to
@@ -228,6 +243,68 @@ case "$OS" in
     ;;
 esac
 
+# The affinity mask this run will use, and the machine it sits inside.
+#
+# A mask does not have to come from -c. A container cpuset, a systemd
+# AllowedCPUs= setting, a batch scheduler that pins jobs, or simply invoking
+# this script under taskset all narrow the mask before the script starts. The
+# signals used below disagree about whether they can see that: nproc honours
+# sched_getaffinity and reports the narrowed count, while lscpu, /proc/cpuinfo
+# and the sysfs cpu walk all report the whole machine regardless. Reading the
+# mask once, here, and scoping each line of the environment block against it is
+# what stops those two views from contradicting each other further down.
+
+# Expand "0-2,5,7-8" to "0 1 2 5 7 8", so a mask can be membership-tested
+# against the enumerations that do not know about it.
+cpu_list_expand() {
+  awk -v s="$1" 'BEGIN {
+    n = split(s, part, ",")
+    for (i = 1; i <= n; i++) {
+      if (part[i] == "") continue
+      if (split(part[i], r, "-") == 2) {
+        for (c = r[1] + 0; c <= r[2] + 0; c++) { printf "%s%d", sep, c; sep = " " }
+      } else {
+        printf "%s%d", sep, part[i] + 0; sep = " "
+      }
+    }
+    printf "\n"
+  }'
+}
+
+# Keep the CPU list out of a `taskset -pc` readback, or nothing when what came
+# back is not one.
+#
+# Callers run taskset under LC_ALL=C because util-linux translates this
+# message. Under de_DE or ko_KR nothing matches `list:`, the strip is a no-op,
+# and the whole sentence survives as the mask. Nothing downstream notices:
+# awk reads an unparseable field as 0, so `taskset -c 15` under ko_KR expanded
+# to cpu 0 and described a 3.90GHz X925 run as a 2.81GHz A725 one, on the exact
+# lines this block exists to make trustworthy. The shape test is the same guard
+# from the other side, for a reworded or reformatted readback that LC_ALL=C
+# cannot help with: a value that is not a bare CPU list is dropped, so the mask
+# reads as unreadable rather than as confidently wrong.
+affinity_list() {
+  local list
+  list="$(sed 's/.*list: *//')"
+  case "$list" in
+    ''|*[!0-9,-]*) return 0 ;;
+  esac
+  printf '%s\n' "$list"
+}
+
+# CPUs the kernel has online. nproc cannot answer this: it is itself narrowed
+# by the mask, which is exactly the contradiction being resolved.
+ONLINE_CPUS=""
+# The mask actually in force. taskset reads it back through sched_getaffinity,
+# so this sees a mask from any source rather than only from -c.
+EFFECTIVE_CPUS=""
+if [ "$OS" = Linux ]; then
+  ONLINE_CPUS="$(cat /sys/devices/system/cpu/online 2>/dev/null || true)"
+  if command -v taskset >/dev/null 2>&1; then
+    EFFECTIVE_CPUS="$(LC_ALL=C taskset -pc $$ 2>/dev/null | affinity_list || true)"
+  fi
+fi
+
 # Prefix prepended to the launch command when -c is given. taskset execs the
 # target in place, so the running process keeps the binary's name and the
 # pgrep -x detection in measure_once() is unaffected; a wrapper that forked
@@ -246,13 +323,14 @@ if [ -n "$CPUSET" ]; then
       taskset -c "$CPUSET" true >/dev/null 2>&1 ||
         { echo "error: -c '$CPUSET' matches no CPU on this machine" >&2; exit 1; }
       LAUNCH_PREFIX="taskset -c $CPUSET "
-      effective="$(taskset -c "$CPUSET" sh -c 'taskset -pc $$' 2>/dev/null |
-                   sed 's/.*list: *//' || true)"
+      effective="$(taskset -c "$CPUSET" sh -c 'LC_ALL=C taskset -pc $$' 2>/dev/null |
+                   affinity_list || true)"
       if [ -n "$effective" ] && [ "$effective" != "$CPUSET" ]; then
         AFFINITY_DESC="cpus $effective (taskset, requested $CPUSET)"
       else
         AFFINITY_DESC="cpus $CPUSET (taskset)"
       fi
+      EFFECTIVE_CPUS="${effective:-$CPUSET}"
       ;;
     Darwin)
       echo "error: -c is not supported on macOS. There is no way to select a specific CPU set: thread_policy_set affinity is a cache-locality hint that Apple Silicon reports as unsupported, and only E-core confinement is reachable at all, via taskpolicy -b, which also changes scheduling priority." >&2
@@ -267,8 +345,16 @@ fi
 # systems without cpufreq. When neither is readable the topology is reported
 # as unknown rather than assumed uniform, because assuming uniform is exactly
 # the error this block exists to prevent.
+#
+# With a CPU list in $1, only those CPUs are enumerated, so the caller can ask
+# what the mask covers rather than what the machine has. The sysfs walk is
+# blind to the mask on its own: it returns all 20 CPUs of a GB10 under
+# `taskset -c 0-2`, next to an nproc-derived count of 3.
 linux_topology() {
-  local src d file cpu key lines=""
+  local src d file cpu key lines="" keep=""
+  if [ -n "${1:-}" ]; then
+    keep=" $(cpu_list_expand "$1") "
+  fi
   if [ -r /sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq ]; then
     src=cpufreq
   elif [ -r /sys/devices/system/cpu/cpu0/cpu_capacity ]; then
@@ -281,6 +367,9 @@ linux_topology() {
   for d in /sys/devices/system/cpu/cpu[0-9]*; do
     cpu="${d##*/cpu}"
     case "$cpu" in ''|*[!0-9]*) continue ;; esac
+    if [ -n "$keep" ]; then
+      case "$keep" in *" $cpu "*) ;; *) continue ;; esac
+    fi
     if [ "$src" = cpufreq ]; then
       file="$d/cpufreq/cpuinfo_max_freq"
     else
@@ -363,7 +452,7 @@ darwin_topology() {
 
 detect_topology() {
   case "$OS" in
-    Linux) linux_topology ;;
+    Linux) linux_topology "$@" ;;
     Darwin) darwin_topology ;;
   esac
 }
@@ -386,20 +475,44 @@ detect_gpu() {
 }
 
 detect_cpu() {
+  local mask="${1:-}"
   case "$OS" in
     Darwin) sysctl -n machdep.cpu.brand_string 2>/dev/null || echo unknown ;;
     Linux)
-      # `model name` is an x86 field. aarch64 /proc/cpuinfo carries
-      # `CPU implementer`/`CPU part` ID pairs instead, so the awk prints an
-      # empty string and still exits 0, which is why a trailing
-      # `|| echo unknown` does not catch it. lscpu decodes those IDs, and on
-      # a heterogeneous part prints one `Model name` per core cluster, so
-      # join them: which clusters exist is itself worth reporting, because
+      # `model name` is an x86 field, and it names the package rather than a
+      # cluster, so a mask cannot change what it should say. aarch64
+      # /proc/cpuinfo carries `CPU implementer`/`CPU part` ID pairs instead, so
+      # the awk prints an empty string and still exits 0, which is why a
+      # trailing `|| echo unknown` does not catch it. lscpu decodes those IDs,
+      # and on a heterogeneous part prints one `Model name` per core cluster,
+      # so join them: which clusters exist is itself worth reporting, because
       # the same work costs different CPU time on each.
       local name
       name="$(awk -F': ' '/model name/ { print $2; exit }' /proc/cpuinfo 2>/dev/null)"
+      # Under a mask, joining every cluster names cores the run will never
+      # touch: the same class of misreport as an affinity line reading
+      # "unpinned" for a pinned run. lscpu's per-CPU MODELNAME column
+      # (util-linux 2.38+) says which clusters the mask actually covers.
+      if [ -z "$name" ] && [ -n "$mask" ]; then
+        name="$(lscpu -e=CPU,MODELNAME 2>/dev/null |
+                awk -v keep=" $(cpu_list_expand "$mask") " '
+                  NR == 1 { next }
+                  index(keep, " " $1 " ") == 0 { next }
+                  { sub(/^[ \t]*[0-9]+[ \t]+/, "") }
+                  !seen[$0]++ { printf "%s%s", (n++ ? " + " : ""), $0 }')"
+      fi
+      # Whole-machine fallback, for an older lscpu without that column. It
+      # over-reports the clusters under a mask, but not silently: the "N of M
+      # cores" count printed beside it already says the run is confined.
+      #
+      # LC_ALL=C because this one matches a field label, and lscpu translates
+      # its labels: a de_DE host prints `Modellname`, nothing matches, and the
+      # cpu line reads `unknown`. The -e=CPU,MODELNAME path above is unaffected,
+      # the column name there being an argument rather than output, so without
+      # this the same machine could name its cluster correctly under a mask and
+      # not without one.
       if [ -z "$name" ]; then
-        name="$(lscpu 2>/dev/null | awk -F': +' '
+        name="$(LC_ALL=C lscpu 2>/dev/null | awk -F': +' '
           /^Model name/ { if (seen[$2]++) next; n[++c] = $2 }
           END { for (i = 1; i <= c; i++) printf "%s%s", (i > 1 ? " + " : ""), n[i] }')"
       fi
@@ -408,37 +521,141 @@ detect_cpu() {
   esac
 }
 
+# How many cores this process can see, minus nproc's OpenMP manners: it caps its
+# answer at OMP_NUM_THREADS/OMP_THREAD_LIMIT, which most ML and HPC images export
+# and which say nothing about sched_getaffinity. A thread-count cap is not a core
+# count, and printing it as one puts a number beside the topology that
+# contradicts it: OMP_NUM_THREADS=4 on an unpinned GB10 read two 10-core clusters
+# on the topology line and `4 cores` on the line directly above it.
 core_count() {
   case "$OS" in
     Darwin) sysctl -n hw.ncpu 2>/dev/null || echo "?" ;;
-    Linux) nproc 2>/dev/null || echo "?" ;;
+    Linux) (unset OMP_NUM_THREADS OMP_THREAD_LIMIT; nproc 2>/dev/null) || echo "?" ;;
   esac
 }
 
+ONLINE_COUNT=""
+if [ -n "$ONLINE_CPUS" ]; then
+  ONLINE_COUNT="$(cpu_list_expand "$ONLINE_CPUS" | wc -w | tr -d ' ')"
+fi
+
+# Does the mask cover less than the whole machine? Compare expanded sets rather
+# than the two strings, so a difference in range formatting between the kernel's
+# online list and taskset's readback cannot masquerade as a restriction.
+CPUS_RESTRICTED=false
+if [ -n "$EFFECTIVE_CPUS" ] && [ -n "$ONLINE_CPUS" ] &&
+   [ "$(cpu_list_expand "$EFFECTIVE_CPUS")" != "$(cpu_list_expand "$ONLINE_CPUS")" ]; then
+  CPUS_RESTRICTED=true
+fi
+
+# Without taskset the mask cannot be read at all, but nproc is narrowed by it,
+# so a count below the online set still proves one is in force. Which CPUs is
+# then unknowable from shell, and the affinity line below says exactly that
+# rather than falling back to "unpinned", which would be the same misreport in
+# a quieter form.
+CPUS_RESTRICTED_OPAQUE=false
+VISIBLE_CPUS=""
+if [ -z "$EFFECTIVE_CPUS" ] && [ -n "$ONLINE_COUNT" ]; then
+  # core_count strips the OpenMP cap for the reason given at its definition.
+  # Left in, a thread-count cap on an entirely unpinned host would be reported
+  # below as an affinity mask.
+  VISIBLE_CPUS="$(core_count)"
+  case "$VISIBLE_CPUS" in
+    ''|*[!0-9]*) ;;
+    *) if [ "$VISIBLE_CPUS" -lt "$ONLINE_COUNT" ]; then CPUS_RESTRICTED_OPAQUE=true; fi ;;
+  esac
+fi
+
+# Passed to the reporting helpers below, and empty unless the mask actually
+# narrows the machine, so an unrestricted run takes byte-for-byte the path it
+# took before any of this existed.
+MASK_ARG=""
+if [ "$CPUS_RESTRICTED" = true ]; then
+  MASK_ARG="$EFFECTIVE_CPUS"
+fi
+
 TOPOLOGY="$(detect_topology)"
+
+# What the mask covers, as opposed to what the machine has. Printed only when
+# those differ, since otherwise it would repeat the line above verbatim.
+TOPOLOGY_IN_USE=""
+if [ -n "$MASK_ARG" ]; then
+  TOPOLOGY_IN_USE="$(detect_topology "$MASK_ARG")"
+fi
 
 # On a heterogeneous host an unpinned run is a mix of core types, and the
 # reader needs to know that before comparing the number to another machine's.
-# Only Linux is pointed at -c: every Apple Silicon Mac reports two perflevels
-# and so lands here, and telling those runs to use a flag that macOS rejects
-# would be advice that never works.
-case "$TOPOLOGY" in
-  heterogeneous*)
-    if [ -z "$CPUSET" ]; then
-      case "$OS" in
-        Linux) AFFINITY_DESC="unpinned (mixed core types: threads may migrate, see -c)" ;;
-        Darwin) AFFINITY_DESC="unpinned (mixed core types: threads may migrate; macOS has no CPU affinity control)" ;;
-      esac
-    fi
-    ;;
+# The test is whether the cores the run can reach are of more than one type,
+# not whether the machine has more than one: a run already confined to a single
+# cluster cannot migrate across types, so pointing it at -c would be advice it
+# has effectively already taken.
+MIXED_CORE_TYPES=false
+case "${TOPOLOGY_IN_USE:-$TOPOLOGY}" in
+  heterogeneous*) MIXED_CORE_TYPES=true ;;
 esac
+
+if [ -z "$CPUSET" ]; then
+  if [ "$CPUS_RESTRICTED" = true ]; then
+    # An inherited mask is invisible to -c, so this line used to read
+    # "unpinned" for a run confined to part of the machine: the opposite of
+    # what happened, on the one line whose job is to certify core placement.
+    AFFINITY_DESC="cpus $EFFECTIVE_CPUS (inherited from the environment, not -c"
+    if [ "$MIXED_CORE_TYPES" = true ]; then
+      AFFINITY_DESC="$AFFINITY_DESC; mixed core types: threads may migrate"
+    fi
+    AFFINITY_DESC="$AFFINITY_DESC)"
+    # Re-apply the mask to the launch, or the line above certifies a placement
+    # the measured process does not have. tmux does not fork the pane from this
+    # script: it forks it from the tmux server, which on the shared default
+    # socket was started by some earlier, unrestricted shell and hands the pane
+    # its own mask instead. Verified: against a server already running,
+    # `taskset -c 0-2 tmux new-session` yields a pane whose mask is the
+    # server's 0-19. Under -c the prefix is set for this same reason, which is
+    # why that path never had the problem. Where the pane would have inherited
+    # the mask anyway this is a no-op, and EFFECTIVE_CPUS has been shape-checked
+    # to a bare CPU list before it reaches the command string tmux hands to a
+    # shell.
+    LAUNCH_PREFIX="taskset -c $EFFECTIVE_CPUS "
+  elif [ "$CPUS_RESTRICTED_OPAQUE" = true ]; then
+    AFFINITY_DESC="restricted, cpus unknown (inherited from the environment; install util-linux taskset to report which)"
+  elif [ "$MIXED_CORE_TYPES" = true ]; then
+    # Only Linux is pointed at -c: every Apple Silicon Mac reports two
+    # perflevels and so lands here, and telling those runs to use a flag that
+    # macOS rejects would be advice that never works.
+    case "$OS" in
+      Linux) AFFINITY_DESC="unpinned (mixed core types: threads may migrate, see -c)" ;;
+      Darwin) AFFINITY_DESC="unpinned (mixed core types: threads may migrate; macOS has no CPU affinity control)" ;;
+    esac
+  fi
+fi
+
+# How many cores the measured run gets, and what that is a subset of. Count the
+# effective mask rather than calling nproc: nproc reports the mask of *this*
+# process, which under -c is not the mask the measured process will be launched
+# with. Pinning to ten CPUs from an unrestricted shell would otherwise print
+# "20 of 20 cores" directly above a "cores in use" line reading 10x.
+#
+# Where the mask is real but unreadable, the count is the one the restriction
+# probe already established. Recomputing it here is the same call, and reusing
+# it keeps the number that decides "restricted" and the number printed beside
+# that word from ever being two different numbers.
+if [ "$CPUS_RESTRICTED" = true ]; then
+  CPU_COUNT="$(cpu_list_expand "$EFFECTIVE_CPUS" | wc -w | tr -d ' ') of $ONLINE_COUNT"
+elif [ "$CPUS_RESTRICTED_OPAQUE" = true ]; then
+  CPU_COUNT="$VISIBLE_CPUS of $ONLINE_COUNT"
+else
+  CPU_COUNT="$(core_count)"
+fi
 
 echo "=== environment ==="
 printf '  all-smi       %s\n' "$("$BIN" --version 2>/dev/null | head -1 || echo unknown)"
 printf '  binary        %s\n' "$BIN"
 printf '  os            %s %s (%s)\n' "$OS" "$(uname -r)" "$(uname -m)"
-printf '  cpu           %s (%s cores)\n' "$(detect_cpu)" "$(core_count)"
+printf '  cpu           %s (%s cores)\n' "$(detect_cpu "$MASK_ARG")" "$CPU_COUNT"
 printf '  topology      %s\n' "$TOPOLOGY"
+if [ -n "$TOPOLOGY_IN_USE" ]; then
+  printf '  cores in use  %s\n' "$TOPOLOGY_IN_USE"
+fi
 printf '  affinity      %s\n' "$AFFINITY_DESC"
 printf '  gpu           %s\n' "$(detect_gpu)"
 printf '  processes     %s\n' "$(($(ps -A 2>/dev/null | wc -l) - 1))"
