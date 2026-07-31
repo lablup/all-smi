@@ -19,6 +19,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 use sysinfo::Disks;
 use tokio::sync::{Mutex, RwLock};
+use tokio::task::JoinHandle;
 use tokio::time::timeout;
 
 /// Type alias for the process cache using std::sync::RwLock for synchronous access
@@ -74,6 +75,103 @@ fn inject_gpu_power(chassis_info: Vec<ChassisInfo>, gpu_info: &[GpuInfo]) -> Vec
         .collect()
 }
 
+/// Everything the GPU reader set produces in one pass.
+///
+/// The four GPU queries stay grouped in a single unit of work on purpose.
+/// They all run against the same `Box<dyn GpuReader>` instances, which carry
+/// internal sampling state (IOReport deltas on Apple Silicon, cached NVML
+/// handles on NVIDIA), so issuing them concurrently against one reader would
+/// change the order in which that state is touched. Keeping them back to back
+/// preserves the exact call sequence the collector used before, while still
+/// letting the whole group overlap with the CPU, memory, chassis, storage and
+/// process groups.
+#[derive(Default)]
+struct GpuCollection {
+    gpu_info: Vec<GpuInfo>,
+    gpu_processes: Vec<ProcessInfo>,
+    gpu_pids: HashSet<u32>,
+    vgpu_info: Vec<VgpuHostInfo>,
+    mig_info: Vec<MigGpuInfo>,
+}
+
+/// Run the full GPU reader pass in the same order the collector always used:
+/// device info, GPU processes, vGPU, then MIG.
+fn collect_from_gpu_readers(readers: &[Box<dyn GpuReader>]) -> GpuCollection {
+    let gpu_info: Vec<GpuInfo> = readers
+        .iter()
+        .flat_map(|reader| reader.get_gpu_info())
+        .collect();
+
+    let mut gpu_processes = Vec::new();
+    let mut gpu_pids = HashSet::new();
+    for reader in readers.iter() {
+        let (procs, pids) = reader.get_gpu_processes();
+        gpu_processes.extend(procs);
+        gpu_pids.extend(pids);
+    }
+
+    // vGPU and MIG run on the same readers set so they share NVML handle
+    // caching with the main GPU collection.
+    let vgpu_info: Vec<VgpuHostInfo> = readers
+        .iter()
+        .flat_map(|reader| reader.get_vgpu_info())
+        .collect();
+    let mig_info: Vec<MigGpuInfo> = readers
+        .iter()
+        .flat_map(|reader| reader.get_mig_info())
+        .collect();
+
+    GpuCollection {
+        gpu_info,
+        gpu_processes,
+        gpu_pids,
+        vgpu_info,
+        mig_info,
+    }
+}
+
+/// Move one synchronous reader pass onto the tokio blocking pool.
+///
+/// The owned read guard is acquired here, in async context, and then moved
+/// into the closure. That ordering is what makes the whole refactor possible:
+/// the reader collections live behind tokio's async `RwLock`, whose `read()`
+/// is a future and therefore unusable inside a blocking closure, while
+/// `blocking_read()` from the blocking pool would risk deadlocking against a
+/// queued async writer. `OwnedRwLockReadGuard<T>` is `'static + Send` whenever
+/// `T: Send + Sync`, which every reader trait already guarantees, so it
+/// satisfies the `spawn_blocking` bounds without cloning or re-owning a single
+/// reader.
+///
+/// The guard is held for the lifetime of the blocking task. That is safe
+/// because the reader collections are written exactly once, by
+/// `initialize_readers`, before the first collection runs, and are read-only
+/// from then on. There is no hotplug/refresh path that takes a write lock
+/// while a collection is in flight.
+async fn spawn_reader_pass<T, R, F>(lock: &Arc<RwLock<T>>, f: F) -> JoinHandle<R>
+where
+    T: Send + Sync + 'static,
+    R: Send + 'static,
+    F: FnOnce(&T) -> R + Send + 'static,
+{
+    let guard = Arc::clone(lock).read_owned().await;
+    tokio::task::spawn_blocking(move || f(&guard))
+}
+
+/// Await a reader-pass `JoinHandle` and log, rather than silently swallow, a
+/// panic in the underlying blocking task before falling back to that group's
+/// default (empty) result. Matches the `eprintln!("Warning: ...")` style
+/// already used in `initialize_readers` for other degraded-but-recoverable
+/// conditions.
+async fn join_or_log_default<R: Default>(handle: JoinHandle<R>, group_name: &str) -> R {
+    match handle.await {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("Warning: {group_name} collection task failed: {err}");
+            R::default()
+        }
+    }
+}
+
 pub struct LocalCollector {
     gpu_readers: Arc<RwLock<Vec<Box<dyn GpuReader>>>>,
     cpu_readers: Arc<RwLock<Vec<Box<dyn CpuReader>>>>,
@@ -125,15 +223,16 @@ impl LocalCollector {
             return;
         }
 
-        // Add startup status with timeout
+        // Add startup status. Pushed unconditionally, like the CPU and memory
+        // lines below: `collect_parallel_first_iteration` counts on exactly
+        // three preamble lines being present (the `3 + index` offset at the
+        // status handler), so silently skipping this push on lock contention
+        // would shift every later status update to the wrong line.
         {
-            let state_result = timeout(Duration::from_secs(2), app_state.lock()).await;
-
-            if let Ok(mut state) = state_result {
-                state
-                    .startup_status_lines
-                    .push("✓ Initializing GPU readers...".to_string());
-            }
+            let mut state = app_state.lock().await;
+            state
+                .startup_status_lines
+                .push("✓ Initializing GPU readers...".to_string());
         }
 
         let gpu_readers = get_gpu_readers();
@@ -234,179 +333,148 @@ impl LocalCollector {
         }
 
         // Create channel for status updates
-        let (status_tx, mut status_rx) = mpsc::channel(10);
+        let (status_tx, mut status_rx) = mpsc::channel::<(usize, String)>(10);
         let app_state_clone = Arc::clone(&app_state);
 
         // Spawn task to handle status updates
         let status_handler = task::spawn(async move {
             while let Some((index, message)) = status_rx.recv().await {
                 let mut state = app_state_clone.lock().await;
-                if index < state.startup_status_lines.len() {
-                    state.startup_status_lines[3 + index] = message;
+                // The five "Collecting ..." lines pushed above sit after the
+                // three reader-initialization lines, hence the +3 offset. Bound
+                // the shifted index, not the raw one, so a caller that pushed
+                // fewer preamble lines cannot panic this task.
+                let slot = 3 + index;
+                if slot < state.startup_status_lines.len() {
+                    state.startup_status_lines[slot] = message;
                 }
             }
         });
 
-        // Run all collections in parallel with status updates
-        // Use Arc references instead of cloning the entire Arc<RwLock<_>>
-        let gpu_readers_1 = Arc::clone(&self.gpu_readers);
-        let gpu_readers_2 = Arc::clone(&self.gpu_readers);
-        let gpu_readers_vgpu = Arc::clone(&self.gpu_readers);
-        let gpu_readers_mig = Arc::clone(&self.gpu_readers);
-        let cpu_readers = Arc::clone(&self.cpu_readers);
-        let memory_readers = Arc::clone(&self.memory_readers);
-        let chassis_reader = Arc::clone(&self.chassis_reader);
+        // Fan every synchronous reader pass out onto the blocking pool. Each
+        // group owns its read guard for the duration of its task, so nothing
+        // below runs on the async worker, and the six groups genuinely overlap
+        // instead of taking turns on one task the way `tokio::join!` did.
         let process_cache = Arc::clone(&self.process_cache);
+        let status_tx_gpu = status_tx.clone();
+        let status_tx_cpu = status_tx.clone();
+        let status_tx_mem = status_tx.clone();
+        let status_tx_proc = status_tx.clone();
+        let status_tx_storage = status_tx.clone();
 
-        let (
-            all_gpu_info,
-            all_cpu_info,
-            all_memory_info,
-            gpu_processes_result,
-            all_processes,
-            all_storage_info,
-            all_chassis_info,
-            all_vgpu_info,
-            all_mig_info,
-        ) = {
-            let status_tx_gpu = status_tx.clone();
-            let status_tx_cpu = status_tx.clone();
-            let status_tx_mem = status_tx.clone();
-            let status_tx_proc = status_tx.clone();
-            let status_tx_storage = status_tx.clone();
+        // GPU device info, GPU processes, vGPU and MIG in one pass.
+        let gpu_task = spawn_reader_pass(&self.gpu_readers, move |readers| {
+            let collected = collect_from_gpu_readers(readers);
+            let _ = status_tx_gpu.blocking_send((0, "✓ GPU information collected".to_string()));
+            collected
+        })
+        .await;
 
-            tokio::join!(
-                // GPU info collection
-                async move {
-                    let readers = gpu_readers_1.read().await;
-                    let info: Vec<GpuInfo> = readers
-                        .iter()
-                        .flat_map(|reader| reader.get_gpu_info())
-                        .collect();
-                    let _ = status_tx_gpu
-                        .send((0, "✓ GPU information collected".to_string()))
-                        .await;
-                    info
-                },
-                // CPU info collection
-                async move {
-                    let readers = cpu_readers.read().await;
-                    let info: Vec<CpuInfo> = readers
-                        .iter()
-                        .flat_map(|reader| reader.get_cpu_info())
-                        .collect();
-                    let _ = status_tx_cpu
-                        .send((1, "✓ CPU information collected".to_string()))
-                        .await;
-                    info
-                },
-                // Memory info collection
-                async move {
-                    let readers = memory_readers.read().await;
-                    let info: Vec<MemoryInfo> = readers
-                        .iter()
-                        .flat_map(|reader| reader.get_memory_info())
-                        .collect();
-                    let _ = status_tx_mem
-                        .send((2, "✓ Memory information collected".to_string()))
-                        .await;
-                    info
-                },
-                // GPU process collection (lightweight - raw GPU processes only)
-                async move {
-                    let readers = gpu_readers_2.read().await;
-                    let mut all_gpu_procs = Vec::new();
-                    let mut all_gpu_pids = HashSet::new();
-                    for reader in readers.iter() {
-                        let (procs, pids) = reader.get_gpu_processes();
-                        all_gpu_procs.extend(procs);
-                        all_gpu_pids.extend(pids);
-                    }
-                    (all_gpu_procs, all_gpu_pids)
-                },
-                // Full process collection - use spawn_blocking to avoid blocking tokio runtime
-                async move {
-                    let all_processes = tokio::task::spawn_blocking(move || {
-                        with_global_system(|system| {
-                            use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, UpdateKind};
-                            // OPTIMIZATION: Only refresh fields we actually need
-                            // - CPU usage for cpu_percent
-                            // - Memory for memory_percent/memory_rss/memory_vms
-                            // - User only if not already set (avoid repeated lookups)
-                            // This is much cheaper than everything() which includes disk I/O, etc.
-                            let refresh_kind = ProcessRefreshKind::nothing()
-                                .with_cpu()
-                                .with_memory()
-                                .with_user(UpdateKind::OnlyIfNotSet);
-                            system.refresh_processes_specifics(
-                                ProcessesToUpdate::All,
-                                true,
-                                refresh_kind,
-                            );
-                            system.refresh_memory();
+        let cpu_task = spawn_reader_pass(
+            &self.cpu_readers,
+            move |readers: &Vec<Box<dyn CpuReader>>| {
+                let info: Vec<CpuInfo> = readers
+                    .iter()
+                    .flat_map(|reader| reader.get_cpu_info())
+                    .collect();
+                let _ = status_tx_cpu.blocking_send((1, "✓ CPU information collected".to_string()));
+                info
+            },
+        )
+        .await;
 
-                            // OPTIMIZATION: Initialize process cache on first iteration
-                            // This populates the cache with all current processes
-                            let gpu_pids: HashSet<u32> = HashSet::new();
-                            let mut cache = process_cache.write().unwrap();
-                            update_process_cache(system, &gpu_pids, &mut cache)
-                        })
-                    })
-                    .await
-                    .unwrap_or_default();
-                    let _ = status_tx_proc
-                        .send((3, "✓ Process information collected".to_string()))
-                        .await;
-                    all_processes
-                },
-                // Storage collection
-                async move {
-                    let storage_info = Self::collect_storage_info();
-                    let _ = status_tx_storage
-                        .send((4, "✓ Storage information collected".to_string()))
-                        .await;
-                    storage_info
-                },
-                // Chassis info collection
-                async move {
-                    let reader = chassis_reader.read().await;
-                    let info: Vec<ChassisInfo> = reader
-                        .as_ref()
-                        .and_then(|r| r.get_chassis_info())
-                        .into_iter()
-                        .collect();
-                    info
-                },
-                // vGPU info collection (only NVIDIA readers produce data; others
-                // return an empty vector via the default trait implementation).
-                async move {
-                    let readers = gpu_readers_vgpu.read().await;
-                    let info: Vec<VgpuHostInfo> = readers
-                        .iter()
-                        .flat_map(|reader| reader.get_vgpu_info())
-                        .collect();
-                    info
-                },
-                // MIG info collection (only NVIDIA readers with MIG enabled
-                // GPUs produce data; everyone else returns an empty vector
-                // via the default trait implementation).
-                async move {
-                    let readers = gpu_readers_mig.read().await;
-                    let info: Vec<MigGpuInfo> = readers
-                        .iter()
-                        .flat_map(|reader| reader.get_mig_info())
-                        .collect();
-                    info
-                }
-            )
-        };
+        let memory_task = spawn_reader_pass(
+            &self.memory_readers,
+            move |readers: &Vec<Box<dyn MemoryReader>>| {
+                let info: Vec<MemoryInfo> = readers
+                    .iter()
+                    .flat_map(|reader| reader.get_memory_info())
+                    .collect();
+                let _ =
+                    status_tx_mem.blocking_send((2, "✓ Memory information collected".to_string()));
+                info
+            },
+        )
+        .await;
+
+        let chassis_task = spawn_reader_pass(
+            &self.chassis_reader,
+            |reader: &Option<Box<dyn ChassisReader>>| {
+                let info: Vec<ChassisInfo> = reader
+                    .as_ref()
+                    .and_then(|r| r.get_chassis_info())
+                    .into_iter()
+                    .collect();
+                info
+            },
+        )
+        .await;
+
+        let storage_task = task::spawn_blocking(move || {
+            let storage_info = Self::collect_storage_info();
+            let _ =
+                status_tx_storage.blocking_send((4, "✓ Storage information collected".to_string()));
+            storage_info
+        });
+
+        let processes_task = task::spawn_blocking(move || {
+            let all_processes = with_global_system(|system| {
+                use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, UpdateKind};
+                // OPTIMIZATION: Only refresh fields we actually need
+                // - CPU usage for cpu_percent
+                // - Memory for memory_percent/memory_rss/memory_vms
+                // - User only if not already set (avoid repeated lookups)
+                // This is much cheaper than everything() which includes disk I/O, etc.
+                let refresh_kind = ProcessRefreshKind::nothing()
+                    .with_cpu()
+                    .with_memory()
+                    .with_user(UpdateKind::OnlyIfNotSet);
+                system.refresh_processes_specifics(ProcessesToUpdate::All, true, refresh_kind);
+                system.refresh_memory();
+
+                // OPTIMIZATION: Initialize process cache on first iteration
+                // This populates the cache with all current processes. The GPU
+                // pid set is deliberately empty here: `merge_gpu_processes`
+                // below applies the GPU attribution for the first cycle.
+                let gpu_pids: HashSet<u32> = HashSet::new();
+                // A panic elsewhere while this lock (or `GLOBAL_SYSTEM`, see
+                // `with_global_system`) was held would otherwise poison it and
+                // make every later cycle panic here too. The cached data is a
+                // plain metric map that is safe to keep using after a panic
+                // mid-update, so recover instead of propagating the poison.
+                let mut cache = process_cache
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                update_process_cache(system, &gpu_pids, &mut cache)
+            });
+            let _ =
+                status_tx_proc.blocking_send((3, "✓ Process information collected".to_string()));
+            all_processes
+        });
+
+        // A panicking reader degrades that group to empty rather than taking the
+        // whole collection loop down. The panic is still logged, so a run of
+        // empty data is diagnosable instead of silent.
+        let GpuCollection {
+            gpu_info: all_gpu_info,
+            gpu_processes,
+            // The first cycle deliberately seeds the process cache with an empty
+            // GPU pid set; `merge_gpu_processes` below applies the attribution.
+            gpu_pids: _,
+            vgpu_info: all_vgpu_info,
+            mig_info: all_mig_info,
+        } = join_or_log_default(gpu_task, "GPU").await;
+        let all_cpu_info = join_or_log_default(cpu_task, "CPU").await;
+        let all_memory_info = join_or_log_default(memory_task, "memory").await;
+        let all_chassis_info = join_or_log_default(chassis_task, "chassis").await;
+        let all_storage_info = join_or_log_default(storage_task, "storage").await;
+        let all_processes = join_or_log_default(processes_task, "process").await;
 
         // Close the channel and wait for status handler to finish
         drop(status_tx);
         let _ = status_handler.await;
 
         // Merge raw GPU processes into main process list
-        let (gpu_processes, _gpu_pids) = gpu_processes_result;
         let mut all_processes_merged = merge_gpu_processes(all_processes, gpu_processes);
 
         // Sort by CPU usage descending and limit to top MAX_DISPLAY_PROCESSES
@@ -447,45 +515,52 @@ impl LocalCollector {
         }
     }
 
-    async fn collect_sequential(&self) -> CollectionData {
-        let gpu_readers = self.gpu_readers.read().await;
-        let all_gpu_info: Vec<GpuInfo> = gpu_readers
-            .iter()
-            .flat_map(|reader| reader.get_gpu_info())
-            .collect();
+    /// Steady-state collection, used for every cycle after the first.
+    ///
+    /// Formerly `collect_sequential`, and renamed because nothing here runs
+    /// serially on the async task any more: every reader pass is dispatched to
+    /// the blocking pool up front and only joined at the end.
+    async fn collect_steady_state(&self) -> CollectionData {
+        // Fan every synchronous reader pass out onto the blocking pool before
+        // touching anything else, so the CPU, memory, chassis and storage
+        // groups are already in flight while the GPU group runs.
+        let gpu_task = spawn_reader_pass(&self.gpu_readers, |readers: &Vec<Box<dyn GpuReader>>| {
+            collect_from_gpu_readers(readers)
+        })
+        .await;
 
-        let cpu_readers = self.cpu_readers.read().await;
-        let all_cpu_info: Vec<CpuInfo> = cpu_readers
-            .iter()
-            .flat_map(|reader| reader.get_cpu_info())
-            .collect();
+        let cpu_task = spawn_reader_pass(&self.cpu_readers, |readers: &Vec<Box<dyn CpuReader>>| {
+            readers
+                .iter()
+                .flat_map(|reader| reader.get_cpu_info())
+                .collect::<Vec<CpuInfo>>()
+        })
+        .await;
 
-        let memory_readers = self.memory_readers.read().await;
-        let all_memory_info: Vec<MemoryInfo> = memory_readers
-            .iter()
-            .flat_map(|reader| reader.get_memory_info())
-            .collect();
+        let memory_task = spawn_reader_pass(
+            &self.memory_readers,
+            |readers: &Vec<Box<dyn MemoryReader>>| {
+                readers
+                    .iter()
+                    .flat_map(|reader| reader.get_memory_info())
+                    .collect::<Vec<MemoryInfo>>()
+            },
+        )
+        .await;
 
-        let mut gpu_processes = Vec::new();
-        let mut gpu_pids = HashSet::new();
-        for reader in gpu_readers.iter() {
-            let (procs, pids) = reader.get_gpu_processes();
-            gpu_processes.extend(procs);
-            gpu_pids.extend(pids);
-        }
+        let chassis_task = spawn_reader_pass(
+            &self.chassis_reader,
+            |reader: &Option<Box<dyn ChassisReader>>| {
+                reader
+                    .as_ref()
+                    .and_then(|r| r.get_chassis_info())
+                    .into_iter()
+                    .collect::<Vec<ChassisInfo>>()
+            },
+        )
+        .await;
 
-        // vGPU info collection — performed on the same readers set so it
-        // shares NVML handle caching with the main GPU collection.
-        let all_vgpu_info: Vec<VgpuHostInfo> = gpu_readers
-            .iter()
-            .flat_map(|reader| reader.get_vgpu_info())
-            .collect();
-
-        // MIG info collection — same locality benefits as vGPU above.
-        let all_mig_info: Vec<MigGpuInfo> = gpu_readers
-            .iter()
-            .flat_map(|reader| reader.get_mig_info())
-            .collect();
+        let storage_task = tokio::task::spawn_blocking(Self::collect_storage_info);
 
         // Determine if we should do a full refresh or selective refresh
         let cycle = self.refresh_cycle.fetch_add(1, Ordering::Relaxed);
@@ -497,38 +572,69 @@ impl LocalCollector {
         } else {
             self.tracked_pids.read().await.clone()
         };
+
+        // The process pass is the one group that cannot start independently:
+        // `update_process_cache` needs this cycle's GPU pid set to decide which
+        // cached entries are GPU-attributed. Joining the GPU group first keeps
+        // that value identical to the pre-change behavior. The remaining groups
+        // are already running, so this join does not extend the critical path
+        // unless GPU plus process collection outlasts all of them.
+        let GpuCollection {
+            gpu_info: all_gpu_info,
+            gpu_processes,
+            gpu_pids,
+            vgpu_info: all_vgpu_info,
+            mig_info: all_mig_info,
+        } = join_or_log_default(gpu_task, "GPU").await;
+
         let process_cache = Arc::clone(&self.process_cache);
-        let all_processes = with_global_system(|system| {
-            use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, UpdateKind};
-            // OPTIMIZATION: Only refresh fields we actually need
-            // - CPU usage for cpu_percent
-            // - Memory for memory_percent/memory_rss/memory_vms
-            // - User only if not already set (avoid repeated lookups)
-            let refresh_kind = ProcessRefreshKind::nothing()
-                .with_cpu()
-                .with_memory()
-                .with_user(UpdateKind::OnlyIfNotSet);
+        let processes_task = tokio::task::spawn_blocking(move || {
+            with_global_system(|system| {
+                use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, UpdateKind};
+                // OPTIMIZATION: Only refresh fields we actually need
+                // - CPU usage for cpu_percent
+                // - Memory for memory_percent/memory_rss/memory_vms
+                // - User only if not already set (avoid repeated lookups)
+                let refresh_kind = ProcessRefreshKind::nothing()
+                    .with_cpu()
+                    .with_memory()
+                    .with_user(UpdateKind::OnlyIfNotSet);
 
-            // OPTIMIZATION: Selective process refresh
-            // Full refresh every N cycles to discover new high-CPU processes;
-            // otherwise only refresh tracked PIDs to significantly reduce CPU usage.
-            if do_full_refresh || tracked_pids_for_refresh.is_empty() {
-                system.refresh_processes_specifics(ProcessesToUpdate::All, true, refresh_kind);
-            } else {
-                system.refresh_processes_specifics(
-                    ProcessesToUpdate::Some(&tracked_pids_for_refresh),
-                    true,
-                    refresh_kind,
-                );
-            }
-            system.refresh_memory();
+                // OPTIMIZATION: Selective process refresh
+                // Full refresh every N cycles to discover new high-CPU processes;
+                // otherwise only refresh tracked PIDs to significantly reduce CPU usage.
+                if do_full_refresh || tracked_pids_for_refresh.is_empty() {
+                    system.refresh_processes_specifics(ProcessesToUpdate::All, true, refresh_kind);
+                } else {
+                    system.refresh_processes_specifics(
+                        ProcessesToUpdate::Some(&tracked_pids_for_refresh),
+                        true,
+                        refresh_kind,
+                    );
+                }
+                system.refresh_memory();
 
-            // OPTIMIZATION: Use process cache to reduce memory allocation overhead
-            // Instead of creating new ProcessInfo objects every cycle, we update
-            // existing cached objects and only allocate for new processes.
-            let mut cache = process_cache.write().unwrap();
-            update_process_cache(system, &gpu_pids, &mut cache)
+                // OPTIMIZATION: Use process cache to reduce memory allocation overhead
+                // Instead of creating new ProcessInfo objects every cycle, we update
+                // existing cached objects and only allocate for new processes.
+                // A panic elsewhere while this lock (or `GLOBAL_SYSTEM`, see
+                // `with_global_system`) was held would otherwise poison it and
+                // make every later cycle panic here too. The cached data is a
+                // plain metric map that is safe to keep using after a panic
+                // mid-update, so recover instead of propagating the poison.
+                let mut cache = process_cache
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                update_process_cache(system, &gpu_pids, &mut cache)
+            })
         });
+
+        let all_cpu_info = join_or_log_default(cpu_task, "CPU").await;
+        let all_memory_info = join_or_log_default(memory_task, "memory").await;
+        let all_chassis_info = join_or_log_default(chassis_task, "chassis").await;
+        let all_storage_info = join_or_log_default(storage_task, "storage").await;
+        let all_processes = join_or_log_default(processes_task, "process").await;
+
         let mut all_processes = merge_gpu_processes(all_processes, gpu_processes);
 
         // Sort by CPU usage descending and limit to top MAX_DISPLAY_PROCESSES
@@ -547,16 +653,6 @@ impl LocalCollector {
             .map(|p| sysinfo::Pid::from_u32(p.pid))
             .collect();
         *self.tracked_pids.write().await = new_tracked_pids;
-
-        let all_storage_info = Self::collect_storage_info();
-
-        // Collect chassis info
-        let chassis_reader = self.chassis_reader.read().await;
-        let all_chassis_info: Vec<ChassisInfo> = chassis_reader
-            .as_ref()
-            .and_then(|r| r.get_chassis_info())
-            .into_iter()
-            .collect();
 
         // Inject aggregated GPU power into chassis info
         let all_chassis_info = inject_gpu_power(all_chassis_info, &all_gpu_info);
@@ -684,7 +780,7 @@ impl DataCollectionStrategy for LocalCollector {
             ));
         }
 
-        Ok(self.collect_sequential().await)
+        Ok(self.collect_steady_state().await)
     }
 
     async fn update_state(
@@ -776,7 +872,11 @@ impl LocalCollector {
         if config.first_iteration {
             Ok(self.collect_parallel_first_iteration(app_state).await)
         } else {
-            Ok(self.collect_sequential().await)
+            Ok(self.collect_steady_state().await)
         }
     }
 }
+
+#[cfg(test)]
+#[path = "local_collector/tests.rs"]
+mod tests;

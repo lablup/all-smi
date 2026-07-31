@@ -40,7 +40,14 @@ pub fn with_global_system<F, R>(f: F) -> R
 where
     F: FnOnce(&mut System) -> R,
 {
-    let mut system = GLOBAL_SYSTEM.lock().unwrap();
+    // Recover from a poisoned lock instead of propagating it: `System` is a
+    // plain metrics snapshot, so continuing to use it after a panic mid-update
+    // elsewhere is safe, and it keeps one panicking caller (there are several,
+    // across GPU/process readers on multiple platforms) from permanently
+    // taking down every later call to this function.
+    let mut system = GLOBAL_SYSTEM
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     f(&mut system)
 }
 
@@ -48,7 +55,9 @@ where
 /// This is the primary use case - collecting process information
 #[allow(dead_code)]
 pub fn refresh_global_processes() {
-    let mut system = GLOBAL_SYSTEM.lock().unwrap();
+    let mut system = GLOBAL_SYSTEM
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     system.refresh_processes_specifics(
         ProcessesToUpdate::All,
         true,
