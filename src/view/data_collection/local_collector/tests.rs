@@ -14,6 +14,20 @@
 
 use super::*;
 
+/// Serializes the tests in this module against each other.
+///
+/// All of them touch the process-global `GLOBAL_SYSTEM` (via
+/// `with_global_system`), and `first_iteration_collection_reports_startup_status`
+/// additionally builds a second full reader set through `initialize_readers`
+/// whose `Drop` impls reach into the shared platform metrics manager (on
+/// macOS, IOReport shutdown). Run concurrently under the default test
+/// harness, those interact and make the tests flaky; held for the whole test
+/// body, this lock makes them deterministic instead. `tokio::sync::Mutex`
+/// rather than `std::sync::Mutex` on purpose: the guard is held across
+/// `.await` points, and unlike `std::sync::Mutex` it does not poison when a
+/// task panics while holding it, so one failing test cannot wedge the rest.
+static TEST_LOCK: Mutex<()> = Mutex::const_new(());
+
 /// Build a collector with real platform readers already installed, skipping
 /// `initialize_readers` so no `AppState` is needed.
 async fn initialized_collector() -> LocalCollector {
@@ -80,6 +94,7 @@ fn process_cpu_time() -> Duration {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "measurement harness: drives real hardware readers, run manually on a release build"]
 async fn measure_collection_arms() {
+    let _serialize = TEST_LOCK.lock().await;
     const SAMPLES: usize = 12;
 
     let collector = initialized_collector().await;
@@ -308,6 +323,7 @@ async fn collect_reference(collector: &LocalCollector) -> CollectionData {
 /// equality, so this asserts on everything that is not time varying.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn parallel_collection_matches_serial_reference() {
+    let _serialize = TEST_LOCK.lock().await;
     let collector = initialized_collector().await;
 
     // Prime the readers and the process cache so neither run pays
@@ -392,6 +408,7 @@ async fn parallel_collection_matches_serial_reference() {
 /// cycles also cover the selective/full process refresh alternation.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn repeated_collections_complete_without_deadlock() {
+    let _serialize = TEST_LOCK.lock().await;
     let collector = initialized_collector().await;
 
     for _ in 0..(FULL_REFRESH_INTERVAL + 2) {
@@ -402,12 +419,59 @@ async fn repeated_collections_complete_without_deadlock() {
     }
 }
 
+/// `join_or_log_default` is the seam that keeps a panicking reader from
+/// taking the whole collection cycle down. Exercise it directly: a task that
+/// panics must not propagate that panic to the caller, and must produce the
+/// group's `Default` instead of hanging or bubbling up the panic.
+#[tokio::test]
+async fn join_or_log_default_falls_back_on_panicking_task() {
+    let handle: JoinHandle<Vec<GpuInfo>> =
+        tokio::task::spawn_blocking(|| panic!("simulated reader panic"));
+    let result = join_or_log_default(handle, "GPU").await;
+    assert!(
+        result.is_empty(),
+        "a panicking reader task must degrade to Default, not propagate"
+    );
+}
+
+/// Finding: a panic while holding `process_cache`'s write lock (mirroring a
+/// panicking reader mid-cycle) used to poison the lock permanently, so every
+/// later cycle panicked in turn on `.write().unwrap()` and produced silent,
+/// permanently empty data. The lock acquisition now recovers via
+/// `PoisonError::into_inner`; this test poisons the lock the same way a
+/// panicking reader would and asserts the next cycle still completes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn steady_state_collection_recovers_from_poisoned_process_cache() {
+    let _serialize = TEST_LOCK.lock().await;
+    let collector = initialized_collector().await;
+
+    let cache = Arc::clone(&collector.process_cache);
+    let poisoned = std::panic::catch_unwind(move || {
+        let _guard = cache.write().unwrap();
+        panic!("simulated panic while holding process_cache");
+    });
+    assert!(poisoned.is_err(), "the simulated panic should have unwound");
+    assert!(
+        collector.process_cache.is_poisoned(),
+        "the write lock should be poisoned after a panic while held"
+    );
+
+    let data = timeout(Duration::from_secs(20), collector.collect_steady_state())
+        .await
+        .expect("collection cycle timed out, likely a lock deadlock instead of recovery");
+    assert!(
+        !data.process_info.is_empty(),
+        "a recovered cache should still produce process data"
+    );
+}
+
 /// The first-iteration path additionally pushes startup status lines from
 /// inside blocking tasks via `blocking_send`. Exercise it end to end so a
 /// misuse of that API (which panics when called from an async context)
 /// cannot reach a release build.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn first_iteration_collection_reports_startup_status() {
+    let _serialize = TEST_LOCK.lock().await;
     let collector = LocalCollector::new();
     let app_state = Arc::new(Mutex::new(AppState::new()));
     collector.initialize_readers(Arc::clone(&app_state)).await;
@@ -431,6 +495,27 @@ async fn first_iteration_collection_reports_startup_status() {
     assert_eq!(
         collected_markers, 5,
         "expected all five collection arms to report completion, got: {:?}",
+        state.startup_status_lines
+    );
+
+    // Regression check for the `3 + index` startup-status offset (finding 3):
+    // `initialize_readers` must always push exactly three preamble lines, in
+    // order, so each "○ Collecting ..." placeholder gets overwritten by the
+    // matching "✓ ... collected" line at the right slot rather than a
+    // neighboring one (or being silently dropped by the bounds check).
+    assert_eq!(
+        state.startup_status_lines,
+        vec![
+            "✓ Initializing GPU readers...",
+            "✓ Initializing CPU readers...",
+            "✓ Initializing memory readers...",
+            "✓ GPU information collected",
+            "✓ CPU information collected",
+            "✓ Memory information collected",
+            "✓ Process information collected",
+            "✓ Storage information collected",
+        ],
+        "startup status lines landed in the wrong slots: {:?}",
         state.startup_status_lines
     );
 }

@@ -157,6 +157,21 @@ where
     tokio::task::spawn_blocking(move || f(&guard))
 }
 
+/// Await a reader-pass `JoinHandle` and log, rather than silently swallow, a
+/// panic in the underlying blocking task before falling back to that group's
+/// default (empty) result. Matches the `eprintln!("Warning: ...")` style
+/// already used in `initialize_readers` for other degraded-but-recoverable
+/// conditions.
+async fn join_or_log_default<R: Default>(handle: JoinHandle<R>, group_name: &str) -> R {
+    match handle.await {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("Warning: {group_name} collection task failed: {err}");
+            R::default()
+        }
+    }
+}
+
 pub struct LocalCollector {
     gpu_readers: Arc<RwLock<Vec<Box<dyn GpuReader>>>>,
     cpu_readers: Arc<RwLock<Vec<Box<dyn CpuReader>>>>,
@@ -208,15 +223,16 @@ impl LocalCollector {
             return;
         }
 
-        // Add startup status with timeout
+        // Add startup status. Pushed unconditionally, like the CPU and memory
+        // lines below: `collect_parallel_first_iteration` counts on exactly
+        // three preamble lines being present (the `3 + index` offset at the
+        // status handler), so silently skipping this push on lock contention
+        // would shift every later status update to the wrong line.
         {
-            let state_result = timeout(Duration::from_secs(2), app_state.lock()).await;
-
-            if let Ok(mut state) = state_result {
-                state
-                    .startup_status_lines
-                    .push("✓ Initializing GPU readers...".to_string());
-            }
+            let mut state = app_state.lock().await;
+            state
+                .startup_status_lines
+                .push("✓ Initializing GPU readers...".to_string());
         }
 
         let gpu_readers = get_gpu_readers();
@@ -421,7 +437,14 @@ impl LocalCollector {
                 // pid set is deliberately empty here: `merge_gpu_processes`
                 // below applies the GPU attribution for the first cycle.
                 let gpu_pids: HashSet<u32> = HashSet::new();
-                let mut cache = process_cache.write().unwrap();
+                // A panic elsewhere while this lock (or `GLOBAL_SYSTEM`, see
+                // `with_global_system`) was held would otherwise poison it and
+                // make every later cycle panic here too. The cached data is a
+                // plain metric map that is safe to keep using after a panic
+                // mid-update, so recover instead of propagating the poison.
+                let mut cache = process_cache
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 update_process_cache(system, &gpu_pids, &mut cache)
             });
             let _ =
@@ -430,8 +453,8 @@ impl LocalCollector {
         });
 
         // A panicking reader degrades that group to empty rather than taking the
-        // whole collection loop down, matching how the process arm already
-        // handled a failed `spawn_blocking`.
+        // whole collection loop down. The panic is still logged, so a run of
+        // empty data is diagnosable instead of silent.
         let GpuCollection {
             gpu_info: all_gpu_info,
             gpu_processes,
@@ -440,12 +463,12 @@ impl LocalCollector {
             gpu_pids: _,
             vgpu_info: all_vgpu_info,
             mig_info: all_mig_info,
-        } = gpu_task.await.unwrap_or_default();
-        let all_cpu_info = cpu_task.await.unwrap_or_default();
-        let all_memory_info = memory_task.await.unwrap_or_default();
-        let all_chassis_info = chassis_task.await.unwrap_or_default();
-        let all_storage_info = storage_task.await.unwrap_or_default();
-        let all_processes = processes_task.await.unwrap_or_default();
+        } = join_or_log_default(gpu_task, "GPU").await;
+        let all_cpu_info = join_or_log_default(cpu_task, "CPU").await;
+        let all_memory_info = join_or_log_default(memory_task, "memory").await;
+        let all_chassis_info = join_or_log_default(chassis_task, "chassis").await;
+        let all_storage_info = join_or_log_default(storage_task, "storage").await;
+        let all_processes = join_or_log_default(processes_task, "process").await;
 
         // Close the channel and wait for status handler to finish
         drop(status_tx);
@@ -562,7 +585,7 @@ impl LocalCollector {
             gpu_pids,
             vgpu_info: all_vgpu_info,
             mig_info: all_mig_info,
-        } = gpu_task.await.unwrap_or_default();
+        } = join_or_log_default(gpu_task, "GPU").await;
 
         let process_cache = Arc::clone(&self.process_cache);
         let processes_task = tokio::task::spawn_blocking(move || {
@@ -594,16 +617,23 @@ impl LocalCollector {
                 // OPTIMIZATION: Use process cache to reduce memory allocation overhead
                 // Instead of creating new ProcessInfo objects every cycle, we update
                 // existing cached objects and only allocate for new processes.
-                let mut cache = process_cache.write().unwrap();
+                // A panic elsewhere while this lock (or `GLOBAL_SYSTEM`, see
+                // `with_global_system`) was held would otherwise poison it and
+                // make every later cycle panic here too. The cached data is a
+                // plain metric map that is safe to keep using after a panic
+                // mid-update, so recover instead of propagating the poison.
+                let mut cache = process_cache
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 update_process_cache(system, &gpu_pids, &mut cache)
             })
         });
 
-        let all_cpu_info = cpu_task.await.unwrap_or_default();
-        let all_memory_info = memory_task.await.unwrap_or_default();
-        let all_chassis_info = chassis_task.await.unwrap_or_default();
-        let all_storage_info = storage_task.await.unwrap_or_default();
-        let all_processes = processes_task.await.unwrap_or_default();
+        let all_cpu_info = join_or_log_default(cpu_task, "CPU").await;
+        let all_memory_info = join_or_log_default(memory_task, "memory").await;
+        let all_chassis_info = join_or_log_default(chassis_task, "chassis").await;
+        let all_storage_info = join_or_log_default(storage_task, "storage").await;
+        let all_processes = join_or_log_default(processes_task, "process").await;
 
         let mut all_processes = merge_gpu_processes(all_processes, gpu_processes);
 
