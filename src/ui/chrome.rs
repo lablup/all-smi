@@ -171,11 +171,11 @@ pub fn print_function_keys<W: Write>(
         // Local mode: both process and GPU sorting
         if state.gpu_filter_enabled {
             format!(
-                "h:Help q:Exit f:Filter ←→:Scroll ↑↓:Scroll p:PID m:Memory g:GPU-Mem [{sort_indicator}] [{filter_indicator}]"
+                "h:Help q:Exit f:Filter ←→:Scroll ↑↓:Scroll p:PID c:CPU m:Memory g:GPU-Mem [{sort_indicator}] [{filter_indicator}]"
             )
         } else {
             format!(
-                "h:Help q:Exit f:Filter ←→:Scroll ↑↓:Scroll p:PID m:Memory g:GPU-Mem [{sort_indicator}]"
+                "h:Help q:Exit f:Filter ←→:Scroll ↑↓:Scroll p:PID c:CPU m:Memory g:GPU-Mem [{sort_indicator}]"
             )
         }
     };
@@ -387,5 +387,44 @@ fn print_filter_bar<W: Write>(stdout: &mut W, cols: u16, state: &AppState) {
     let remaining = (cols as usize).saturating_sub(used);
     if remaining > 0 {
         print_colored_text(stdout, &" ".repeat(remaining), Color::White, None, None);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::print_function_keys;
+    use crate::app_state::{AppState, SortCriteria};
+
+    #[test]
+    fn local_status_bar_advertises_cpu_sort_shortcut_and_indicator() {
+        let mut state = AppState::new();
+        state.sort_criteria = SortCriteria::CpuPercent;
+
+        let mut output = Vec::new();
+        print_function_keys(&mut output, 200, 30, &state, false);
+        let rendered = String::from_utf8(output).expect("status bar should be valid UTF-8");
+
+        assert!(
+            rendered.contains("c:CPU"),
+            "local status bar must advertise the CPU sort shortcut.\n--- status ---\n{rendered}"
+        );
+        assert!(
+            rendered.contains("Sort:CPU%"),
+            "local status bar must surface the active CPU sort indicator.\n--- status ---\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn remote_status_bar_keeps_cpu_shortcut_hidden() {
+        let state = AppState::new();
+
+        let mut output = Vec::new();
+        print_function_keys(&mut output, 200, 30, &state, true);
+        let rendered = String::from_utf8(output).expect("status bar should be valid UTF-8");
+
+        assert!(
+            !rendered.contains("c:CPU"),
+            "remote status bar must not advertise the local-only CPU shortcut.\n--- status ---\n{rendered}"
+        );
     }
 }

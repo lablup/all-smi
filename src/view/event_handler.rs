@@ -346,6 +346,10 @@ fn handle_users_tab_keys(key_event: KeyEvent, state: &mut AppState) -> bool {
             change_users_sort(state, UserSortKey::User);
             true
         }
+        // Local-only CPU sort shortcut. Consume it on the Users tab so
+        // remote-mode behaviour stays unchanged instead of leaking into
+        // the global process-sort handler.
+        KeyCode::Char('c') => true,
         KeyCode::Char('m') => {
             change_users_sort(state, UserSortKey::Memory);
             true
@@ -978,6 +982,7 @@ fn handle_navigation_keys(key_event: KeyEvent, state: &mut AppState, args: &View
         KeyCode::PageUp => handle_page_up(state, args),
         KeyCode::PageDown => handle_page_down(state, args),
         KeyCode::Char('p') => state.sort_criteria = SortCriteria::Pid,
+        KeyCode::Char('c') => state.sort_criteria = SortCriteria::CpuPercent,
         KeyCode::Char('m') => state.sort_criteria = SortCriteria::MemoryPercent,
         KeyCode::Char('u') => state.sort_criteria = SortCriteria::Utilization,
         KeyCode::Char('g') => state.sort_criteria = SortCriteria::GpuMemory,
@@ -1730,6 +1735,34 @@ mod tests {
             state.sort_criteria,
             SortCriteria::MemoryPercent,
             "Users-tab `m` must not leak into the global GPU sort"
+        );
+    }
+
+    #[tokio::test]
+    async fn local_c_key_changes_sort_to_cpu_percent() {
+        let mut state = AppState::new();
+        state.loading = false;
+        state.is_local_mode = true;
+
+        handle_key_event(key(KeyCode::Char('c')), &mut state, &args()).await;
+
+        assert_eq!(
+            state.sort_criteria,
+            SortCriteria::CpuPercent,
+            "`c` in local mode must switch to CPU% sorting"
+        );
+    }
+
+    #[tokio::test]
+    async fn users_tab_c_does_not_leak_into_global_cpu_sort() {
+        let mut state = state_with_users_tab();
+
+        handle_key_event(key(KeyCode::Char('c')), &mut state, &args()).await;
+
+        assert_ne!(
+            state.sort_criteria,
+            SortCriteria::CpuPercent,
+            "Users-tab `c` must not leak into the global CPU sort"
         );
     }
 
