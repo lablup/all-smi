@@ -206,6 +206,7 @@ fn render_shortcuts_section(
     if !is_remote {
         left_column.extend(vec![
             ("  P", "Sort processes by PID", "shortcut"),
+            ("  C", "Sort processes by CPU%", "shortcut"),
             ("  M", "Sort processes by memory", "shortcut"),
         ]);
     }
@@ -587,4 +588,38 @@ fn get_current_sort_status(sort_criteria: &crate::app_state::SortCriteria) -> St
         crate::app_state::SortCriteria::Temperature => "Temperature",
     }
     .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::render_shortcuts_section;
+    use crate::app_state::AppState;
+
+    #[test]
+    fn local_help_advertises_cpu_sort_shortcut() {
+        let state = AppState::new();
+        let shortcuts: String = (0..40)
+            .map(|line| render_shortcuts_section(line, 118, &state, false))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(
+            shortcuts.contains("Sort processes by CPU%"),
+            "local shortcuts must advertise the CPU sort shortcut.\n--- shortcuts ---\n{shortcuts}"
+        );
+    }
+
+    #[test]
+    fn remote_help_hides_local_cpu_sort_shortcut() {
+        let state = AppState::new();
+        let shortcuts: String = (0..40)
+            .map(|line| render_shortcuts_section(line, 118, &state, true))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(
+            !shortcuts.contains("Sort processes by CPU%"),
+            "remote shortcuts must not advertise the local-only CPU sort shortcut.\n--- shortcuts ---\n{shortcuts}"
+        );
+    }
 }
