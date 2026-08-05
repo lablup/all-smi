@@ -24,6 +24,8 @@ pub use readers::tenstorrent::get_tenstorrent_status_message;
 pub mod cpu_linux;
 #[cfg(target_os = "macos")]
 pub mod cpu_macos;
+#[cfg(target_os = "macos")]
+pub mod cpu_macos_intel;
 #[cfg(target_os = "windows")]
 pub mod cpu_windows;
 

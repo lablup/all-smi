@@ -31,10 +31,17 @@
 
 mod ioreport;
 mod metrics;
-mod smc;
 mod thermal;
 
 pub mod manager;
+
+// Public so the Intel Mac readers can talk to the SMC directly. They cannot go
+// through `manager`, which requires IOReport and therefore Apple Silicon.
+pub mod smc;
+
+// Public so the Intel Mac chassis reader can read thermal pressure without the
+// native metrics manager. NSProcessInfo.thermalState is architecture-agnostic.
+pub use thermal::get_thermal_state;
 
 // Re-export public types for use by apple_silicon_native reader and main
 #[allow(unused_imports)]

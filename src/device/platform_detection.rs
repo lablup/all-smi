@@ -207,10 +207,59 @@ fn detect_apple_silicon() -> bool {
         return false;
     }
 
-    let output =
-        execute_command_default("uname", &["-m"]).expect("Failed to execute uname command");
+    // An `aarch64-apple-darwin` binary can only ever run on Apple Silicon, so
+    // answer from the compile-time target rather than from an external command
+    // that a restricted PATH could hide. Without this, an unresolvable `uname`
+    // would report Apple Silicon hardware as an Intel Mac and hand it the Intel
+    // readers.
+    if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        return true;
+    }
 
-    output.stdout.trim() == "arm64"
+    // An x86_64 binary running under Rosetta 2 sees `uname -m` == "x86_64" even
+    // though the machine is Apple Silicon, so ask the kernel whether this
+    // process is translated before trusting the machine string. The probe is
+    // compiled out on aarch64 builds, which can only ever run natively.
+    if is_translated_process() {
+        return true;
+    }
+
+    // A missing or unexecutable `uname` used to abort the whole process here.
+    // Treat the failure as "not Apple Silicon" instead: every caller of this
+    // function already has a working non-Apple-Silicon path, so degrading is
+    // strictly better than panicking.
+    match execute_command_default("uname", &["-m"]) {
+        Ok(output) => output.stdout.trim() == "arm64",
+        Err(_) => false,
+    }
+}
+
+/// Report whether the current process runs under Rosetta 2 translation.
+///
+/// `sysctl.proc_translated` returns 1 for translated processes and 0 for
+/// native ones. The key does not exist at all on Intel Macs, where sysctl
+/// exits non-zero; that is treated as "not translated".
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+fn is_translated_process() -> bool {
+    matches!(
+        execute_command_default("sysctl", &["-n", "sysctl.proc_translated"]),
+        Ok(output) if output.status == 0 && output.stdout.trim() == "1"
+    )
+}
+
+#[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
+fn is_translated_process() -> bool {
+    false
+}
+
+/// Report whether this is an Intel (x86_64) Mac.
+///
+/// Complement of [`is_apple_silicon`] on macOS. Defined only on macOS because
+/// every caller sits behind a `target_os = "macos"` gate, and an always-false
+/// stub elsewhere would be dead code under the `-D warnings` build.
+#[cfg(target_os = "macos")]
+pub fn is_intel_mac() -> bool {
+    !is_apple_silicon()
 }
 
 pub fn has_furiosa() -> bool {
@@ -558,6 +607,40 @@ pub fn get_container_pid_namespace() -> Option<u32> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Architecture detection must never abort the process (it used to
+    /// `.expect()` on the `uname` probe) and must be stable across calls
+    /// because the result is cached in a `OnceLock`.
+    #[test]
+    fn apple_silicon_detection_is_total_and_stable() {
+        let first = is_apple_silicon();
+        assert_eq!(first, is_apple_silicon());
+
+        if std::env::consts::OS != "macos" {
+            assert!(!first, "non-macOS hosts are never Apple Silicon");
+        }
+    }
+
+    /// An `aarch64-apple-darwin` binary can only ever run on Apple Silicon, so
+    /// detection must answer from the compile-time target and never depend on
+    /// resolving `uname`. Failing open to `false` here would hand Apple Silicon
+    /// hardware the Intel readers.
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[test]
+    fn aarch64_macos_build_reports_apple_silicon() {
+        assert!(is_apple_silicon());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn intel_mac_is_the_macos_complement_of_apple_silicon() {
+        assert_eq!(is_intel_mac(), !is_apple_silicon());
+    }
 }
 
 /// Aggregated hardware-detection snapshot.

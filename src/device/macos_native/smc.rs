@@ -38,6 +38,35 @@ use std::sync::OnceLock;
 /// Maximum number of temperature keys to discover per category (similar to mactop's limit)
 const MAX_TEMP_KEYS: usize = 64;
 
+/// Maximum number of fans to probe. No Mac ships with more than a handful.
+const MAX_FANS: u32 = 8;
+
+/// Upper bound for a plausible fan speed in RPM. Readings above this come from
+/// a key that is missing or holds something other than a tachometer value.
+const MAX_PLAUSIBLE_FAN_RPM: f64 = 20_000.0;
+
+/// Upper bound for a plausible whole-machine or CPU-package power reading in
+/// watts. The largest Mac Pro power supply is well under this.
+const MAX_PLAUSIBLE_POWER_WATTS: f64 = 2_000.0;
+
+/// True when `value` is a plausible whole-machine or CPU-package power
+/// reading in watts (finite and within `0.0..=MAX_PLAUSIBLE_POWER_WATTS`).
+///
+/// Guards `get_system_power` and `get_cpu_package_power` against a missing or
+/// differently-typed SMC key surfacing as a bogus metric: a wrong data type
+/// can decode to `NaN`, a huge magnitude, or a negative value, none of which
+/// is a real power draw.
+fn is_plausible_power_watts(value: f64) -> bool {
+    value.is_finite() && (0.0..=MAX_PLAUSIBLE_POWER_WATTS).contains(&value)
+}
+
+/// True when `value` is a plausible fan speed in RPM (finite and within
+/// `0.0..=MAX_PLAUSIBLE_FAN_RPM`). Same rationale as
+/// [`is_plausible_power_watts`], applied to `get_fan_readings`.
+fn is_plausible_fan_rpm(value: f64) -> bool {
+    value.is_finite() && (0.0..=MAX_PLAUSIBLE_FAN_RPM).contains(&value)
+}
+
 /// Discovered temperature keys (CPU keys, GPU keys)
 /// Using a single static prevents race conditions where one call discovers keys
 /// but the other category's keys are discarded.
@@ -56,6 +85,7 @@ unsafe extern "C" {
     fn IOServiceGetMatchingService(master_port: u32, matching: *mut c_void) -> u32;
     fn IOServiceOpen(device: u32, owning_task: u32, conn_type: u32, conn: *mut u32) -> i32;
     fn IOServiceClose(conn: u32) -> i32;
+    fn IOObjectRelease(object: u32) -> i32;
     fn IOConnectCallStructMethod(
         conn: u32,
         selector: u32,
@@ -137,6 +167,48 @@ struct KeyData {
     bytes: [u8; 32],
 }
 
+/// Sensor category a discovered SMC temperature key belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TempKeyCategory {
+    Cpu,
+    Gpu,
+}
+
+/// Classify an SMC key as a CPU or GPU temperature sensor.
+///
+/// Two disjoint sensor families are recognized, and each one is pinned to the
+/// data type it actually uses. That pairing is what keeps Intel support from
+/// disturbing Apple Silicon: the two naming schemes differ in the case of the
+/// second character, so no key can be claimed by both families.
+///
+/// - Apple Silicon uses `flt ` (IEEE 754) sensors named `Tp*` (performance
+///   die), `Te*` (efficiency die) and `Tg*` (GPU die).
+/// - Intel uses `sp78` fixed-point sensors named `TC*` (CPU proximity/die, for
+///   example TC0P and TC0D) and `TG*` (GPU proximity/die, TG0P and TG0D).
+///
+/// Every discovered reading is still range-filtered by the callers, so a
+/// misclassified sensor cannot pull an average outside plausible temperatures.
+fn classify_temperature_key(key: &str, data_type: u32) -> Option<TempKeyCategory> {
+    let bytes = key.as_bytes();
+    if bytes.len() < 2 || bytes[0] != b'T' {
+        return None;
+    }
+
+    match data_type {
+        SMC_TYPE_FLT => match bytes[1] {
+            b'p' | b'e' => Some(TempKeyCategory::Cpu),
+            b'g' => Some(TempKeyCategory::Gpu),
+            _ => None,
+        },
+        SMC_TYPE_SP78 => match bytes[1] {
+            b'C' => Some(TempKeyCategory::Cpu),
+            b'G' => Some(TempKeyCategory::Gpu),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// Convert FourCC string to u32
 fn str_to_fourcc(s: &str) -> u32 {
     let bytes = s.as_bytes();
@@ -168,6 +240,15 @@ impl SMC {
 
             let mut conn: u32 = 0;
             let result = IOServiceOpen(device, mach_task_self(), 0, &mut conn);
+
+            // `IOServiceGetMatchingService` returns a +1-retained object that
+            // the caller owns. `IOServiceOpen` creates an independent user
+            // client and does not adopt that reference, so the service handle
+            // has to be released on both outcomes or every call leaks a mach
+            // port right. `SMCMetrics::collect` opens a fresh connection once
+            // per collection cycle, so the leak was unbounded over the
+            // lifetime of a long-running `view` or `api` process.
+            IOObjectRelease(device);
 
             if result != 0 {
                 return Err("Failed to open SMC connection");
@@ -276,11 +357,8 @@ impl SMC {
 
     /// Discover all temperature keys dynamically
     ///
-    /// Based on mactop's loadSMCTempKeys implementation:
-    /// - Iterates through all SMC keys
-    /// - Filters for 'flt ' type (float, dataType == 1718383648)
-    /// - CPU keys: Tp* or Te* prefix
-    /// - GPU keys: Tg* prefix
+    /// Iterates the whole SMC key space once and keeps the keys that
+    /// [`classify_temperature_key`] recognizes as CPU or GPU sensors.
     ///
     /// Returns at most MAX_TEMP_KEYS per category to prevent unbounded growth.
     pub fn discover_temperature_keys(&self) -> (Vec<String>, Vec<String>) {
@@ -309,27 +387,10 @@ impl SMC {
                 Err(_) => continue,
             };
 
-            // Filter for 'flt ' type (1718383648 == b"flt " as u32)
-            if key_info.data_type != SMC_TYPE_FLT {
-                continue;
-            }
-
-            let key_bytes = key.as_bytes();
-            if key_bytes.len() < 2 {
-                continue;
-            }
-
-            // CPU temperature keys: Tp* or Te*
-            if key_bytes[0] == b'T'
-                && (key_bytes[1] == b'p' || key_bytes[1] == b'e')
-                && cpu_keys.len() < MAX_TEMP_KEYS
-            {
-                cpu_keys.push(key);
-            }
-            // GPU temperature keys: Tg*
-            else if key_bytes[0] == b'T' && key_bytes[1] == b'g' && gpu_keys.len() < MAX_TEMP_KEYS
-            {
-                gpu_keys.push(key);
+            match classify_temperature_key(&key, key_info.data_type) {
+                Some(TempKeyCategory::Cpu) if cpu_keys.len() < MAX_TEMP_KEYS => cpu_keys.push(key),
+                Some(TempKeyCategory::Gpu) if gpu_keys.len() < MAX_TEMP_KEYS => gpu_keys.push(key),
+                _ => {}
             }
         }
 
@@ -532,40 +593,160 @@ impl SMC {
     }
 
     /// Read system power (PSTR key)
+    ///
+    /// PSTR is the SMC's own estimate of total system draw in watts. It exists
+    /// on most Intel Macs and is model-dependent, so callers must treat it as
+    /// an approximation rather than a metered value. Implausible readings
+    /// (non-finite, negative, or beyond any Mac's power envelope) are dropped
+    /// so a missing or differently-typed key cannot surface as a metric.
     pub fn get_system_power(&mut self) -> Option<f64> {
-        self.read_value("PSTR").ok()
+        let value = self.read_value("PSTR").ok()?;
+        is_plausible_power_watts(value).then_some(value)
     }
 
-    /// Read fan speeds
-    pub fn get_fan_speeds(&mut self) -> Vec<(String, u32)> {
+    /// Read CPU package power in watts, when the model exposes it.
+    ///
+    /// The SMC power key family varies across Intel Mac generations, so the
+    /// candidates are tried in order of specificity: package total, package
+    /// cores, then the older per-package core key. Returns `None` when none of
+    /// them is present, which is a normal outcome on many models.
+    pub fn get_cpu_package_power(&mut self) -> Option<f64> {
+        const CPU_POWER_KEYS: [&str; 3] = ["PCPT", "PCPC", "PC0C"];
+
+        for key in CPU_POWER_KEYS {
+            if let Ok(value) = self.read_value(key)
+                && is_plausible_power_watts(value)
+                && value > 0.0
+            {
+                return Some(value);
+            }
+        }
+
+        None
+    }
+
+    /// Read every fan the SMC reports, including its maximum rated speed.
+    ///
+    /// `FNum` holds the fan count; `F<i>Ac` and `F<i>Mx` hold the actual and
+    /// maximum RPM of fan `i`. A fan whose actual speed cannot be read is
+    /// skipped rather than reported as zero.
+    pub fn get_fan_readings(&mut self) -> Vec<FanReading> {
         let mut fans = Vec::new();
 
         // Try to read fan count
         let fan_count = match self.read_value("FNum") {
-            Ok(v) => v as u32,
-            Err(_) => 2, // Default to checking 2 fans
+            Ok(v) if v.is_finite() && v >= 0.0 => v as u32,
+            _ => 2, // Default to checking 2 fans
         };
 
-        for i in 0..fan_count.min(8) {
-            let key = format!("F{i}Ac");
-            if let Ok(speed) = self.read_value(&key) {
-                fans.push((format!("Fan {i}"), speed as u32));
-            }
+        for index in 0..fan_count.min(MAX_FANS) {
+            let actual_rpm = match self.read_value(&format!("F{index}Ac")) {
+                Ok(v) if is_plausible_fan_rpm(v) => v as u32,
+                _ => continue,
+            };
+
+            let max_rpm = match self.read_value(&format!("F{index}Mx")) {
+                Ok(v) if is_plausible_fan_rpm(v) => v as u32,
+                _ => 0,
+            };
+
+            fans.push(FanReading {
+                index,
+                actual_rpm,
+                max_rpm,
+            });
         }
 
         fans
+    }
+
+    /// Read fan speeds as `(name, rpm)` pairs.
+    pub fn get_fan_speeds(&mut self) -> Vec<(String, u32)> {
+        self.get_fan_readings()
+            .into_iter()
+            .map(|fan| (fan.name(), fan.actual_rpm))
+            .collect()
+    }
+}
+
+/// Lazily opened, reusable SMC connection.
+///
+/// Readers are polled on the UI refresh interval, so the connection is opened
+/// once and then reused instead of handshaking with IOKit on every cycle
+/// (which is what [`SMCMetrics::collect`] does, acceptable there because the
+/// native metrics manager caches its results). A failed open is remembered as
+/// `Unavailable` so a machine without a reachable SMC does not pay for a retry
+/// on every poll either.
+#[derive(Default)]
+pub enum SmcConnection {
+    #[default]
+    Unopened,
+    Open(SMC),
+    Unavailable,
+}
+
+impl SmcConnection {
+    /// Return the open connection, opening it on first use.
+    ///
+    /// Returns `None` once the SMC has been found unreachable.
+    pub fn get(&mut self) -> Option<&mut SMC> {
+        if matches!(self, SmcConnection::Unopened) {
+            *self = match SMC::new() {
+                Ok(smc) => SmcConnection::Open(smc),
+                Err(_) => SmcConnection::Unavailable,
+            };
+        }
+
+        match self {
+            SmcConnection::Open(smc) => Some(smc),
+            _ => None,
+        }
+    }
+}
+
+/// A single fan reading from the SMC.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FanReading {
+    /// Zero-based fan index as used in the `F<i>Ac` key family.
+    pub index: u32,
+    /// Current speed in RPM.
+    pub actual_rpm: u32,
+    /// Maximum rated speed in RPM, or 0 when the SMC does not report one.
+    pub max_rpm: u32,
+}
+
+impl FanReading {
+    /// Human-readable fan name for display and metric labels.
+    pub fn name(&self) -> String {
+        format!("Fan {}", self.index)
     }
 }
 
 impl Drop for SMC {
     fn drop(&mut self) {
-        unsafe {
-            IOServiceClose(self.conn);
+        // A zero `conn` is MACH_PORT_NULL, which only the unit tests construct.
+        // Closing it is harmless but pointless, so skip it.
+        if self.conn != 0 {
+            // SAFETY: `conn` is an io_connect_t returned by a successful
+            // `IOServiceOpen` in `SMC::new`, owned exclusively by `self`.
+            // `SMC` has a `Drop` impl (so it cannot be `Copy`) and derives no
+            // `Clone`, so the handle is closed exactly once.
+            unsafe {
+                IOServiceClose(self.conn);
+            }
         }
     }
 }
 
-// Safety: SMC uses IOKit which is thread-safe
+// SAFETY: `conn` is a mach port name in this task's IPC namespace. It carries
+// no thread-local state and no thread affinity, so the handle stays valid when
+// the owning `SMC` moves between threads (readers are polled from Tokio's
+// blocking pool, which does not pin a task to one thread).
+//
+// `Sync` is deliberately NOT implemented: the read path takes `&mut self`, and
+// concurrent `IOConnectCallStructMethod` calls on a single AppleSMC user client
+// are not guaranteed safe. Callers that need shared access wrap this in a
+// `Mutex`, which is what makes them `Sync` without any further `unsafe`.
 unsafe impl Send for SMC {}
 
 /// SMC metrics collection result
@@ -622,6 +803,102 @@ mod tests {
         assert_eq!(str_to_fourcc("#KEY"), u32::from_be_bytes(*b"#KEY"));
     }
 
+    /// Apple Silicon sensors are `flt ` floats named `Tp*`/`Te*` (CPU) and
+    /// `Tg*` (GPU). This is the behavior discovery had before Intel keys were
+    /// added and it must be preserved exactly.
+    #[test]
+    fn classifies_apple_silicon_float_sensors() {
+        assert_eq!(
+            classify_temperature_key("Tp01", SMC_TYPE_FLT),
+            Some(TempKeyCategory::Cpu)
+        );
+        assert_eq!(
+            classify_temperature_key("Te05", SMC_TYPE_FLT),
+            Some(TempKeyCategory::Cpu)
+        );
+        assert_eq!(
+            classify_temperature_key("Tg0f", SMC_TYPE_FLT),
+            Some(TempKeyCategory::Gpu)
+        );
+    }
+
+    /// Intel Macs report temperatures as `sp78` fixed point under the classic
+    /// TC*/TG* names, which the old `flt `-only filter never found.
+    #[test]
+    fn classifies_intel_fixed_point_sensors() {
+        assert_eq!(
+            classify_temperature_key("TC0P", SMC_TYPE_SP78),
+            Some(TempKeyCategory::Cpu)
+        );
+        assert_eq!(
+            classify_temperature_key("TC0D", SMC_TYPE_SP78),
+            Some(TempKeyCategory::Cpu)
+        );
+        assert_eq!(
+            classify_temperature_key("TG0P", SMC_TYPE_SP78),
+            Some(TempKeyCategory::Gpu)
+        );
+        assert_eq!(
+            classify_temperature_key("TG0D", SMC_TYPE_SP78),
+            Some(TempKeyCategory::Gpu)
+        );
+    }
+
+    /// The two families must stay disjoint. Accepting an Intel-named key as a
+    /// float, or an Apple Silicon-named key as fixed point, would let unrelated
+    /// sensors pollute the temperature averages on the other architecture.
+    #[test]
+    fn temperature_families_do_not_cross_data_types() {
+        assert_eq!(classify_temperature_key("TC0P", SMC_TYPE_FLT), None);
+        assert_eq!(classify_temperature_key("TG0P", SMC_TYPE_FLT), None);
+        assert_eq!(classify_temperature_key("Tp01", SMC_TYPE_SP78), None);
+        assert_eq!(classify_temperature_key("Tg0f", SMC_TYPE_SP78), None);
+    }
+
+    /// Non-temperature keys and unrelated data types must never be collected,
+    /// whatever their name looks like.
+    #[test]
+    fn rejects_non_temperature_keys() {
+        // Right prefix letters, wrong leading character.
+        assert_eq!(classify_temperature_key("Fp01", SMC_TYPE_FLT), None);
+        // Temperature-looking name in a category we do not track.
+        assert_eq!(classify_temperature_key("TA0P", SMC_TYPE_SP78), None);
+        // Power and fan keys.
+        assert_eq!(classify_temperature_key("PSTR", SMC_TYPE_FLT), None);
+        assert_eq!(classify_temperature_key("F0Ac", SMC_TYPE_FLT), None);
+        // Recognized names carried by an unrelated data type.
+        assert_eq!(classify_temperature_key("Tp01", SMC_TYPE_UI32), None);
+        assert_eq!(classify_temperature_key("TC0P", SMC_TYPE_UI8), None);
+        // Degenerate keys.
+        assert_eq!(classify_temperature_key("", SMC_TYPE_FLT), None);
+        assert_eq!(classify_temperature_key("T", SMC_TYPE_FLT), None);
+    }
+
+    /// SP78 is signed 7.8 fixed point, which is how every Intel Mac reports
+    /// temperatures. Getting the divisor wrong yields readings off by 256x.
+    #[test]
+    fn test_sp78_fixed_point_decoding() {
+        let smc = SMC { conn: 0 }; // convert_value doesn't touch the connection
+        let mut bytes = [0u8; 32];
+        // 52.5°C in signed 7.8 fixed point = 52.5 * 256 = 13440 = 0x3480
+        bytes[0..2].copy_from_slice(&0x3480_i16.to_be_bytes());
+        let value = smc.convert_value(&bytes, SMC_TYPE_SP78, 2);
+        assert!(
+            (value - 52.5).abs() < 0.01,
+            "expected ~52.5, got {value} for the Intel sp78 temperature encoding"
+        );
+    }
+
+    #[test]
+    fn fan_reading_names_are_indexed() {
+        let fan = FanReading {
+            index: 1,
+            actual_rpm: 2100,
+            max_rpm: 5500,
+        };
+        assert_eq!(fan.name(), "Fan 1");
+    }
+
     /// Sanity-check little-endian decoding of the `flt ` SMC type. Apple
     /// Silicon stores temperature sensor floats as little-endian; if this
     /// regresses we get garbage values like 1e-32 or 3e36 instead of real
@@ -637,5 +914,34 @@ mod tests {
             (value - 51.2).abs() < 0.01,
             "expected ~51.2, got {value} — float endianness may have regressed"
         );
+    }
+
+    /// `get_system_power` and `get_cpu_package_power` both rely on this
+    /// predicate to drop a reading from a missing or differently-typed SMC
+    /// key before it can surface as a bogus metric.
+    #[test]
+    fn plausible_power_watts_rejects_non_finite_negative_and_out_of_range_values() {
+        assert!(is_plausible_power_watts(0.0));
+        assert!(is_plausible_power_watts(127.99)); // sp78 saturation point
+        assert!(is_plausible_power_watts(MAX_PLAUSIBLE_POWER_WATTS));
+
+        assert!(!is_plausible_power_watts(-0.01));
+        assert!(!is_plausible_power_watts(MAX_PLAUSIBLE_POWER_WATTS + 0.01));
+        assert!(!is_plausible_power_watts(f64::NAN));
+        assert!(!is_plausible_power_watts(f64::INFINITY));
+        assert!(!is_plausible_power_watts(f64::NEG_INFINITY));
+    }
+
+    /// Same contract as the power predicate, applied to `get_fan_readings`.
+    #[test]
+    fn plausible_fan_rpm_rejects_non_finite_negative_and_out_of_range_values() {
+        assert!(is_plausible_fan_rpm(0.0));
+        assert!(is_plausible_fan_rpm(5500.0));
+        assert!(is_plausible_fan_rpm(MAX_PLAUSIBLE_FAN_RPM));
+
+        assert!(!is_plausible_fan_rpm(-1.0));
+        assert!(!is_plausible_fan_rpm(MAX_PLAUSIBLE_FAN_RPM + 0.01));
+        assert!(!is_plausible_fan_rpm(f64::NAN));
+        assert!(!is_plausible_fan_rpm(f64::INFINITY));
     }
 }

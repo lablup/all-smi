@@ -69,8 +69,13 @@
 //! | Platform | GPUs | NPUs | CPU | Memory |
 //! |----------|------|------|-----|--------|
 //! | Linux | NVIDIA, AMD | Gaudi, TPU, Tenstorrent, Rebellions, Furiosa | Yes | Yes |
-//! | macOS | Apple Silicon | - | Yes | Yes |
+//! | macOS (Apple Silicon) | Apple Silicon | - | Yes | Yes |
+//! | macOS (Intel) | - | - | Yes | Yes |
 //! | Windows | NVIDIA, AMD | - | Yes | Yes |
+//!
+//! Intel Macs report CPU, memory, and chassis metrics (temperature, fan speeds,
+//! approximate total power) without sudo. GPU monitoring for their integrated
+//! Intel and discrete AMD graphics is not implemented.
 //!
 //! ## Features
 //!

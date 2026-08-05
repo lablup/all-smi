@@ -303,6 +303,16 @@ Older releases introduced environment variables with different naming. All alias
   - Provides actual temperature readings from SMC sensors
   - Run with: `all-smi local`
 
+### macOS (Intel)
+- **No sudo required:** Uses the Apple SMC and NSProcessInfo directly
+  - CPU model, socket/core/thread counts, and clocks come from `sysctl`
+  - Per-core utilization bars, plus CPU temperature from the SMC `TC0P`/`TC0D` sensors
+  - Chassis block reports fan RPMs, thermal pressure, and approximate total system power (SMC `PSTR`)
+  - GPU monitoring is not available: the integrated Intel and discrete AMD GPUs in Intel Macs are not read, so the GPU list stays empty
+  - Total power is the SMC's own estimate rather than a metered value, and its accuracy varies by model. `powermetrics` would be metered but needs sudo, which all-smi does not ask for on macOS
+  - Download `all-smi-macos-x86_64.zip` from the releases page. It is signed and notarized like the Apple Silicon archive
+  - Run with: `all-smi local`
+
 ### Linux with AMD GPUs
 - **Sudo Access Required:** AMD GPU monitoring requires `sudo` to access `/dev/dri` devices
 - **ROCm Installation:** AMD GPU support requires ROCm drivers and libraries
@@ -580,6 +590,7 @@ Stable check IDs (greppable across versions):
   - Actual CPU/GPU temperature readings from SMC sensors
   - Thermal pressure monitoring
   - P/E core architecture support
+  - Intel Macs (x86_64): CPU, memory, and chassis monitoring via SMC and sysctl, including per-core bars, CPU temperature, fan RPMs, and approximate system power. No GPU monitoring
 - **NVIDIA Jetson:** 
   - Special support for Tegra-based systems
   - DLA (Deep Learning Accelerator) monitoring

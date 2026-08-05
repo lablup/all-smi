@@ -204,17 +204,25 @@ impl AllSmi {
         let _ = &config;
 
         // Initialize platform-specific managers
+        // The native metrics manager is built on IOReport's "Energy Model"
+        // channel group, which only exists on Apple Silicon. Initializing it on
+        // an Intel Mac always fails inside `IOReport::new`, so gate it the same
+        // way the binary entry points do instead of failing on every startup.
         #[cfg(target_os = "macos")]
         let macos_initialized = {
-            match initialize_native_metrics_manager(config.sample_interval_ms) {
-                Ok(()) => true,
-                Err(e) => {
-                    // Log but don't fail - some metrics may still work
-                    if config.verbose {
-                        eprintln!("Warning: macOS native metrics init failed: {e}");
+            if crate::device::is_apple_silicon() {
+                match initialize_native_metrics_manager(config.sample_interval_ms) {
+                    Ok(()) => true,
+                    Err(e) => {
+                        // Log but don't fail - some metrics may still work
+                        if config.verbose {
+                            eprintln!("Warning: macOS native metrics init failed: {e}");
+                        }
+                        false
                     }
-                    false
                 }
+            } else {
+                false
             }
         };
 
