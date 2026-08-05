@@ -516,20 +516,36 @@ jobs:
           }
           trap diagnose ERR
 
-          # `service status` reports running the moment launchd spawns
-          # the program, which is well before it has finished coming up:
-          # enumerating the IOReport channel list dominates startup and
-          # ProcessType=Background runs it at background QoS. Every
-          # readiness wait below therefore polls the metrics endpoint,
-          # not the process state. Polling status instead races, and the
-          # race is invisible until an assertion downstream fails for an
-          # unrelated-looking reason.
+          # Every readiness wait polls for a rendered metric line, which
+          # is the same condition the assertions downstream require.
+          #
+          # Two weaker gates were tried and both race. `service status`
+          # reports running the moment launchd spawns the program, long
+          # before it has come up. Plain HTTP 200 is not much better:
+          # axum binds the listener and starts serving `/metrics` while
+          # the background collection loop has not yet written anything
+          # into AppState, and an empty AppState renders a byte-empty
+          # body by design (`empty_inputs_render_empty_string` in
+          # src/api/metrics/render.rs). So the endpoint answers 200 with
+          # zero bytes for a while. Measured on an M1 Ultra: about 0.3 s
+          # at normal priority, and 2.1 to 3.5 s under the background QoS
+          # this service's ProcessType=Background selects. Run
+          # 31005178260 lost that race by 243 ms.
+          #
+          # This also protects the shutdown assertion further down. A
+          # SIGTERM delivered before `run_api_mode` has spawned the WAL
+          # flush task produces no flush line at all, so a gate that
+          # opens early turns that assertion into a coin flip too.
           ready() {
             for _ in $(seq 1 60); do
-              curl -sf --max-time 5 localhost:9090/metrics >/dev/null && return 0
+              if curl -sf --max-time 5 localhost:9090/metrics | grep -q '^all_smi_'; then
+                return 0
+              fi
               sleep 2
             done
-            echo "::error::the exporter never served /metrics"
+            echo "::error::the exporter never rendered an all_smi_ metric line"
+            echo "--- last /metrics response ---"
+            curl -sv --max-time 5 localhost:9090/metrics 2>&1 | head -40
             return 1
           }
 
@@ -539,6 +555,14 @@ jobs:
           "$BIN" service status --user --json | grep -q '"running": true'
           "$BIN" service status --user --json | grep -q '"enabled": true'
           curl -sf --max-time 10 localhost:9090/metrics | grep -q '^all_smi_'
+          # Assert a specific family rather than only "some line". The
+          # runner is a VM with no IOReport, so the native metrics
+          # manager fails to initialize and the GPU and chassis readers
+          # degrade to zeros and to nothing respectively. The memory
+          # reader is pure sysinfo with no failure path at all
+          # (src/device/memory_macos.rs), which makes this the one line
+          # guaranteed to be present on any macOS host.
+          curl -sf --max-time 10 localhost:9090/metrics | grep -q '^all_smi_memory_total_bytes'
           grep -q "API server listening" "$LOG"
 
           "$BIN" service restart --user
@@ -547,8 +571,13 @@ jobs:
           # `stop` boots the job out, which is a SIGTERM. The final
           # energy-WAL flush has to be reached before launchd's
           # ExitTimeOut turns it into a SIGKILL (issues #191, #310).
+          # Poll rather than sleeping a fixed amount: the flush runs on
+          # spawn_blocking and ends in an fsync, and this job is the one
+          # place that would notice it getting slower.
           "$BIN" service stop --user
-          sleep 3
+          for _ in $(seq 1 30); do
+            grep -q "energy WAL: shutdown requested" "$LOG" && break || sleep 1
+          done
           grep -q "energy WAL: shutdown requested" "$LOG"
           "$BIN" service status --user && rc=0 || rc=$?
           test "$rc" -eq 3
@@ -564,6 +593,15 @@ jobs:
 
           "$BIN" service uninstall --user
           test ! -f "$PLIST"
+          # `launchctl bootout` returns before launchd has finished
+          # tearing the job down. That is the same race BOOTSTRAP_ATTEMPTS
+          # in src/service_cmd/launchctl.rs exists to absorb, so sampling
+          # `launchctl print` exactly once here would be the same
+          # gate-versus-assertion mistake in a different costume.
+          for _ in $(seq 1 30); do
+            launchctl print "$TARGET" >/dev/null 2>&1 || break
+            sleep 1
+          done
           launchctl print "$TARGET" >/dev/null 2>&1 && rc=0 || rc=$?
           test "$rc" -ne 0
           # `uninstall` keeps the log deliberately.
