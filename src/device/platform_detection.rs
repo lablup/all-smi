@@ -207,6 +207,15 @@ fn detect_apple_silicon() -> bool {
         return false;
     }
 
+    // An `aarch64-apple-darwin` binary can only ever run on Apple Silicon, so
+    // answer from the compile-time target rather than from an external command
+    // that a restricted PATH could hide. Without this, an unresolvable `uname`
+    // would report Apple Silicon hardware as an Intel Mac and hand it the Intel
+    // readers.
+    if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        return true;
+    }
+
     // An x86_64 binary running under Rosetta 2 sees `uname -m` == "x86_64" even
     // though the machine is Apple Silicon, so ask the kernel whether this
     // process is translated before trusting the machine string. The probe is
@@ -617,8 +626,10 @@ mod tests {
         }
     }
 
-    /// An `aarch64-apple-darwin` binary can only ever run on Apple Silicon,
-    /// so detection failing open to `false` there would be a real bug.
+    /// An `aarch64-apple-darwin` binary can only ever run on Apple Silicon, so
+    /// detection must answer from the compile-time target and never depend on
+    /// resolving `uname`. Failing open to `false` here would hand Apple Silicon
+    /// hardware the Intel readers.
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     #[test]
     fn aarch64_macos_build_reports_apple_silicon() {

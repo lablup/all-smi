@@ -197,13 +197,35 @@ jobs:
         run: cargo build --release --target ${{ matrix.target }} --locked
 
       # 8) macOS code signing
-      # The Developer ID key goes into a keychain named after this run, and the
-      # cleanup step at the end of the job deletes it unconditionally. That
+      # The Developer ID key goes into a keychain named after this run. That
       # matters on the self-hosted Intel Mac, which is persistent: with the
-      # action's default fixed keychain name the signing key would survive the
-      # job on disk and every run would append another certificate to the same
-      # keychain. GitHub-hosted macOS runners are ephemeral and unaffected, but
-      # they take the same path so there is only one behavior to reason about.
+      # action's default fixed name (`signing_temp`) two runs would collide and
+      # every run would append another certificate to the same keychain.
+      #
+      # Cleanup is the import action's own post step, which runs
+      # `security delete-keychain` at the end of the job on success, failure,
+      # and cancellation. Do NOT add a step that deletes this keychain: the
+      # post step would then fail with "The specified keychain could not be
+      # found" and fail the whole job after the artifacts were uploaded, which
+      # also skips the notify-teams and promote-release jobs.
+      - name: Remove stale signing keychains
+        if: runner.os == 'macOS'
+        run: |
+          # Safety net for the persistent runner, reachable only when an
+          # earlier run was hard-killed before its post step could delete its
+          # keychain. Scoped to this workflow's own name prefix and to files
+          # older than a day, so it can never remove a keychain this workflow
+          # did not create nor one belonging to a run still in flight.
+          STALE=$(find "$HOME/Library/Keychains" -maxdepth 1 -name 'all-smi-signing-*' -mtime +0 2>/dev/null || true)
+          if [ -n "$STALE" ]; then
+            echo "$STALE" | while IFS= read -r kc; do
+              echo "Removing stale signing keychain: $kc"
+              security delete-keychain "$kc" || true
+            done
+          else
+            echo "No stale signing keychains"
+          fi
+
       - name: Import Developer ID certificate
         if: runner.os == 'macOS'
         uses: apple-actions/import-codesign-certs@v6
@@ -381,27 +403,6 @@ jobs:
           files: |
             ${{ matrix.asset_name }}${{ matrix.archive_ext }}
             ${{ matrix.asset_name }}${{ matrix.archive_ext }}.sha256
-
-      # 12) Delete the run-scoped signing keychain.
-      # always() so a failed build, a cancelled run, or a notarization error
-      # still removes the Developer ID private key from the machine. Deleting a
-      # keychain also drops it from every search list, so no separate
-      # `security list-keychains` reset is needed. Failures are tolerated: the
-      # keychain does not exist when certificate import never ran.
-      - name: Remove signing keychain
-        if: ${{ always() && runner.os == 'macOS' }}
-        run: |
-          # The action materializes `<name>` as `<name>.keychain-db`; try both
-          # spellings so a change in that convention cannot silently skip cleanup.
-          KEYCHAIN="all-smi-signing-${{ github.run_id }}-${{ github.run_attempt }}"
-          if security delete-keychain "${KEYCHAIN}.keychain-db" 2>/dev/null \
-            || security delete-keychain "$KEYCHAIN" 2>/dev/null; then
-            echo "Removed signing keychain $KEYCHAIN"
-          else
-            echo "No signing keychain to remove"
-          fi
-          echo "Remaining user keychains:"
-          security list-keychains -d user
 
   # ============================================================================
   # Microsoft Teams release notification (Power Automate Workflows webhook)
