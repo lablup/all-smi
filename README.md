@@ -131,6 +131,10 @@ all-smi record --output trace.ndjson.zst --duration 1h
 
 # Replay a captured stream in the TUI
 all-smi view --replay trace.ndjson.zst
+
+# Run API mode as a supervised background service (Linux/systemd)
+sudo all-smi service install --now
+all-smi service status
 ```
 
 ### Local Mode (Monitor Local Hardware)
@@ -173,11 +177,13 @@ http://gpu-node3:9090
 
 ### File locations
 
-| Platform | Canonical path |
-|----------|----------------|
-| Linux    | `$XDG_CONFIG_HOME/all-smi/config.toml` (fallback `~/.config/all-smi/config.toml`) |
-| macOS    | `~/Library/Application Support/all-smi/config.toml` (also accepts `~/.config/all-smi/config.toml`) |
-| Windows  | `%APPDATA%\all-smi\config.toml` |
+| Platform | Canonical path | Also searched |
+|----------|----------------|---------------|
+| Linux    | `$XDG_CONFIG_HOME/all-smi/config.toml` (fallback `~/.config/all-smi/config.toml`) | `/etc/all-smi/config.toml` |
+| macOS    | `~/Library/Application Support/all-smi/config.toml` | `~/.config/all-smi/config.toml` |
+| Windows  | `%APPDATA%\all-smi\config.toml` | — |
+
+Candidates are probed in order and the first existing file wins, so a per-user file always beats the machine-wide one. `/etc/all-smi/config.toml` exists for daemons: a service running as a dedicated account has no home directory, so no per-user candidate ever resolves for it (see [Running as a service](#running-as-a-service)). `all-smi config init` only ever writes the per-user path; creating `/etc/all-smi/config.toml` is an administrator's decision.
 
 Pass `--config <PATH>` to any subcommand to override the discovery and force a specific file. A missing or malformed `--config` target is a hard error (exit 2); implicit discovery silently falls back to defaults when no candidate file exists. To print the active path for the current user without writing any file, run `all-smi config path` (also surfaced in `all-smi --help` under the "Configuration file" section).
 
@@ -294,6 +300,81 @@ Older releases introduced environment variables with different naming. All alias
 | `ALL_SMI_ENERGY_NO_WAL` | `ALL_SMI_ENERGY_WAL_ENABLED=false` | Set to `1`/`true` to disable WAL. |
 | `ALL_SMI_ENERGY_GAP_SECONDS` | `ALL_SMI_ENERGY_GAP_INTERPOLATE_SECONDS` | Interpolation gap in seconds. |
 | `ALL_SMI_ENERGY_CURRENCY` | `ALL_SMI_ENERGY_CURRENCY` | Currency symbol (same canonical name). |
+
+## Running as a service
+
+`all-smi api` is the data source behind `all-smi view --hosts/--hostfile`, so on a cluster it wants to start at boot, restart on failure, and log to the platform's journal. The `all-smi service` subcommand installs and controls it:
+
+```bash
+all-smi service install   [--user] [--service-user NAME] [--now] [--force]
+all-smi service uninstall [--user] [--force]
+all-smi service start     [--user]
+all-smi service stop      [--user]
+all-smi service restart   [--user]
+all-smi service status    [--user] [--json]
+```
+
+The default scope is system-wide and requires root; `--user` installs a per-user service with no elevation. `status` exits `0` when the service is running and `3` when it is stopped or not installed, mirroring `systemctl is-active`; every other failure exits `1`.
+
+There are deliberately no `--port` or `--interval` flags on `install`. Runtime configuration lives in the environment file and the TOML config file, so changing a setting never means regenerating and reinstalling the service definition.
+
+<!-- Additional platform subsections (macOS launchd, Windows Service Control Manager) are appended below the Linux subsection as they land. -->
+
+### Linux (systemd)
+
+The canonical unit is [`packaging/systemd/all-smi.service`](packaging/systemd/all-smi.service). Both installation paths use it: the Debian package ships it verbatim, and `all-smi service install` embeds the same file and rewrites `ExecStart=` plus the account directives for the scope you asked for.
+
+**From the Debian package or PPA.** The package installs the unit but leaves it disabled, because opening a listening port as a side effect of `apt install` would be a surprise on a machine where `all-smi` is just a CLI tool:
+
+```bash
+sudo apt install all-smi
+sudo systemctl enable --now all-smi
+curl -s localhost:9090/metrics | head
+journalctl -u all-smi -f
+```
+
+The package also creates a dedicated `all-smi` system account and installs `/etc/default/all-smi` as a conffile for environment overrides.
+
+**From a tarball, `cargo install`, or a local build.** Use the subcommand:
+
+```bash
+# System-wide, started immediately.
+sudo all-smi service install --now
+all-smi service status
+
+# Run as a dedicated account instead of root (recommended where your
+# vendor CLI permits it; create the account first).
+sudo all-smi service install --service-user all-smi --now
+
+# Per-user, no root. Add `loginctl enable-linger $USER` for boot persistence.
+all-smi service install --user --now
+all-smi service status --user
+
+sudo all-smi service uninstall
+```
+
+The subcommand default is root, not a dedicated account, because vendor CLIs (`hl-smi`, `rbln-stat`, `furiosa-smi`, `tegrastats`) differ in what permissions they need, and a wrong guess yields a silently empty metrics page. The Debian package can take the opposite default because its unit is tested against the `all-smi` account.
+
+`install` refuses to run when a package manager already owns the binary (`dpkg` at `/usr/bin/all-smi`, or a Homebrew prefix) and points at that package manager's own command instead. Both `install` and `uninstall` also refuse to touch a unit file that lacks the `# Managed by 'all-smi service'` marker. Pass `--force` to override either refusal.
+
+**Configuration.** The system service reads `/etc/all-smi/config.toml`; a user service reads your usual per-user config path. Environment variables from `/etc/default/all-smi` take precedence over the TOML file:
+
+```sh
+# /etc/default/all-smi
+ALL_SMI_API_PORT=9090
+ALL_SMI_API_INTERVAL_SECS=3
+RUST_LOG=info
+```
+
+`/etc/all-smi/config.toml` exists as its own discovery candidate because a service running as a dedicated account has no home directory, and because the unit sets `ProtectHome=true`, which makes even root's `~/.config` invisible to the service. `all-smi config path` lists the full search order for the current user.
+
+**Unit hardening.** The unit enables `NoNewPrivileges`, `ProtectSystem=strict`, `ProtectHome`, `PrivateTmp`, `ProtectKernelModules`, `ProtectControlGroups`, and `RestrictSUIDSGID`. Two directives are deliberately absent and should stay that way: `PrivateDevices=` would hide `/dev/nvidia*` and `/dev/dri/*` from NVML and the AMD/Intel readers, and `ProtectProc=`/`ProcSubset=` would hide the processes the process-metrics reader enumerates. `SupplementaryGroups=video render` covers the DRM render nodes under stock Debian and Ubuntu udev rules.
+
+A user-scope unit drops `ProtectSystem=`, `ProtectHome=`, `PrivateTmp=`, and `ProtectControlGroups=`: a per-user systemd manager cannot always create a mount namespace (Ubuntu 24.04 and later restrict unprivileged user namespaces through AppArmor), and a unit whose namespace setup fails does not start at all. The namespace-free hardening is kept in both scopes.
+
+**Unix socket.** `PrivateTmp=true` namespaces `/tmp`, so the default `/tmp/all-smi.sock` fallback would not be reachable from outside the service. The unit provides `/run/all-smi` through `RuntimeDirectory=`; set `ALL_SMI_API_SOCKET=/run/all-smi/all-smi.sock` in the environment file to expose the socket there.
+
+**Other init systems.** OpenRC, runit, and sysvinit are not supported by the subcommand; it detects the absence of systemd and points at the canonical unit for manual adaptation.
 
 ## Platform-Specific Requirements
 

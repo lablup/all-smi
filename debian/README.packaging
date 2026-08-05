@@ -42,6 +42,54 @@ If the build fails on Launchpad:
    - Permission issues: Ensure proper file permissions in debian/rules
    - Cargo registry access: The build will fail if it tries to download crates
 
+## systemd Integration
+
+The package ships a systemd unit for API mode (issue #309).
+
+### Files
+
+| Source | Installed to | Mechanism |
+|---|---|---|
+| `debian/all-smi.service` | `/lib/systemd/system/all-smi.service` | `dh_installsystemd` (debhelper compat 13 picks it up by name) |
+| `debian/all-smi.default` | `/etc/default/all-smi` | explicit `install` in `override_dh_auto_install`; automatically a conffile because it lives under `/etc` |
+| `debian/all-smi.sysusers` | `/usr/lib/sysusers.d/all-smi.conf` | `dh_installsysusers` (debhelper >= 13.3) |
+| `debian/all-smi.postinst` | maintainer script | `adduser` fallback for the service account, plus the enable hint |
+
+`debian/all-smi.service` and `debian/all-smi.default` are byte-identical copies of `packaging/systemd/all-smi.service` and `packaging/systemd/all-smi.default`, which are the canonical sources. The `packaging-sync` CI job fails the build if they drift. Edit the `packaging/` copy and copy it over the `debian/` one:
+
+```bash
+cp packaging/systemd/all-smi.service debian/all-smi.service
+cp packaging/systemd/all-smi.default debian/all-smi.default
+```
+
+They are duplicated rather than symlinked because the Launchpad workflow checks out a release tag and overlays only `debian/` from the current branch, so anything the build needs must live under `debian/`.
+
+### The unit ships disabled
+
+`debian/rules` invokes `dh_installsystemd --no-enable --no-start`. all-smi is first a CLI tool, and opening a listening port as a side effect of `apt install` would surprise operators. This deliberately diverges from `prometheus-node-exporter`. `debian/all-smi.postinst` prints a one-line hint instead:
+
+```
+Run 'sudo systemctl enable --now all-smi' to start the metrics exporter.
+```
+
+### The service account
+
+`debian/all-smi.sysusers` declares the `all-smi` system account, which `systemd-sysusers` creates. `debian/all-smi.postinst` carries an `adduser --system --group` fallback guarded by `getent passwd all-smi`, so the account still exists if `dh_installsysusers` did not run (older debhelper, or a host without `systemd-sysusers`). Both paths are idempotent.
+
+### Which `rules` variant to edit
+
+Only three variants are reachable, and all three carry the systemd changes:
+
+| Variant | Consumed by | Builds the binary package? |
+|---|---|---|
+| `debian/rules` | `.github/workflows/launchpad_ppa.yml` (source package, built on Launchpad) | yes |
+| `debian/rules.binary` | `.github/workflows/debian_build.yml` (copied over `debian/rules`) | yes |
+| `debian/rules.source` | `debian/prepare-source-package.sh` (copied over `debian/rules`) | yes |
+| `debian/rules.launchpad` | nothing | no |
+| `debian/rules.launchpad-simple` | nothing | no |
+
+`rules.launchpad` and `rules.launchpad-simple` are unreferenced legacy templates. Nothing copies them into place, so changes there would have no effect. If you resurrect one, port the `override_dh_installsystemd` target and the `/etc/default/all-smi` install line from `debian/rules` first.
+
 ### Automatic Version Incrementing
 The packaging scripts support automatic version incrementing to avoid conflicts with existing PPA versions:
 

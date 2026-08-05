@@ -1,0 +1,28 @@
+[Unit]
+Description=all-smi GPU/NPU metrics exporter (API mode)
+Documentation=https://github.com/lablup/all-smi
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+ExecStart=/usr/bin/all-smi api
+EnvironmentFile=-/etc/default/all-smi
+Restart=on-failure
+RestartSec=5
+User=all-smi
+Group=all-smi
+SupplementaryGroups=video render
+RuntimeDirectory=all-smi
+CacheDirectory=all-smi
+Environment=ALL_SMI_ENERGY_WAL_PATH=/var/cache/all-smi/energy-wal.bin
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

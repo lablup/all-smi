@@ -136,6 +136,21 @@ pub mod cli;
 #[cfg(feature = "cli")]
 pub mod cli_config;
 
+/// Service subcommand argument types (issue #309). Same rationale as
+/// [`cli_config`]; re-exported from `cli`.
+#[cfg(feature = "cli")]
+pub mod cli_service;
+
+/// Cross-platform service-management backends for `all-smi api`
+/// (issue #309).
+///
+/// Exposed from the library so the backend contract
+/// ([`service_cmd::ServiceBackend`] and friends) is documented and unit
+/// tested independently of the binary, and so the follow-up macOS
+/// (#310) and Windows (#311) backends have a stable place to land.
+#[cfg(feature = "cli")]
+pub mod service_cmd;
+
 /// Self-diagnosis and support-bundle subcommand (issue #188).
 ///
 /// Exposed under `cli` because the orchestrator depends on tokio + clap

@@ -24,6 +24,8 @@ pub use crate::cli_config::{
     ConfigAction, ConfigArgs, ConfigPathArgs, ConfigPrintArgs, ConfigPrintFormat,
     ConfigValidateArgs,
 };
+// Service subcommand argument types, same rationale (issue #309).
+pub use crate::cli_service::{ServiceAction, ServiceArgs};
 
 /// Energy Session help block — appended at the end of `--help`.
 ///
@@ -96,6 +98,17 @@ pub enum Commands {
     /// Inspect, initialise, or validate the TOML configuration file
     /// (issue #192). See `all-smi config --help` for subcommands.
     Config(ConfigArgs),
+    /// Install and control `all-smi api` as a supervised background
+    /// service (issue #309).
+    ///
+    /// The system scope requires root and registers the service
+    /// machine-wide; `--user` installs a per-user service with no
+    /// elevation. Runtime settings stay in the environment file and the
+    /// TOML config, so changing a port never requires reinstalling.
+    /// Linux (systemd) is supported today; macOS launchd and Windows
+    /// Service Control Manager backends are tracked separately.
+    /// See `all-smi service --help` for subcommands.
+    Service(ServiceArgs),
 }
 
 #[derive(Parser, Clone)]
@@ -602,17 +615,38 @@ pub struct DoctorArgs {
 ///   Optional TOML file. Precedence: CLI flags > env vars > config file > built-in defaults.
 ///   Active path (this platform):
 ///     <resolved-path>   (active | not found)
+///   Also searched:
+///     <other-candidate>   (active | not found)
 ///   Inspect:  all-smi config path   Init:  all-smi config init   Print merged:  all-smi config print
 ///   Override path with --config <PATH>.
 /// ```
+///
+/// The "Also searched" block lists every candidate other than the active
+/// one, so a platform with a machine-wide path (Linux
+/// `/etc/all-smi/config.toml`, issue #309) surfaces it without a separate
+/// `config path` invocation. It is omitted when there is nothing else to
+/// show, which keeps the block short on platforms with a single
+/// candidate.
 pub fn config_help_block() -> String {
     let resolved = paths::active_config_path();
     let line = paths::format_path_with_existence(resolved.as_deref());
+
+    let others: String = paths::candidate_config_paths()
+        .iter()
+        .filter(|p| Some(p.as_path()) != resolved.as_deref())
+        .map(|p| format!("\n    {}", paths::format_path_with_existence(Some(p))))
+        .collect();
+    let also = if others.is_empty() {
+        String::new()
+    } else {
+        format!("\n  Also searched:{others}")
+    };
+
     format!(
         "Configuration file:\n  \
         Optional TOML file. Precedence: CLI flags > env vars > config file > built-in defaults.\n  \
         Active path (this platform):\n    \
-        {line}\n  \
+        {line}{also}\n  \
         Inspect:  all-smi config path   Init:  all-smi config init   Print merged:  all-smi config print\n  \
         Override path with --config <PATH>."
     )
@@ -737,6 +771,104 @@ mod tests {
             help.contains("config path"),
             "help should mention `config path`, got:\n{help}"
         );
+    }
+
+    /// Every candidate other than the active one must appear in the
+    /// help block. Issue #309 added the Linux machine-wide candidate,
+    /// which would otherwise be invisible to anyone who never runs
+    /// `all-smi config path`.
+    #[test]
+    fn config_help_block_lists_the_non_active_candidates() {
+        let block = config_help_block();
+        let active = paths::active_config_path();
+        let others: Vec<_> = paths::candidate_config_paths()
+            .into_iter()
+            .filter(|p| Some(p.as_path()) != active.as_deref())
+            .collect();
+
+        if others.is_empty() {
+            assert!(
+                !block.contains("Also searched"),
+                "with a single candidate the block must stay short, got:\n{block}"
+            );
+        } else {
+            assert!(
+                block.contains("Also searched"),
+                "extra candidates must be labelled, got:\n{block}"
+            );
+            for p in others {
+                assert!(
+                    block.contains(&p.display().to_string()),
+                    "candidate {} missing from the help block:\n{block}",
+                    p.display()
+                );
+            }
+        }
+    }
+
+    /// The `service` subcommand must be reachable from the shipped
+    /// binary, not just defined. Regression guard for the wiring in
+    /// `main.rs` and the `Commands` enum (issue #309).
+    #[test]
+    fn service_subcommand_is_registered() {
+        let cmd = build_command_with_runtime_help();
+        let service = cmd
+            .get_subcommands()
+            .find(|s| s.get_name() == "service")
+            .expect("`all-smi service` must be a registered subcommand");
+
+        let mut actions: Vec<_> = service
+            .get_subcommands()
+            .map(|s| s.get_name().to_string())
+            .filter(|n| n != "help")
+            .collect();
+        actions.sort();
+        assert_eq!(
+            actions,
+            vec!["install", "restart", "start", "status", "stop", "uninstall"],
+            "the service subcommand set is a cross-platform contract (#310, #311)"
+        );
+    }
+
+    /// The flag spellings are part of the same contract as the
+    /// subcommand names; the macOS and Windows backends are written
+    /// against them.
+    #[test]
+    fn service_flags_match_the_documented_contract() {
+        let cmd = build_command_with_runtime_help();
+        let service = cmd
+            .get_subcommands()
+            .find(|s| s.get_name() == "service")
+            .expect("service subcommand");
+
+        let flags = |name: &str| -> Vec<String> {
+            service
+                .get_subcommands()
+                .find(|s| s.get_name() == name)
+                .unwrap_or_else(|| panic!("`service {name}` must exist"))
+                .get_arguments()
+                .filter_map(|a| a.get_long().map(str::to_string))
+                .filter(|l| l != "help" && l != "config")
+                .collect()
+        };
+
+        for expected in ["user", "service-user", "now", "force"] {
+            assert!(
+                flags("install").iter().any(|f| f == expected),
+                "`service install` must accept --{expected}, got: {:?}",
+                flags("install")
+            );
+        }
+        for action in ["start", "stop", "restart"] {
+            assert_eq!(flags(action), vec!["user".to_string()], "action: {action}");
+        }
+        assert!(flags("uninstall").iter().any(|f| f == "user"));
+        for expected in ["user", "json"] {
+            assert!(
+                flags("status").iter().any(|f| f == expected),
+                "`service status` must accept --{expected}"
+            );
+        }
     }
 
     /// `config_help_block()` must annotate the resolved path with an

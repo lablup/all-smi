@@ -1,0 +1,17 @@
+# /etc/default/all-smi : environment for the all-smi systemd service
+#
+# Read by the unit via `EnvironmentFile=-/etc/default/all-smi`. Every line
+# is a plain KEY=VALUE pair (no shell expansion, no export). Uncomment and
+# edit what you need, then `sudo systemctl restart all-smi`.
+#
+# Precedence for every setting: environment variable (this file) beats
+# /etc/all-smi/config.toml, which beats the compiled default. Settings that
+# have no environment variable live in the TOML file only.
+#
+#ALL_SMI_API_PORT=9090
+#ALL_SMI_API_INTERVAL_SECS=3
+#ALL_SMI_API_PROCESSES=true
+#ALL_SMI_API_SOCKET=/run/all-smi/all-smi.sock
+#ALL_SMI_API_CORS_ALLOWED_ORIGINS=
+#ALL_SMI_API_MAX_SSE_SUBSCRIBERS=
+#RUST_LOG=info

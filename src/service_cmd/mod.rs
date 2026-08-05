@@ -1,0 +1,437 @@
+// Copyright 2025 Lablup Inc. and Jeongkyu Shin
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//! Cross-platform service-management framework for `all-smi api`
+//! (issue #309).
+//!
+//! # Layering
+//!
+//! * [`ServiceBackend`] is the platform contract. Exactly one backend is
+//!   selected at compile time by [`backend`].
+//! * [`run`] is the CLI entry point. It owns everything that must behave
+//!   identically on every platform: scope selection, the package-manager
+//!   refusal, operator-facing output, and the process exit code.
+//! * The backends own everything platform-specific: where the service
+//!   definition lives, how it is rendered, and which supervisor command
+//!   applies it.
+//!
+//! # Adding a platform
+//!
+//! [`backend`] already carries a `cfg` arm for Linux, macOS, and
+//! Windows. The macOS launchd backend (issue #310) and the Windows SCM
+//! backend (issue #311) each replace their own arm and add a sibling
+//! module; nothing else in this file needs to change. Keep the
+//! [`ServiceBackend`] method signatures and the exit codes below
+//! untouched: they are the cross-platform contract the CLI documents.
+//!
+//! # Exit codes
+//!
+//! * `0` — the action succeeded. For `status`, the service is running.
+//! * `1` — the action failed (needs elevation, unsupported platform,
+//!   package-managed binary, supervisor command failed, I/O error).
+//! * `3` — `status` only: the service is installed but stopped, or not
+//!   installed at all. Mirrors `systemctl is-active`.
+
+// Only the Linux arm of `backend()` is live today, so on macOS and
+// Windows the shared plumbing the backends consume (the error variants,
+// the elevation probe, `SERVICE_NAME`) has no caller until #310 and #311
+// land. Dead-code detection stays fully active on Linux, which is where
+// CI runs `cargo clippy -- -D warnings`.
+#![cfg_attr(not(target_os = "linux"), allow(dead_code))]
+
+use std::path::PathBuf;
+
+use crate::cli::ServiceAction;
+
+pub mod detect;
+
+// The systemd backend and its unit renderer compile on Linux, and under
+// `cfg(test)` everywhere else so their pure logic (template rendering,
+// `systemctl show` parsing) stays covered on macOS and Windows
+// developer machines. They are never dispatched off Linux.
+#[cfg(any(target_os = "linux", test))]
+pub mod systemd;
+#[cfg(any(target_os = "linux", test))]
+pub mod template;
+
+/// The service identifier used by every backend: the systemd unit name
+/// minus its suffix, the launchd label suffix, the SCM service name.
+pub const SERVICE_NAME: &str = "all-smi";
+
+/// Exit code for a successful action, and for `status` when running.
+pub const EXIT_OK: i32 = 0;
+/// Exit code for any failure.
+pub const EXIT_ERROR: i32 = 1;
+/// Exit code for `status` when the service is not running.
+pub const EXIT_NOT_RUNNING: i32 = 3;
+
+/// Which supervisor instance an action targets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Scope {
+    /// The machine-wide supervisor. Every mutating action requires root.
+    System,
+    /// The invoking user's own supervisor. No elevation required, and
+    /// no boot persistence without an explicit opt-in per platform.
+    User,
+}
+
+impl Scope {
+    /// Map the CLI `--user` flag onto a scope. System is the default.
+    pub fn from_user_flag(user: bool) -> Self {
+        if user { Self::User } else { Self::System }
+    }
+
+    /// Stable lowercase name used in JSON output and diagnostics.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::System => "system",
+            Self::User => "user",
+        }
+    }
+}
+
+impl std::fmt::Display for Scope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Everything a backend needs to materialise a service definition.
+///
+/// Deliberately carries no port, interval, or socket field: runtime
+/// configuration lives in the environment file and the TOML config, so a
+/// settings change never regenerates the service definition.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstallSpec {
+    pub scope: Scope,
+    /// Account to run as. `None` means the platform default, which is
+    /// root for system scope and the invoking user for user scope.
+    pub service_user: Option<String>,
+    /// Start the service immediately in addition to enabling it.
+    pub start_now: bool,
+    /// Overwrite a definition this tool did not write.
+    pub force: bool,
+}
+
+/// Observed state of the service in one scope.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ServiceStatus {
+    /// A service definition exists in this scope.
+    pub installed: bool,
+    /// Whether it starts at boot. `None` when the platform cannot say.
+    pub enabled: Option<bool>,
+    /// The service is running right now.
+    pub running: bool,
+    /// Main process id when running.
+    pub pid: Option<u32>,
+    /// Short human-readable state, e.g. `active (running)`.
+    pub detail: String,
+}
+
+/// Failure modes shared by every backend.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum ServiceError {
+    /// The action needs root or Administrator and the caller has neither.
+    #[error("{0}")]
+    NeedsElevation(String),
+    /// No supervisor backend applies to this platform or host.
+    #[error("{0}")]
+    NotSupported(String),
+    /// A package manager owns this binary and ships its own service
+    /// definition; installing a second one would fight it.
+    #[error("{0}")]
+    PackageManaged(String),
+    /// The action would clobber or remove a service definition this tool
+    /// did not write, or the request cannot be expressed as one.
+    ///
+    /// Added beyond the variant list in issue #309: the managed-by
+    /// marker guard needs a distinct failure mode, and folding it into
+    /// [`ServiceError::PackageManaged`] would produce a misleading
+    /// "use your package manager instead" hint.
+    #[error("{0}")]
+    Conflict(String),
+    /// No service definition exists in the requested scope.
+    #[error("the all-smi service is not installed in this scope")]
+    NotInstalled,
+    /// Filesystem failure while reading or writing a service definition.
+    #[error("{0}")]
+    Io(#[from] std::io::Error),
+    /// A supervisor command exited non-zero.
+    #[error("`{cmd}` failed: {stderr}")]
+    CommandFailed { cmd: String, stderr: String },
+}
+
+/// Platform contract implemented once per supervisor.
+///
+/// Implementations must be idempotent: re-running `install` over a
+/// definition carrying the managed-by marker updates it in place, and
+/// `stop` on an already-stopped service succeeds.
+pub trait ServiceBackend {
+    /// Write the service definition and register it for boot.
+    fn install(&self, spec: &InstallSpec) -> Result<(), ServiceError>;
+    /// Stop, deregister, and remove the service definition. Refuses a
+    /// definition that lacks the managed-by marker; see
+    /// [`ServiceBackend::uninstall_forced`].
+    fn uninstall(&self, scope: Scope) -> Result<(), ServiceError>;
+    fn start(&self, scope: Scope) -> Result<(), ServiceError>;
+    fn stop(&self, scope: Scope) -> Result<(), ServiceError>;
+    fn restart(&self, scope: Scope) -> Result<(), ServiceError>;
+    fn status(&self, scope: Scope) -> Result<ServiceStatus, ServiceError>;
+
+    /// `uninstall` that also removes a definition lacking the
+    /// managed-by marker, backing the CLI's `--force` flag.
+    ///
+    /// The default delegates to [`ServiceBackend::uninstall`], which is
+    /// correct for any backend that does not stamp a marker. Backends
+    /// that do stamp one override this method.
+    fn uninstall_forced(&self, scope: Scope) -> Result<(), ServiceError> {
+        self.uninstall(scope)
+    }
+}
+
+/// Select the backend for the current platform.
+///
+/// Each arm is independent so a follow-up issue can replace exactly one
+/// without touching the others.
+pub fn backend() -> Result<Box<dyn ServiceBackend>, ServiceError> {
+    #[cfg(target_os = "linux")]
+    {
+        Ok(Box::new(systemd::SystemdBackend::new()))
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        Err(ServiceError::NotSupported(
+            "`all-smi service` has no macOS backend yet; launchd support is tracked in \
+             https://github.com/lablup/all-smi/issues/310. Until then, run \
+             `brew services start all-smi` on a Homebrew install, or write a launchd \
+             plist that execs `all-smi api`."
+                .to_string(),
+        ))
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        Err(ServiceError::NotSupported(
+            "`all-smi service` has no Windows backend yet; Service Control Manager \
+             support is tracked in https://github.com/lablup/all-smi/issues/311. \
+             Until then, register `all-smi api` with `sc.exe create` or a supervisor \
+             such as NSSM."
+                .to_string(),
+        ))
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    {
+        Err(ServiceError::NotSupported(
+            "`all-smi service` supports Linux (systemd) only on this build; adapt \
+             packaging/systemd/all-smi.service from the all-smi source tree to your \
+             init system."
+                .to_string(),
+        ))
+    }
+}
+
+/// Refuse a privileged action when the caller is not elevated.
+///
+/// Shared by every backend so the wording stays identical across
+/// platforms. `verb` is the subcommand name, e.g. `install`.
+pub fn require_elevation(verb: &str) -> Result<(), ServiceError> {
+    if is_elevated() {
+        return Ok(());
+    }
+    Err(ServiceError::NeedsElevation(format!(
+        "service {verb} requires root; re-run with sudo, or pass --user for a per-user service"
+    )))
+}
+
+#[cfg(unix)]
+fn is_elevated() -> bool {
+    // SAFETY: `geteuid` takes no arguments, reads no caller-provided
+    // memory, and is documented as always succeeding.
+    unsafe { libc::geteuid() == 0 }
+}
+
+#[cfg(not(unix))]
+fn is_elevated() -> bool {
+    // The Windows SCM backend (issue #311) brings its own Administrator
+    // probe. Until it lands, no non-Unix backend is ever dispatched, so
+    // reporting "not elevated" is the safe answer.
+    false
+}
+
+/// Resolve the absolute path of the running binary for embedding into a
+/// service definition. Falls back to the unresolved path when the
+/// filesystem cannot canonicalize it (for example a deleted-and-replaced
+/// binary on a filesystem without `/proc`).
+pub fn current_exe_canonical() -> Result<PathBuf, ServiceError> {
+    let exe = std::env::current_exe()?;
+    Ok(exe.canonicalize().unwrap_or(exe))
+}
+
+/// CLI entry point. Returns the process exit code; see the module-level
+/// "Exit codes" section.
+pub fn run(action: &ServiceAction) -> i32 {
+    let scope = Scope::from_user_flag(action.user_scope());
+    let backend = match backend() {
+        Ok(b) => b,
+        Err(e) => return report(&e),
+    };
+
+    match action {
+        ServiceAction::Install(args) => {
+            // The package-manager refusal lives here, not in the
+            // backends, so every platform inherits it unchanged.
+            if let Err(e) = detect::guard(args.force) {
+                return report(&e);
+            }
+            if scope == Scope::User && args.service_user.is_some() {
+                eprintln!(
+                    "warning: --service-user is ignored in --user scope; a user service \
+                     always runs as the invoking user"
+                );
+            }
+            let spec = InstallSpec {
+                scope,
+                service_user: args.service_user.clone(),
+                start_now: args.now,
+                force: args.force,
+            };
+            match backend.install(&spec) {
+                Ok(()) => {
+                    report_install_success(&spec);
+                    EXIT_OK
+                }
+                Err(e) => report(&e),
+            }
+        }
+        ServiceAction::Uninstall(args) => {
+            let result = if args.force {
+                backend.uninstall_forced(scope)
+            } else {
+                backend.uninstall(scope)
+            };
+            match result {
+                Ok(()) => {
+                    println!("Removed the all-smi {scope} service.");
+                    EXIT_OK
+                }
+                Err(e) => report(&e),
+            }
+        }
+        ServiceAction::Start(_) => simple(backend.start(scope), scope, "Started"),
+        ServiceAction::Stop(_) => simple(backend.stop(scope), scope, "Stopped"),
+        ServiceAction::Restart(_) => simple(backend.restart(scope), scope, "Restarted"),
+        ServiceAction::Status(args) => match backend.status(scope) {
+            Ok(status) => {
+                if args.json {
+                    print_status_json(&status, scope);
+                } else {
+                    print_status_text(&status, scope);
+                }
+                if status.running {
+                    EXIT_OK
+                } else {
+                    EXIT_NOT_RUNNING
+                }
+            }
+            Err(e) => report(&e),
+        },
+    }
+}
+
+fn simple(result: Result<(), ServiceError>, scope: Scope, past_tense: &str) -> i32 {
+    match result {
+        Ok(()) => {
+            println!("{past_tense} the all-smi {scope} service.");
+            EXIT_OK
+        }
+        Err(e) => report(&e),
+    }
+}
+
+fn report_install_success(spec: &InstallSpec) {
+    let scope = spec.scope;
+    println!("Installed the all-smi {scope} service and enabled it.");
+    if spec.start_now {
+        println!("It is running now.");
+    } else {
+        let flag = if scope == Scope::User { " --user" } else { "" };
+        println!("It is not running yet. Start it with: all-smi service start{flag}");
+    }
+    if scope == Scope::User {
+        let user = whoami::username().unwrap_or_else(|_| "<user>".to_string());
+        println!(
+            "Note: a user service only runs while you are logged in. Run \
+             `loginctl enable-linger {user}` for boot persistence."
+        );
+    }
+    println!(
+        "Runtime settings live in the environment file and the TOML config, not in the \
+         service definition. Run `all-smi config path` to see the active TOML path."
+    );
+}
+
+fn print_status_text(status: &ServiceStatus, scope: Scope) {
+    if !status.installed {
+        println!("all-smi ({scope} scope): not installed");
+        return;
+    }
+    let enabled = match status.enabled {
+        Some(true) => "enabled",
+        Some(false) => "disabled",
+        None => "enablement unknown",
+    };
+    let running = if status.running { "running" } else { "stopped" };
+    println!("all-smi ({scope} scope): installed, {enabled}, {running}");
+    if !status.detail.is_empty() {
+        println!("  state: {}", status.detail);
+    }
+    if let Some(pid) = status.pid {
+        println!("  main pid: {pid}");
+    }
+}
+
+fn print_status_json(status: &ServiceStatus, scope: Scope) {
+    let value = serde_json::json!({
+        "installed": status.installed,
+        "enabled": status.enabled,
+        "running": status.running,
+        "pid": status.pid,
+        "scope": scope.as_str(),
+        "detail": status.detail,
+    });
+    match serde_json::to_string_pretty(&value) {
+        Ok(s) => println!("{s}"),
+        // Serializing a closed set of bools, integers, and strings
+        // cannot fail; fall back to the text form rather than panicking.
+        Err(_) => print_status_text(status, scope),
+    }
+}
+
+/// Print an error and map it onto the process exit code.
+fn report(err: &ServiceError) -> i32 {
+    eprintln!("error: {err}");
+    if let ServiceError::PackageManaged(_) = err {
+        eprintln!("hint: pass --force to install alongside the package-managed definition anyway");
+    }
+    EXIT_ERROR
+}
+
+// Test module lives in `mod_tests.rs` to keep this file under the
+// 500-line soft limit.
+#[cfg(test)]
+#[path = "mod_tests.rs"]
+mod tests;
