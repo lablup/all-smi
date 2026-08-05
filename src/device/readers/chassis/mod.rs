@@ -24,10 +24,17 @@
 #[cfg(target_os = "macos")]
 mod apple_silicon_native;
 
+// Intel Mac chassis reader using the SMC and NSProcessInfo (no sudo required)
+#[cfg(target_os = "macos")]
+mod intel_mac;
+
 mod generic;
 
 #[cfg(target_os = "macos")]
 pub use apple_silicon_native::AppleSiliconNativeChassisReader;
+
+#[cfg(target_os = "macos")]
+pub use intel_mac::IntelMacChassisReader;
 
 #[allow(unused_imports)]
 pub use generic::GenericChassisReader;
@@ -39,7 +46,15 @@ pub fn create_chassis_reader() -> Box<dyn ChassisReader> {
     // On macOS, use native APIs (no sudo required)
     #[cfg(target_os = "macos")]
     {
-        Box::new(AppleSiliconNativeChassisReader::new())
+        // The Apple Silicon reader depends on the IOReport-backed native
+        // metrics manager, which never initializes on an Intel Mac. Choosing it
+        // there produced no chassis block at all; Intel Macs get an SMC-backed
+        // reader instead.
+        if crate::device::is_intel_mac() {
+            Box::new(IntelMacChassisReader::new())
+        } else {
+            Box::new(AppleSiliconNativeChassisReader::new())
+        }
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -58,5 +73,25 @@ mod tests {
         let reader = create_chassis_reader();
         // Just verify we can create a reader without panicking
         let _ = reader.get_chassis_info();
+    }
+
+    /// Reader selection must follow the architecture, because the Apple
+    /// Silicon reader silently yields nothing on Intel hardware.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_reader_selection_follows_architecture() {
+        let reader = create_chassis_reader();
+        let platform = reader
+            .get_chassis_info()
+            .and_then(|info| info.detail.get("platform").cloned());
+
+        if crate::device::is_intel_mac() {
+            assert_eq!(platform.as_deref(), Some("Intel Mac"));
+        } else {
+            // On Apple Silicon the reader needs the native metrics manager,
+            // which the test binary does not initialize, so it may legitimately
+            // report nothing. It must never claim to be an Intel Mac.
+            assert_ne!(platform.as_deref(), Some("Intel Mac"));
+        }
     }
 }

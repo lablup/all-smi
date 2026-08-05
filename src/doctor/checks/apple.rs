@@ -44,7 +44,7 @@ static APPLE_SILICON: Check = Check {
 
 static SMC_ROOT: Check = Check {
     id: "apple.smc",
-    title: "SMC / IOReport root requirement",
+    title: "SMC accessibility",
     severity_on_fail: Severity::Warn,
     run: check_smc_root,
 };
@@ -83,21 +83,25 @@ fn check_apple_silicon(_ctx: &CheckCtx) -> CheckResult {
     }
 }
 
+/// Probe the SMC by actually opening a connection.
+///
+/// This used to report a euid check and advise re-running under sudo, which
+/// was wrong: IOReport and the SMC are readable by unprivileged processes,
+/// which is the whole basis of macOS support here. The advice also became
+/// actively misleading for Intel Macs, whose CPU temperature, fan speeds, and
+/// chassis power all come from this connection.
 fn check_smc_root(_ctx: &CheckCtx) -> CheckResult {
     #[cfg(target_os = "macos")]
     {
-        // SAFETY: geteuid is always-safe.
-        let euid = unsafe { libc::geteuid() };
-        if euid == 0 {
-            CheckResult::Pass("running as root — IOReport/SMC accessible".to_string())
-        } else {
-            CheckResult::Warn(
-                "running as non-root".to_string(),
+        match crate::device::macos_native::smc::SMC::new() {
+            Ok(_) => CheckResult::Pass("SMC reachable (no sudo required)".to_string()),
+            Err(e) => CheckResult::Warn(
+                format!("SMC connection failed: {e}"),
                 Some(
-                    "macOS hardware reads (IOReport/SMC chassis power) require sudo; re-run with sudo"
+                    "CPU/GPU temperature, fan speeds, and chassis power will be unavailable"
                         .to_string(),
                 ),
-            )
+            ),
         }
     }
     #[cfg(not(target_os = "macos"))]

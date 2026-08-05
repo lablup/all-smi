@@ -14,7 +14,11 @@
 
 // Use native metrics manager for Apple Silicon
 use crate::device::macos_native::get_native_metrics_manager;
+// Intel Macs read temperature and package power straight from the SMC: the
+// native metrics manager is IOReport-backed and therefore Apple Silicon only.
+use crate::device::macos_native::smc::SmcConnection;
 
+use crate::device::cpu_macos_intel::IntelCpuHardware;
 use crate::device::{
     AppleSiliconCpuInfo, CoreType, CoreUtilization, CpuInfo, CpuPlatformType, CpuReader,
     CpuSocketInfo,
@@ -25,8 +29,6 @@ use chrono::Local;
 use std::sync::{Mutex, RwLock};
 use sysinfo::System;
 
-type CpuHardwareParseResult = Result<(String, u32, u32, u32, u32, u32), Box<dyn std::error::Error>>;
-type IntelCpuInfo = (String, u32, u32, u32, u32, u32);
 /// (cpu_model, s_core_count, p_core_count, e_core_count, gpu_core_count)
 type AppleSiliconHwInfo = (String, u32, u32, u32, u32);
 
@@ -46,7 +48,9 @@ pub struct MacOsCpuReader {
     cached_p_core_l2_cache_mb: Mutex<Option<u32>>,
     cached_e_core_l2_cache_mb: Mutex<Option<u32>>,
     // Cached hardware info for Intel
-    cached_intel_info: Mutex<Option<IntelCpuInfo>>,
+    cached_intel_info: Mutex<Option<IntelCpuHardware>>,
+    // Cached SMC connection, used by the Intel path only
+    smc: Mutex<SmcConnection>,
 }
 
 impl Default for MacOsCpuReader {
@@ -73,15 +77,17 @@ impl MacOsCpuReader {
             cached_p_core_l2_cache_mb: Mutex::new(None),
             cached_e_core_l2_cache_mb: Mutex::new(None),
             cached_intel_info: Mutex::new(None),
+            smc: Mutex::new(SmcConnection::default()),
         }
     }
 
+    /// Detect Apple Silicon through the shared, cached platform probe.
+    ///
+    /// This used to be a second private copy of the `uname -m` check. Routing
+    /// it through `platform_detection` keeps a single answer per process, and
+    /// picks up the Rosetta 2 handling that copy did not have.
     fn detect_apple_silicon() -> bool {
-        if let Ok(output) = new_command("uname").arg("-m").output() {
-            let architecture = String::from_utf8_lossy(&output.stdout);
-            return architecture.trim() == "arm64";
-        }
-        false
+        crate::device::platform_detection::is_apple_silicon()
     }
 
     fn get_cpu_info_from_system(&self) -> Result<CpuInfo, Box<dyn std::error::Error>> {
@@ -336,33 +342,22 @@ impl MacOsCpuReader {
         instance: String,
         time: String,
     ) -> Result<CpuInfo, Box<dyn std::error::Error>> {
-        // Check cache BEFORE calling expensive system_profiler command
-        // IMPORTANT: Read cache value first and drop the lock before any else branch
-        let cached_info = self.cached_intel_info.lock().unwrap().clone();
-        // Lock is now released
+        let hardware = self.get_intel_hardware_info();
 
-        let (cpu_model, socket_count, total_cores, total_threads, base_frequency, cache_size) =
-            if let Some(info) = cached_info {
-                // Use cached values - avoids expensive system_profiler call
-                info
-            } else {
-                // Get CPU information using system_profiler (first time only)
-                let output = new_command("system_profiler")
-                    .arg("SPHardwareDataType")
-                    .output()?;
+        // Refresh once per collection cycle, then reuse the snapshot for both
+        // the aggregate and the per-core numbers.
+        self.ensure_cpu_refreshed();
+        let cpu_utilization = self.system.read().unwrap().global_cpu_usage() as f64;
 
-                let hardware_info = String::from_utf8_lossy(&output.stdout);
-                self.parse_intel_mac_hardware_info(&hardware_info)?
-            };
+        // Intel cores are homogeneous, so no P/E/S split applies: passing zero
+        // for every Apple Silicon cluster size makes every core Standard.
+        let per_core_utilization = self.get_per_core_utilization_no_refresh(0, 0, 0);
 
-        // Get CPU utilization using sysinfo
-        let cpu_utilization = self.get_cpu_utilization_sysinfo()?;
+        // CPU temperature and package power come from the SMC over the cached
+        // connection. Both are absent on some models, which is not an error.
+        let (temperature, power_consumption) = self.read_intel_smc_metrics();
 
-        // Get CPU temperature (may not be available)
-        let temperature = self.get_cpu_temperature();
-
-        // Power consumption is not easily available on Intel Macs
-        let power_consumption = None;
+        let socket_count = hardware.socket_count.max(1);
 
         // Create per-socket info
         let mut per_socket_info = Vec::new();
@@ -370,10 +365,10 @@ impl MacOsCpuReader {
             per_socket_info.push(CpuSocketInfo {
                 socket_id,
                 utilization: cpu_utilization,
-                cores: total_cores / socket_count,
-                threads: total_threads / socket_count,
+                cores: hardware.physical_cores / socket_count,
+                threads: hardware.logical_cores / socket_count,
                 temperature,
-                frequency_mhz: base_frequency,
+                frequency_mhz: hardware.base_frequency_mhz,
             });
         }
 
@@ -382,23 +377,57 @@ impl MacOsCpuReader {
             host_id: hostname.clone(), // For local mode, host_id is just the hostname
             hostname,
             instance,
-            cpu_model,
+            cpu_model: hardware.model.clone(),
             architecture: "x86_64".to_string(),
             platform_type: CpuPlatformType::Intel,
             socket_count,
-            total_cores,
-            total_threads,
-            base_frequency_mhz: base_frequency,
-            max_frequency_mhz: base_frequency, // Max frequency not easily available
-            cache_size_mb: cache_size,
+            total_cores: hardware.physical_cores,
+            total_threads: hardware.logical_cores,
+            base_frequency_mhz: hardware.base_frequency_mhz,
+            max_frequency_mhz: hardware.max_frequency_mhz,
+            cache_size_mb: hardware.l3_cache_mb,
             utilization: cpu_utilization,
             temperature,
             power_consumption,
             per_socket_info,
             apple_silicon_info: None,
-            per_core_utilization: Vec::new(), // Intel Macs don't have easy per-core data
+            per_core_utilization,
             time,
         })
+    }
+
+    /// Read CPU temperature (Celsius) and package power (watts) from the SMC.
+    ///
+    /// Both readings share one cached connection so a poll costs two key reads
+    /// rather than a fresh IOKit handshake.
+    fn read_intel_smc_metrics(&self) -> (Option<u32>, Option<f64>) {
+        let Ok(mut guard) = self.smc.lock() else {
+            return (None, None);
+        };
+        let Some(smc) = guard.get() else {
+            return (None, None);
+        };
+
+        let temperature = smc.get_cpu_temperature().map(|t| t.round() as u32);
+        let power = smc.get_cpu_package_power();
+
+        (temperature, power)
+    }
+
+    /// Collect the immutable Intel CPU hardware description, caching it.
+    ///
+    /// Discovery itself lives in `cpu_macos_intel`; this only owns the cache.
+    fn get_intel_hardware_info(&self) -> IntelCpuHardware {
+        if let Some(cached) = self.cached_intel_info.lock().unwrap().clone() {
+            return cached;
+        }
+
+        // Last-resort thread count, used only when `hw.logicalcpu` is missing.
+        let logical_cpu_fallback = self.system.read().unwrap().cpus().len() as u32;
+        let hardware = IntelCpuHardware::collect(logical_cpu_fallback);
+
+        *self.cached_intel_info.lock().unwrap() = Some(hardware.clone());
+        hardware
     }
 
     /// Fast method to get Apple Silicon hardware info using sysctl and ioreg
@@ -743,75 +772,6 @@ impl MacOsCpuReader {
         }
     }
 
-    fn parse_intel_mac_hardware_info(&self, hardware_info: &str) -> CpuHardwareParseResult {
-        // Check if we have cached values
-        if let Some(cached_info) = self.cached_intel_info.lock().unwrap().clone() {
-            return Ok(cached_info);
-        }
-
-        let mut cpu_model = String::new();
-        let mut socket_count = 1u32;
-        let mut total_cores = 0u32;
-        let mut total_threads = 0u32;
-        let mut base_frequency = 0u32;
-        let mut cache_size = 0u32;
-
-        for line in hardware_info.lines() {
-            let line = line.trim();
-            if line.starts_with("Processor Name:") {
-                cpu_model = line.split(':').nth(1).unwrap_or("").trim().to_string();
-            } else if line.starts_with("Processor Speed:") {
-                if let Some(ghz) = crate::parse_colon_value!(line, f64) {
-                    base_frequency = (ghz * 1000.0) as u32;
-                }
-            } else if line.starts_with("Number of Processors:") {
-                if let Some(procs) = crate::parse_colon_value!(line, u32) {
-                    socket_count = procs;
-                }
-            } else if line.starts_with("Total Number of Cores:") {
-                if let Some(cores) = crate::parse_colon_value!(line, u32) {
-                    total_cores = cores;
-                    total_threads = cores * 2; // Assume hyperthreading
-                }
-            } else if line.starts_with("L3 Cache:")
-                && let Some(size) = crate::parse_colon_value!(line, u32)
-            {
-                cache_size = size;
-            }
-        }
-
-        let result = (
-            cpu_model,
-            socket_count,
-            total_cores,
-            total_threads,
-            base_frequency,
-            cache_size,
-        );
-
-        // Cache the values
-        *self.cached_intel_info.lock().unwrap() = Some(result.clone());
-
-        Ok(result)
-    }
-
-    fn get_cpu_utilization_sysinfo(&self) -> Result<f64, Box<dyn std::error::Error>> {
-        // Check if we need to do first refresh
-        if !*self.first_refresh_done.read().unwrap() {
-            self.system.write().unwrap().refresh_cpu_usage();
-            std::thread::sleep(std::time::Duration::from_millis(100));
-            *self.first_refresh_done.write().unwrap() = true;
-        }
-
-        // Refresh CPU information to get latest data
-        self.system.write().unwrap().refresh_cpu_usage();
-
-        // Get global CPU usage
-        let cpu_usage = self.system.read().unwrap().global_cpu_usage() as f64;
-
-        Ok(cpu_usage)
-    }
-
     /// OPTIMIZATION: Refresh CPU usage once per collection cycle
     /// This avoids multiple refresh_cpu_usage() calls which was causing high CPU usage
     fn ensure_cpu_refreshed(&self) {
@@ -891,8 +851,9 @@ impl MacOsCpuReader {
             // Return typical values based on chip
             Ok(3000) // 3 GHz as default
         } else {
-            // Try to get from system_profiler (already parsed in get_intel_mac_cpu_info)
-            Ok(2400) // Default fallback
+            // Intel: the real nominal clock, from hw.cpufrequency or the brand
+            // string, instead of a hardcoded constant.
+            Ok(self.get_intel_hardware_info().base_frequency_mhz)
         }
     }
 
@@ -901,14 +862,10 @@ impl MacOsCpuReader {
             // Apple Silicon max frequencies vary by core type
             Ok(3500) // Typical P-core max frequency
         } else {
-            Ok(3000) // Default for Intel Macs
+            // Intel: hw.cpufrequency_max, falling back to the base clock when
+            // the key is absent (see IntelCpuHardware::apply_defaults).
+            Ok(self.get_intel_hardware_info().max_frequency_mhz)
         }
-    }
-
-    fn get_cpu_temperature(&self) -> Option<u32> {
-        // Temperature monitoring on macOS requires specialized tools
-        // This is a placeholder - actual implementation might use external tools
-        None
     }
 
     #[allow(dead_code)] // OPTIMIZATION: Now using cached native_data instead

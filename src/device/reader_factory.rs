@@ -122,6 +122,10 @@ pub fn get_gpu_readers() -> Vec<Box<dyn GpuReader>> {
                     apple_silicon_native::AppleSiliconNativeGpuReader::new(),
                 ));
             }
+            // Intel Macs intentionally get no GPU reader. Their integrated
+            // Intel and discrete AMD GPUs would need an IOAccelerator-based
+            // reader, tracked separately in issue #307. CPU, memory, and
+            // chassis monitoring work without it.
         }
         "windows" => {
             #[cfg(target_os = "windows")]

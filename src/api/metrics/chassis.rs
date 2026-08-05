@@ -15,9 +15,10 @@
 //! Chassis metrics exporter for Prometheus
 //!
 //! Exports node-level metrics including:
-//! - Total power consumption (CPU+GPU+ANE)
-//! - Thermal pressure (Apple Silicon)
-//! - Individual power components (CPU, GPU, ANE)
+//! - Total power consumption (CPU+GPU+ANE on Apple Silicon, SMC PSTR on Intel Macs)
+//! - Thermal pressure (macOS)
+//! - Individual power components (CPU, GPU, ANE), whichever the platform reports
+//! - Fan speeds, where the platform reports them
 
 use super::{MetricBuilder, MetricExporter};
 use crate::device::ChassisInfo;
@@ -146,7 +147,7 @@ impl<'a> MetricExporter for ChassisMetricExporter<'a> {
             builder
                 .help(
                     "all_smi_chassis_power_watts",
-                    "Total chassis power consumption in watts (CPU+GPU+ANE)",
+                    "Total chassis power consumption in watts",
                 )
                 .type_("all_smi_chassis_power_watts", "gauge");
 
@@ -164,12 +165,12 @@ impl<'a> MetricExporter for ChassisMetricExporter<'a> {
             }
         }
 
-        // Export thermal pressure metric (Apple Silicon)
+        // Export thermal pressure metric (macOS)
         if flags.has_thermal_pressure {
             builder
                 .help(
                     "all_smi_chassis_thermal_pressure_info",
-                    "Thermal pressure level (Apple Silicon)",
+                    "Thermal pressure level (macOS)",
                 )
                 .type_("all_smi_chassis_thermal_pressure_info", "gauge");
 

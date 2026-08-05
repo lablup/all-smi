@@ -1,5 +1,13 @@
 name: Release
 
+# SECURITY: this repository is public and this workflow schedules jobs on
+# self-hosted runners (the Windows signing box and the Intel Mac builder).
+# Both triggers below are maintainer-only: `release: published` requires push
+# access to publish a release, and `workflow_dispatch` requires write access.
+# Neither can be fired by a pull request, so a fork PR can never run code on a
+# self-hosted machine. Do NOT add `pull_request`, `pull_request_target`, or
+# `issue_comment` triggers here, and keep self-hosted runners out of ci.yml
+# (which is PR-triggered and runs on GitHub-hosted runners only).
 on:
   release:
     types: [published]
@@ -15,7 +23,7 @@ on:
         description: 'Tag to build from AND upload artifacts to (e.g. v1.2.3). Empty = build the dispatched ref.'
         required: false
       targets:
-        description: 'Platforms to build (comma-separated: windows, linux, macos, or all). Empty = all.'
+        description: 'Platform families to build (comma-separated: windows, linux, macos, or all). Empty = all. "macos" covers both aarch64 and x86_64.'
         required: false
         default: ''
         type: string
@@ -45,12 +53,20 @@ jobs:
           # Full build matrix; each entry is tagged with os_family for filtering.
           # JSON uses only double quotes, so a single-quoted bash literal is safe
           # and avoids heredoc indentation pitfalls inside this YAML block.
+          #
+          # `os` becomes the job's runs-on value. It is a label string for every
+          # GitHub-hosted runner and for the label-targeted Windows box, and a
+          # {group, labels} object for the self-hosted Intel Mac, which has to be
+          # selected out of a specific runner group. runs-on is evaluated per
+          # matrix job instance, so the two shapes coexist without affecting each
+          # other.
           ALL='[
             {"os_family":"linux",   "target":"x86_64-unknown-linux-gnu",    "os":"ubuntu-22.04",             "artifact_name":"all-smi",     "asset_name":"all-smi-linux-x86_64",       "archive_ext":".tar.gz", "protoc_platform":"linux-x86_64"},
             {"os_family":"linux",   "target":"x86_64-unknown-linux-musl",   "os":"ubuntu-latest",           "artifact_name":"all-smi",     "asset_name":"all-smi-linux-x86_64-musl",  "archive_ext":".tar.gz", "protoc_platform":"linux-x86_64"},
             {"os_family":"linux",   "target":"aarch64-unknown-linux-gnu",   "os":"ubuntu-22.04-arm",        "artifact_name":"all-smi",     "asset_name":"all-smi-linux-aarch64",      "archive_ext":".tar.gz", "protoc_platform":"linux-aarch_64"},
             {"os_family":"linux",   "target":"aarch64-unknown-linux-musl",  "os":"ubuntu-24.04-arm",        "artifact_name":"all-smi",     "asset_name":"all-smi-linux-aarch64-musl", "archive_ext":".tar.gz", "protoc_platform":"linux-aarch_64"},
             {"os_family":"macos",   "target":"aarch64-apple-darwin",        "os":"macos-14",                "artifact_name":"all-smi",     "asset_name":"all-smi-macos-aarch64",      "archive_ext":".zip",    "protoc_platform":"osx-aarch_64"},
+            {"os_family":"macos",   "target":"x86_64-apple-darwin",         "os":{"group":"macOS x64","labels":"self-hosted-macos-15-x64"}, "artifact_name":"all-smi", "asset_name":"all-smi-macos-x86_64", "archive_ext":".zip", "protoc_platform":"osx-x86_64"},
             {"os_family":"windows", "target":"x86_64-pc-windows-msvc",      "os":"windows-on-macmini02-x64","artifact_name":"all-smi.exe", "asset_name":"all-smi-windows-x86_64",     "archive_ext":".zip",    "protoc_platform":""}
           ]'
 
@@ -130,11 +146,12 @@ jobs:
           echo "RUSTUP_HOME=C:\.rustup" >> $env:GITHUB_ENV
 
       # 2) Cache Cargo build artifacts
-      # Skipped on the Windows self-hosted runner: its persistent CARGO_HOME
-      # (configured above) already caches the registry across runs, so the
-      # GitHub Actions cache would only mirror an empty ~/.cargo location.
+      # Skipped on the self-hosted runners. The Windows box has a persistent
+      # CARGO_HOME (configured above), and the Intel Mac keeps its workspace and
+      # ~/.cargo between jobs, so on both the Actions cache would only mirror
+      # state the machine already has while costing a full upload every run.
       - name: Cache cargo
-        if: matrix.target != 'x86_64-pc-windows-msvc'
+        if: matrix.target != 'x86_64-pc-windows-msvc' && matrix.target != 'x86_64-apple-darwin'
         uses: actions/cache@v5
         with:
           path: |
@@ -180,12 +197,20 @@ jobs:
         run: cargo build --release --target ${{ matrix.target }} --locked
 
       # 8) macOS code signing
+      # The Developer ID key goes into a keychain named after this run, and the
+      # cleanup step at the end of the job deletes it unconditionally. That
+      # matters on the self-hosted Intel Mac, which is persistent: with the
+      # action's default fixed keychain name the signing key would survive the
+      # job on disk and every run would append another certificate to the same
+      # keychain. GitHub-hosted macOS runners are ephemeral and unaffected, but
+      # they take the same path so there is only one behavior to reason about.
       - name: Import Developer ID certificate
         if: runner.os == 'macOS'
         uses: apple-actions/import-codesign-certs@v6
         with:
           p12-file-base64: ${{ secrets.DEV_ID_CERT_P12 }}
           p12-password: ${{ secrets.DEV_ID_CERT_PASSWORD }}
+          keychain: all-smi-signing-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Code sign macOS binary
         if: runner.os == 'macOS'
@@ -356,6 +381,27 @@ jobs:
           files: |
             ${{ matrix.asset_name }}${{ matrix.archive_ext }}
             ${{ matrix.asset_name }}${{ matrix.archive_ext }}.sha256
+
+      # 12) Delete the run-scoped signing keychain.
+      # always() so a failed build, a cancelled run, or a notarization error
+      # still removes the Developer ID private key from the machine. Deleting a
+      # keychain also drops it from every search list, so no separate
+      # `security list-keychains` reset is needed. Failures are tolerated: the
+      # keychain does not exist when certificate import never ran.
+      - name: Remove signing keychain
+        if: ${{ always() && runner.os == 'macOS' }}
+        run: |
+          # The action materializes `<name>` as `<name>.keychain-db`; try both
+          # spellings so a change in that convention cannot silently skip cleanup.
+          KEYCHAIN="all-smi-signing-${{ github.run_id }}-${{ github.run_attempt }}"
+          if security delete-keychain "${KEYCHAIN}.keychain-db" 2>/dev/null \
+            || security delete-keychain "$KEYCHAIN" 2>/dev/null; then
+            echo "Removed signing keychain $KEYCHAIN"
+          else
+            echo "No signing keychain to remove"
+          fi
+          echo "Remaining user keychains:"
+          security list-keychains -d user
 
   # ============================================================================
   # Microsoft Teams release notification (Power Automate Workflows webhook)
