@@ -146,10 +146,16 @@ jobs:
           echo "RUSTUP_HOME=C:\.rustup" >> $env:GITHUB_ENV
 
       # 2) Cache Cargo build artifacts
-      # Skipped on the self-hosted runners. The Windows box has a persistent
-      # CARGO_HOME (configured above), and the Intel Mac keeps its workspace and
-      # ~/.cargo between jobs, so on both the Actions cache would only mirror
-      # state the machine already has while costing a full upload every run.
+      # Skipped on the self-hosted runners, for different reasons on each.
+      # The Windows box has a persistent CARGO_HOME and RUSTUP_HOME (configured
+      # above), so the Actions cache would only mirror state already on disk.
+      # On the Intel Mac only ~/.cargo survives between jobs: actions/checkout
+      # defaults to clean: true, whose `git clean -ffdx` removes the ignored
+      # target/ directory, so each release compiles the dependency tree cold.
+      # That is accepted here because releases are infrequent and a release
+      # target/ is large enough that caching it would crowd the repository's
+      # 10 GB cache budget shared with the other five targets. Revisit with
+      # real build times if the Intel job becomes the critical path.
       - name: Cache cargo
         if: matrix.target != 'x86_64-pc-windows-msvc' && matrix.target != 'x86_64-apple-darwin'
         uses: actions/cache@v5

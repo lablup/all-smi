@@ -423,7 +423,13 @@ impl MacOsCpuReader {
         }
 
         // Last-resort thread count, used only when `hw.logicalcpu` is missing.
-        let logical_cpu_fallback = self.system.read().unwrap().cpus().len() as u32;
+        // Deliberately not `self.system.cpus().len()`: this runs before the
+        // first `ensure_cpu_refreshed`, and a freshly constructed `System` has
+        // an empty CPU list, so that source reports 0 and the result would be
+        // cached for the process lifetime.
+        let logical_cpu_fallback = std::thread::available_parallelism()
+            .map(|n| n.get() as u32)
+            .unwrap_or(0);
         let hardware = IntelCpuHardware::collect(logical_cpu_fallback);
 
         *self.cached_intel_info.lock().unwrap() = Some(hardware.clone());
