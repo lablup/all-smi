@@ -375,11 +375,6 @@ fn render_terminal_section(line_idx: usize, width: usize) -> String {
         ("", "", ""),
         ("Local Monitoring:", "", "header"),
         ("  all-smi", "Monitor local GPUs (default mode)", "command"),
-        (
-            "  sudo all-smi local",
-            "Monitor local GPUs (requires sudo on macOS)",
-            "command",
-        ),
         ("", "", ""),
         ("Remote Monitoring:", "", "header"),
         (
@@ -592,7 +587,7 @@ fn get_current_sort_status(sort_criteria: &crate::app_state::SortCriteria) -> St
 
 #[cfg(test)]
 mod tests {
-    use super::render_shortcuts_section;
+    use super::{render_shortcuts_section, render_terminal_section};
     use crate::app_state::AppState;
 
     #[test]
@@ -621,5 +616,25 @@ mod tests {
             !shortcuts.contains("Sort processes by CPU%"),
             "remote shortcuts must not advertise the local-only CPU sort shortcut.\n--- shortcuts ---\n{shortcuts}"
         );
+    }
+
+    #[test]
+    fn local_help_omits_obsolete_macos_sudo_command() {
+        let output = render_terminal_section(0, 120)
+            + "\n"
+            + &render_terminal_section(1, 120)
+            + "\n"
+            + &render_terminal_section(2, 120)
+            + "\n"
+            + &render_terminal_section(3, 120)
+            + "\n"
+            + &render_terminal_section(4, 120)
+            + "\n"
+            + &render_terminal_section(5, 120);
+
+        assert!(output.contains("Local Monitoring:"));
+        assert!(output.contains("all-smi"));
+        assert!(!output.contains("sudo all-smi local"));
+        assert!(!output.contains("requires sudo on macOS"));
     }
 }
