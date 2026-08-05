@@ -505,13 +505,14 @@ jobs:
           #
           # Not in argv either, which rules out the usual replacement,
           # `-c http.extraheader="Authorization: Basic $(...)"`. Command lines
-          # are world-readable through `ps` for as long as the process runs, and
-          # any step that later turns on `set -x` prints the expanded line into
-          # the workflow log. What is written below survives both: `$HOMEBREW_TAP_TOKEN`
-          # sits inside single quotes, so bash passes the eleven characters of
-          # the variable's name to git and expands nothing, and a trace of this
-          # line shows the same name. Only the shell that git spawns to run the
-          # helper resolves it, from its inherited environment.
+          # are readable through `ps` for as long as the process runs, and any
+          # step that later turns on `set -x` prints the expanded line into the
+          # workflow log. What is written below survives both: the helper string
+          # sits inside single quotes, so bash hands git the name
+          # `$HOMEBREW_TAP_TOKEN` and expands nothing, and a trace of this line
+          # shows that same name. Only the shell that git spawns to run the
+          # helper resolves it, from its inherited environment, and xtrace does
+          # not reach that shell.
           #
           # The empty `-c credential.helper=` first is not redundant. An empty
           # value resets the helper list, which drops whatever the runner image
