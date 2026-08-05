@@ -16,10 +16,12 @@ mod api;
 mod app_state;
 mod cli;
 mod cli_config;
+mod cli_service;
 mod common;
 mod config_cmd;
 mod device;
 mod doctor;
+mod service_cmd;
 #[macro_use]
 mod parsing;
 mod metrics;
@@ -107,6 +109,16 @@ fn main() {
     // Tokio runtime and its I/O is purely local filesystem work.
     if let Some(Commands::Config(ref cfg_args)) = cli.command {
         let code = config_cmd::run(cli.config.as_deref(), &cfg_args.action);
+        std::process::exit(code);
+    }
+
+    // `service` is likewise synchronous: it writes a service definition
+    // and shells out to the platform supervisor. It must run before the
+    // config load below, because installing a service on a host whose
+    // config file is malformed is exactly when an operator needs the
+    // subcommand to work. (Issue #309.)
+    if let Some(Commands::Service(ref svc_args)) = cli.command {
+        let code = service_cmd::run(&svc_args.action);
         std::process::exit(code);
     }
 
@@ -251,6 +263,10 @@ async fn run_command(cli: Cli, settings: Settings) {
             // was built. This branch is unreachable in practice; keep it
             // so the match is exhaustive.
             unreachable!("config subcommand is dispatched before runtime");
+        }
+        Some(Commands::Service(_)) => {
+            // Same as `config`: dispatched synchronously in `main`.
+            unreachable!("service subcommand is dispatched before runtime");
         }
         Some(Commands::Api(mut args)) => {
             // When using native macOS APIs, no sudo is needed

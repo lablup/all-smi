@@ -14,6 +14,9 @@ override_dh_auto_install:
 	# Install the pre-built binary
 	# The binary should be extracted to the project root before building the package
 	install -D -m 0755 all-smi debian/all-smi/usr/bin/all-smi
+	# Operator-editable environment file consumed by the unit's
+	# `EnvironmentFile=-/etc/default/all-smi` line.
+	install -D -m 0644 debian/all-smi.default debian/all-smi/etc/default/all-smi
 
 override_dh_auto_test:
 	# Skip tests for pre-built binary
@@ -21,6 +24,13 @@ override_dh_auto_test:
 
 override_dh_auto_clean:
 	@echo "Skipping clean step because we use pre-built binary"
+
+# Ship the unit disabled. all-smi is first a CLI tool, and opening a listening
+# port as a side effect of `apt install` would surprise operators, so this
+# deliberately diverges from prometheus-node-exporter. debian/all-smi.postinst
+# prints the `systemctl enable --now all-smi` hint instead.
+override_dh_installsystemd:
+	dh_installsystemd --no-enable --no-start
 
 override_dh_builddeb:
 	dh_builddeb --destdir=../

@@ -39,6 +39,17 @@ pub const CONFIG_FILE_NAME: &str = "config.toml";
 /// The app-specific subdirectory under the platform config root.
 pub const APP_DIR_NAME: &str = "all-smi";
 
+/// System-wide configuration file on Linux (issue #309).
+///
+/// A daemon supervised by systemd runs as a dedicated account with no
+/// home directory, so the per-user XDG candidate never resolves for it.
+/// This path is the machine-wide fallback the packaged service reads.
+/// It is a discovery candidate only: `all-smi config init` still writes
+/// the per-user file, because writing into `/etc` is an administrator's
+/// decision, not a side effect of a helper command.
+#[cfg(target_os = "linux")]
+pub const LINUX_SYSTEM_CONFIG_PATH: &str = "/etc/all-smi/config.toml";
+
 /// Expand a leading `~` or `~/` in a path-like string to the user's
 /// home directory. Returns the input unchanged when no home directory is
 /// available (e.g. `$HOME` unset on Linux, no `UserProfile` on Windows).
@@ -125,35 +136,67 @@ pub fn default_config_path() -> Option<PathBuf> {
     config_dir().map(|d| d.join(CONFIG_FILE_NAME))
 }
 
+/// Append `path` unless an identical entry is already queued.
+///
+/// Candidate order is meaningful (first existing file wins), so a
+/// duplicate would be harmless but confusing in `all-smi config path`
+/// output. Every branch of [`candidate_config_paths`] goes through this
+/// helper so a new platform cannot reintroduce duplicates.
+fn push_unique(out: &mut Vec<PathBuf>, path: PathBuf) {
+    if !out.iter().any(|p| p == &path) {
+        out.push(path);
+    }
+}
+
 /// Ordered list of paths the loader tries when no `--config` flag is
 /// supplied. First existing file wins. When none exist the caller
 /// proceeds with compiled defaults + env overrides.
 ///
-/// * Linux: only the canonical path (XDG).
-/// * macOS: canonical Apple path first, then `~/.config/all-smi/config.toml`
+/// The list is built in two tiers, each a set of sibling `cfg` branches:
+///
+/// 1. **Per-user candidates.** The platform-canonical path from
+///    [`default_config_path`], plus any per-platform parity fallback.
+/// 2. **System-wide candidates** (issue #309). A daemon runs as a
+///    dedicated account with no home directory, so it needs a
+///    machine-wide file. Linux contributes `/etc/all-smi/config.toml`;
+///    the macOS (#310) and Windows (#311) counterparts are added as
+///    sibling branches in the same tier.
+///
+/// Current resolution per platform:
+///
+/// * Linux: the XDG path, then `/etc/all-smi/config.toml`.
+/// * macOS: the canonical Apple path, then `~/.config/all-smi/config.toml`
 ///   as a parity fallback for operators migrating from Linux.
 /// * Windows: only the canonical `%APPDATA%` path.
 pub fn candidate_config_paths() -> Vec<PathBuf> {
     let mut out = Vec::new();
+
+    // --- Tier 1: per-user candidates ---------------------------------
     if let Some(primary) = default_config_path() {
-        out.push(primary);
+        push_unique(&mut out, primary);
     }
     // macOS parity fallback — issue spec: "fallback
     // `~/.config/all-smi/config.toml` accepted".
     #[cfg(target_os = "macos")]
     {
         if let Some(home) = dirs::home_dir() {
-            let xdg_like = home
-                .join(".config")
-                .join(APP_DIR_NAME)
-                .join(CONFIG_FILE_NAME);
-            // Avoid duplicates if the user somehow has the Apple path
-            // pointing at ~/.config (shouldn't happen but be defensive).
-            if !out.iter().any(|p| p == &xdg_like) {
-                out.push(xdg_like);
-            }
+            push_unique(
+                &mut out,
+                home.join(".config")
+                    .join(APP_DIR_NAME)
+                    .join(CONFIG_FILE_NAME),
+            );
         }
     }
+
+    // --- Tier 2: system-wide candidates (issue #309) ------------------
+    // Always ordered after the per-user tier so an operator's own file
+    // still wins over the machine-wide one when both exist.
+    #[cfg(target_os = "linux")]
+    {
+        push_unique(&mut out, PathBuf::from(LINUX_SYSTEM_CONFIG_PATH));
+    }
+
     out
 }
 
@@ -269,6 +312,70 @@ mod tests {
         if dirs::home_dir().is_some() {
             let paths = candidate_config_paths();
             assert!(!paths.is_empty());
+        }
+    }
+
+    #[test]
+    fn push_unique_drops_repeats_and_preserves_order() {
+        let mut out = Vec::new();
+        push_unique(&mut out, PathBuf::from("/a"));
+        push_unique(&mut out, PathBuf::from("/b"));
+        push_unique(&mut out, PathBuf::from("/a"));
+        assert_eq!(out, vec![PathBuf::from("/a"), PathBuf::from("/b")]);
+    }
+
+    #[test]
+    fn candidate_config_paths_has_no_duplicates() {
+        let paths = candidate_config_paths();
+        let mut seen = paths.clone();
+        seen.sort();
+        seen.dedup();
+        assert_eq!(seen.len(), paths.len(), "duplicate candidates: {paths:?}");
+    }
+
+    /// Issue #309: a systemd-supervised daemon runs as an account with
+    /// no home directory, so the machine-wide file must be discoverable.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_candidates_include_the_system_wide_path() {
+        let paths = candidate_config_paths();
+        let system = PathBuf::from(LINUX_SYSTEM_CONFIG_PATH);
+        assert!(
+            paths.contains(&system),
+            "/etc/all-smi/config.toml must be a discovery candidate on Linux: {paths:?}"
+        );
+    }
+
+    /// The operator's own file must win over the machine-wide one when
+    /// both exist, so the system path is ordered last.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_system_candidate_is_ordered_after_the_user_candidate() {
+        let paths = candidate_config_paths();
+        let system = PathBuf::from(LINUX_SYSTEM_CONFIG_PATH);
+        let system_index = paths
+            .iter()
+            .position(|p| p == &system)
+            .expect("system candidate must be present");
+        if let Some(user) = default_config_path() {
+            let user_index = paths
+                .iter()
+                .position(|p| p == &user)
+                .expect("user candidate must be present");
+            assert!(
+                user_index < system_index,
+                "the per-user candidate must be probed first: {paths:?}"
+            );
+        }
+    }
+
+    /// `config init` must never target `/etc`: writing there is an
+    /// administrator's decision, not a side effect of a helper command.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn default_config_path_is_never_the_system_wide_path() {
+        if let Some(p) = default_config_path() {
+            assert_ne!(p, PathBuf::from(LINUX_SYSTEM_CONFIG_PATH));
         }
     }
 

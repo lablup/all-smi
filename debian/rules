@@ -37,12 +37,25 @@ override_dh_auto_build:
 
 override_dh_auto_install:
 	install -D -m 0755 target/release/all-smi debian/all-smi/usr/bin/all-smi
+	# /etc/default/all-smi is the operator-editable environment file read by
+	# the unit through `EnvironmentFile=-`. Installed from debian/ rather than
+	# packaging/ so the Launchpad job, which overlays only debian/ onto a
+	# release-tag checkout, always finds it. A CI job asserts the two copies
+	# stay byte-identical.
+	install -D -m 0644 debian/all-smi.default debian/all-smi/etc/default/all-smi
 
 override_dh_auto_test:
 	@echo "Skipping tests for PPA build"
 
 override_dh_auto_clean:
 	rm -rf $(CARGO_TARGET_DIR) $(HOME)
+
+# Ship the unit disabled. all-smi is first a CLI tool, and opening a listening
+# port as a side effect of `apt install` would surprise operators, so this
+# deliberately diverges from prometheus-node-exporter. debian/all-smi.postinst
+# prints the `systemctl enable --now all-smi` hint instead.
+override_dh_installsystemd:
+	dh_installsystemd --no-enable --no-start
 
 override_dh_builddeb:
 	dh_builddeb --destdir=../

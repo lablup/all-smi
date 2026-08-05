@@ -1,0 +1,25 @@
+#!/bin/sh
+set -e
+
+#DEBHELPER#
+
+# The dedicated service account is normally created by systemd-sysusers from
+# debian/all-smi.sysusers, wired in by dh_installsysusers (debhelper >= 13.3).
+# Fall back to adduser when that helper did not run, when the target series
+# ships an older debhelper, or when the host has no systemd-sysusers binary.
+# Both paths are idempotent, and the getent guard keeps this a no-op on the
+# common path.
+if [ "$1" = "configure" ]; then
+    if ! getent passwd all-smi >/dev/null 2>&1; then
+        adduser --system --group --no-create-home --home /nonexistent \
+                --gecos "all-smi metrics exporter" --quiet all-smi || true
+    fi
+
+    # The exporter opens a listening socket, so enabling it is an explicit
+    # operator decision rather than a side effect of `apt install`. This
+    # deliberately diverges from prometheus-node-exporter; dh_installsystemd
+    # is invoked with --no-enable --no-start in debian/rules.
+    echo "Run 'sudo systemctl enable --now all-smi' to start the metrics exporter."
+fi
+
+exit 0
