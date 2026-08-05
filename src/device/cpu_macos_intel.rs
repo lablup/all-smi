@@ -23,8 +23,26 @@
 //! size and the marketing processor name on models where the corresponding
 //! sysctl keys are missing.
 
-use crate::utils::command::new_command;
+use crate::device::common::command_executor::{CommandOptions, execute_command};
+use crate::device::common::execute_command_default;
 use std::collections::HashMap;
+use std::time::Duration;
+
+/// Absolute paths to the macOS system binaries this module shells out to.
+///
+/// Resolving these through `PATH` would let a writable directory earlier in
+/// `PATH` than `/usr/sbin` substitute a different binary. `sudo` on macOS does
+/// not set `secure_path`, so the invoking user's `PATH` survives into an
+/// elevated process. Both binaries live at fixed, SIP-protected locations, so
+/// naming them outright costs no portability.
+const SYSCTL_BIN: &str = "/usr/sbin/sysctl";
+const SYSTEM_PROFILER_BIN: &str = "/usr/sbin/system_profiler";
+
+/// `system_profiler SPHardwareDataType` legitimately takes roughly half a
+/// second, which does not comfortably fit the shared fast-fail budget (2s on
+/// bare metal, 500ms containerized). It runs at most once per process and only
+/// on the gap-filling path, so it gets its own more generous ceiling.
+const SYSTEM_PROFILER_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Hardware facts about an Intel Mac CPU. These never change while the process
 /// runs, so the caller collects them once and caches them.
@@ -78,8 +96,15 @@ impl IntelCpuHardware {
         // later Intel Macs. sysctl reports unknown keys on stderr and keeps
         // going, so the exit status is deliberately ignored and only the keys
         // that did come back are parsed.
-        let output = new_command("sysctl")
-            .args([
+        // Routed through `execute_command_default` rather than a bare
+        // `Command::output()` so the call inherits the shared timeout, the
+        // kill-child-on-timeout behavior, and the 16 MiB output cap. A bare
+        // `output()` waits forever and reads to EOF, and this runs on a
+        // `spawn_blocking` worker that Tokio cannot cancel, so a wedged child
+        // would strand that worker for the life of the process.
+        let stdout = execute_command_default(
+            SYSCTL_BIN,
+            &[
                 "machdep.cpu.brand_string",
                 "hw.packages",
                 "hw.physicalcpu",
@@ -87,13 +112,10 @@ impl IntelCpuHardware {
                 "hw.cpufrequency",
                 "hw.cpufrequency_max",
                 "hw.l3cachesize",
-            ])
-            .output();
-
-        let stdout = match output {
-            Ok(output) => String::from_utf8_lossy(&output.stdout).into_owned(),
-            Err(_) => String::new(),
-        };
+            ],
+        )
+        .map(|output| output.stdout)
+        .unwrap_or_default();
 
         let values = parse_sysctl_pairs(&stdout);
         let read_u64 = |key: &str| values.get(key).and_then(|v| v.parse::<u64>().ok());
@@ -127,14 +149,20 @@ impl IntelCpuHardware {
     /// Fall back to `system_profiler SPHardwareDataType` for the fields sysctl
     /// cannot supply on every model.
     fn from_system_profiler() -> Option<Self> {
-        let output = new_command("system_profiler")
-            .arg("SPHardwareDataType")
-            .output()
-            .ok()?;
+        // Bounded for the same reason as the sysctl call above. This one is the
+        // likelier of the two to wedge: `system_profiler` queries IOKit, which
+        // can block on unresponsive hardware.
+        let output = execute_command(
+            SYSTEM_PROFILER_BIN,
+            &["SPHardwareDataType"],
+            &CommandOptions {
+                timeout: Some(SYSTEM_PROFILER_TIMEOUT),
+                check_status: false,
+            },
+        )
+        .ok()?;
 
-        Some(parse_system_profiler_hardware(&String::from_utf8_lossy(
-            &output.stdout,
-        )))
+        Some(parse_system_profiler_hardware(&output.stdout))
     }
 
     /// True when sysctl left a field that `system_profiler` can still supply.

@@ -67,6 +67,7 @@ unsafe extern "C" {
     fn IOServiceGetMatchingService(master_port: u32, matching: *mut c_void) -> u32;
     fn IOServiceOpen(device: u32, owning_task: u32, conn_type: u32, conn: *mut u32) -> i32;
     fn IOServiceClose(conn: u32) -> i32;
+    fn IOObjectRelease(object: u32) -> i32;
     fn IOConnectCallStructMethod(
         conn: u32,
         selector: u32,
@@ -221,6 +222,15 @@ impl SMC {
 
             let mut conn: u32 = 0;
             let result = IOServiceOpen(device, mach_task_self(), 0, &mut conn);
+
+            // `IOServiceGetMatchingService` returns a +1-retained object that
+            // the caller owns. `IOServiceOpen` creates an independent user
+            // client and does not adopt that reference, so the service handle
+            // has to be released on both outcomes or every call leaks a mach
+            // port right. `SMCMetrics::collect` opens a fresh connection once
+            // per collection cycle, so the leak was unbounded over the
+            // lifetime of a long-running `view` or `api` process.
+            IOObjectRelease(device);
 
             if result != 0 {
                 return Err("Failed to open SMC connection");
@@ -697,13 +707,29 @@ impl FanReading {
 
 impl Drop for SMC {
     fn drop(&mut self) {
-        unsafe {
-            IOServiceClose(self.conn);
+        // A zero `conn` is MACH_PORT_NULL, which only the unit tests construct.
+        // Closing it is harmless but pointless, so skip it.
+        if self.conn != 0 {
+            // SAFETY: `conn` is an io_connect_t returned by a successful
+            // `IOServiceOpen` in `SMC::new`, owned exclusively by `self`.
+            // `SMC` has a `Drop` impl (so it cannot be `Copy`) and derives no
+            // `Clone`, so the handle is closed exactly once.
+            unsafe {
+                IOServiceClose(self.conn);
+            }
         }
     }
 }
 
-// Safety: SMC uses IOKit which is thread-safe
+// SAFETY: `conn` is a mach port name in this task's IPC namespace. It carries
+// no thread-local state and no thread affinity, so the handle stays valid when
+// the owning `SMC` moves between threads (readers are polled from Tokio's
+// blocking pool, which does not pin a task to one thread).
+//
+// `Sync` is deliberately NOT implemented: the read path takes `&mut self`, and
+// concurrent `IOConnectCallStructMethod` calls on a single AppleSMC user client
+// are not guaranteed safe. Callers that need shared access wrap this in a
+// `Mutex`, which is what makes them `Sync` without any further `unsafe`.
 unsafe impl Send for SMC {}
 
 /// SMC metrics collection result
