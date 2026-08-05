@@ -213,6 +213,21 @@ jobs:
           "$BIN" service uninstall --user
           test ! -f "$UNIT"
 
+          # `--now` is a distinct code path (`systemctl enable --now`
+          # rather than `enable` followed by `start`), so exercise it
+          # rather than inferring it from the two halves above.
+          "$BIN" service install --user --now
+          for _ in $(seq 1 30); do
+            "$BIN" service status --user && break || sleep 1
+          done
+          "$BIN" service status --user
+          "$BIN" service status --user --json | grep -q '"running": true'
+
+          "$BIN" service uninstall --user
+          test ! -f "$UNIT"
+          "$BIN" service status --user && rc=0 || rc=$?
+          test "$rc" -eq 3
+
       # ── System scope fallback: same lifecycle under sudo ──
       - name: System-scope lifecycle
         if: steps.probe.outputs.user_scope != 'true'
