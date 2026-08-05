@@ -245,10 +245,12 @@ fn is_translated_process() -> bool {
 
 /// Report whether this is an Intel (x86_64) Mac.
 ///
-/// Complement of [`is_apple_silicon`] on macOS, and always `false` elsewhere,
-/// so callers can branch on "Intel Mac" without repeating the OS check.
+/// Complement of [`is_apple_silicon`] on macOS. Defined only on macOS because
+/// every caller sits behind a `target_os = "macos"` gate, and an always-false
+/// stub elsewhere would be dead code under the `-D warnings` build.
+#[cfg(target_os = "macos")]
 pub fn is_intel_mac() -> bool {
-    std::env::consts::OS == "macos" && !is_apple_silicon()
+    !is_apple_silicon()
 }
 
 pub fn has_furiosa() -> bool {
@@ -623,13 +625,10 @@ mod tests {
         assert!(is_apple_silicon());
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn intel_mac_is_the_macos_complement_of_apple_silicon() {
-        if std::env::consts::OS == "macos" {
-            assert_eq!(is_intel_mac(), !is_apple_silicon());
-        } else {
-            assert!(!is_intel_mac());
-        }
+        assert_eq!(is_intel_mac(), !is_apple_silicon());
     }
 }
 
