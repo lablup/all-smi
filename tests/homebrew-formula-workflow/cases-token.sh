@@ -58,8 +58,12 @@ new_push_sandbox() {
     make_tap "$box" "${FIXTURES}/one-stanza.rb"
     git -C "${box}/homebrew-tap" push --quiet "${box}/remote/tap.git" main
 
-    mkdir -p "${box}/home"
-    HOME="${box}/home" git config --global credential.helper store
+    # XDG_CONFIG_HOME is overridden alongside HOME because `git config --global`
+    # writes to $XDG_CONFIG_HOME/git/config when that file exists, and the point
+    # of the next line is to plant a global credential helper in the sandbox,
+    # not in whatever config the person running these tests actually uses.
+    mkdir -p "${box}/home" "${box}/xdg"
+    HOME="${box}/home" XDG_CONFIG_HOME="${box}/xdg" git config --global credential.helper store
     printf 'https://someone:leftover@127.0.0.1\n' > "${box}/home/.git-credentials"
 
     port=$(start_git_server "$box") || return 1
@@ -75,6 +79,7 @@ run_push_step() {  # sandbox logfile -> status
     (
         cd "$box" || exit 127
         export HOME="${box}/home"
+        export XDG_CONFIG_HOME="${box}/xdg"
         export HOMEBREW_TAP_TOKEN="$FAKE_TOKEN"
         export VERSION_NO_V="$NEW_VERSION"
         # -x on purpose: the trace is one of the things being asserted about.
