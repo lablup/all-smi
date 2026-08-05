@@ -56,7 +56,7 @@ use windows_service::{define_windows_service, service_dispatcher};
 
 use super::scm_backend::{describe, raw_code};
 use super::{EXIT_ERROR, EXIT_OK, SERVICE_NAME, scm, scm_log};
-use crate::api::server;
+use crate::api::shutdown as api_shutdown;
 use crate::cli::ApiArgs;
 use crate::common::config_file::{self, Settings};
 
@@ -122,7 +122,7 @@ fn run_service(log_dir: &Result<std::path::PathBuf, String>) -> Result<(), Strin
                 // Reaches the same graceful path Ctrl+C takes on Unix,
                 // including the energy WAL flush. Returns immediately;
                 // the drain happens on the main thread.
-                server::request_shutdown();
+                api_shutdown::request_shutdown();
                 ServiceControlHandlerResult::NoError
             }
             _ => ServiceControlHandlerResult::NotImplemented,
@@ -168,10 +168,10 @@ fn run_service(log_dir: &Result<std::path::PathBuf, String>) -> Result<(), Strin
     // Report SERVICE_RUNNING only once a listener is bound, so the SCM
     // never shows a running service whose port refuses connections.
     runtime.spawn(async move {
-        server::wait_until_serving().await;
+        api_shutdown::wait_until_serving().await;
         // A Stop that arrived during startup already moved us to
         // STOP_PENDING; going back to RUNNING would be a lie.
-        if !server::shutdown_requested() {
+        if !api_shutdown::shutdown_requested() {
             report(
                 ServiceState::Running,
                 accepted,
@@ -187,7 +187,7 @@ fn run_service(log_dir: &Result<std::path::PathBuf, String>) -> Result<(), Strin
 
     // `run_api_mode` returns only after the listeners have drained and
     // the energy WAL has been flushed.
-    let exit_code = if server::shutdown_requested() {
+    let exit_code = if api_shutdown::shutdown_requested() {
         tracing::info!("all-smi service stopped cleanly");
         ServiceExitCode::Win32(0)
     } else {

@@ -105,8 +105,10 @@ pub enum Commands {
     /// machine-wide; `--user` installs a per-user service with no
     /// elevation. Runtime settings stay in the environment file and the
     /// TOML config, so changing a port never requires reinstalling.
-    /// Linux (systemd) is supported today; macOS launchd and Windows
-    /// Service Control Manager backends are tracked separately.
+    /// Linux (systemd) and Windows (Service Control Manager) are
+    /// supported today; the macOS launchd backend is tracked
+    /// separately. `--user` has no meaning on Windows, where the
+    /// Service Control Manager has no per-user scope.
     /// See `all-smi service --help` for subcommands.
     Service(ServiceArgs),
 }
@@ -825,9 +827,30 @@ mod tests {
         actions.sort();
         assert_eq!(
             actions,
-            vec!["install", "restart", "start", "status", "stop", "uninstall"],
+            vec![
+                "install",
+                "restart",
+                "run",
+                "start",
+                "status",
+                "stop",
+                "uninstall"
+            ],
             "the service subcommand set is a cross-platform contract (#310, #311)"
         );
+
+        // `run` is the Windows Service Control Manager entry point
+        // (issue #311), not an operator-facing action, so it must stay
+        // out of `--help` on every platform. The rest must stay visible.
+        for action in service.get_subcommands() {
+            let name = action.get_name();
+            let hidden = action.is_hide_set();
+            match name {
+                "run" => assert!(hidden, "`service run` must remain hidden from --help"),
+                "help" => {}
+                other => assert!(!hidden, "`service {other}` must stay visible in --help"),
+            }
+        }
     }
 
     /// The flag spellings are part of the same contract as the

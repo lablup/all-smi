@@ -21,6 +21,12 @@ pub mod latch;
 pub mod metrics;
 pub mod server;
 pub mod server_state;
+/// Graceful-shutdown and readiness signalling (issue #311).
+pub mod shutdown;
 
 pub use frame_bus::FrameBus;
 pub use server::*;
+// `shutdown` is deliberately not glob re-exported here. Its entry
+// points are reached through `api::shutdown::…`, which is how the
+// Windows service host imports them; a re-export would be an unused
+// import in the binary target, where the module tree is private.
