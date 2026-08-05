@@ -114,13 +114,12 @@ pub const USER_SCOPE_DROPPED_PREFIXES: &[&str] = &[
     "Wants=network-online.target",
 ];
 
-/// Directives that are safe in a user unit because they need no
-/// privilege: `prctl`- and seccomp-based hardening only.
-///
-/// Dropping a directive from the user-scope render must never become an
-/// excuse to weaken what a user manager *can* enforce, so this list is
-/// asserted positively by the tests.
-pub const USER_SCOPE_KEPT_HARDENING: &[&str] = &["NoNewPrivileges=", "RestrictSUIDSGID="];
+// The complementary "kept in user scope" list lives in the test module
+// (`USER_SCOPE_KEPT_HARDENING` in `template_tests.rs`). It is a test
+// contract, not runtime data: the renderer only ever consults the drop
+// list above. Keeping it here would be dead code in the binary target,
+// where dead-code analysis is per target and a `pub` item is not
+// automatically live the way it is in the library target.
 
 /// Inputs for [`render_unit`].
 #[derive(Debug, Clone)]

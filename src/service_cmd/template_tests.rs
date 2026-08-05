@@ -168,6 +168,17 @@ fn system_scope_keeps_every_hardening_directive() {
     }
 }
 
+/// Hardening a per-user systemd manager *can* apply, because it is
+/// implemented purely through `prctl` or a seccomp filter and needs no
+/// privilege.
+///
+/// The complement of [`USER_SCOPE_DROPPED_PREFIXES`]. Dropping what a
+/// user manager cannot apply must never become an excuse to weaken what
+/// it can, so this list is asserted positively below. It lives in the
+/// test module rather than beside the drop list because the renderer
+/// never consults it: only the tests do.
+const USER_SCOPE_KEPT_HARDENING: &[&str] = &["NoNewPrivileges=", "RestrictSUIDSGID="];
+
 #[test]
 fn user_scope_keeps_the_privilege_free_hardening() {
     // Dropping what a user manager cannot apply must not become an
