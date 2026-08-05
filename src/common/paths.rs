@@ -89,7 +89,7 @@ pub fn program_data_root() -> PathBuf {
 ///
 /// A service registered by `all-smi service install` runs as
 /// LocalSystem, whose `%APPDATA%` resolves to
-/// `C:\Windows\System32\config\systemprofile\AppData\Roaming` — a
+/// `C:\Windows\System32\config\systemprofile\AppData\Roaming`, a
 /// directory no operator will ever open, let alone edit. `%PROGRAMDATA%`
 /// is the machine-wide counterpart of `/etc`, so that is where an
 /// administrator configures the service. Discovery candidate only:
