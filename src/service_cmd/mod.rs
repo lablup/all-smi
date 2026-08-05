@@ -103,19 +103,29 @@ pub mod plist;
 // on this crate dies in `zstd-sys`, whose build script needs a C
 // toolchain with Windows headers. If you change them, check them the
 // way they were written: an isolated probe crate that `#[path]`-includes
-// the real `service_cmd`, `common`, `cli`, `cli_service`, and
-// `utils::command` sources, stubs `crate::api` and `crate::device` (the
-// two that drag in the device readers), and depends only on
+// the real `service_cmd`, `common`, `cli`, `cli_service`,
+// `utils::command`, `api::latch`, and `api::shutdown` sources, and stubs
+// only `crate::device` and `api::server::run_api_mode`, the two that
+// drag in the device readers. It needs no dependency beyond
 // `windows-service`, `tracing-appender`, and the pure-Rust crates those
-// modules need. Give it both a library and a binary target, because
-// this crate compiles its module tree twice and a `pub` item that is
-// always live in a library target can be dead behind a binary's private
-// module root. Then run:
+// modules already use.
+//
+// Two details are easy to get wrong. Give the probe a binary target as
+// well as a library one: this crate compiles its module tree twice, and
+// a `pub` item that is always live in a library target can be dead
+// behind a binary's private module root, which is exactly where the
+// dead-code lint has something to say. And have the stub `run_api_mode`
+// call `shutdown::mark_serving` and `shutdown::shutdown_signal`, since
+// the real `server.rs` is their only caller and cannot be included;
+// without those calls the probe's reachability graph diverges from the
+// real crate's and reports a false positive. Then run:
 //
 //     cargo clippy --target x86_64-pc-windows-msvc --lib --bins --tests -- -D warnings
 //
 // Verify the probe actually reaches the files before trusting it: paste
-// a deliberate type error into each and confirm it fails.
+// a deliberate type error into each and confirm it fails. A clean run
+// from a probe that silently stopped resolving a `#[path]` looks exactly
+// like a clean run from one that did not.
 //
 // `scm` carries the same `allow(dead_code)` companion as the systemd,
 // template, and launchd modules above, for the same reason: off Windows
@@ -301,9 +311,10 @@ pub fn backend() -> Result<Box<dyn ServiceBackend>, ServiceError> {
     #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     {
         Err(ServiceError::NotSupported(
-            "`all-smi service` supports Linux (systemd) only on this build; adapt \
-             packaging/systemd/all-smi.service from the all-smi source tree to your \
-             init system."
+            "`all-smi service` has no supervisor backend for this platform. It drives systemd on \
+             Linux, launchd on macOS, and the Service Control Manager on Windows; adapt \
+             packaging/systemd/all-smi.service from the all-smi source tree to whatever \
+             supervises this host."
                 .to_string(),
         ))
     }
