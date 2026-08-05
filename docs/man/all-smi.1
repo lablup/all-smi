@@ -255,6 +255,91 @@ instead; \fBRuntimeDirectory=\fR provides \fI/run/all\-smi\fR.
 .PP
 OpenRC, runit, and sysvinit are not supported by the subcommand. It detects the
 absence of systemd and points at the canonical unit for manual adaptation.
+.SS macOS (launchd)
+The canonical job definition is
+\fIpackaging/launchd/com.lablup.all\-smi.plist\fR in the source tree, a
+self\-contained system LaunchDaemon.
+.B all\-smi service install
+embeds the same file and rewrites \fBProgramArguments\fR, the log paths, and
+the account keys for the requested scope. The launchd label is
+\fBcom.lablup.all\-smi\fR in both scopes; they occupy different domains, so it
+never collides.
+.PP
+Homebrew installs ship a service block, and the subcommand refuses to install
+alongside it. The two \fBbrew services\fR invocations are not interchangeable:
+.RS
+.nf
+brew services start all\-smi        # gui/$UID, stops at logout
+sudo brew services start all\-smi   # system domain, starts at boot
+.fi
+.RE
+A rack\-mounted Mac that reboots unattended needs the elevated form; the
+unelevated one leaves it with no exporter after a power cycle.
+.PP
+For a zip archive, \fBcargo install\fR, or a local build, use the subcommand:
+.RS
+.nf
+sudo all\-smi service install \-\-now   # /Library/LaunchDaemons
+all\-smi service status
+sudo all\-smi service uninstall
+
+all\-smi service install \-\-user \-\-now  # ~/Library/LaunchAgents
+.fi
+.RE
+.PP
+launchd has no separate enabled state. A plist in \fILaunchDaemons\fR or
+\fILaunchAgents\fR is bootstrapped automatically at boot or login, and
+\fBRunAtLoad\fR starts it from there, so
+.B install
+without \fB\-\-now\fR writes the plist and stops, which is exactly "enabled at
+boot, not running yet".
+.B install \-\-now
+additionally boots the job out and back in, because launchd caches a loaded
+job's definition and bootstrapping over it fails rather than replacing it.
+.B stop
+boots the job out and leaves the plist, so the service returns at the next
+boot.
+.B install
+also runs \fBlaunchctl enable\fR to clear a persistent disable override, which
+outlives both the plist and a reboot;
+.B uninstall
+deliberately does not disable, for the same reason, and leaves the log file in
+place.
+.PP
+launchd has no \fBEnvironmentFile=\fR equivalent, so there is no
+\fI/etc/default/all\-smi\fR analogue on macOS: the TOML config is the only
+settings surface. A LaunchDaemon runs outside any login session, which makes
+\fI~/Library/Application Support\fR resolve to root's home rather than the
+administrator's;
+\fI/Library/Application Support/all\-smi/config.toml\fR is a discovery
+candidate for exactly that case, ordered after every per\-user candidate.
+.PP
+A user\-scope render drops \fBUserName\fR, \fBGroupName\fR, and
+\fBInitGroups\fR, all of which need root. launchd does not reject them the way
+systemd rejects an unprivileged user unit: on macOS 26.6, bootstrapping a
+LaunchAgent carrying \fBUserName root\fR succeeds and the job still runs as the
+invoking user, with the key silently ignored. They are dropped because keeping
+them would ship a plist that reads as a root job to anyone auditing the
+machine when it is not one, and because Apple documents the keys as requiring
+root without documenting that fallback. \fBSoftResourceLimits\fR is kept in
+both scopes, since raising a soft rlimit up to the inherited hard limit needs
+no privilege.
+.PP
+\fB\-\-service\-user\fR sets \fBUserName\fR in system scope and drops
+\fBGroupName\fR rather than mirroring the account name the way the systemd
+renderer does, because macOS has no convention that an account owns an
+eponymous group; omitting the key makes launchd use the account's primary
+group from the password database. Such an account needs a writable home
+directory, or an explicit \fB[energy] wal_path\fR, or the energy WAL degrades
+to in\-memory with a warning.
+.PP
+The Apple Silicon native readers (IOReport, the SMC,
+\fBNSProcessInfo.thermalState\fR) need neither sudo nor a GUI session, and a
+LaunchAgent exports the same metric set a foreground \fBall\-smi api\fR does.
+The plist sets \fBProcessType\fR to \fBBackground\fR so the exporter runs at
+background QoS on the efficiency cores rather than competing with the workload
+it monitors, which costs a few seconds of extra startup while the IOReport
+channel list is enumerated.
 .SH INTERACTIVE CONTROLS (LOCAL/VIEW MODE)
 .TP
 .B Tab / Shift+Tab
@@ -401,16 +486,19 @@ Optional TOML configuration file. Per-platform canonical paths:
 .IP \(bu 3
 Linux: \fI$XDG_CONFIG_HOME/all-smi/config.toml\fR (fallback \fI~/.config/all-smi/config.toml\fR), then \fI/etc/all-smi/config.toml\fR
 .IP \(bu 3
-macOS: \fI~/Library/Application Support/all-smi/config.toml\fR (also accepts \fI~/.config/all-smi/config.toml\fR)
+macOS: \fI~/Library/Application Support/all-smi/config.toml\fR (also accepts \fI~/.config/all-smi/config.toml\fR, then \fI/Library/Application Support/all-smi/config.toml\fR)
 .IP \(bu 3
 Windows: \fI%APPDATA%\\all-smi\\config.toml\fR
 .RE
 .RS
 Candidates are probed in order and the first existing file wins, so a
-per-user file always beats the machine-wide one. \fI/etc/all-smi/config.toml\fR
-exists for daemons: a service running as a dedicated account has no home
-directory, and the shipped unit sets \fBProtectHome=true\fR, so no per-user
-candidate resolves for it. \fBall-smi config init\fR only ever writes the
+per-user file always beats the machine-wide one. The machine-wide paths exist
+for daemons. On Linux, a service running as a dedicated account has no home
+directory and the shipped unit sets \fBProtectHome=true\fR, so no per-user
+candidate resolves for it. On macOS, a launchd LaunchDaemon runs outside any
+login session, so \fI~/Library/Application Support\fR resolves to root's home
+rather than the administrator's, and launchd offers no environment-file
+mechanism to work around it. \fBall-smi config init\fR only ever writes the
 per-user path.
 .RE
 .RS
@@ -455,6 +543,22 @@ carry \fB# Managed by 'all-smi service'\fR as their first line; the subcommand
 refuses to overwrite or remove a unit without it unless \fB--force\fR is
 passed. The canonical source is \fIpackaging/systemd/all-smi.service\fR in the
 all-smi source tree.
+.TP
+.I com.lablup.all-smi.plist
+launchd job definition for API mode on macOS. The system-scope LaunchDaemon
+lives at \fI/Library/LaunchDaemons/com.lablup.all-smi.plist\fR; a user-scope
+LaunchAgent lives at \fI~/Library/LaunchAgents/com.lablup.all-smi.plist\fR.
+Both are written by
+.B all-smi service install
+and carry \fB<!-- Managed by 'all-smi service' -->\fR after the DOCTYPE (an XML
+declaration has to stay on line 1, so unlike a systemd unit the marker cannot
+be the first line); the subcommand refuses to overwrite or remove a plist
+without it unless \fB--force\fR is passed. The canonical source is
+\fIpackaging/launchd/com.lablup.all-smi.plist\fR in the all-smi source tree.
+Logs go to \fI/var/log/all-smi/all-smi.log\fR and
+\fI~/Library/Logs/all-smi/all-smi.log\fR respectively;
+.B uninstall
+leaves them in place.
 .TP
 .I /etc/default/all-smi
 Environment file read by the systemd unit through

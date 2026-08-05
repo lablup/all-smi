@@ -210,11 +210,27 @@ async fn run_command(cli: Cli, settings: Settings) {
     //   cleanly with a complete final JSON line"). Skip them for
     //   `Record` so the cooperative path wins.
     //
+    // * `Api` owns its shutdown for the same reason. `run_api_mode`
+    //   waits for axum's graceful shutdown, then performs the final
+    //   energy-WAL flush and fsync and removes the Unix socket file.
+    //   The unconditional exit below won that race, so every SIGTERM
+    //   dropped the last batch of accumulated Joules and left a stale
+    //   socket behind. That is not an edge case for a service: SIGTERM
+    //   is exactly how `launchctl bootout` and `systemctl stop` end it,
+    //   so it happened on every restart (issues #191, #309, #310).
+    //
     // * Every other subcommand keeps the original behaviour — no device
     //   manager does partial-state flushing, so an immediate exit on
     //   signal is the desired shutdown semantics.
-    let is_record = matches!(cli.command, Some(Commands::Record(_)));
-    if !is_record {
+    let owns_shutdown = match &cli.command {
+        Some(Commands::Record(_) | Commands::Api(_)) => true,
+        // `None` redispatches through `[general].default_mode` further
+        // down, and the recursive call cannot uninstall a handler this
+        // call already spawned. Resolve the effective mode here.
+        None => settings.general.default_mode == "api",
+        _ => false,
+    };
+    if !owns_shutdown {
         // Set up signal handler for clean shutdown
         tokio::spawn(async {
             signal::ctrl_c().await.expect("Failed to listen for Ctrl+C");
@@ -331,6 +347,19 @@ async fn run_command(cli: Cli, settings: Settings) {
             }
 
             run_api_mode(&args, &settings).await;
+
+            // Reached once the graceful shutdown above has finished, so
+            // the collectors are torn down in the same deterministic
+            // order `view` uses. Previously the signal handler exited
+            // the process before this point could be reached at all.
+            #[cfg(target_os = "macos")]
+            {
+                shutdown_native_metrics_manager();
+            }
+            #[cfg(target_os = "linux")]
+            {
+                shutdown_hlsmi_manager();
+            }
         }
         Some(Commands::Local(mut args)) => {
             // On non-macOS platforms, require sudo

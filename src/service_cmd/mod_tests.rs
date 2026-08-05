@@ -72,25 +72,20 @@ fn default_status_is_not_installed() {
     assert_eq!(s.pid, None);
 }
 
-/// Non-Linux platforms must fail with a message that names the
-/// follow-up issue, so an operator who hits it knows where to look.
-#[cfg(not(target_os = "linux"))]
+/// Platforms with no backend yet must fail with a message that names
+/// the follow-up issue, so an operator who hits it knows where to look.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 #[test]
-fn non_linux_backend_points_at_the_follow_up_issue() {
-    let err = backend().err().expect("no backend outside Linux yet");
+fn unimplemented_backend_points_at_the_follow_up_issue() {
+    let err = backend().err().expect("no backend on this platform yet");
     let msg = err.to_string();
     assert!(matches!(err, ServiceError::NotSupported(_)));
-    #[cfg(target_os = "macos")]
-    assert!(
-        msg.contains("issues/310"),
-        "macOS arm must name issue #310, got: {msg}"
-    );
     #[cfg(target_os = "windows")]
     assert!(
         msg.contains("issues/311"),
         "Windows arm must name issue #311, got: {msg}"
     );
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[cfg(not(target_os = "windows"))]
     assert!(msg.contains("packaging/systemd/all-smi.service"));
 }
 
@@ -98,4 +93,30 @@ fn non_linux_backend_points_at_the_follow_up_issue() {
 #[test]
 fn linux_backend_resolves() {
     assert!(backend().is_ok(), "Linux must always resolve a backend");
+}
+
+/// Issue #310: the macOS arm dispatches launchd rather than refusing.
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_backend_resolves() {
+    assert!(backend().is_ok(), "macOS must resolve the launchd backend");
+}
+
+/// A user-scope install has to warn about the session boundary, and the
+/// escape hatch it names has to be the one that platform actually has.
+/// Getting this wrong sends an operator chasing a command that does not
+/// exist on their machine.
+#[test]
+fn user_scope_note_names_a_real_escape_hatch() {
+    let note = user_scope_persistence_note();
+    #[cfg(target_os = "macos")]
+    assert!(
+        note.contains("LaunchAgent") && note.contains("sudo all-smi service install"),
+        "macOS note must point at the system LaunchDaemon, got: {note}"
+    );
+    #[cfg(not(target_os = "macos"))]
+    assert!(
+        note.contains("enable-linger"),
+        "the systemd note must point at lingering, got: {note}"
+    );
 }

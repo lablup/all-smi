@@ -105,13 +105,25 @@ pub fn guard(force: bool) -> Result<(), ServiceError> {
              all-smi' instead"
                 .to_string(),
         )),
-        PackageOwner::Homebrew => Err(ServiceError::PackageManaged(
+        PackageOwner::Homebrew => Err(ServiceError::PackageManaged(format!(
             "The Homebrew formula already ships a service definition; use 'brew services start \
-             all-smi' instead"
-                .to_string(),
-        )),
+             all-smi' instead{HOMEBREW_BOOT_HINT}"
+        ))),
     }
 }
+
+/// Extra guidance appended to the Homebrew refusal.
+///
+/// `brew services` bootstraps into `gui/$UID` without sudo and into the
+/// system domain with it, and only the latter survives a reboot on a
+/// headless node. That distinction is macOS-specific: on Linuxbrew
+/// `brew services` drives `systemctl --user`, where running it under
+/// sudo is not a supported mode.
+#[cfg(target_os = "macos")]
+const HOMEBREW_BOOT_HINT: &str =
+    " (or 'sudo brew services start all-smi' for a boot-time system daemon)";
+#[cfg(not(target_os = "macos"))]
+const HOMEBREW_BOOT_HINT: &str = "";
 
 #[cfg(test)]
 mod tests {
@@ -192,6 +204,24 @@ mod tests {
         // `--force` short-circuits before any filesystem probing, so
         // this holds on every host regardless of what is installed.
         assert!(guard(true).is_ok());
+    }
+
+    /// Issue #310: on macOS the two `brew services` invocations land in
+    /// different launchd domains and only the elevated one survives a
+    /// reboot, so a headless operator who follows the unelevated hint
+    /// gets a monitoring node that goes dark at the next power cycle.
+    /// The refusal has to name both.
+    #[test]
+    fn the_homebrew_refusal_distinguishes_the_two_brew_services_domains() {
+        #[cfg(target_os = "macos")]
+        {
+            assert!(HOMEBREW_BOOT_HINT.contains("sudo brew services start all-smi"));
+            assert!(HOMEBREW_BOOT_HINT.contains("boot-time"));
+        }
+        // Linuxbrew drives `systemctl --user`, where running the whole
+        // thing under sudo is not a supported mode, so no hint there.
+        #[cfg(not(target_os = "macos"))]
+        assert!(HOMEBREW_BOOT_HINT.is_empty());
     }
 
     #[test]
