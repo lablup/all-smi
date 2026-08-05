@@ -181,9 +181,9 @@ http://gpu-node3:9090
 |----------|----------------|---------------|
 | Linux    | `$XDG_CONFIG_HOME/all-smi/config.toml` (fallback `~/.config/all-smi/config.toml`) | `/etc/all-smi/config.toml` |
 | macOS    | `~/Library/Application Support/all-smi/config.toml` | `~/.config/all-smi/config.toml`, then `/Library/Application Support/all-smi/config.toml` |
-| Windows  | `%APPDATA%\all-smi\config.toml` | — |
+| Windows  | `%APPDATA%\all-smi\config.toml` | `%PROGRAMDATA%\all-smi\config.toml` |
 
-Candidates are probed in order and the first existing file wins, so a per-user file always beats the machine-wide one. The machine-wide paths exist for daemons. On Linux a service running as a dedicated account has no home directory, so no per-user candidate ever resolves for it; on macOS a launchd LaunchDaemon runs outside any login session, so `~/Library/Application Support` resolves to root's home rather than the administrator's, and launchd has no environment-file mechanism to work around it (see [Running as a service](#running-as-a-service)). `all-smi config init` only ever writes the per-user path; creating `/etc/all-smi/config.toml` or `/Library/Application Support/all-smi/config.toml` is an administrator's decision.
+Candidates are probed in order and the first existing file wins, so a per-user file always beats the machine-wide one. The machine-wide paths exist for daemons. On Linux a service running as a dedicated account has no home directory, so no per-user candidate ever resolves for it; on macOS a launchd LaunchDaemon runs outside any login session, so `~/Library/Application Support` resolves to root's home rather than the administrator's, and launchd has no environment-file mechanism to work around it; on Windows a service running as LocalSystem resolves `%APPDATA%` into `C:\Windows\System32\config\systemprofile\AppData\Roaming`, which no operator will ever edit (see [Running as a service](#running-as-a-service)). `all-smi config init` only ever writes the per-user path; creating `/etc/all-smi/config.toml`, `/Library/Application Support/all-smi/config.toml`, or `%PROGRAMDATA%\all-smi\config.toml` is an administrator's decision.
 
 Pass `--config <PATH>` to any subcommand to override the discovery and force a specific file. A missing or malformed `--config` target is a hard error (exit 2); implicit discovery silently falls back to defaults when no candidate file exists. To print the active path for the current user without writing any file, run `all-smi config path` (also surfaced in `all-smi --help` under the "Configuration file" section).
 
@@ -424,6 +424,58 @@ Logs go to `/var/log/all-smi/all-smi.log` for the daemon and `~/Library/Logs/all
 `--service-user` sets `UserName` in system scope and drops `GroupName` rather than mirroring the account name the way the Linux renderer does. macOS has no convention that an account owns an eponymous group, so omitting the key makes launchd use the account's primary group straight from the password database. Give such an account a writable home directory, or point `[energy] wal_path` somewhere it can write, or the energy WAL degrades to in-memory with a warning in the log.
 
 **Apple Silicon metrics under launchd.** The native readers (IOReport, the SMC, and `NSProcessInfo.thermalState`) need no GUI session and no sudo, and a LaunchAgent exports the same metric set a foreground `all-smi api` does: GPU utilization and power, SMC GPU and CPU temperatures, ANE power, thermal pressure, and P/E cluster frequencies. The plist sets `ProcessType` to `Background` so the exporter runs at background QoS on the efficiency cores and does not compete with the workload it is watching. That costs a few seconds of extra startup, because enumerating the IOReport channel list is the expensive part of coming up; it is a one-time cost per launch.
+
+### Windows (Service Control Manager)
+
+`all-smi service` registers a native Windows service through the Service Control Manager. Nothing is shelled out to `sc.exe`, and the release zip needs no extra files: the same `all-smi.exe` is both the CLI and the service host.
+
+Every mutating action needs Administrator rights. Run them from an elevated Command Prompt, Windows Terminal, or PowerShell (right-click, "Run as administrator"); an unelevated attempt exits `1` with an explanation rather than a bare `os error 5`. `all-smi service status` works without elevation.
+
+```powershell
+# Register and start. Starts automatically at boot from then on,
+# with no logged-in user.
+all-smi service install --now
+all-smi service status
+Invoke-WebRequest http://localhost:9090/metrics -UseBasicParsing | Select-Object -ExpandProperty Content
+
+all-smi service restart
+all-smi service stop
+all-smi service uninstall
+```
+
+The service is named `all-smi` and appears in `services.msc` as **all-smi GPU/NPU Metrics Exporter**. It runs as **LocalSystem**, because NVML, the WMI thermal-zone classes under `root\cimv2` and `root\wmi`, the AMD Ryzen Master interface, and LibreHardwareMonitor-style sensor access all need it. Start type is plain automatic rather than delayed, so metrics exist early in boot. If the process dies, the SCM restarts it after 5 seconds, up to three times before the failure counter resets a day later.
+
+`--user` is **not supported on Windows**: the SCM has no per-user service scope, so this is a platform limit rather than a missing feature. For a non-admin, per-login exporter, register a Task Scheduler task instead:
+
+```powershell
+schtasks /create /tn all-smi /tr "C:\path\to\all-smi.exe api" /sc onlogon
+```
+
+`all-smi service run` exists but is hidden: it is the SCM entry point, not a way to start the exporter by hand. Run from a console it explains itself and exits `1`. Use `all-smi api` for a foreground server.
+
+**Idempotency.** Re-running `install` over a service that already points at the same `all-smi.exe` updates its configuration in place. A service of the same name that points somewhere else is refused, with the two paths named; pass `--force` to repoint it anyway. `uninstall` applies the same guard. This is the Windows counterpart of the Linux managed-by marker: the SCM offers nowhere to stamp one, so the registered binary path is the identity check.
+
+Reconfiguring an already-running service does not restart it, matching `systemctl enable --now`. Run `all-smi service restart` to pick up a new binary path or config file.
+
+**Configuration.** The service reads `%PROGRAMDATA%\all-smi\config.toml` (usually `C:\ProgramData\all-smi\config.toml`). That path exists because a service running as LocalSystem resolves `%APPDATA%` into `C:\Windows\System32\config\systemprofile\AppData\Roaming`, which no operator will ever edit. Your own `%APPDATA%\all-smi\config.toml` still wins for interactive runs; `all-smi config path` lists the full search order.
+
+```toml
+# C:\ProgramData\all-smi\config.toml
+[api]
+port = 9090
+interval_secs = 3
+```
+
+Restart the service after editing it. Environment variables such as `RUST_LOG` are set for the service through its registry key, in the `Environment` value (type `REG_MULTI_SZ`) under `HKLM\SYSTEM\CurrentControlSet\Services\all-smi`.
+
+**Logs.** stdout is void under the SCM, so the service writes to `%PROGRAMDATA%\all-smi\logs\all-smi.<date>.log`, rotated daily and pruned to the last 14 files. The default level is `info`; raise it with `RUST_LOG` through the registry value above.
+
+**Firewall.** `all-smi` never touches the firewall. To let other hosts scrape the exporter, open the port yourself from an elevated prompt:
+
+```powershell
+netsh advfirewall firewall add rule name="all-smi" dir=in action=allow protocol=TCP localport=9090
+netsh advfirewall firewall delete rule name="all-smi"
+```
 
 ## Platform-Specific Requirements
 

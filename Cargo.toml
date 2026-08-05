@@ -89,6 +89,17 @@ openssl = { version = "0.10.80", features = ["vendored"] }
 [target.'cfg(target_os = "windows")'.dependencies]
 wmi = "0.18"
 libloading = "0.9"
+# Service Control Manager integration for `all-smi service` (issue #311).
+# Mullvad's crate, MIT OR Apache-2.0, MSRV 1.71 against this project's
+# rust-version = 1.96. Chosen over shelling to sc.exe so failures arrive
+# as Win32 error codes we can translate instead of localized text we
+# would have to scrape, and over a WinSW/NSSM wrapper so the signed
+# release archive still ships a single binary.
+windows-service = "0.8.1"
+# Rolling file logging for the service context. Under the SCM there is
+# no console, so `all-smi service run` writes to
+# %PROGRAMDATA%\all-smi\logs instead of stdout.
+tracing-appender = "0.2.5"
 
 # macOS-specific dependencies
 [target.'cfg(target_os = "macos")'.dependencies]

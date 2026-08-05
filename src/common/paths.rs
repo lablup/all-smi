@@ -19,7 +19,9 @@
 //!   `~/.config/all-smi/config.toml`.
 //! - macOS: `~/Library/Application Support/all-smi/config.toml` with
 //!   `~/.config/all-smi/config.toml` accepted as fallback for parity.
-//! - Windows: `%APPDATA%\all-smi\config.toml`.
+//! - Windows: `%APPDATA%\all-smi\config.toml`, plus
+//!   `%PROGRAMDATA%\all-smi\config.toml` as the machine-wide fallback
+//!   the Service Control Manager backend reads.
 //!
 //! Public surface:
 //! - [`default_config_path`] — the primary canonical path for the
@@ -62,6 +64,53 @@ pub const LINUX_SYSTEM_CONFIG_PATH: &str = "/etc/all-smi/config.toml";
 /// config init` still writes the per-user file.
 #[cfg(target_os = "macos")]
 pub const MACOS_SYSTEM_CONFIG_PATH: &str = "/Library/Application Support/all-smi/config.toml";
+
+/// Machine-wide `all-smi` data directory beneath a `%PROGRAMDATA%` root
+/// (issue #311).
+///
+/// Split out as a pure function so the Windows layout stays unit tested
+/// on non-Windows developer machines, where `%PROGRAMDATA%` does not
+/// exist. The Windows service backend builds its log directory on top of
+/// the same root, so this is the single place the layout is decided.
+#[cfg(any(windows, test))]
+pub fn program_data_app_dir(program_data_root: &Path) -> PathBuf {
+    program_data_root.join(APP_DIR_NAME)
+}
+
+/// Environment variable naming the machine-wide application data root.
+/// Windows environment lookups are case-insensitive, so the canonical
+/// mixed-case spelling is fine.
+#[cfg(windows)]
+pub const PROGRAM_DATA_ENV: &str = "ProgramData";
+
+/// Where `%PROGRAMDATA%` points on a stock Windows install. Used only
+/// when the variable is missing from the environment, which should not
+/// happen but must not make the service unconfigurable if it does.
+#[cfg(windows)]
+pub const PROGRAM_DATA_FALLBACK: &str = r"C:\ProgramData";
+
+/// Resolve the machine-wide application data root.
+#[cfg(windows)]
+pub fn program_data_root() -> PathBuf {
+    match std::env::var_os(PROGRAM_DATA_ENV) {
+        Some(v) if !v.is_empty() => PathBuf::from(v),
+        _ => PathBuf::from(PROGRAM_DATA_FALLBACK),
+    }
+}
+
+/// System-wide configuration file on Windows (issue #311).
+///
+/// A service registered by `all-smi service install` runs as
+/// LocalSystem, whose `%APPDATA%` resolves to
+/// `C:\Windows\System32\config\systemprofile\AppData\Roaming`, a
+/// directory no operator will ever open, let alone edit. `%PROGRAMDATA%`
+/// is the machine-wide counterpart of `/etc`, so that is where an
+/// administrator configures the service. Discovery candidate only:
+/// `all-smi config init` still writes the per-user file.
+#[cfg(windows)]
+pub fn windows_system_config_path() -> PathBuf {
+    program_data_app_dir(&program_data_root()).join(CONFIG_FILE_NAME)
+}
 
 /// Expand a leading `~` or `~/` in a path-like string to the user's
 /// home directory. Returns the input unchanged when no home directory is
@@ -171,11 +220,11 @@ fn push_unique(out: &mut Vec<PathBuf>, path: PathBuf) {
 ///    [`default_config_path`], plus any per-platform parity fallback.
 /// 2. **System-wide candidates** (issue #309). A daemon runs as a
 ///    dedicated account with no home directory, so it needs a
-///    machine-wide file. Linux contributes `/etc/all-smi/config.toml`
-///    and macOS contributes
-///    `/Library/Application Support/all-smi/config.toml` (#310); the
-///    Windows counterpart (#311) is added as a sibling branch in the
-///    same tier.
+///    machine-wide file. Linux contributes `/etc/all-smi/config.toml`,
+///    macOS contributes
+///    `/Library/Application Support/all-smi/config.toml` (#310), and
+///    Windows contributes `%PROGRAMDATA%\all-smi\config.toml` (#311),
+///    each as a sibling branch in the same tier.
 ///
 /// Current resolution per platform:
 ///
@@ -183,7 +232,8 @@ fn push_unique(out: &mut Vec<PathBuf>, path: PathBuf) {
 /// * macOS: the canonical Apple path, then `~/.config/all-smi/config.toml`
 ///   as a parity fallback for operators migrating from Linux, then
 ///   `/Library/Application Support/all-smi/config.toml`.
-/// * Windows: only the canonical `%APPDATA%` path.
+/// * Windows: the `%APPDATA%` path, then
+///   `%PROGRAMDATA%\all-smi\config.toml`.
 pub fn candidate_config_paths() -> Vec<PathBuf> {
     let mut out = Vec::new();
 
@@ -216,6 +266,14 @@ pub fn candidate_config_paths() -> Vec<PathBuf> {
     #[cfg(target_os = "macos")]
     {
         push_unique(&mut out, PathBuf::from(MACOS_SYSTEM_CONFIG_PATH));
+    }
+    // Windows (issue #311). Ordered after the `%APPDATA%` candidate
+    // pushed by the per-user tier above, so an interactive operator's
+    // own file still wins; the service, which has no usable `%APPDATA%`,
+    // falls through to this one.
+    #[cfg(windows)]
+    {
+        push_unique(&mut out, windows_system_config_path());
     }
 
     out
@@ -437,6 +495,63 @@ mod tests {
     fn macos_default_config_path_is_never_the_system_wide_path() {
         if let Some(p) = default_config_path() {
             assert_ne!(p, PathBuf::from(MACOS_SYSTEM_CONFIG_PATH));
+        }
+    }
+
+    /// Issue #311: the pure half of the Windows machine-wide layout,
+    /// asserted on every host so the layout cannot silently change on a
+    /// developer machine that never compiles the Windows branches.
+    #[test]
+    fn program_data_app_dir_appends_the_app_directory() {
+        let dir = program_data_app_dir(Path::new(r"C:\ProgramData"));
+        assert!(dir.ends_with(APP_DIR_NAME), "got {}", dir.display());
+        assert_eq!(
+            dir.join(CONFIG_FILE_NAME).file_name(),
+            Some(std::ffi::OsStr::new(CONFIG_FILE_NAME))
+        );
+    }
+
+    /// Issue #311: a service running as LocalSystem cannot reach a
+    /// useful `%APPDATA%`, so the machine-wide file must be discoverable.
+    #[cfg(windows)]
+    #[test]
+    fn windows_candidates_include_the_program_data_path() {
+        let paths = candidate_config_paths();
+        assert!(
+            paths.contains(&windows_system_config_path()),
+            "%PROGRAMDATA%\\all-smi\\config.toml must be a discovery candidate: {paths:?}"
+        );
+    }
+
+    /// The operator's own file must win over the machine-wide one.
+    #[cfg(windows)]
+    #[test]
+    fn windows_program_data_candidate_is_ordered_after_the_user_candidate() {
+        let paths = candidate_config_paths();
+        let system = windows_system_config_path();
+        let system_index = paths
+            .iter()
+            .position(|p| p == &system)
+            .expect("system candidate must be present");
+        if let Some(user) = default_config_path() {
+            let user_index = paths
+                .iter()
+                .position(|p| p == &user)
+                .expect("user candidate must be present");
+            assert!(
+                user_index < system_index,
+                "the per-user candidate must be probed first: {paths:?}"
+            );
+        }
+    }
+
+    /// `config init` must never target `%PROGRAMDATA%`: writing there is
+    /// an administrator's decision, not a helper command's side effect.
+    #[cfg(windows)]
+    #[test]
+    fn windows_default_config_path_is_never_the_program_data_path() {
+        if let Some(p) = default_config_path() {
+            assert_ne!(p, windows_system_config_path());
         }
     }
 

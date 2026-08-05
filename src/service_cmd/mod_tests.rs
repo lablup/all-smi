@@ -72,20 +72,22 @@ fn default_status_is_not_installed() {
     assert_eq!(s.pid, None);
 }
 
-/// Platforms with no backend yet must fail with a message that names
-/// the follow-up issue, so an operator who hits it knows where to look.
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+/// A platform with no backend must fail with [`ServiceError::NotSupported`]
+/// and a message that points at something actionable, so an operator who
+/// hits it knows what to do next.
+///
+/// Linux, macOS, and Windows all dispatch a real backend now (#309,
+/// #310, #311), so this no longer covers a "not implemented yet" arm.
+/// What is left is the genuine `not(any(...))` fallback in [`backend`]:
+/// FreeBSD, illumos, and anything else the crate happens to compile on,
+/// where the answer is the canonical systemd unit to adapt by hand. Keep
+/// this `cfg` the exact complement of the arms in [`backend`].
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 #[test]
-fn unimplemented_backend_points_at_the_follow_up_issue() {
-    let err = backend().err().expect("no backend on this platform yet");
+fn unsupported_platform_backend_points_at_the_canonical_unit() {
+    let err = backend().err().expect("no backend on this platform");
     let msg = err.to_string();
     assert!(matches!(err, ServiceError::NotSupported(_)));
-    #[cfg(target_os = "windows")]
-    assert!(
-        msg.contains("issues/311"),
-        "Windows arm must name issue #311, got: {msg}"
-    );
-    #[cfg(not(target_os = "windows"))]
     assert!(msg.contains("packaging/systemd/all-smi.service"));
 }
 
@@ -100,6 +102,14 @@ fn linux_backend_resolves() {
 #[test]
 fn macos_backend_resolves() {
     assert!(backend().is_ok(), "macOS must resolve the launchd backend");
+}
+
+/// Issue #311 replaced the Windows "not supported yet" arm with the
+/// Service Control Manager backend.
+#[cfg(target_os = "windows")]
+#[test]
+fn windows_backend_resolves() {
+    assert!(backend().is_ok(), "Windows must resolve the SCM backend");
 }
 
 /// A user-scope install has to warn about the session boundary, and the
@@ -119,4 +129,27 @@ fn user_scope_note_names_a_real_escape_hatch() {
         note.contains("enable-linger"),
         "the systemd note must point at lingering, got: {note}"
     );
+}
+
+/// Issue #311: `service run` is the Service Control Manager entry
+/// point. The supervisor decides which scope it launched the process
+/// in, so there is nothing for `--user` to select.
+#[test]
+fn service_run_selects_no_scope() {
+    let action = crate::cli::ServiceAction::Run(crate::cli_service::ServiceRunArgs {});
+    assert!(!action.user_scope());
+}
+
+/// On a platform with no Service Control Manager, `service run` must
+/// fail rather than quietly behaving like `all-smi api`. An operator who
+/// copies the hidden subcommand from a Windows runbook onto a Linux box
+/// needs to be told, not silently given a foreground server on a port
+/// nothing is scraping.
+#[cfg(not(windows))]
+#[test]
+fn service_run_is_refused_off_windows() {
+    let code = run(&crate::cli::ServiceAction::Run(
+        crate::cli_service::ServiceRunArgs {},
+    ));
+    assert_eq!(code, EXIT_ERROR);
 }

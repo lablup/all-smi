@@ -137,7 +137,8 @@ Can be used together with --port for simultaneous TCP and Unix socket listeners.
 .TP
 .B \-\-user
 Operate on the per\-user service instead of the system\-wide one. Accepted by
-every \fBservice\fR subcommand. The system scope is the default and requires
+every \fBservice\fR subcommand. Refused on Windows, where the Service Control
+Manager has no per\-user scope. The system scope is the default and requires
 root for every mutating action.
 .TP
 .B \-\-service\-user \fINAME\fR
@@ -340,6 +341,84 @@ The plist sets \fBProcessType\fR to \fBBackground\fR so the exporter runs at
 background QoS on the efficiency cores rather than competing with the workload
 it monitors, which costs a few seconds of extra startup while the IOReport
 channel list is enumerated.
+.SS Windows (Service Control Manager)
+.B all\-smi service
+registers a native Windows service through the Service Control Manager, without
+shelling out to \fBsc.exe\fR. The signed release archive needs no extra files:
+the same \fIall\-smi.exe\fR is both the CLI and the service host.
+.PP
+Every mutating action requires Administrator rights; run them from an elevated
+terminal. An unelevated attempt exits
+.B 1
+with an explanation rather than a bare \fBos error 5\fR.
+.B status
+works unelevated.
+.RS
+.nf
+all\-smi service install \-\-now
+all\-smi service status
+all\-smi service restart
+all\-smi service stop
+all\-smi service uninstall
+.fi
+.RE
+.PP
+The service is named \fIall\-smi\fR and shown in \fBservices.msc\fR as
+\fBall\-smi GPU/NPU Metrics Exporter\fR. It runs as \fBLocalSystem\fR, because
+NVML, the WMI thermal\-zone classes under \fIroot\\cimv2\fR and
+\fIroot\\wmi\fR, the AMD Ryzen Master interface, and LibreHardwareMonitor\-style
+sensor access all require it. The start type is plain automatic rather than
+delayed, so metrics exist early in boot. On failure the SCM restarts the
+process after 5 seconds, up to three times before the failure counter resets a
+day later.
+.PP
+.B \-\-user
+is not supported on Windows: the Service Control Manager has no per\-user
+service scope, so this is a platform limit rather than a missing feature.
+Register a Task Scheduler task for a per\-login exporter instead, for example
+\fBschtasks /create /tn all\-smi /tr "<path>\\all\-smi.exe api" /sc onlogon\fR.
+.PP
+.B all\-smi service run
+is a hidden subcommand: it is the Service Control Manager entry point, not a
+way to start the exporter by hand. Run from a console it explains itself and
+exits
+.B 1.
+Use
+.B all\-smi api
+for a foreground server.
+.PP
+Re\-running
+.B install
+over a service that already points at the same \fIall\-smi.exe\fR updates its
+configuration in place. A service of the same name pointing elsewhere is
+refused, with both paths named; \fB\-\-force\fR repoints it anyway, and
+.B uninstall
+applies the same guard. The registered binary path is the Windows counterpart
+of the Linux managed\-by marker, because the SCM offers nowhere to stamp one.
+Reconfiguring a running service does not restart it, matching
+\fBsystemctl enable \-\-now\fR; run
+.B all\-smi service restart
+to pick up a new binary path or configuration.
+.PP
+The service reads \fI%PROGRAMDATA%\\all\-smi\\config.toml\fR. A service running
+as LocalSystem resolves \fI%APPDATA%\fR into the systemprofile directory, which
+no operator will ever edit, so the machine\-wide path is the one that matters
+here. Environment variables such as \fBRUST_LOG\fR are set for the service
+through the \fBEnvironment\fR value (\fBREG_MULTI_SZ\fR) under
+\fIHKLM\\SYSTEM\\CurrentControlSet\\Services\\all\-smi\fR.
+.PP
+Because stdout is void under the Service Control Manager, the service logs to
+\fI%PROGRAMDATA%\\all\-smi\\logs\\all\-smi.<date>.log\fR, rotated daily and
+pruned to the last 14 files. The default level is \fBinfo\fR.
+.PP
+The firewall is never modified automatically. To let other hosts scrape the
+exporter, run from an elevated prompt:
+.RS
+.nf
+netsh advfirewall firewall add rule name="all\-smi" dir=in action=allow protocol=TCP localport=9090
+netsh advfirewall firewall delete rule name="all\-smi"
+.fi
+.RE
 .SH INTERACTIVE CONTROLS (LOCAL/VIEW MODE)
 .TP
 .B Tab / Shift+Tab
@@ -488,7 +567,8 @@ Linux: \fI$XDG_CONFIG_HOME/all-smi/config.toml\fR (fallback \fI~/.config/all-smi
 .IP \(bu 3
 macOS: \fI~/Library/Application Support/all-smi/config.toml\fR (also accepts \fI~/.config/all-smi/config.toml\fR, then \fI/Library/Application Support/all-smi/config.toml\fR)
 .IP \(bu 3
-Windows: \fI%APPDATA%\\all-smi\\config.toml\fR
+Windows: \fI%APPDATA%\\all-smi\\config.toml\fR, then
+\fI%PROGRAMDATA%\\all-smi\\config.toml\fR
 .RE
 .RS
 Candidates are probed in order and the first existing file wins, so a
@@ -498,8 +578,9 @@ directory and the shipped unit sets \fBProtectHome=true\fR, so no per-user
 candidate resolves for it. On macOS, a launchd LaunchDaemon runs outside any
 login session, so \fI~/Library/Application Support\fR resolves to root's home
 rather than the administrator's, and launchd offers no environment-file
-mechanism to work around it. \fBall-smi config init\fR only ever writes the
-per-user path.
+mechanism to work around it. On Windows, a service running as LocalSystem
+resolves \fI%APPDATA%\fR into the systemprofile directory that no operator will
+ever edit. \fBall-smi config init\fR only ever writes the per-user path.
 .RE
 .RS
 The active path for the current user is printed by
@@ -559,6 +640,22 @@ Logs go to \fI/var/log/all-smi/all-smi.log\fR and
 \fI~/Library/Logs/all-smi/all-smi.log\fR respectively;
 .B uninstall
 leaves them in place.
+.TP
+.I all-smi (Windows service)
+Service Control Manager registration for API mode, created by
+.B all-smi service install
+and shown in \fBservices.msc\fR as \fBall\-smi GPU/NPU Metrics Exporter\fR. It
+runs \fI<install path>\\all\-smi.exe service run\fR as LocalSystem at automatic
+start. The subcommand refuses to reconfigure or remove a service of that name
+whose registered binary path is not the running executable, unless
+\fB\-\-force\fR is passed. Environment overrides live in the \fBEnvironment\fR
+value (\fBREG_MULTI_SZ\fR) under
+\fIHKLM\\SYSTEM\\CurrentControlSet\\Services\\all\-smi\fR.
+.TP
+.I %PROGRAMDATA%\\all-smi\\logs\\all-smi.<date>.log
+Rolling log written by the Windows service, because stdout is void under the
+Service Control Manager. Daily rotation, last 14 files retained, \fBinfo\fR
+level unless \fBRUST_LOG\fR says otherwise.
 .TP
 .I /etc/default/all-smi
 Environment file read by the systemd unit through

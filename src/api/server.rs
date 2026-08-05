@@ -21,6 +21,8 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
+use crate::api::shutdown::{mark_serving, shutdown_signal};
+
 #[cfg(unix)]
 use std::path::PathBuf;
 #[cfg(unix)]
@@ -99,13 +101,24 @@ fn set_socket_permissions(path: &std::path::Path) -> std::io::Result<()> {
 
 /// Run the API server with TCP and optionally Unix Domain Socket listeners.
 pub async fn run_api_mode(args: &ApiArgs, settings: &Settings) {
-    tracing_subscriber::registry()
+    // `try_init` rather than `init`: a host may have installed a
+    // subscriber already, and `init` panics in that case. The Windows
+    // service host does exactly that, because stdout is void under the
+    // Service Control Manager and its logs have to reach a file under
+    // %PROGRAMDATA% instead (issue #311). On every other entry point
+    // nothing has registered a subscriber yet, so this still installs
+    // the stdout layer as before.
+    if tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "all_smi=debug,tower_http=debug".into()),
         )
         .with(tracing_subscriber::fmt::layer())
-        .init();
+        .try_init()
+        .is_err()
+    {
+        tracing::debug!("a tracing subscriber is already installed; keeping the host's");
+    }
 
     println!("Starting API mode...");
     // Build the state with the merged energy config so the integrator's
@@ -295,43 +308,12 @@ async fn run_tcp_listener(app: Router, port: u16) {
             .local_addr()
             .unwrap_or_else(|_| "unknown".parse().unwrap())
     );
+    mark_serving();
     if let Err(e) = axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await
     {
         tracing::error!("TCP server error: {e}");
-    }
-}
-
-/// Complete when the process receives Ctrl+C on any platform, or a
-/// `SIGTERM` on Unix. Callers use this to let `axum::serve` return so
-/// the parent function can run post-shutdown cleanup (energy WAL flush,
-/// socket cleanup, etc.).
-async fn shutdown_signal() {
-    let ctrl_c = async {
-        let _ = tokio::signal::ctrl_c().await;
-    };
-
-    #[cfg(unix)]
-    let terminate = async {
-        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-            Ok(mut s) => {
-                s.recv().await;
-            }
-            Err(e) => {
-                tracing::warn!("failed to install SIGTERM handler: {e}");
-                // Fall back to ctrl_c only.
-                std::future::pending::<()>().await;
-            }
-        }
-    };
-
-    #[cfg(not(unix))]
-    let terminate = std::future::pending::<()>();
-
-    tokio::select! {
-        _ = ctrl_c => {}
-        _ = terminate => {}
     }
 }
 
@@ -377,6 +359,7 @@ async fn run_unix_listener(app: Router, path: PathBuf) {
     }
 
     tracing::info!("API server listening on Unix socket: {}", path.display());
+    mark_serving();
 
     // Serve the application with graceful shutdown so the caller can
     // run post-serve cleanup (WAL flush, socket cleanup) once we see a
@@ -453,6 +436,7 @@ async fn run_dual_listeners(app: Router, port: u16, socket_path: PathBuf) {
             .unwrap_or_else(|_| "unknown".parse().unwrap()),
         socket_path.display()
     );
+    mark_serving();
 
     // Clone the app for the second server
     let app_clone = app.clone();

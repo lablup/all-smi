@@ -65,6 +65,20 @@ pub enum ServiceAction {
     /// but stopped or not installed at all, mirroring the `systemctl
     /// is-active` convention.
     Status(ServiceStatusArgs),
+    /// Service Control Manager entry point (Windows only, issue #311).
+    ///
+    /// Hidden from `--help`: this is not something an operator runs. The
+    /// Windows SCM starts the registered binary with these arguments and
+    /// expects the process to call `StartServiceCtrlDispatcher` within
+    /// about 30 seconds. Run from an ordinary console it fails with an
+    /// explanation rather than starting a server, because there is no
+    /// dispatcher to connect to. Use `all-smi api` for that.
+    ///
+    /// The variant exists on every platform so the argument surface does
+    /// not change shape per target; non-Windows builds answer with the
+    /// standard "not supported" error.
+    #[command(hide = true)]
+    Run(ServiceRunArgs),
 }
 
 impl ServiceAction {
@@ -79,9 +93,18 @@ impl ServiceAction {
             Self::Uninstall(a) => a.user,
             Self::Start(a) | Self::Stop(a) | Self::Restart(a) => a.user,
             Self::Status(a) => a.user,
+            // The supervisor decides which scope it launched us in;
+            // there is nothing for the process itself to select.
+            Self::Run(_) => false,
         }
     }
 }
+
+/// `service run` takes no arguments today. It exists as a struct rather
+/// than a unit variant so a future flag (a log-level override, say) is a
+/// purely additive change.
+#[derive(Args, Clone, Debug)]
+pub struct ServiceRunArgs {}
 
 #[derive(Args, Clone, Debug)]
 pub struct ServiceInstallArgs {
