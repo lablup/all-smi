@@ -25,6 +25,11 @@ COPY proto/ ./proto/
 # Copy the source code
 COPY src/ ./src/
 
+# Copy packaging assets embedded into the binary with include_str!
+# (service unit templates). Keep this in sync with the paths asserted by
+# tests/docker_build_context_test.rs.
+COPY packaging/ ./packaging/
+
 # Build the application in release mode
 RUN cargo build --release --bin all-smi
 

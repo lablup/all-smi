@@ -180,10 +180,10 @@ http://gpu-node3:9090
 | Platform | Canonical path | Also searched |
 |----------|----------------|---------------|
 | Linux    | `$XDG_CONFIG_HOME/all-smi/config.toml` (fallback `~/.config/all-smi/config.toml`) | `/etc/all-smi/config.toml` |
-| macOS    | `~/Library/Application Support/all-smi/config.toml` | `~/.config/all-smi/config.toml` |
+| macOS    | `~/Library/Application Support/all-smi/config.toml` | `~/.config/all-smi/config.toml`, then `/Library/Application Support/all-smi/config.toml` |
 | Windows  | `%APPDATA%\all-smi\config.toml` | — |
 
-Candidates are probed in order and the first existing file wins, so a per-user file always beats the machine-wide one. `/etc/all-smi/config.toml` exists for daemons: a service running as a dedicated account has no home directory, so no per-user candidate ever resolves for it (see [Running as a service](#running-as-a-service)). `all-smi config init` only ever writes the per-user path; creating `/etc/all-smi/config.toml` is an administrator's decision.
+Candidates are probed in order and the first existing file wins, so a per-user file always beats the machine-wide one. The machine-wide paths exist for daemons. On Linux a service running as a dedicated account has no home directory, so no per-user candidate ever resolves for it; on macOS a launchd LaunchDaemon runs outside any login session, so `~/Library/Application Support` resolves to root's home rather than the administrator's, and launchd has no environment-file mechanism to work around it (see [Running as a service](#running-as-a-service)). `all-smi config init` only ever writes the per-user path; creating `/etc/all-smi/config.toml` or `/Library/Application Support/all-smi/config.toml` is an administrator's decision.
 
 Pass `--config <PATH>` to any subcommand to override the discovery and force a specific file. A missing or malformed `--config` target is a hard error (exit 2); implicit discovery silently falls back to defaults when no candidate file exists. To print the active path for the current user without writing any file, run `all-smi config path` (also surfaced in `all-smi --help` under the "Configuration file" section).
 
@@ -377,6 +377,53 @@ A user-scope unit keeps only the hardening that needs no privilege, `NoNewPrivil
 **Unix socket.** `PrivateTmp=true` namespaces `/tmp`, so the default `/tmp/all-smi.sock` fallback would not be reachable from outside the service. The unit provides `/run/all-smi` through `RuntimeDirectory=`; set `ALL_SMI_API_SOCKET=/run/all-smi/all-smi.sock` in the environment file to expose the socket there.
 
 **Other init systems.** OpenRC, runit, and sysvinit are not supported by the subcommand; it detects the absence of systemd and points at the canonical unit for manual adaptation.
+
+### macOS (launchd)
+
+The canonical job definition is [`packaging/launchd/com.lablup.all-smi.plist`](packaging/launchd/com.lablup.all-smi.plist), a self-contained system LaunchDaemon you can also copy into `/Library/LaunchDaemons` by hand. `all-smi service install` embeds the same file and rewrites `ProgramArguments`, the log paths, and the account keys for the scope you asked for. The launchd label is `com.lablup.all-smi` in both scopes; they live in different domains, so the name never collides.
+
+**From Homebrew.** The formula ships a service block, so `brew services` is the supported path and the subcommand refuses to install alongside it:
+
+```bash
+brew install lablup/tap/all-smi
+
+# Per-user. Bootstraps into gui/$UID, so it stops at logout.
+brew services start all-smi
+
+# Boot-time. Bootstraps into the system domain and survives a reboot
+# with nobody logged in. This is the one a headless node wants.
+sudo brew services start all-smi
+
+curl -s localhost:9090/metrics | head
+tail -f "$(brew --prefix)/var/log/all-smi.log"
+```
+
+The two invocations are not interchangeable. Without `sudo`, `brew services` targets your GUI login session; a rack-mounted Mac mini or Studio that reboots unattended will come back with no exporter running. With `sudo` it targets the system domain and starts at boot.
+
+**From a zip, `cargo install`, or a local build.** Use the subcommand:
+
+```bash
+# System-wide LaunchDaemon at /Library/LaunchDaemons, started immediately.
+sudo all-smi service install --now
+all-smi service status
+sudo all-smi service uninstall
+
+# Per-user LaunchAgent at ~/Library/LaunchAgents, no root.
+all-smi service install --user --now
+all-smi service status --user
+```
+
+Logs go to `/var/log/all-smi/all-smi.log` for the daemon and `~/Library/Logs/all-smi/all-smi.log` for the agent, through `StandardOutPath` and `StandardErrorPath`. `uninstall` boots the job out and removes the plist but leaves the log behind, so you can still read why you removed it.
+
+**launchd has no separate "enabled" state.** A plist sitting in `LaunchDaemons` or `LaunchAgents` is bootstrapped automatically at boot or login, and `RunAtLoad` starts it from there. So `install` without `--now` writes the plist and stops, which is precisely "enabled at boot, not running yet"; `install --now` additionally boots the job out and back in, because launchd caches a loaded job's definition and bootstrapping over it fails rather than replacing it. `stop` boots the job out of its domain and leaves the plist, so the service returns at the next boot, matching `systemctl stop`. `install` also runs `launchctl enable` to clear a persistent disable override, which otherwise outlives both the plist and a reboot; `uninstall` deliberately does not `disable`, for the same reason.
+
+**Configuration.** launchd has no `EnvironmentFile=` equivalent, so unlike the Linux service there is no `/etc/default/all-smi` analogue: the TOML config is the whole story. A system LaunchDaemon runs outside any login session, so `~/Library/Application Support` resolves to root's home rather than yours. `/Library/Application Support/all-smi/config.toml` is a discovery candidate exactly for that case, ordered after every per-user candidate so your own file still wins when both exist. `all-smi config path` lists the full search order.
+
+**Which plist keys a LaunchAgent gets.** A user-scope render drops `UserName`, `GroupName`, and `InitGroups`, all of which need root. On macOS 26.6 launchd does not reject them the way systemd rejects an unprivileged user unit: bootstrapping a LaunchAgent that carries `UserName root` succeeds and the job still runs as you, with the key silently ignored. They are dropped because keeping them would ship a plist that reads, to anyone auditing what runs privileged on the machine, as a root job when it is not, and because Apple documents the keys as requiring root without documenting the fallback. Everything else is kept in both scopes, including `SoftResourceLimits`, since raising a soft rlimit up to the inherited hard limit needs no privilege.
+
+`--service-user` sets `UserName` in system scope and drops `GroupName` rather than mirroring the account name the way the Linux renderer does. macOS has no convention that an account owns an eponymous group, so omitting the key makes launchd use the account's primary group straight from the password database. Give such an account a writable home directory, or point `[energy] wal_path` somewhere it can write, or the energy WAL degrades to in-memory with a warning in the log.
+
+**Apple Silicon metrics under launchd.** The native readers (IOReport, the SMC, and `NSProcessInfo.thermalState`) need no GUI session and no sudo, and a LaunchAgent exports the same metric set a foreground `all-smi api` does: GPU utilization and power, SMC GPU and CPU temperatures, ANE power, thermal pressure, and P/E cluster frequencies. The plist sets `ProcessType` to `Background` so the exporter runs at background QoS on the efficiency cores and does not compete with the workload it is watching. That costs a few seconds of extra startup, because enumerating the IOReport channel list is the expensive part of coming up; it is a one-time cost per launch.
 
 ### Windows (Service Control Manager)
 

@@ -52,6 +52,19 @@ pub const APP_DIR_NAME: &str = "all-smi";
 #[cfg(target_os = "linux")]
 pub const LINUX_SYSTEM_CONFIG_PATH: &str = "/etc/all-smi/config.toml";
 
+/// System-wide configuration file on macOS (issue #310).
+///
+/// The macOS counterpart of [`LINUX_SYSTEM_CONFIG_PATH`], and the only
+/// settings surface a launchd daemon has: launchd offers no
+/// `EnvironmentFile=` equivalent, so `/etc/default/all-smi` has no
+/// analogue here. A system LaunchDaemon runs outside any login session,
+/// so `~/Library/Application Support` resolves to root's own home (or to
+/// a `--service-user` account's) rather than to the administrator's.
+/// Like the Linux path this is a discovery candidate only: `all-smi
+/// config init` still writes the per-user file.
+#[cfg(target_os = "macos")]
+pub const MACOS_SYSTEM_CONFIG_PATH: &str = "/Library/Application Support/all-smi/config.toml";
+
 /// Machine-wide `all-smi` data directory beneath a `%PROGRAMDATA%` root
 /// (issue #311).
 ///
@@ -207,16 +220,18 @@ fn push_unique(out: &mut Vec<PathBuf>, path: PathBuf) {
 ///    [`default_config_path`], plus any per-platform parity fallback.
 /// 2. **System-wide candidates** (issue #309). A daemon runs as a
 ///    dedicated account with no home directory, so it needs a
-///    machine-wide file. Linux contributes `/etc/all-smi/config.toml`
-///    and Windows contributes `%PROGRAMDATA%\all-smi\config.toml`
-///    (issue #311); the macOS counterpart (#310) is a sibling branch in
-///    the same tier.
+///    machine-wide file. Linux contributes `/etc/all-smi/config.toml`,
+///    macOS contributes
+///    `/Library/Application Support/all-smi/config.toml` (#310), and
+///    Windows contributes `%PROGRAMDATA%\all-smi\config.toml` (#311),
+///    each as a sibling branch in the same tier.
 ///
 /// Current resolution per platform:
 ///
 /// * Linux: the XDG path, then `/etc/all-smi/config.toml`.
 /// * macOS: the canonical Apple path, then `~/.config/all-smi/config.toml`
-///   as a parity fallback for operators migrating from Linux.
+///   as a parity fallback for operators migrating from Linux, then
+///   `/Library/Application Support/all-smi/config.toml`.
 /// * Windows: the `%APPDATA%` path, then
 ///   `%PROGRAMDATA%\all-smi\config.toml`.
 pub fn candidate_config_paths() -> Vec<PathBuf> {
@@ -246,6 +261,11 @@ pub fn candidate_config_paths() -> Vec<PathBuf> {
     #[cfg(target_os = "linux")]
     {
         push_unique(&mut out, PathBuf::from(LINUX_SYSTEM_CONFIG_PATH));
+    }
+    // macOS system LaunchDaemon (issue #310).
+    #[cfg(target_os = "macos")]
+    {
+        push_unique(&mut out, PathBuf::from(MACOS_SYSTEM_CONFIG_PATH));
     }
     // Windows (issue #311). Ordered after the `%APPDATA%` candidate
     // pushed by the per-user tier above, so an interactive operator's
@@ -435,6 +455,46 @@ mod tests {
     fn default_config_path_is_never_the_system_wide_path() {
         if let Some(p) = default_config_path() {
             assert_ne!(p, PathBuf::from(LINUX_SYSTEM_CONFIG_PATH));
+        }
+    }
+
+    /// Issue #310: a launchd LaunchDaemon runs outside any login
+    /// session, so `~/Library/Application Support` resolves to root's
+    /// home rather than the administrator's. The machine-wide file has
+    /// to be discoverable for the daemon to be configurable at all.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_candidates_include_the_system_wide_path() {
+        let paths = candidate_config_paths();
+        let system = PathBuf::from(MACOS_SYSTEM_CONFIG_PATH);
+        assert!(
+            paths.contains(&system),
+            "/Library/Application Support/all-smi/config.toml must be a discovery candidate on \
+             macOS: {paths:?}"
+        );
+    }
+
+    /// The operator's own files, both the Apple-canonical path and the
+    /// `~/.config` parity fallback, must win over the machine-wide one.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_system_candidate_is_ordered_last() {
+        let paths = candidate_config_paths();
+        let system = PathBuf::from(MACOS_SYSTEM_CONFIG_PATH);
+        assert_eq!(
+            paths.iter().position(|p| p == &system),
+            Some(paths.len() - 1),
+            "the machine-wide candidate must be probed after every per-user one: {paths:?}"
+        );
+    }
+
+    /// `config init` must never target `/Library/Application Support`
+    /// for the same reason it must never target `/etc`.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_default_config_path_is_never_the_system_wide_path() {
+        if let Some(p) = default_config_path() {
+            assert_ne!(p, PathBuf::from(MACOS_SYSTEM_CONFIG_PATH));
         }
     }
 
