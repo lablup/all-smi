@@ -49,6 +49,24 @@ const MAX_PLAUSIBLE_FAN_RPM: f64 = 20_000.0;
 /// watts. The largest Mac Pro power supply is well under this.
 const MAX_PLAUSIBLE_POWER_WATTS: f64 = 2_000.0;
 
+/// True when `value` is a plausible whole-machine or CPU-package power
+/// reading in watts (finite and within `0.0..=MAX_PLAUSIBLE_POWER_WATTS`).
+///
+/// Guards `get_system_power` and `get_cpu_package_power` against a missing or
+/// differently-typed SMC key surfacing as a bogus metric: a wrong data type
+/// can decode to `NaN`, a huge magnitude, or a negative value, none of which
+/// is a real power draw.
+fn is_plausible_power_watts(value: f64) -> bool {
+    value.is_finite() && (0.0..=MAX_PLAUSIBLE_POWER_WATTS).contains(&value)
+}
+
+/// True when `value` is a plausible fan speed in RPM (finite and within
+/// `0.0..=MAX_PLAUSIBLE_FAN_RPM`). Same rationale as
+/// [`is_plausible_power_watts`], applied to `get_fan_readings`.
+fn is_plausible_fan_rpm(value: f64) -> bool {
+    value.is_finite() && (0.0..=MAX_PLAUSIBLE_FAN_RPM).contains(&value)
+}
+
 /// Discovered temperature keys (CPU keys, GPU keys)
 /// Using a single static prevents race conditions where one call discovers keys
 /// but the other category's keys are discarded.
@@ -583,7 +601,7 @@ impl SMC {
     /// so a missing or differently-typed key cannot surface as a metric.
     pub fn get_system_power(&mut self) -> Option<f64> {
         let value = self.read_value("PSTR").ok()?;
-        (value.is_finite() && (0.0..=MAX_PLAUSIBLE_POWER_WATTS).contains(&value)).then_some(value)
+        is_plausible_power_watts(value).then_some(value)
     }
 
     /// Read CPU package power in watts, when the model exposes it.
@@ -597,8 +615,7 @@ impl SMC {
 
         for key in CPU_POWER_KEYS {
             if let Ok(value) = self.read_value(key)
-                && value.is_finite()
-                && (0.0..=MAX_PLAUSIBLE_POWER_WATTS).contains(&value)
+                && is_plausible_power_watts(value)
                 && value > 0.0
             {
                 return Some(value);
@@ -624,12 +641,12 @@ impl SMC {
 
         for index in 0..fan_count.min(MAX_FANS) {
             let actual_rpm = match self.read_value(&format!("F{index}Ac")) {
-                Ok(v) if v.is_finite() && (0.0..=MAX_PLAUSIBLE_FAN_RPM).contains(&v) => v as u32,
+                Ok(v) if is_plausible_fan_rpm(v) => v as u32,
                 _ => continue,
             };
 
             let max_rpm = match self.read_value(&format!("F{index}Mx")) {
-                Ok(v) if v.is_finite() && (0.0..=MAX_PLAUSIBLE_FAN_RPM).contains(&v) => v as u32,
+                Ok(v) if is_plausible_fan_rpm(v) => v as u32,
                 _ => 0,
             };
 
@@ -897,5 +914,34 @@ mod tests {
             (value - 51.2).abs() < 0.01,
             "expected ~51.2, got {value} — float endianness may have regressed"
         );
+    }
+
+    /// `get_system_power` and `get_cpu_package_power` both rely on this
+    /// predicate to drop a reading from a missing or differently-typed SMC
+    /// key before it can surface as a bogus metric.
+    #[test]
+    fn plausible_power_watts_rejects_non_finite_negative_and_out_of_range_values() {
+        assert!(is_plausible_power_watts(0.0));
+        assert!(is_plausible_power_watts(127.99)); // sp78 saturation point
+        assert!(is_plausible_power_watts(MAX_PLAUSIBLE_POWER_WATTS));
+
+        assert!(!is_plausible_power_watts(-0.01));
+        assert!(!is_plausible_power_watts(MAX_PLAUSIBLE_POWER_WATTS + 0.01));
+        assert!(!is_plausible_power_watts(f64::NAN));
+        assert!(!is_plausible_power_watts(f64::INFINITY));
+        assert!(!is_plausible_power_watts(f64::NEG_INFINITY));
+    }
+
+    /// Same contract as the power predicate, applied to `get_fan_readings`.
+    #[test]
+    fn plausible_fan_rpm_rejects_non_finite_negative_and_out_of_range_values() {
+        assert!(is_plausible_fan_rpm(0.0));
+        assert!(is_plausible_fan_rpm(5500.0));
+        assert!(is_plausible_fan_rpm(MAX_PLAUSIBLE_FAN_RPM));
+
+        assert!(!is_plausible_fan_rpm(-1.0));
+        assert!(!is_plausible_fan_rpm(MAX_PLAUSIBLE_FAN_RPM + 0.01));
+        assert!(!is_plausible_fan_rpm(f64::NAN));
+        assert!(!is_plausible_fan_rpm(f64::INFINITY));
     }
 }

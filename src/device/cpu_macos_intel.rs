@@ -458,11 +458,20 @@ mod tests {
         assert!(missing_cache.has_gaps());
     }
 
-    /// Collection must always yield a usable record even on a host where every
-    /// probe fails, because the caller divides by `socket_count`.
+    /// `apply_defaults` alone must always yield a usable record even when
+    /// every probe failed, because the caller divides by `socket_count`.
+    ///
+    /// This exercises the worst case directly on a fully empty record rather
+    /// than going through `collect()`, which shells out to `sysctl` and,
+    /// when there are gaps, `system_profiler`. `collect()`'s own logic (gap
+    /// detection, gap filling, the sysctl/brand-string frequency fallback) is
+    /// already covered by the other pure-logic tests in this module, so
+    /// spawning real subprocesses here would only add wall-clock cost to the
+    /// suite without covering anything new.
     #[test]
-    fn collection_always_produces_safe_values() {
-        let hardware = IntelCpuHardware::collect(4);
+    fn apply_defaults_produces_safe_values_from_a_fully_empty_record() {
+        let mut hardware = IntelCpuHardware::default();
+        hardware.apply_defaults();
 
         assert!(!hardware.model.is_empty());
         assert!(hardware.socket_count >= 1);
