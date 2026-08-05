@@ -59,6 +59,15 @@ if [ "${#groups[@]}" -eq 0 ]; then
     groups=(formula download token)
 fi
 
+# The token cases start a local git server in the background. Each case stops
+# its own, but an interrupted or failed run would otherwise leave one bound to a
+# loopback port for the rest of the session.
+cleanup() {
+    stop_git_server
+    rm -f "$SERVER_PIDFILE"
+}
+trap cleanup EXIT INT TERM
+
 printf 'workflow: %s\n' "$WORKFLOW"
 
 for group in "${groups[@]}"; do

@@ -21,7 +21,7 @@ start_git_server() {  # sandbox -> echoes port
         export AUTH_LOG="${box}/auth.log"
         exec python3 "${HARNESS_DIR}/git-http-server.py"
     ) > "${box}/port" 2>"${box}/server.log" &
-    GIT_SERVER_PID=$!
+    printf '%s\n' "$!" >> "$SERVER_PIDFILE"
 
     local waited=0
     while [ "$waited" -lt 100 ]; do
@@ -36,12 +36,17 @@ start_git_server() {  # sandbox -> echoes port
     return 1
 }
 
+# Kills every server this run started. `wait` is deliberately not used: the
+# servers were spawned inside a command substitution, so they are not children
+# of the shell that ends up calling this.
 stop_git_server() {
-    if [ -n "${GIT_SERVER_PID:-}" ]; then
-        kill "$GIT_SERVER_PID" 2>/dev/null
-        wait "$GIT_SERVER_PID" 2>/dev/null
-        GIT_SERVER_PID=""
-    fi
+    [ -s "${SERVER_PIDFILE:-/nonexistent}" ] || return 0
+    local pid
+    while IFS= read -r pid; do
+        [ -n "$pid" ] || continue
+        kill "$pid" 2>/dev/null
+    done < "$SERVER_PIDFILE"
+    : > "$SERVER_PIDFILE"
 }
 
 # A bare tap on the server side, a working clone on the client side whose

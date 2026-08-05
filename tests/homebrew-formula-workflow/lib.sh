@@ -17,6 +17,11 @@ PASS_COUNT=0
 FAIL_COUNT=0
 CURRENT_CASE="(none)"
 
+# Background servers are recorded here rather than in a variable, because the
+# sandbox builders that start them run inside `$(...)` and a variable set in a
+# command substitution never reaches the caller. A file crosses that boundary.
+SERVER_PIDFILE=$(mktemp "${TMPDIR:-/tmp}/all-smi-hbw-servers.XXXXXX")
+
 # Synthetic values for the release being written. Distinct enough per artifact
 # that a rewrite landing on the wrong stanza is visible in the output rather
 # than merely wrong.
