@@ -351,6 +351,224 @@ jobs:
           sudo rm -f "$UNIT"
           sudo systemctl daemon-reload
 
+  # ═══════════════════════════════════════════════════════════════
+  # Job: launchd service smoke test (issue #310)
+  # ═══════════════════════════════════════════════════════════════
+  # Runs on Apple Silicon so the native readers (IOReport, SMC,
+  # thermalState) are actually exercised from a launchd context, not
+  # just the plist renderer.
+  #
+  # Split into two tiers because a hosted runner may have no
+  # bootstrappable GUI domain:
+  #
+  #  1. Render tier. `install --user` without `--now` writes the plist
+  #     and touches launchd not at all, so plist validity, the managed
+  #     marker, the user-scope key drops, and both refusal paths are
+  #     checkable anywhere. Always runs.
+  #  2. Lifecycle tier. Gated on `launchctl print gui/$UID` succeeding.
+  #     Skips with a notice rather than failing where the domain is
+  #     absent.
+  #
+  # The system domain is deliberately never touched: no
+  # /Library/LaunchDaemons, no `sudo launchctl bootstrap system`.
+  # ───────────────────────────────────────────────────────────────
+  launchd-service:
+    name: launchd Service Smoke Test
+    runs-on: macos-14
+    needs: test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup protoc
+        uses: ./.github/actions/setup-protoc
+        with:
+          version: ${{ env.PROTOC_VERSION }}
+          platform: osx-aarch_64
+
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Build all-smi
+        run: cargo build --bin all-smi
+
+      - name: Probe for a bootstrappable GUI domain
+        id: probe
+        run: |
+          if launchctl print "gui/$(id -u)" >/dev/null 2>&1; then
+            echo "gui_domain=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "gui_domain=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::no gui/\$UID domain on this runner; running the render tier only"
+          fi
+
+      # ── Render tier: no launchd domain required ──
+      #
+      # launchd accepts a LaunchAgent carrying UserName/GroupName and
+      # silently ignores them, so a regression that leaves those keys in
+      # a user-scope plist cannot be caught by bootstrapping it. It has
+      # to be caught here, on the rendered file.
+      - name: Rendered plist is valid and correctly scoped
+        run: |
+          set -eEux
+          BIN="$PWD/target/debug/all-smi"
+          PLIST="$HOME/Library/LaunchAgents/com.lablup.all-smi.plist"
+
+          diagnose() {
+            set +x
+            echo "::group::diagnostics: rendered LaunchAgent plist"
+            echo "--- $PLIST ---"
+            cat "$PLIST" 2>&1 || echo "(absent)"
+            echo "--- plutil ---"
+            plutil -lint "$PLIST" 2>&1 || true
+            echo "::endgroup::"
+          }
+          trap diagnose ERR
+
+          "$BIN" service status --user && rc=0 || rc=$?
+          test "$rc" -eq 3
+
+          "$BIN" service install --user
+          test -f "$PLIST"
+
+          # launchd parses this with CFPropertyList; a stray `--` inside
+          # the marker comment would make the whole job unloadable.
+          plutil -lint "$PLIST"
+          grep -qF "<!-- Managed by 'all-smi service' -->" "$PLIST"
+          grep -qF "<string>api</string>" "$PLIST"
+          grep -qF "$HOME/Library/Logs/all-smi/all-smi.log" "$PLIST"
+
+          # Keys a gui/$UID domain cannot honour must be absent.
+          for key in UserName GroupName InitGroups; do
+            if grep -qF "<key>${key}</key>" "$PLIST"; then
+              echo "::error::${key} must not survive into a user-scope plist"
+              exit 1
+            fi
+          done
+
+          # Installed but not bootstrapped is the documented state here.
+          "$BIN" service status --user && rc=0 || rc=$?
+          test "$rc" -eq 3
+          "$BIN" service status --user --json | grep -q '"installed": true'
+
+          "$BIN" service uninstall --user
+          test ! -f "$PLIST"
+
+      - name: Refuse an unelevated system install and a foreign plist
+        run: |
+          set -eEux
+          BIN="$PWD/target/debug/all-smi"
+          PLIST="$HOME/Library/LaunchAgents/com.lablup.all-smi.plist"
+
+          # System scope must refuse before writing anything at all.
+          "$BIN" service install && rc=0 || rc=$?
+          test "$rc" -eq 1
+          "$BIN" service install 2>&1 | grep -q "requires root"
+          test ! -f /Library/LaunchDaemons/com.lablup.all-smi.plist
+
+          printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>' \
+            '<plist version="1.0"><dict><key>Label</key><string>hand written</string></dict></plist>' \
+            > "$PLIST"
+          "$BIN" service install --user && rc=0 || rc=$?
+          test "$rc" -eq 1
+          "$BIN" service uninstall --user && rc=0 || rc=$?
+          test "$rc" -eq 1
+          grep -q "hand written" "$PLIST"
+
+          "$BIN" service uninstall --user --force
+          test ! -f "$PLIST"
+
+      # ── Lifecycle tier: needs a real gui/$UID domain ──
+      - name: User-scope lifecycle
+        if: steps.probe.outputs.gui_domain == 'true'
+        run: |
+          set -eEux
+          BIN="$PWD/target/debug/all-smi"
+          PLIST="$HOME/Library/LaunchAgents/com.lablup.all-smi.plist"
+          LOG="$HOME/Library/Logs/all-smi/all-smi.log"
+          TARGET="gui/$(id -u)/com.lablup.all-smi"
+
+          # A job that fails to spawn under launchd reports almost
+          # nothing through the exit code alone, so dump the three
+          # places the reason can be before giving up.
+          diagnose() {
+            set +x
+            echo "::group::diagnostics: launchd user-scope service"
+            echo "--- $PLIST ---"
+            cat "$PLIST" 2>&1 || echo "(absent)"
+            echo "--- launchctl print $TARGET ---"
+            launchctl print "$TARGET" 2>&1 || true
+            echo "--- launchctl print-disabled gui/$(id -u) ---"
+            launchctl print-disabled "gui/$(id -u)" 2>&1 | grep -i all-smi || true
+            echo "--- $LOG ---"
+            cat "$LOG" 2>&1 || echo "(absent)"
+            echo "--- service status ---"
+            "$BIN" service status --user 2>&1 || true
+            echo "::endgroup::"
+          }
+          trap diagnose ERR
+
+          # `service status` reports running the moment launchd spawns
+          # the program, which is well before it has finished coming up:
+          # enumerating the IOReport channel list dominates startup and
+          # ProcessType=Background runs it at background QoS. Every
+          # readiness wait below therefore polls the metrics endpoint,
+          # not the process state. Polling status instead races, and the
+          # race is invisible until an assertion downstream fails for an
+          # unrelated-looking reason.
+          ready() {
+            for _ in $(seq 1 60); do
+              curl -sf --max-time 5 localhost:9090/metrics >/dev/null && return 0
+              sleep 2
+            done
+            echo "::error::the exporter never served /metrics"
+            return 1
+          }
+
+          "$BIN" service install --user --now
+          ready
+          "$BIN" service status --user
+          "$BIN" service status --user --json | grep -q '"running": true'
+          "$BIN" service status --user --json | grep -q '"enabled": true'
+          curl -sf --max-time 10 localhost:9090/metrics | grep -q '^all_smi_'
+          grep -q "API server listening" "$LOG"
+
+          "$BIN" service restart --user
+          ready
+
+          # `stop` boots the job out, which is a SIGTERM. The final
+          # energy-WAL flush has to be reached before launchd's
+          # ExitTimeOut turns it into a SIGKILL (issues #191, #310).
+          "$BIN" service stop --user
+          sleep 3
+          grep -q "energy WAL: shutdown requested" "$LOG"
+          "$BIN" service status --user && rc=0 || rc=$?
+          test "$rc" -eq 3
+          "$BIN" service status --user --json | grep -q '"installed": true'
+
+          # A persistent disable override outlives the plist and a
+          # reboot, so `install` has to clear it and `status` has to see
+          # it.
+          launchctl disable "$TARGET"
+          "$BIN" service status --user --json | grep -q '"enabled": false'
+          "$BIN" service install --user
+          "$BIN" service status --user --json | grep -q '"enabled": true'
+
+          "$BIN" service uninstall --user
+          test ! -f "$PLIST"
+          launchctl print "$TARGET" >/dev/null 2>&1 && rc=0 || rc=$?
+          test "$rc" -ne 0
+          # `uninstall` keeps the log deliberately.
+          test -f "$LOG"
+
   build-check:
     name: Build Check
     runs-on: ubuntu-latest

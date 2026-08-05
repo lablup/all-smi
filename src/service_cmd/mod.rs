@@ -29,11 +29,12 @@
 //! # Adding a platform
 //!
 //! [`backend`] already carries a `cfg` arm for Linux, macOS, and
-//! Windows. The macOS launchd backend (issue #310) and the Windows SCM
-//! backend (issue #311) each replace their own arm and add a sibling
-//! module; nothing else in this file needs to change. Keep the
-//! [`ServiceBackend`] method signatures and the exit codes below
-//! untouched: they are the cross-platform contract the CLI documents.
+//! Windows. The Windows SCM backend (issue #311) replaces its own arm
+//! and adds a sibling module; nothing else in this file needs to
+//! change. Keep the [`ServiceBackend`] method signatures and the exit
+//! codes below untouched: they are the cross-platform contract the CLI
+//! documents. macOS (issue #310) landed exactly that way: it replaced
+//! one arm and added [`launchd`] plus [`plist`].
 //!
 //! # Exit codes
 //!
@@ -43,12 +44,11 @@
 //! * `3` — `status` only: the service is installed but stopped, or not
 //!   installed at all. Mirrors `systemctl is-active`.
 
-// Only the Linux arm of `backend()` is live today, so on macOS and
-// Windows the shared plumbing the backends consume (the error variants,
-// the elevation probe, `SERVICE_NAME`) has no caller until #310 and #311
-// land. Dead-code detection stays fully active on Linux, which is where
-// CI runs `cargo clippy -- -D warnings`.
-#![cfg_attr(not(target_os = "linux"), allow(dead_code))]
+// Windows has no live `backend()` arm yet, so there the shared plumbing
+// the backends consume (the error variants, the elevation probe) has no
+// caller until #311 lands. Dead-code detection stays fully active on
+// Linux and macOS, which both dispatch a real backend.
+#![cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
 
 use std::path::PathBuf;
 
@@ -56,17 +56,44 @@ use crate::cli::ServiceAction;
 
 pub mod detect;
 
-// The systemd backend and its unit renderer compile on Linux, and under
-// `cfg(test)` everywhere else so their pure logic (template rendering,
-// `systemctl show` parsing) stays covered on macOS and Windows
-// developer machines. They are never dispatched off Linux.
+// Each backend compiles on its own platform, and under `cfg(test)`
+// everywhere else so its pure logic (definition rendering, supervisor
+// output parsing, path layout) stays covered on every developer machine
+// and in CI. Neither is ever dispatched off its own platform.
+//
+// The `allow(dead_code)` companions are the per-target blindness guard:
+// this crate compiles the module tree twice, and in the binary target a
+// `pub` item is live only if it is reachable. A backend that the local
+// `backend()` arm does not return therefore looks dead there even
+// though it is exercised by the library target's tests.
 #[cfg(any(target_os = "linux", test))]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub mod systemd;
 #[cfg(any(target_os = "linux", test))]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub mod template;
 
-/// The service identifier used by every backend: the systemd unit name
-/// minus its suffix, the launchd label suffix, the SCM service name.
+#[cfg(any(target_os = "macos", test))]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub mod launchctl;
+#[cfg(any(target_os = "macos", test))]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub mod launchd;
+#[cfg(any(target_os = "macos", test))]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub mod plist;
+
+/// The service identifier every backend is named after: the systemd
+/// unit name minus its suffix, the trailing component of the launchd
+/// label, the SCM service name.
+///
+/// Only the systemd backend passes it to its supervisor as a runtime
+/// argument; launchd needs a reverse-DNS label, so [`plist::LABEL`]
+/// spells the whole thing out. That makes this constant genuinely
+/// uncalled in a non-Linux **binary** build, where reachability rather
+/// than `pub` decides liveness, even though the library target and the
+/// tests both use it.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub const SERVICE_NAME: &str = "all-smi";
 
 /// Exit code for a successful action, and for `status` when running.
@@ -213,13 +240,7 @@ pub fn backend() -> Result<Box<dyn ServiceBackend>, ServiceError> {
 
     #[cfg(target_os = "macos")]
     {
-        Err(ServiceError::NotSupported(
-            "`all-smi service` has no macOS backend yet; launchd support is tracked in \
-             https://github.com/lablup/all-smi/issues/310. Until then, run \
-             `brew services start all-smi` on a Homebrew install, or write a launchd \
-             plist that execs `all-smi api`."
-                .to_string(),
-        ))
+        Ok(Box::new(launchd::LaunchdBackend::new()))
     }
 
     #[cfg(target_os = "windows")]
@@ -372,16 +393,40 @@ fn report_install_success(spec: &InstallSpec) {
         println!("It is not running yet. Start it with: all-smi service start{flag}");
     }
     if scope == Scope::User {
-        let user = whoami::username().unwrap_or_else(|_| "<user>".to_string());
-        println!(
-            "Note: a user service only runs while you are logged in. Run \
-             `loginctl enable-linger {user}` for boot persistence."
-        );
+        println!("{}", user_scope_persistence_note());
     }
     println!(
-        "Runtime settings live in the environment file and the TOML config, not in the \
-         service definition. Run `all-smi config path` to see the active TOML path."
+        "Runtime settings live in {SETTINGS_SOURCES}, not in the service definition. Run \
+         `all-smi config path` to see the active TOML path."
     );
+}
+
+/// Where an operator changes a running service's settings. launchd has
+/// no `EnvironmentFile=` equivalent, so on macOS the TOML config is the
+/// whole story.
+#[cfg(target_os = "macos")]
+const SETTINGS_SOURCES: &str = "the TOML config";
+#[cfg(not(target_os = "macos"))]
+const SETTINGS_SOURCES: &str = "the environment file and the TOML config";
+
+/// Platform-specific caveat printed after a user-scope install. Every
+/// platform bounds a per-user service to a login session, but each one
+/// spells the escape hatch differently.
+#[cfg(target_os = "macos")]
+fn user_scope_persistence_note() -> String {
+    "Note: a LaunchAgent runs only while you are logged in to a desktop session and stops at \
+     logout. launchd has no per-user lingering, so boot persistence on a headless node means the \
+     system LaunchDaemon: `sudo all-smi service install --now`."
+        .to_string()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn user_scope_persistence_note() -> String {
+    let user = whoami::username().unwrap_or_else(|_| "<user>".to_string());
+    format!(
+        "Note: a user service only runs while you are logged in. Run \
+         `loginctl enable-linger {user}` for boot persistence."
+    )
 }
 
 fn print_status_text(status: &ServiceStatus, scope: Scope) {
