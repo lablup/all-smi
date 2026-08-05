@@ -72,6 +72,25 @@ pub mod template;
 // the Service Control Manager and therefore compiles (and is tested)
 // everywhere, while the three modules below are handle plumbing over
 // `windows-service` and exist only on Windows.
+//
+// Nothing in CI compiles the three Windows-only modules today: the test
+// job runs on Linux, and `cargo check --target x86_64-pc-windows-msvc`
+// on this crate dies in `zstd-sys`, whose build script needs a C
+// toolchain with Windows headers. If you change them, check them the
+// way they were written: an isolated probe crate that `#[path]`-includes
+// the real `service_cmd`, `common`, `cli`, `cli_service`, and
+// `utils::command` sources, stubs `crate::api` and `crate::device` (the
+// two that drag in the device readers), and depends only on
+// `windows-service`, `tracing-appender`, and the pure-Rust crates those
+// modules need. Give it both a library and a binary target, because
+// this crate compiles its module tree twice and a `pub` item that is
+// always live in a library target can be dead behind a binary's private
+// module root. Then run:
+//
+//     cargo clippy --target x86_64-pc-windows-msvc --lib --bins --tests -- -D warnings
+//
+// Verify the probe actually reaches the files before trusting it: paste
+// a deliberate type error into each and confirm it fails.
 #[cfg(any(windows, test))]
 pub mod scm;
 #[cfg(windows)]
