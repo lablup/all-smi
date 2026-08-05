@@ -133,20 +133,67 @@ jobs:
           fi
 
       # ── User scope: install, start, restart, stop, uninstall ──
+      #
+      # The ERR trap is not scaffolding: a unit that a per-user manager
+      # cannot apply dies before ExecStart, and `systemctl --user start`
+      # reports only "control process exited with error code". Without
+      # the journal and the rendered unit in the log, that failure is
+      # undebuggable from CI output alone. Keep the trap.
       - name: User-scope lifecycle
         if: steps.probe.outputs.user_scope == 'true'
         run: |
-          set -eux
+          set -eEux
           BIN="$PWD/target/debug/all-smi"
+          UNIT="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/all-smi.service"
+
+          diagnose() {
+            set +x
+            echo "::group::diagnostics: user-scope all-smi.service"
+            echo "--- rendered unit ($UNIT) ---"
+            cat "$UNIT" 2>&1 || true
+            echo "--- systemctl --user status ---"
+            systemctl --user status all-smi.service --no-pager -l 2>&1 || true
+            echo "--- systemctl --user show (failure detail) ---"
+            systemctl --user show all-smi.service \
+              -p LoadState -p ActiveState -p SubState -p Result \
+              -p ExecMainCode -p ExecMainStatus -p StatusErrno -p InvocationID 2>&1 || true
+            echo "--- journalctl --user ---"
+            journalctl --user -xeu all-smi.service --no-pager -n 200 2>&1 || true
+            echo "--- host namespace policy (the usual cause) ---"
+            sysctl user.max_user_namespaces 2>&1 || true
+            sysctl kernel.apparmor_restrict_unprivileged_userns 2>&1 || true
+            echo "::endgroup::"
+          }
+          trap diagnose ERR
 
           "$BIN" service status --user && rc=0 || rc=$?
           test "$rc" -eq 3  # not installed yet
 
           "$BIN" service install --user
-          test -f "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/all-smi.service"
-          head -1 "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/all-smi.service" | grep -qF "# Managed by 'all-smi service'"
-          grep -q "^WantedBy=default.target$" "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/all-smi.service"
-          ! grep -q "^User=" "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/all-smi.service"
+          test -f "$UNIT"
+          head -1 "$UNIT" | grep -qF "# Managed by 'all-smi service'"
+          grep -q "^WantedBy=default.target$" "$UNIT"
+
+          # Every directive a per-user manager cannot apply must be
+          # absent. Each of these makes the unit fail before ExecStart,
+          # which is exactly the class of bug this job exists to catch.
+          for forbidden in \
+              "User=" "Group=" "SupplementaryGroups=" "ProtectKernelModules=" \
+              "ProtectSystem=" "ProtectHome=" "PrivateTmp=" "ProtectControlGroups="; do
+            if grep -q "^${forbidden}" "$UNIT"; then
+              echo "::error::user-scope unit contains ${forbidden}, which a per-user systemd manager cannot apply"
+              diagnose
+              exit 1
+            fi
+          done
+          # ...and the privilege-free hardening must survive.
+          grep -q "^NoNewPrivileges=true$" "$UNIT"
+          grep -q "^RestrictSUIDSGID=true$" "$UNIT"
+
+          # systemd's own parser is the authority on whether the rendered
+          # unit is valid. Also covers the issue's `systemd-analyze
+          # verify` acceptance criterion.
+          systemd-analyze --user verify "$UNIT"
 
           "$BIN" service status --user && rc=0 || rc=$?
           test "$rc" -eq 3  # installed, not started
@@ -164,15 +211,38 @@ jobs:
           test "$rc" -eq 3
 
           "$BIN" service uninstall --user
-          test ! -f "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/all-smi.service"
+          test ! -f "$UNIT"
 
       # ── System scope fallback: same lifecycle under sudo ──
       - name: System-scope lifecycle
         if: steps.probe.outputs.user_scope != 'true'
         run: |
-          set -eux
+          set -eEux
           BIN="$PWD/target/debug/all-smi"
           UNIT=/etc/systemd/system/all-smi.service
+
+          # Same rationale as the user-scope trap: a unit that fails
+          # before ExecStart produces an opaque error, so always dump the
+          # journal and the rendered unit. Keep this permanently.
+          diagnose() {
+            set +x
+            echo "::group::diagnostics: system-scope all-smi.service"
+            echo "--- rendered unit ($UNIT) ---"
+            sudo cat "$UNIT" 2>&1 || true
+            echo "--- systemctl status ---"
+            sudo systemctl status all-smi.service --no-pager -l 2>&1 || true
+            echo "--- systemctl show (failure detail) ---"
+            sudo systemctl show all-smi.service \
+              -p LoadState -p ActiveState -p SubState -p Result \
+              -p ExecMainCode -p ExecMainStatus -p StatusErrno -p InvocationID 2>&1 || true
+            echo "--- journalctl ---"
+            sudo journalctl -xeu all-smi.service --no-pager -n 200 2>&1 || true
+            echo "--- effective configuration ---"
+            sudo cat /etc/all-smi/config.toml 2>&1 || true
+            sudo cat /etc/default/all-smi 2>&1 || true
+            echo "::endgroup::"
+          }
+          trap diagnose ERR
 
           # Unprivileged mutation must be refused with the documented message.
           "$BIN" service install && rc=0 || rc=$?
@@ -194,6 +264,21 @@ jobs:
           # behind a symlink.
           sudo grep -q "^ExecStart=.*target/debug/all-smi api$" "$UNIT"
           sudo grep -q "^WantedBy=multi-user.target$" "$UNIT"
+          # A system manager runs as root and can apply the full
+          # hardening set, so unlike user scope none of it is dropped.
+          for required in \
+              "NoNewPrivileges=true" "ProtectSystem=strict" "ProtectHome=true" \
+              "PrivateTmp=true" "ProtectKernelModules=true" \
+              "ProtectControlGroups=true" "RestrictSUIDSGID=true"; do
+            sudo grep -q "^${required}$" "$UNIT" || {
+              echo "::error::system-scope unit lost hardening directive ${required}"
+              diagnose
+              exit 1
+            }
+          done
+          # systemd's own parser is the authority. Also covers the
+          # issue's `systemd-analyze verify` acceptance criterion.
+          sudo systemd-analyze verify "$UNIT"
           systemctl is-enabled all-smi
 
           for _ in $(seq 1 30); do
@@ -201,8 +286,7 @@ jobs:
             sleep 1
           done
           systemctl is-active --quiet all-smi || {
-            systemctl status all-smi --no-pager || true
-            journalctl -u all-smi --no-pager -n 200 || true
+            diagnose
             exit 1
           }
 
@@ -221,7 +305,8 @@ jobs:
             sleep 1
           done
           systemctl is-active --quiet all-smi || {
-            journalctl -u all-smi --no-pager -n 200 || true
+            echo "::error::service did not come back after kill -9 within RestartSec"
+            diagnose
             exit 1
           }
 

@@ -169,37 +169,125 @@ fn system_scope_keeps_every_hardening_directive() {
 }
 
 #[test]
-fn user_scope_keeps_the_namespace_free_hardening() {
-    // Dropping the mount-namespace directives must not become an
-    // excuse to drop the hardening a user manager can always apply.
+fn user_scope_keeps_the_privilege_free_hardening() {
+    // Dropping what a user manager cannot apply must not become an
+    // excuse to drop what it can. These two are prctl and seccomp only,
+    // so they need no privilege and belong in every rendering.
     let unit = user_unit();
-    for directive in [
-        "NoNewPrivileges=true",
-        "ProtectKernelModules=true",
-        "RestrictSUIDSGID=true",
-    ] {
+    for directive in USER_SCOPE_KEPT_HARDENING {
         assert!(
             unit.contains(directive),
-            "{directive} works in a user manager and must be preserved, got:\n{unit}"
+            "{directive} needs no privilege and must be preserved, got:\n{unit}"
         );
     }
 }
 
+/// The regression guard for the CI failure this list exists to prevent.
+///
+/// Every directive a per-user manager cannot apply must be absent from
+/// the user render. Leaving one in does not degrade the service, it
+/// stops it from starting at all: the unit dies before `ExecStart` and
+/// `systemctl --user start` reports only "control process exited with
+/// error code".
 #[test]
-fn user_scope_drops_the_mount_namespace_directives() {
-    // A per-user manager cannot always create a mount namespace
-    // (Ubuntu 24.04+ restricts unprivileged user namespaces), and a
-    // unit whose namespace setup fails does not start at all.
+fn user_scope_drops_everything_a_user_manager_cannot_apply() {
     let unit = user_unit();
-    for directive in [
-        "ProtectSystem=",
-        "ProtectHome=",
-        "PrivateTmp=",
-        "ProtectControlGroups=",
-    ] {
+    for directive in USER_SCOPE_DROPPED_PREFIXES {
         assert!(
             !unit.contains(directive),
-            "{directive} needs a mount namespace and must be dropped in user scope, got:\n{unit}"
+            "{directive} must be dropped in user scope or the unit fails before ExecStart, got:\n{unit}"
+        );
+    }
+}
+
+/// `ProtectKernelModules=` is the trap: it reads as pure seccomp, but it
+/// also alters the capability bounding set, which an unprivileged
+/// manager can only do from inside a user namespace. Where the host
+/// denies unprivileged user namespaces (stock Ubuntu 24.04 and later),
+/// the unit dies with 218/CAPABILITIES. Reproduced against systemd 255
+/// with `ExecStart=/bin/sleep` to rule the application out.
+///
+/// It costs nothing to drop: an unprivileged process never holds
+/// `CAP_SYS_MODULE` in the first place, so module loading is already
+/// impossible for a user service.
+#[test]
+fn user_scope_drops_protect_kernel_modules() {
+    let unit = user_unit();
+    assert!(
+        !unit.contains("ProtectKernelModules"),
+        "ProtectKernelModules needs a user namespace to alter the capability bounding set; \
+         leaving it in makes `systemctl --user start` fail with 218/CAPABILITIES, got:\n{unit}"
+    );
+    // It is still correct, and still applied, for a system unit.
+    assert!(system_unit(None).contains("ProtectKernelModules=true"));
+}
+
+/// The two lists must not overlap, or a directive would be both
+/// required and forbidden and one of the assertions above would be
+/// unsatisfiable.
+#[test]
+fn kept_and_dropped_directive_lists_are_disjoint() {
+    for kept in USER_SCOPE_KEPT_HARDENING {
+        assert!(
+            !USER_SCOPE_DROPPED_PREFIXES.contains(kept),
+            "`{kept}` appears in both the kept and the dropped list"
+        );
+    }
+}
+
+/// Everything the user render keeps from the `[Service]` section must be
+/// either a drop-list survivor by design or explicitly known-safe. This
+/// catches a directive added to the shipped unit that nobody classified:
+/// a new privileged directive would otherwise silently reach user-scope
+/// installs and break them exactly the way ProtectKernelModules did.
+#[test]
+fn every_service_directive_in_the_user_render_is_classified() {
+    // Directives that need no privilege and are intentionally kept.
+    const KNOWN_SAFE: &[&str] = &[
+        "Type=",
+        "ExecStart=",
+        "EnvironmentFile=",
+        "Restart=",
+        "RestartSec=",
+        "RuntimeDirectory=",
+        "CacheDirectory=",
+        "NoNewPrivileges=",
+        "RestrictSUIDSGID=",
+    ];
+
+    let unit = user_unit();
+    let mut in_service = false;
+    for line in unit.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            in_service = line == "[Service]";
+            continue;
+        }
+        if !in_service || line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        assert!(
+            KNOWN_SAFE.iter().any(|k| line.starts_with(k)),
+            "unclassified directive `{line}` reached the user-scope render. Decide whether a \
+             per-user systemd manager can apply it: add it to KNOWN_SAFE here if it needs no \
+             privilege, otherwise add it to USER_SCOPE_DROPPED_PREFIXES."
+        );
+    }
+}
+
+/// Not a style nit: a directive listed for dropping that no longer
+/// exists in the shipped unit means the classification has gone stale,
+/// and the next directive rename would slip an unapplicable one into
+/// user-scope installs unnoticed.
+#[test]
+fn kept_hardening_all_appears_in_the_shipped_unit() {
+    for prefix in USER_SCOPE_KEPT_HARDENING {
+        assert!(
+            UNIT_TEMPLATE
+                .lines()
+                .any(|l| l.trim_start().starts_with(prefix)),
+            "`{prefix}` is listed as kept user-scope hardening but the shipped unit no longer \
+             sets it"
         );
     }
 }

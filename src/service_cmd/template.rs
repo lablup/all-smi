@@ -57,12 +57,54 @@ pub const UNIT_TEMPLATE: &str = include_str!("../../packaging/systemd/all-smi.se
 
 /// Directives stripped when rendering a user-scope unit.
 ///
-/// Each entry is a line prefix. Two distinct reasons are represented,
-/// grouped in order below.
+/// # The rule
+///
+/// A per-user `systemd --user` manager runs unprivileged. Any directive
+/// whose setup needs a privilege the manager does not hold makes the
+/// unit fail *before* `ExecStart` is reached, so the service never
+/// starts at all. The failure surfaces as an opaque "control process
+/// exited with error code" from `systemctl --user start`, with the real
+/// cause only in the journal. Every such directive must be dropped here.
+///
+/// Directives that are implemented purely with `prctl` or a seccomp
+/// filter need no privilege and are kept in both scopes:
+/// `NoNewPrivileges=` and `RestrictSUIDSGID=`.
+///
+/// # Verified failure modes
+///
+/// Reproduced against systemd 255 on Ubuntu 24.04 with a real per-user
+/// manager, using `/bin/sleep` as `ExecStart` so the application itself
+/// was out of the picture:
+///
+/// | Directive | Exit status | Journal |
+/// |---|---|---|
+/// | `SupplementaryGroups=` | `216/GROUP` | `Failed to determine supplementary groups: No such process` |
+/// | `ProtectKernelModules=` | `218/CAPABILITIES` | `Failed to set up user namespacing for unprivileged user` then `Failed to drop capabilities: Operation not permitted` |
+///
+/// `ProtectKernelModules=` is the non-obvious one: it reads as pure
+/// seccomp, but it also strips `CAP_SYS_MODULE` from the capability
+/// bounding set and hides `/usr/lib/modules`, and an unprivileged
+/// manager can only do that from inside a user namespace. Where the host
+/// denies unprivileged user namespaces, the unit dies at 218 before
+/// exec.
 pub const USER_SCOPE_DROPPED_PREFIXES: &[&str] = &[
-    // ---- Cannot work in a per-user manager ----
-    // A user manager has no authority to change supplementary groups.
+    // ---- Need a privilege the user manager does not hold ----
+    // 216/GROUP: a user manager cannot change supplementary groups.
     "SupplementaryGroups=",
+    // 218/CAPABILITIES where unprivileged user namespaces are denied:
+    // altering the capability bounding set requires one.
+    "ProtectKernelModules=",
+    // The following need a private mount namespace, which an
+    // unprivileged manager can only obtain through a user namespace.
+    // Ubuntu 24.04 and later restrict those through AppArmor, and a unit
+    // whose namespace setup fails does not start (226/NAMESPACE).
+    // `ProtectHome=` is doubly wrong here: it would hide the operator's
+    // own `~/.config/all-smi/config.toml` from their own service.
+    "ProtectSystem=",
+    "ProtectHome=",
+    "PrivateTmp=",
+    "ProtectControlGroups=",
+    // ---- Meaningless or wrong in a user manager ----
     // The user cache directory resolves normally, so pinning the WAL at
     // /var/cache/all-smi would point it somewhere unwritable.
     "Environment=ALL_SMI_ENERGY_WAL_PATH=",
@@ -70,22 +112,15 @@ pub const USER_SCOPE_DROPPED_PREFIXES: &[&str] = &[
     // user unit only produces a startup warning.
     "After=network-online.target",
     "Wants=network-online.target",
-    // ---- Require a private mount namespace ----
-    // A per-user manager cannot always create one: Ubuntu 24.04 and
-    // later restrict unprivileged user namespaces through AppArmor, and
-    // a unit whose namespace setup fails does not start at all (exit
-    // status 226/NAMESPACE). These directives also buy little for a
-    // process that is already unprivileged, and `ProtectHome=` in
-    // particular would hide the operator's own
-    // `~/.config/all-smi/config.toml` from their own service. The
-    // namespace-free hardening (`NoNewPrivileges=`,
-    // `ProtectKernelModules=`, `RestrictSUIDSGID=`) is kept in both
-    // scopes.
-    "ProtectSystem=",
-    "ProtectHome=",
-    "PrivateTmp=",
-    "ProtectControlGroups=",
 ];
+
+/// Directives that are safe in a user unit because they need no
+/// privilege: `prctl`- and seccomp-based hardening only.
+///
+/// Dropping a directive from the user-scope render must never become an
+/// excuse to weaken what a user manager *can* enforce, so this list is
+/// asserted positively by the tests.
+pub const USER_SCOPE_KEPT_HARDENING: &[&str] = &["NoNewPrivileges=", "RestrictSUIDSGID="];
 
 /// Inputs for [`render_unit`].
 #[derive(Debug, Clone)]

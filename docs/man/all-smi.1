@@ -231,10 +231,22 @@ The unit enables \fBNoNewPrivileges\fR, \fBProtectSystem=strict\fR,
 \fBProtectControlGroups\fR, and \fBRestrictSUIDSGID\fR. \fBPrivateDevices=\fR
 and \fBProtectProc=\fR are deliberately absent: the former would hide
 \fI/dev/nvidia*\fR and \fI/dev/dri/*\fR from NVML and the AMD/Intel readers,
-the latter would hide the processes the process\-metrics reader enumerates. A
-user\-scope unit additionally drops the directives that need a private mount
-namespace (\fBProtectSystem=\fR, \fBProtectHome=\fR, \fBPrivateTmp=\fR,
-\fBProtectControlGroups=\fR), which a per\-user manager cannot always create.
+the latter would hide the processes the process\-metrics reader enumerates.
+.PP
+A user\-scope unit keeps only the hardening that needs no privilege,
+\fBNoNewPrivileges=\fR and \fBRestrictSUIDSGID=\fR, and drops
+\fBSupplementaryGroups=\fR, \fBProtectKernelModules=\fR, \fBProtectSystem=\fR,
+\fBProtectHome=\fR, \fBPrivateTmp=\fR, and \fBProtectControlGroups=\fR. A
+per\-user manager runs unprivileged, and a directive whose setup it cannot
+perform makes the unit fail before \fBExecStart\fR, so the service never starts:
+\fBSupplementaryGroups=\fR exits \fB216/GROUP\fR, and the rest need a user
+namespace, which Ubuntu 24.04 and later restrict through AppArmor, giving
+\fB218/CAPABILITIES\fR or \fB226/NAMESPACE\fR. \fBProtectKernelModules=\fR is
+the surprising member: it also strips \fBCAP_SYS_MODULE\fR from the capability
+bounding set, which needs a user namespace. Dropping it costs nothing, because a
+user service never holds that capability anyway. \fBProtectHome=\fR is dropped
+for a second reason as well, since it would hide the operator's own
+\fI~/.config/all\-smi/config.toml\fR from their own service.
 .PP
 Because \fBPrivateTmp=true\fR namespaces \fI/tmp\fR, the default
 \fI/tmp/all\-smi.sock\fR fallback is unreachable from outside the service. Set
