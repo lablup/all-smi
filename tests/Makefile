@@ -1,4 +1,4 @@
-.PHONY: help all container-cpu-frequency arm-cpu-frequency container-benchmark container-cpu container-memory container-simple quick-api clean
+.PHONY: help all container-cpu-frequency arm-cpu-frequency container-benchmark container-cpu container-memory container-simple quick-api homebrew-formula-workflow clean
 
 # Default target
 help:
@@ -22,6 +22,9 @@ help:
 	@echo "Performance Tests:"
 	@echo "  high-scale-monitoring       Test monitoring 100+ remote nodes (TODO)"
 	@echo "  api-load-test              Test API performance under load (TODO)"
+	@echo ""
+	@echo "Workflow Tests:"
+	@echo "  homebrew-formula-workflow   Run the Homebrew tap workflow's step bodies (macOS only)"
 	@echo ""
 	@echo "Utility:"
 	@echo "  all                        Run all available tests"
@@ -94,6 +97,13 @@ high-scale-monitoring:
 api-load-test:
 	@echo "=== API load test not yet implemented ==="
 	@echo "TODO: Create test-api-load.sh"
+
+# Run the update_homebrew_formula.yml step bodies against fixtures. Offline, and
+# deliberately not part of `all`: the bodies call gsed, brew style and BSD awk,
+# so this needs macOS, matching the workflow's own runs-on.
+homebrew-formula-workflow:
+	@echo "=== Running Homebrew formula workflow step tests ==="
+	@./homebrew-formula-workflow/run-workflow-steps.sh
 
 # Clean up test artifacts
 clean:

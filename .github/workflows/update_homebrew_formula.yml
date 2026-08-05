@@ -12,20 +12,62 @@ on:
     types:
       - completed
 
+# This job reads this repository's releases through `gh api` and writes nothing
+# back to it. The only write target anywhere in the run is lablup/homebrew-tap,
+# which is reached with HOMEBREW_TAP_TOKEN and not with GITHUB_TOKEN, so read is
+# the whole requirement. Declaring it here also drops every other scope to none,
+# which is what keeps a compromised step from, say, opening a pull request or
+# writing a deployment on the strength of this job's GITHUB_TOKEN.
 permissions:
-  contents: write
+  contents: read
+
+# One formula file, one tap, one branch. Two releases published close together
+# otherwise put two runs on the same file: both clone the tap at the same
+# commit, both rewrite Formula/all-smi.rb from different tags, and the second
+# push is refused as a non-fast-forward. That run ends red having done nothing,
+# and the tap keeps whichever tag happened to push first, which is as likely to
+# be the older one. Nobody looking at a green release notices. Serializing makes
+# the second run clone what the first one pushed, so the tags land in the order
+# they were published.
+#
+# The group is a constant rather than a ref or a tag, because the contended
+# resource is the tap and not anything in this repository.
+# `cancel-in-progress: false` because a cancelled run can be interrupted between
+# `git commit` and `git push`, and there is nothing here that reasons about
+# resuming from that.
+concurrency:
+  group: update-homebrew-formula
+  cancel-in-progress: false
 
 jobs:
   update-homebrew:
     name: Update Homebrew Formula
     runs-on: macos-latest
+
+    # Recorded decision, per issue #316: the `packaging` environment has
+    # `protection_rules: []` and `deployment_branch_policy: null`, so naming it
+    # here scopes HOMEBREW_TAP_TOKEN to this job but gates nothing. Adding
+    # required reviewers or a branch policy is a repository administration
+    # change rather than a workflow change, it changes who is able to ship a
+    # release, and it is therefore left to a human to decide and apply. It was
+    # deliberately not done as part of #316. Until it is, the environment is
+    # bookkeeping, and what actually limits the token's reach is below: the tap
+    # is cloned anonymously, the credential is supplied to the single `git push`
+    # invocation from the environment, and it is never written to disk.
     environment: packaging
 
     if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
 
     steps:
+      # `persist-credentials: false` for the same reason the tap clone below
+      # carries no credential: by default actions/checkout writes GITHUB_TOKEN
+      # into .git/config as an http.extraheader, where it stays readable by
+      # every later step and by anything those steps run. No step here performs
+      # a git operation in this checkout, so nothing needs it.
       - name: Checkout this repository
         uses: actions/checkout@v6
+        with:
+          persist-credentials: false
 
       - name: Install gnu-sed
         run: brew install gnu-sed
@@ -56,14 +98,26 @@ jobs:
 
       - name: Clone Homebrew tap repository
         run: |
-          git clone https://x-access-token:${{ secrets.HOMEBREW_TAP_TOKEN }}@github.com/lablup/homebrew-tap.git
+          set -euo pipefail
+
+          # Cloned anonymously, on purpose. lablup/homebrew-tap is public, and
+          # has to be for `brew tap lablup/tap` to work without credentials, so
+          # reading it needs no token at all. This used to clone from
+          # `https://x-access-token:<token>@github.com/lablup/homebrew-tap.git`,
+          # which git records verbatim as the `origin` url in
+          # homebrew-tap/.git/config. The token then sat in the workspace for
+          # the rest of the job, readable by every subsequent step and by
+          # anything those steps invoke, third-party actions included, and any
+          # code execution anywhere in the job was a tap compromise rather than
+          # a nuisance. Only the push needs the credential, and the push step
+          # takes it from the environment for the length of one command.
+          git clone https://github.com/lablup/homebrew-tap.git
           cd homebrew-tap
           git config user.name "GitHub Action"
           git config user.email "actions@github.com"
 
       - name: Download release artifacts and calculate SHA256
         run: |
-          cd homebrew-tap
           set -euo pipefail
 
           RAW_VERSION="${VERSION}"
@@ -87,7 +141,7 @@ jobs:
             exit 1
           fi
 
-          echo "VERSION_NO_V=$VERSION" >> $GITHUB_ENV  # Export version without 'v' to GitHub env
+          echo "VERSION_NO_V=$VERSION" >> "$GITHUB_ENV"  # Export version without 'v' to GitHub env
 
           # This repository was renamed from inureyes/all-smi to lablup/all-smi.
           # The old path still resolves through GitHub's rename redirect, but
@@ -96,7 +150,16 @@ jobs:
           # lands verbatim in the tap formula, so the redirect was load-bearing
           # for every `brew install all-smi`, not just for this workflow.
           BASE="https://github.com/lablup/all-smi/releases/download/v${VERSION}"
-          mkdir -p tmp
+
+          # Downloads land in RUNNER_TEMP, outside the tap clone. They used to
+          # go to homebrew-tap/tmp, which meant four release archives sat inside
+          # a git working tree whose next two steps rewrite a tracked file and
+          # commit it, and the only thing keeping them out of that commit was
+          # the commit step naming Formula/all-smi.rb explicitly. That is one
+          # `git add -A` away from publishing binaries into a Homebrew tap, and
+          # nothing about the download needs to be there in the first place.
+          ARTIFACT_DIR="${RUNNER_TEMP}/all-smi-artifacts"
+          mkdir -p "$ARTIFACT_DIR"
 
           # `-f` so a missing or renamed asset fails here rather than leaving a
           # zero-byte file whose checksum gets committed to the tap, and an
@@ -119,9 +182,9 @@ jobs:
             } >> "$GITHUB_ENV"
           }
 
-          fetch mac       "${BASE}/all-smi-macos-aarch64.zip"    tmp/mac.zip
-          fetch linux_arm "${BASE}/all-smi-linux-aarch64.tar.gz" tmp/linux-arm.tar.gz
-          fetch linux_x86 "${BASE}/all-smi-linux-x86_64.tar.gz"  tmp/linux-x86.tar.gz
+          fetch mac       "${BASE}/all-smi-macos-aarch64.zip"    "${ARTIFACT_DIR}/mac.zip"
+          fetch linux_arm "${BASE}/all-smi-linux-aarch64.tar.gz" "${ARTIFACT_DIR}/linux-arm.tar.gz"
+          fetch linux_x86 "${BASE}/all-smi-linux-x86_64.tar.gz"  "${ARTIFACT_DIR}/linux-x86.tar.gz"
 
           # The Intel Mac zip only exists from the release that first built
           # x86_64-apple-darwin onwards (#306), so its absence is a normal state
@@ -145,9 +208,26 @@ jobs:
           # because the name contains dots, and as a regex those match any
           # character, so an asset named `all-smi-macos-x86_64Xzip` would read as
           # this one being present.
-          ASSETS=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/v${VERSION}" --jq '.assets[].name')
+          #
+          # The names come from the paginated assets collection, not from the
+          # `assets` array that the release object embeds. That array carries no
+          # pagination controls and no Link header, so its completeness is not
+          # something the API promises, and this workflow reads absence from it
+          # as a decision: a truncated list is a silent "the release does not
+          # publish an Intel zip", which either skips an artifact that exists or
+          # trips the version-skew refusal in the next step. Releases here
+          # already publish 18 assets and gain more with every added target, so
+          # the safe reading is the one with a documented contract. `--paginate`
+          # follows the Link header to the end; `per_page=100` keeps that to a
+          # single request at the current asset count.
+          RELEASE_ID=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/v${VERSION}" --jq '.id')
+          if ! [[ $RELEASE_ID =~ ^[0-9]+$ ]]; then
+            echo "::error::Could not resolve a numeric release id for v${VERSION}."
+            exit 1
+          fi
+          ASSETS=$(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}/assets?per_page=100" --jq '.[].name')
           if printf '%s\n' "$ASSETS" | grep -qxF "all-smi-macos-x86_64.zip"; then
-            fetch mac_x86 "${BASE}/all-smi-macos-x86_64.zip" tmp/mac-x86.zip
+            fetch mac_x86 "${BASE}/all-smi-macos-x86_64.zip" "${ARTIFACT_DIR}/mac-x86.zip"
             echo "mac_x86_present=true" >> "$GITHUB_ENV"
           else
             echo "::notice::v${VERSION} publishes no all-smi-macos-x86_64.zip."
@@ -304,27 +384,76 @@ jobs:
             exit 1
           fi
 
-          # A substitution that silently no-ops would leave the previous
-          # release's checksum behind, so require the exact expected set. The
-          # count comes from the list the previous step actually wrote rather
-          # than from a literal: the Intel macOS stanza is optional, so a fixed
-          # number is wrong in one of the two states, and a literal is the kind
-          # that quietly goes stale the next time an artifact is added.
-          shas=("$mac_sha" "$linux_arm_sha" "$linux_x86_sha")
+          # The expected artifacts, as the (url, sha256) pairs they have to form
+          # in the formula. The count comes from the list the previous step
+          # actually wrote rather than from a literal: the Intel macOS stanza is
+          # optional, so a fixed number is wrong in one of the two states, and a
+          # literal is the kind that quietly goes stale the next time an
+          # artifact is added.
+          expected_urls=("$mac_url" "$linux_arm_url" "$linux_x86_url")
+          expected_shas=("$mac_sha" "$linux_arm_sha" "$linux_x86_sha")
           if [ "${mac_x86_state:-skipped}" = "updated" ]; then
-            shas+=("$mac_x86_sha")
+            expected_urls+=("$mac_x86_url")
+            expected_shas+=("$mac_x86_sha")
           fi
 
+          # A substitution that silently no-ops would leave the previous
+          # release's checksum behind, so require the exact expected count.
+          # Counted over sha256 stanzas rather than over pairs, so a checksum
+          # with no url above it is caught too.
           n=$(grep -c "^[[:space:]]*sha256 " Formula/all-smi.rb || true)
-          if [ "$n" -ne "${#shas[@]}" ]; then
-            echo "::error::Formula/all-smi.rb: expected ${#shas[@]} sha256 stanzas, found ${n}."
+          if [ "$n" -ne "${#expected_shas[@]}" ]; then
+            echo "::error::Formula/all-smi.rb: expected ${#expected_shas[@]} sha256 stanzas, found ${n}."
             exit 1
           fi
-          for sha in "${shas[@]}"; do
-            if ! grep -q "^[[:space:]]*sha256 \"${sha}\"$" Formula/all-smi.rb; then
-              echo "::error::Formula/all-smi.rb: sha256 ${sha} was not written."
+
+          # url and checksum are then checked together, as the pair `brew
+          # install` will act on. Checking them independently, which is what this
+          # used to do, accepts a formula in which two artifacts have exchanged
+          # checksums: every expected checksum is present, every url names the
+          # right release, and each stanza describes a file that exists. Swapped
+          # is not a hypothetical shape either, it is precisely what a rewrite
+          # that matched one stanza and wrote into another produces, which is the
+          # failure mode the whole update step is built around avoiding. The
+          # result installs a Linux tarball whose sha256 is a macOS zip's, so it
+          # fails at the checksum for a reason that says nothing about the cause.
+          #
+          # Pairs are read out of the file the same way set_artifact writes
+          # them: a url stanza, then the first sha256 stanza below it. A url
+          # with no sha256 beneath it yields no pair, so the count comes up
+          # short and the comparison below rejects the file.
+          TAB=$'\t'
+          pairs="${RUNNER_TEMP}/formula-url-sha-pairs.txt"
+          awk '
+            /^[[:space:]]*url "/ {
+              u = $0
+              sub(/^[[:space:]]*url "/, "", u)
+              sub(/".*$/, "", u)
+              pending = 1
+              next
+            }
+            pending && /^[[:space:]]*sha256 "/ {
+              s = $0
+              sub(/^[[:space:]]*sha256 "/, "", s)
+              sub(/".*$/, "", s)
+              printf "%s\t%s\n", u, s
+              pending = 0
+            }
+          ' Formula/all-smi.rb > "$pairs"
+
+          found=$(wc -l < "$pairs" | tr -d '[:space:]')
+          if [ "$found" -ne "${#expected_urls[@]}" ]; then
+            echo "::error::Formula/all-smi.rb: expected ${#expected_urls[@]} url/sha256 pairs, found ${found}."
+            exit 1
+          fi
+
+          i=0
+          while [ "$i" -lt "${#expected_urls[@]}" ]; do
+            if ! grep -qxF "${expected_urls[$i]}${TAB}${expected_shas[$i]}" "$pairs"; then
+              echo "::error::Formula/all-smi.rb: no url stanza for ${expected_urls[$i]} is followed by sha256 ${expected_shas[$i]}."
               exit 1
             fi
+            i=$((i + 1))
           done
 
           # Every release download has to name this release, whatever the
@@ -347,6 +476,10 @@ jobs:
           fi
 
       - name: Commit and push changes to tap
+        env:
+          # The only step in the job that the tap token is exposed to, and the
+          # only one that needs it. Every step above reads public data.
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         run: |
           cd homebrew-tap
           set -euo pipefail
@@ -361,7 +494,43 @@ jobs:
           fi
 
           git commit -m "bump: all-smi to v${VERSION_NO_V}"
-          git push origin main
+
+          # The credential exists for the duration of this one command, and in
+          # only one place: this process's environment.
+          #
+          # Not in the remote url, which is where it used to live. `git clone
+          # https://x-access-token:<token>@...` records the url in .git/config,
+          # so the token outlives the command that used it and is readable by
+          # everything that runs afterwards in the job.
+          #
+          # Not in argv either, which rules out the usual replacement,
+          # `-c http.extraheader="Authorization: Basic $(...)"`. Command lines
+          # are readable through `ps` for as long as the process runs, and any
+          # step that later turns on `set -x` prints the expanded line into the
+          # workflow log. What is written below survives both: the helper string
+          # sits inside single quotes, so bash hands git the name
+          # `$HOMEBREW_TAP_TOKEN` and expands nothing, and a trace of this line
+          # shows that same name. Only the shell that git spawns to run the
+          # helper resolves it, from its inherited environment, and xtrace does
+          # not reach that shell.
+          #
+          # The empty `-c credential.helper=` first is not redundant. An empty
+          # value resets the helper list, which drops whatever the runner image
+          # configures globally, osxkeychain on macOS among them. Without it a
+          # successful authentication is handed to that helper for storage, and
+          # the token lands in the keychain, which is disk. The helper below
+          # answers `get` and nothing else, so git's post-authentication `store`
+          # call is a no-op, and the `if` makes it exit 0 so git does not treat
+          # the silence as a failed helper.
+          #
+          # SC2016 is the point, not an oversight: the single quotes are what
+          # keep bash from expanding the variable, so only the helper's own
+          # shell ever sees the value.
+          # shellcheck disable=SC2016
+          git \
+            -c credential.helper= \
+            -c 'credential.helper=!f() { if [ "$1" = get ]; then printf "username=x-access-token\npassword=%s\n" "$HOMEBREW_TAP_TOKEN"; fi; }; f' \
+            push origin main
 
       # Deliberately last, and deliberately red. The release publishes an Intel
       # Mac artifact that the formula has no stanza for, so the three artifacts
