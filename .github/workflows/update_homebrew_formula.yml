@@ -33,14 +33,26 @@ jobs:
       - name: Determine version tag
         id: get_version
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ github.event.inputs.release_tag }}" ]; then
-            echo "VERSION=${{ github.event.inputs.release_tag }}" >> $GITHUB_ENV
+          set -euo pipefail
+
+          # The tag is read from the environment, never interpolated into the
+          # script. A workflow expression is substituted textually before bash
+          # parses the line, and a git tag may legally contain a double quote, a
+          # semicolon, a backtick, command substitution and `&&`: whitespace is
+          # refused by check-ref-format, but almost no shell metacharacter is.
+          # `v1.0.0";id;#` is a valid tag, and interpolated it runs `id` in this
+          # job, the job that holds the tap push token in its clone. The
+          # workflow_dispatch input is free text and reaches exactly as far.
+          if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ -n "$RELEASE_TAG_INPUT" ]; then
+            echo "VERSION=$RELEASE_TAG_INPUT" >> "$GITHUB_ENV"
           else
-            TAG=$(gh api repos/${{ github.repository }}/releases/latest --jq .tag_name)
-            echo "VERSION=$TAG" >> $GITHUB_ENV
+            TAG=$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq .tag_name)
+            echo "VERSION=$TAG" >> "$GITHUB_ENV"
           fi
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT_NAME: ${{ github.event_name }}
+          RELEASE_TAG_INPUT: ${{ github.event.inputs.release_tag }}
 
       - name: Clone Homebrew tap repository
         run: |
@@ -54,8 +66,27 @@ jobs:
           cd homebrew-tap
           set -euo pipefail
 
-          RAW_VERSION="${{ env.VERSION }}"
+          RAW_VERSION="${VERSION}"
           VERSION="${RAW_VERSION#v}"  # Remove leading 'v'
+
+          # VERSION is about to become a download url, a gh api path, a grep
+          # pattern and a line in the formula, so it is constrained once here,
+          # before any of those see it, rather than at each sink.
+          #
+          # Refusing `/` is what matters most: curl collapses `/../` in a path,
+          # so a version of the form `0.0.0/../../../owner/repo/releases/download/v1`
+          # silently retargets BASE at another repository, and both the binary
+          # that gets checksummed and the url written into the tap come from
+          # there. The version-tagged url guard in the validation step does not
+          # catch it, because the retargeted url still contains the version.
+          # Refusing `[`, `*` and `\` keeps the version from breaking that same
+          # grep, whose `|| true` turns a grep usage error into an empty string
+          # and lets the comparison be skipped instead of failing.
+          if ! [[ $VERSION =~ ^[0-9][0-9A-Za-z.+-]*$ ]]; then
+            echo "::error::Refusing to run for tag '${RAW_VERSION}': the version must start with a digit and contain only digits, letters, '.', '+' and '-'."
+            exit 1
+          fi
+
           echo "VERSION_NO_V=$VERSION" >> $GITHUB_ENV  # Export version without 'v' to GitHub env
 
           # This repository was renamed from inureyes/all-smi to lablup/all-smi.
@@ -92,12 +123,45 @@ jobs:
           fetch linux_arm "${BASE}/all-smi-linux-aarch64.tar.gz" tmp/linux-arm.tar.gz
           fetch linux_x86 "${BASE}/all-smi-linux-x86_64.tar.gz"  tmp/linux-x86.tar.gz
 
+          # The Intel Mac zip only exists from the release that first built
+          # x86_64-apple-darwin onwards (#306), so its absence is a normal state
+          # for older tags rather than an error, and re-running this workflow
+          # against one of them has to keep working.
+          #
+          # Presence is decided from the release's asset list, not from whether a
+          # download failed. curl cannot tell "this release never published that
+          # asset" apart from "the network dropped", and quietly reading a
+          # transient failure as absence is how an artifact stops being published
+          # without anyone noticing. The list is fetched into a variable first
+          # because a pipeline inside `if` suppresses errexit, which would put
+          # that same conflation back in through the API call. Whatever the
+          # release does list goes through the same hard-failing `fetch` as
+          # everything else, integrity check included. What absence means is
+          # decided in the next step, which knows whether the formula still
+          # expects an Intel artifact.
+          #
+          # -x because the release also carries `<asset>.sha256` sidecars, and an
+          # unanchored match would accept one of those as the asset itself. -F
+          # because the name contains dots, and as a regex those match any
+          # character, so an asset named `all-smi-macos-x86_64Xzip` would read as
+          # this one being present.
+          ASSETS=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/v${VERSION}" --jq '.assets[].name')
+          if printf '%s\n' "$ASSETS" | grep -qxF "all-smi-macos-x86_64.zip"; then
+            fetch mac_x86 "${BASE}/all-smi-macos-x86_64.zip" tmp/mac-x86.zip
+            echo "mac_x86_present=true" >> "$GITHUB_ENV"
+          else
+            echo "::notice::v${VERSION} publishes no all-smi-macos-x86_64.zip."
+            echo "mac_x86_present=false" >> "$GITHUB_ENV"
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Update formula
         run: |
           cd homebrew-tap
           set -euo pipefail
 
-          VERSION="${{ env.VERSION_NO_V }}"  # Use version without 'v'
+          VERSION="$VERSION_NO_V"  # Use version without 'v'
 
           # Stanzas are located by name, never by line offset. This step used to
           # rewrite each checksum with
@@ -125,11 +189,23 @@ jobs:
             gsed -i "s|^\([[:space:]]*\)version .*|\1version \"${version}\"|" "$file"
           }
 
+          # Number of url stanzas naming ARTIFACT. Artifact file names are what
+          # distinguishes stanzas here, and no two of them are substrings of one
+          # another (`all-smi-macos-aarch64.zip` cannot match the x86_64 url, and
+          # vice versa), so one macOS block per architecture addresses cleanly.
+          # Zero is a real state, not only an error: the formula lives in another
+          # repository and gains a stanza in a separate manual commit, so a new
+          # artifact exists here for a while before the tap has anywhere to put
+          # it. set_artifact still refuses anything but exactly one.
+          count_artifact() {  # file artifact
+            awk -v a="$2" '$0 ~ /^[[:space:]]*url / && index($0, a) { c++ } END { print c+0 }' "$1"
+          }
+
           # Rewrites the url stanza whose value contains ARTIFACT, then the
           # first sha256 stanza below it, preserving each line's indentation.
           set_artifact() {  # file artifact url sha
             local file="$1" artifact="$2" url="$3" sha="$4" n
-            n=$(awk -v a="$artifact" '$0 ~ /^[[:space:]]*url / && index($0, a) { c++ } END { print c+0 }' "$file")
+            n=$(count_artifact "$file" "$artifact")
             if [ "$n" -ne 1 ]; then
               echo "::error::${file}: expected exactly one url stanza for ${artifact}, found ${n}."
               exit 1
@@ -162,12 +238,56 @@ jobs:
           set_artifact Formula/all-smi.rb all-smi-linux-aarch64.tar.gz "$linux_arm_url" "$linux_arm_sha"
           set_artifact Formula/all-smi.rb all-smi-linux-x86_64.tar.gz  "$linux_x86_url" "$linux_x86_sha"
 
+          # The Intel Mac artifact and the formula stanza that serves it arrive
+          # independently: the asset appears in the first release built for
+          # x86_64-apple-darwin, the stanza in a hand-written commit to
+          # lablup/homebrew-tap. All four combinations occur, and each one is
+          # answered here rather than left to whatever the rewrite happens to do.
+          #
+          #   asset yes, stanza yes  update it, like any other artifact.
+          #   asset no,  stanza no   nothing to do. This is every release up to
+          #                          v0.25.0, and re-running against those tags
+          #                          has to stay a no-op.
+          #   asset yes, stanza no   update the rest and push, then end the job
+          #                          red in a later step. Failing here instead
+          #                          would hold the other three artifacts back
+          #                          over a tap that is merely incomplete, and a
+          #                          warning alone would leave Intel users
+          #                          unserved for as long as nobody reads the
+          #                          logs.
+          #   asset no,  stanza yes  refuse, before anything is pushed. Skipping
+          #                          would bump `version` while the Intel url
+          #                          still points at an older release: `brew
+          #                          install` then hands an Intel user a binary
+          #                          of a different version than the formula
+          #                          claims, and it passes `ruby -c` and `brew
+          #                          style` on the way out. Either the release
+          #                          lost an artifact it used to publish or the
+          #                          tag predates it; both want a human.
+          INTEL_MAC=all-smi-macos-x86_64.zip
+          stanzas=$(count_artifact Formula/all-smi.rb "$INTEL_MAC")
+
+          if [ "${mac_x86_present:-false}" != "true" ]; then
+            if [ "$stanzas" -ne 0 ]; then
+              echo "::error::Formula/all-smi.rb: the formula has an ${INTEL_MAC} stanza but v${VERSION} does not publish that asset. Refusing to bump the version while the Intel url still points at another release."
+              exit 1
+            fi
+            echo "::notice::v${VERSION} publishes no ${INTEL_MAC} and the formula has no stanza for it; the macOS section is left as is."
+            echo "mac_x86_state=skipped" >> "$GITHUB_ENV"
+          elif [ "$stanzas" -eq 0 ]; then
+            echo "::warning::v${VERSION} publishes ${INTEL_MAC} but Formula/all-smi.rb has no stanza for it, so Intel Macs are still served nothing. The other artifacts are updated and pushed; this job then fails on purpose."
+            echo "mac_x86_state=stanza-missing" >> "$GITHUB_ENV"
+          else
+            set_artifact Formula/all-smi.rb "$INTEL_MAC" "$mac_x86_url" "$mac_x86_sha"
+            echo "mac_x86_state=updated" >> "$GITHUB_ENV"
+          fi
+
       - name: Validate updated formula
         run: |
           cd homebrew-tap
           set -euo pipefail
 
-          VERSION="${{ env.VERSION_NO_V }}"
+          VERSION="$VERSION_NO_V"
 
           echo "=== Formula/all-smi.rb ==="
           cat Formula/all-smi.rb
@@ -185,18 +305,46 @@ jobs:
           fi
 
           # A substitution that silently no-ops would leave the previous
-          # release's checksum behind, so require the exact expected set.
+          # release's checksum behind, so require the exact expected set. The
+          # count comes from the list the previous step actually wrote rather
+          # than from a literal: the Intel macOS stanza is optional, so a fixed
+          # number is wrong in one of the two states, and a literal is the kind
+          # that quietly goes stale the next time an artifact is added.
+          shas=("$mac_sha" "$linux_arm_sha" "$linux_x86_sha")
+          if [ "${mac_x86_state:-skipped}" = "updated" ]; then
+            shas+=("$mac_x86_sha")
+          fi
+
           n=$(grep -c "^[[:space:]]*sha256 " Formula/all-smi.rb || true)
-          if [ "$n" -ne 3 ]; then
-            echo "::error::Formula/all-smi.rb: expected 3 sha256 stanzas, found ${n}."
+          if [ "$n" -ne "${#shas[@]}" ]; then
+            echo "::error::Formula/all-smi.rb: expected ${#shas[@]} sha256 stanzas, found ${n}."
             exit 1
           fi
-          for sha in "$mac_sha" "$linux_arm_sha" "$linux_x86_sha"; do
+          for sha in "${shas[@]}"; do
             if ! grep -q "^[[:space:]]*sha256 \"${sha}\"$" Formula/all-smi.rb; then
               echo "::error::Formula/all-smi.rb: sha256 ${sha} was not written."
               exit 1
             fi
           done
+
+          # Every release download has to name this release, whatever the
+          # checksums say. A stanza the update step declined to touch keeps its
+          # old url, and a formula whose version and urls disagree installs a
+          # binary of the wrong version through checksums that all verify. Same
+          # class of failure as the mlxcel corruption, caught from the other end.
+          # Scoped to releases/download urls so a url that is not a release asset
+          # is not read as a version mismatch.
+          #
+          # The version is part of a regex here, so its dots are escaped:
+          # unescaped they match any character, and a url left behind at
+          # `v0X25X0` would be counted as pointing at v0.25.0.
+          version_re="${VERSION//./\\.}"
+          urls=$(grep -c "^[[:space:]]*url \".*/releases/download/" Formula/all-smi.rb || true)
+          tagged=$(grep -c "^[[:space:]]*url \".*/releases/download/v${version_re}/" Formula/all-smi.rb || true)
+          if [ "$urls" -ne "$tagged" ]; then
+            echo "::error::Formula/all-smi.rb: ${urls} release urls but only ${tagged} point at v${VERSION}."
+            exit 1
+          fi
 
       - name: Commit and push changes to tap
         run: |
@@ -208,9 +356,25 @@ jobs:
           # Re-running the workflow for a version already in the tap is not an
           # error; `git commit` would fail on an empty index otherwise.
           if git diff --cached --quiet; then
-            echo "Formula already up to date for v${{ env.VERSION_NO_V }}, nothing to push."
+            echo "Formula already up to date for v${VERSION_NO_V}, nothing to push."
             exit 0
           fi
 
-          git commit -m "bump: all-smi to v${{ env.VERSION_NO_V }}"
+          git commit -m "bump: all-smi to v${VERSION_NO_V}"
           git push origin main
+
+      # Deliberately last, and deliberately red. The release publishes an Intel
+      # Mac artifact that the formula has no stanza for, so the three artifacts
+      # it does describe were updated and pushed above and Intel users got
+      # nothing. Failing earlier would have withheld a correct update from every
+      # other platform; a warning would have been true, printed, and forgotten.
+      # Ending the job red leaves the tap current, the gap on the run summary,
+      # and the fix a two-line edit to lablup/homebrew-tap Formula/all-smi.rb
+      # (an `if Hardware::CPU.intel?` block inside `on_macos`, mirroring the one
+      # `on_linux` already has) plus a workflow_dispatch re-run for the same tag,
+      # which is a no-op for everything already committed.
+      - name: Report unpublished Intel macOS artifact
+        if: env.mac_x86_state == 'stanza-missing'
+        run: |
+          echo "::error::v${VERSION_NO_V} publishes all-smi-macos-x86_64.zip but lablup/homebrew-tap Formula/all-smi.rb has no url stanza for it, so Intel Macs still install nothing. Add an 'if Hardware::CPU.intel?' block inside on_macos with that url and its sha256, then re-run this workflow for the same tag."
+          exit 1
