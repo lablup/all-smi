@@ -125,6 +125,29 @@ For detailed information about shell script tests, see: [tests/README.md](tests/
 - **Memory Limit Detection**: Test cgroups v1/v2 memory limit detection
 - **Build-in-Container Tests**: All tests build all-smi inside containers for realistic scenarios
 
+### Homebrew Formula Workflow Tests
+
+`.github/workflows/update_homebrew_formula.yml` pushes to `lablup/homebrew-tap`, a production Homebrew tap, so it cannot be exercised by running it. `tests/homebrew-formula-workflow/` runs its step bodies instead, read out of the committed YAML by step name so the thing under test is the file that ships.
+
+```bash
+# All case groups
+./tests/homebrew-formula-workflow/run-workflow-steps.sh
+
+# One group: formula | download | token
+./tests/homebrew-formula-workflow/run-workflow-steps.sh formula
+
+# Point it at a deliberately broken copy, to check a case would really fail
+ALL_SMI_WORKFLOW=/tmp/mutant.yml ./tests/homebrew-formula-workflow/run-workflow-steps.sh token
+```
+
+Requires macOS, matching the workflow's `runs-on: macos-latest`: the step bodies call `gsed`, `brew style` and BSD `awk`. Also needs `python3` with PyYAML.
+
+- **formula**: the four release-asset / formula-stanza states, a malformed tap with duplicate stanzas, the url/sha256 pairing guard, and a stanza left behind at an older release.
+- **download**: artifacts landing outside the tap clone, and the release asset list being read from the paginated assets collection. `gh` and `curl` are stubbed, so the group is offline and cannot be turned red by the state of a real release.
+- **token**: the push step run for real against a local authenticating Git smart-HTTP server, asserting the tap credential reaches the wire and appears in no file, no execution trace, and no credential store.
+
+Nothing here pushes to the tap or contacts GitHub.
+
 ## Troubleshooting
 
 #### "sudo: a terminal is required to read the password"
