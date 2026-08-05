@@ -378,6 +378,58 @@ A user-scope unit keeps only the hardening that needs no privilege, `NoNewPrivil
 
 **Other init systems.** OpenRC, runit, and sysvinit are not supported by the subcommand; it detects the absence of systemd and points at the canonical unit for manual adaptation.
 
+### Windows (Service Control Manager)
+
+`all-smi service` registers a native Windows service through the Service Control Manager. Nothing is shelled out to `sc.exe`, and the release zip needs no extra files: the same `all-smi.exe` is both the CLI and the service host.
+
+Every mutating action needs Administrator rights. Run them from an elevated Command Prompt, Windows Terminal, or PowerShell (right-click, "Run as administrator"); an unelevated attempt exits `1` with an explanation rather than a bare `os error 5`. `all-smi service status` works without elevation.
+
+```powershell
+# Register and start. Starts automatically at boot from then on,
+# with no logged-in user.
+all-smi service install --now
+all-smi service status
+Invoke-WebRequest http://localhost:9090/metrics -UseBasicParsing | Select-Object -ExpandProperty Content
+
+all-smi service restart
+all-smi service stop
+all-smi service uninstall
+```
+
+The service is named `all-smi` and appears in `services.msc` as **all-smi GPU/NPU Metrics Exporter**. It runs as **LocalSystem**, because NVML, the WMI thermal-zone classes under `root\cimv2` and `root\wmi`, the AMD Ryzen Master interface, and LibreHardwareMonitor-style sensor access all need it. Start type is plain automatic rather than delayed, so metrics exist early in boot. If the process dies, the SCM restarts it after 5 seconds, up to three times before the failure counter resets a day later.
+
+`--user` is **not supported on Windows**: the SCM has no per-user service scope, so this is a platform limit rather than a missing feature. For a non-admin, per-login exporter, register a Task Scheduler task instead:
+
+```powershell
+schtasks /create /tn all-smi /tr "C:\path\to\all-smi.exe api" /sc onlogon
+```
+
+`all-smi service run` exists but is hidden: it is the SCM entry point, not a way to start the exporter by hand. Run from a console it explains itself and exits `1`. Use `all-smi api` for a foreground server.
+
+**Idempotency.** Re-running `install` over a service that already points at the same `all-smi.exe` updates its configuration in place. A service of the same name that points somewhere else is refused, with the two paths named; pass `--force` to repoint it anyway. `uninstall` applies the same guard. This is the Windows counterpart of the Linux managed-by marker: the SCM offers nowhere to stamp one, so the registered binary path is the identity check.
+
+Reconfiguring an already-running service does not restart it, matching `systemctl enable --now`. Run `all-smi service restart` to pick up a new binary path or config file.
+
+**Configuration.** The service reads `%PROGRAMDATA%\all-smi\config.toml` (usually `C:\ProgramData\all-smi\config.toml`). That path exists because a service running as LocalSystem resolves `%APPDATA%` into `C:\Windows\System32\config\systemprofile\AppData\Roaming`, which no operator will ever edit. Your own `%APPDATA%\all-smi\config.toml` still wins for interactive runs; `all-smi config path` lists the full search order.
+
+```toml
+# C:\ProgramData\all-smi\config.toml
+[api]
+port = 9090
+interval_secs = 3
+```
+
+Restart the service after editing it. Environment variables such as `RUST_LOG` are set for the service through its registry key, in the `Environment` value (type `REG_MULTI_SZ`) under `HKLM\SYSTEM\CurrentControlSet\Services\all-smi`.
+
+**Logs.** stdout is void under the SCM, so the service writes to `%PROGRAMDATA%\all-smi\logs\all-smi.<date>.log`, rotated daily and pruned to the last 14 files. The default level is `info`; raise it with `RUST_LOG` through the registry value above.
+
+**Firewall.** `all-smi` never touches the firewall. To let other hosts scrape the exporter, open the port yourself from an elevated prompt:
+
+```powershell
+netsh advfirewall firewall add rule name="all-smi" dir=in action=allow protocol=TCP localport=9090
+netsh advfirewall firewall delete rule name="all-smi"
+```
+
 ## Platform-Specific Requirements
 
 ### macOS (Apple Silicon)

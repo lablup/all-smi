@@ -15,6 +15,9 @@
 pub mod collection_loop;
 pub mod frame_bus;
 pub mod handlers;
+/// One-way boolean latch used for shutdown and readiness signalling
+/// (issue #311).
+pub mod latch;
 pub mod metrics;
 pub mod server;
 pub mod server_state;

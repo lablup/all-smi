@@ -29,10 +29,10 @@
 //! # Adding a platform
 //!
 //! [`backend`] already carries a `cfg` arm for Linux, macOS, and
-//! Windows. The macOS launchd backend (issue #310) and the Windows SCM
-//! backend (issue #311) each replace their own arm and add a sibling
-//! module; nothing else in this file needs to change. Keep the
-//! [`ServiceBackend`] method signatures and the exit codes below
+//! Windows. The macOS launchd backend (issue #310) replaces its own arm
+//! and adds a sibling module; nothing else in this file needs to
+//! change. The Windows SCM backend (issue #311) did exactly that. Keep
+//! the [`ServiceBackend`] method signatures and the exit codes below
 //! untouched: they are the cross-platform contract the CLI documents.
 //!
 //! # Exit codes
@@ -43,11 +43,13 @@
 //! * `3` — `status` only: the service is installed but stopped, or not
 //!   installed at all. Mirrors `systemctl is-active`.
 
-// Only the Linux arm of `backend()` is live today, so on macOS and
-// Windows the shared plumbing the backends consume (the error variants,
-// the elevation probe, `SERVICE_NAME`) has no caller until #310 and #311
-// land. Dead-code detection stays fully active on Linux, which is where
-// CI runs `cargo clippy -- -D warnings`.
+// On macOS the shared plumbing the backends consume (the error
+// variants, the Unix elevation probe, `SERVICE_NAME`) has no caller
+// until #310 lands. Dead-code detection stays fully active on Linux,
+// which is where CI runs `cargo clippy -- -D warnings`. The Windows
+// modules added by #311 re-enable the lint for themselves with an inner
+// `#![warn(dead_code)]`, because a blanket allow across the whole
+// Windows tree would hide unused items in code no CI job compiles.
 #![cfg_attr(not(target_os = "linux"), allow(dead_code))]
 
 use std::path::PathBuf;
@@ -64,6 +66,20 @@ pub mod detect;
 pub mod systemd;
 #[cfg(any(target_os = "linux", test))]
 pub mod template;
+
+// The Windows SCM backend (issue #311). Same split as the systemd
+// backend: `scm` holds everything that can be decided without touching
+// the Service Control Manager and therefore compiles (and is tested)
+// everywhere, while the three modules below are handle plumbing over
+// `windows-service` and exist only on Windows.
+#[cfg(any(windows, test))]
+pub mod scm;
+#[cfg(windows)]
+pub mod scm_backend;
+#[cfg(windows)]
+pub mod scm_host;
+#[cfg(windows)]
+pub mod scm_log;
 
 /// The service identifier used by every backend: the systemd unit name
 /// minus its suffix, the launchd label suffix, the SCM service name.
@@ -224,13 +240,7 @@ pub fn backend() -> Result<Box<dyn ServiceBackend>, ServiceError> {
 
     #[cfg(target_os = "windows")]
     {
-        Err(ServiceError::NotSupported(
-            "`all-smi service` has no Windows backend yet; Service Control Manager \
-             support is tracked in https://github.com/lablup/all-smi/issues/311. \
-             Until then, register `all-smi api` with `sc.exe create` or a supervisor \
-             such as NSSM."
-                .to_string(),
-        ))
+        Ok(Box::new(scm_backend::ScmBackend::new()))
     }
 
     #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
@@ -266,10 +276,36 @@ fn is_elevated() -> bool {
 
 #[cfg(not(unix))]
 fn is_elevated() -> bool {
-    // The Windows SCM backend (issue #311) brings its own Administrator
-    // probe. Until it lands, no non-Unix backend is ever dispatched, so
-    // reporting "not elevated" is the safe answer.
+    // The Windows SCM backend does not route through here. It lets the
+    // Service Control Manager answer the question by opening exactly the
+    // handles each action needs and translating `ERROR_ACCESS_DENIED`
+    // through `scm::map_os_error`, which tests the capability actually
+    // required rather than a proxy for it. Any other non-Unix platform
+    // has no backend at all, so "not elevated" stays the safe answer.
     false
+}
+
+/// Handle `service run`, the Windows Service Control Manager entry
+/// point (issue #311).
+///
+/// Dispatched before [`backend`] because it is the process side of the
+/// service rather than a management action: it never opens the SCM to
+/// manage a service, it *is* the service.
+fn run_service_host() -> i32 {
+    #[cfg(windows)]
+    {
+        scm_host::run()
+    }
+
+    #[cfg(not(windows))]
+    {
+        report(&ServiceError::NotSupported(
+            "`all-smi service run` is the Windows Service Control Manager entry point and has no \
+             meaning on this platform. Use `all-smi api` to serve metrics in the foreground, or \
+             `all-smi service install` to register a supervised service."
+                .to_string(),
+        ))
+    }
 }
 
 /// Resolve the absolute path of the running binary for embedding into a
@@ -284,6 +320,12 @@ pub fn current_exe_canonical() -> Result<PathBuf, ServiceError> {
 /// CLI entry point. Returns the process exit code; see the module-level
 /// "Exit codes" section.
 pub fn run(action: &ServiceAction) -> i32 {
+    // `run` is the process side of the service, not a management
+    // action, so it is dispatched before a backend is selected.
+    if let ServiceAction::Run(_) = action {
+        return run_service_host();
+    }
+
     let scope = Scope::from_user_flag(action.user_scope());
     let backend = match backend() {
         Ok(b) => b,
@@ -349,6 +391,9 @@ pub fn run(action: &ServiceAction) -> i32 {
             }
             Err(e) => report(&e),
         },
+        // Dispatched above, before a backend was selected. Kept so the
+        // match stays exhaustive.
+        ServiceAction::Run(_) => unreachable!("service run is dispatched before backend selection"),
     }
 }
 
