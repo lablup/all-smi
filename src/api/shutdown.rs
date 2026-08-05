@@ -15,7 +15,7 @@
 //! Graceful-shutdown and readiness signalling for `all-smi api`
 //! (issue #311).
 //!
-//! Split out of [`super::server`], which was already past the file-size
+//! Split out of [`crate::api::server`], which was already past the file-size
 //! soft limit, and because this is a self-contained concern: it is the
 //! only place that decides what counts as a reason to stop serving.
 //!
@@ -49,8 +49,8 @@ fn serving_latch() -> &'static Latch {
     SERVING.get_or_init(Latch::new)
 }
 
-/// Ask a running [`run_api_mode`] to shut down gracefully, exactly as a
-/// `Ctrl+C` or `SIGTERM` would (issue #311).
+/// Ask a running [`super::server::run_api_mode`] to shut down
+/// gracefully, exactly as a `Ctrl+C` or `SIGTERM` would (issue #311).
 ///
 /// This exists because the Windows Service Control Manager delivers its
 /// Stop control on a control-handler thread and gives the process no

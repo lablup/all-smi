@@ -24,10 +24,10 @@
 //! `SERVICE_RUNNING`, which is "once a listener is bound".
 //!
 //! Both are one-way transitions: `false` once, `true` forever after.
-//! [`Latch`] is that primitive, and it is a plain value rather than a
-//! process global so its semantics can be unit tested deterministically
-//! on any platform, including hosts that will never run a Windows
-//! service.
+//! [`Latch`](crate::api::latch::Latch) is that primitive, and it is a
+//! plain value rather than a process global so its semantics can be unit
+//! tested deterministically on any platform, including hosts that will
+//! never run a Windows service.
 
 use std::sync::Arc;
 
