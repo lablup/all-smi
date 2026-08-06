@@ -382,7 +382,7 @@ A user-scope unit keeps only the hardening that needs no privilege, `NoNewPrivil
 
 The canonical job definition is [`packaging/launchd/com.lablup.all-smi.plist`](packaging/launchd/com.lablup.all-smi.plist), a self-contained system LaunchDaemon you can also copy into `/Library/LaunchDaemons` by hand. `all-smi service install` embeds the same file and rewrites `ProgramArguments`, the log paths, and the account keys for the scope you asked for. The launchd label is `com.lablup.all-smi` in both scopes; they live in different domains, so the name never collides.
 
-**From Homebrew.** The formula ships a service block, so `brew services` is the supported path and the subcommand refuses to install alongside it:
+**From Homebrew.** The formula ships a service block, so `brew services` is the supported path and the subcommand refuses to install alongside it. `brew install` only writes the plist into the keg; it never calls `launchctl` for you, so the exporter is not listening until you run one of the `brew services start` commands below:
 
 ```bash
 brew install lablup/tap/all-smi
