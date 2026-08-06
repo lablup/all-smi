@@ -88,6 +88,17 @@ jobs:
   # runners usually have no user manager, so the system scope is the
   # fallback and covers the same lifecycle plus /etc/all-smi/config.toml
   # discovery.
+  #
+  # Readiness gating (issues #323, #324, #329). Every wait for "the
+  # exporter is up" in this job polls `/-/ready`, never `systemctl
+  # is-active` and never a plain HTTP 200 on `/metrics`. The rule exists
+  # because a gate that opens on a weaker condition than the assertion it
+  # protects is a flake waiting for a slow runner: PR #323 fixed exactly
+  # that on the launchd job after run 31005178260 lost the race by
+  # 243 ms. Note that `curl -sf .../metrics` is permanently unusable as a
+  # gate now, because #324 made `/metrics` answer 200 from the moment the
+  # listener binds, by design. `/-/ready` is the purpose-built signal:
+  # 503 until the first collection cycle lands, 200 after.
   # ───────────────────────────────────────────────────────────────
   systemd-service:
     name: systemd Service Smoke Test
@@ -296,18 +307,65 @@ jobs:
           sudo systemd-analyze verify "$UNIT"
           systemctl is-enabled all-smi
 
-          for _ in $(seq 1 30); do
-            if systemctl is-active --quiet all-smi; then break; fi
-            sleep 1
-          done
-          systemctl is-active --quiet all-smi || {
-            diagnose
-            exit 1
+          # Readiness gate (issues #329, #324). Poll the exporter's own
+          # readiness endpoint, which is the condition the assertions
+          # below actually require, rather than a proxy for it.
+          #
+          # `systemctl is-active` was the old gate and is the wrong
+          # question. For Type=exec it reports active as soon as the
+          # binary has been executed, which says nothing about whether
+          # the listener is bound or whether a collection cycle has run.
+          # It survived only because the assertion downstream was
+          # `curl -sf | head -5`, where `head` swallows the pipeline's
+          # exit status so an empty body could not fail it. Tightening
+          # that assertion without fixing this gate would have
+          # reintroduced the exact flake PR #323 fixed on the launchd
+          # side, where run 31005178260 lost the race by 243 ms.
+          #
+          # `/-/ready` (added by #324) returns 503 until the collection
+          # loop's first iteration has written into AppState, and 200
+          # after. That write is the same one that publishes
+          # `all_smi_memory_total_bytes`, so a 200 here is not merely
+          # correlated with the assertion below, it is the same event.
+          # Do not weaken this back to `is-active` or to a plain HTTP
+          # 200 on `/metrics`: since #324 `/metrics` answers 200 from
+          # the moment the listener binds, deliberately, so it can never
+          # serve as a readiness gate again.
+          #
+          # Polling port 19191 rather than the default 9090 also means
+          # the gate itself proves /etc/all-smi/config.toml moved the
+          # listener (#309, #330).
+          ready() {
+            for _ in $(seq 1 60); do
+              if curl -sf --max-time 5 "http://127.0.0.1:19191/-/ready" >/dev/null 2>&1; then
+                return 0
+              fi
+              sleep 2
+            done
+            echo "::error::the exporter never reported ready on 127.0.0.1:19191/-/ready"
+            echo "--- last /-/ready response ---"
+            curl -sv --max-time 5 "http://127.0.0.1:19191/-/ready" 2>&1 | head -40
+            echo "--- last /metrics response ---"
+            curl -sv --max-time 5 "http://127.0.0.1:19191/metrics" 2>&1 | head -40
+            echo "--- listeners ---"
+            sudo ss -lntp 2>&1 | head -20 || true
+            return 1
           }
+
+          ready
 
           sudo "$BIN" service status
           sudo "$BIN" service status --json | grep -q '"running": true'
-          curl -sf --max-time 10 http://127.0.0.1:19191/metrics | head -5
+          # Assert on rendered content, not on the port merely answering.
+          # `all_smi_memory_total_bytes` rather than a bare `^all_smi_`
+          # prefix: since #324 the baseline families (`all_smi_up`,
+          # `all_smi_build_info`) are emitted unconditionally, so
+          # `^all_smi_` now matches even when every device reader has
+          # failed. The Linux memory reader is /proc/meminfo with no
+          # failure path, which makes this the family guaranteed present
+          # on any runner, and it is a real collected value rather than
+          # the exporter describing itself.
+          curl -sf --max-time 10 http://127.0.0.1:19191/metrics | grep -q '^all_smi_memory_total_bytes'
 
           # Crash recovery: systemd must bring it back within RestartSec.
           MAINPID=$(systemctl show all-smi -p MainPID --value)
@@ -324,8 +382,19 @@ jobs:
             diagnose
             exit 1
           }
+          # `is-active` with a changed MainPID is the right question for
+          # "did systemd restart it", but not for "is it usable again".
+          # The criterion this covers on #309 is that the service
+          # survives a crash, so wait for it to serve once more.
+          ready
+          curl -sf --max-time 10 http://127.0.0.1:19191/metrics | grep -q '^all_smi_memory_total_bytes'
 
+          # `restart` was previously asserted only by its own exit code,
+          # which says nothing about whether the replacement process came
+          # up. Gate on the same readiness signal.
           sudo "$BIN" service restart
+          ready
+
           sudo "$BIN" service stop
           sudo "$BIN" service status && rc=0 || rc=$?
           test "$rc" -eq 3
@@ -516,21 +585,28 @@ jobs:
           }
           trap diagnose ERR
 
-          # Every readiness wait polls for a rendered metric line, which
-          # is the same condition the assertions downstream require.
+          # Every readiness wait polls `/-/ready`, which is the condition
+          # the assertions downstream require rather than a proxy for it.
           #
           # Two weaker gates were tried and both race. `service status`
           # reports running the moment launchd spawns the program, long
-          # before it has come up. Plain HTTP 200 is not much better:
-          # axum binds the listener and starts serving `/metrics` while
-          # the background collection loop has not yet written anything
-          # into AppState, and an empty AppState renders a byte-empty
-          # body by design (`empty_inputs_render_empty_string` in
-          # src/api/metrics/render.rs). So the endpoint answers 200 with
-          # zero bytes for a while. Measured on an M1 Ultra: about 0.3 s
-          # at normal priority, and 2.1 to 3.5 s under the background QoS
-          # this service's ProcessType=Background selects. Run
-          # 31005178260 lost that race by 243 ms.
+          # before it has come up. Plain HTTP 200 on `/metrics` is not a
+          # gate either, and since #324 it is permanently not one: that
+          # endpoint answers 200 from the moment axum binds the listener,
+          # deliberately, so that existing scrapers never see a non-200.
+          # Run 31005178260 lost that race by 243 ms.
+          #
+          # PR #323 worked around this by polling for rendered metric
+          # content (`grep -q '^all_smi_'`). That was the right fix at
+          # the time, but #324 has since made it wrong twice over: the
+          # baseline families it added mean `^all_smi_` now matches from
+          # the very first request, so the old pattern would open the
+          # gate immediately and race again, and `/-/ready` now exists as
+          # the purpose-built signal. It returns 503 until the collection
+          # loop's first iteration writes into AppState and 200 after,
+          # which is the same event that publishes the metric families
+          # asserted below. Kept identical to the systemd job's gate so
+          # the two smoke tests cannot drift (#329).
           #
           # This also protects the shutdown assertion further down. A
           # SIGTERM delivered before `run_api_mode` has spawned the WAL
@@ -538,12 +614,14 @@ jobs:
           # opens early turns that assertion into a coin flip too.
           ready() {
             for _ in $(seq 1 60); do
-              if curl -sf --max-time 5 localhost:9090/metrics | grep -q '^all_smi_'; then
+              if curl -sf --max-time 5 localhost:9090/-/ready >/dev/null 2>&1; then
                 return 0
               fi
               sleep 2
             done
-            echo "::error::the exporter never rendered an all_smi_ metric line"
+            echo "::error::the exporter never reported ready on localhost:9090/-/ready"
+            echo "--- last /-/ready response ---"
+            curl -sv --max-time 5 localhost:9090/-/ready 2>&1 | head -40
             echo "--- last /metrics response ---"
             curl -sv --max-time 5 localhost:9090/metrics 2>&1 | head -40
             return 1
@@ -554,14 +632,22 @@ jobs:
           "$BIN" service status --user
           "$BIN" service status --user --json | grep -q '"running": true'
           "$BIN" service status --user --json | grep -q '"enabled": true'
-          curl -sf --max-time 10 localhost:9090/metrics | grep -q '^all_smi_'
-          # Assert a specific family rather than only "some line". The
-          # runner is a VM with no IOReport, so the native metrics
+          # The #324 baseline must be present on a real launchd-managed
+          # service, not only in the unit tests. This used to be a bare
+          # `^all_smi_` check, which no longer distinguishes anything now
+          # that the baseline is unconditional, so assert the baseline
+          # itself and let the next check carry the real-data burden.
+          curl -sf --max-time 10 localhost:9090/metrics | grep -q '^all_smi_up'
+          curl -sf --max-time 10 localhost:9090/metrics | grep -q '^all_smi_build_info'
+          # Assert a specific device family rather than only "some line".
+          # The runner is a VM with no IOReport, so the native metrics
           # manager fails to initialize and the GPU and chassis readers
           # degrade to zeros and to nothing respectively. The memory
           # reader is pure sysinfo with no failure path at all
           # (src/device/memory_macos.rs), which makes this the one line
-          # guaranteed to be present on any macOS host.
+          # guaranteed to be present on any macOS host. Distinct from the
+          # baseline above: this one proves a collection cycle actually
+          # produced data, which is what `/-/ready` gated on.
           curl -sf --max-time 10 localhost:9090/metrics | grep -q '^all_smi_memory_total_bytes'
           grep -q "API server listening" "$LOG"
 
