@@ -441,6 +441,11 @@ async fn prometheus_output_is_byte_identical_to_api_exporter_for_same_data() {
         // Snapshot mode has no live integrator — aligns with the
         // Prometheus serializer path.
         energy_integrator: None,
+        // The serializer under test hard-codes `ready: true` because it
+        // only runs after a synchronous collection (issue #324); match it
+        // so this stays a parity assertion rather than accidentally
+        // asserting the readiness flag has no effect on the output.
+        ready: true,
     };
     let expected = render_prometheus_exposition(&inputs);
 

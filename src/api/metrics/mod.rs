@@ -16,6 +16,8 @@ pub mod chassis;
 pub mod cpu;
 pub mod disk;
 pub mod energy;
+/// Baseline `all_smi_up` / `all_smi_build_info` families (issue #324).
+pub mod exporter_status;
 pub mod gpu;
 pub mod hardware;
 pub mod memory;

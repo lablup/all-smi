@@ -27,9 +27,15 @@
 //! flush, breaking Prometheus counter monotonicity across a restart.
 //!
 //! The mirror question, when the service may report `SERVICE_RUNNING`,
-//! is answered by the readiness latch: each listener raises it after a
+//! is answered by the serving latch: each listener raises it after a
 //! successful bind, so the SCM never sees a running service whose port
 //! refuses connections.
+//!
+//! Note the deliberate narrowing of vocabulary since #311: this latch is
+//! the *serving* signal, not the *readiness* signal. Issue #324 added the
+//! latter as `/-/ready` and as the `all_smi_up` gauge, and considered
+//! moving this latch behind it. It did not. [`mark_serving`] carries the
+//! reasoning.
 
 use std::sync::OnceLock;
 
@@ -85,6 +91,11 @@ pub fn shutdown_requested() -> bool {
 /// The Windows service host awaits this before reporting
 /// `SERVICE_RUNNING`, so the SCM never sees a running service whose port
 /// is not yet accepting connections.
+///
+/// This resolves at bind, which is *before* the first collection cycle.
+/// It is a serving signal, not a readiness one: see [`mark_serving`] for
+/// why the two are kept apart, and use `/-/ready` when the question is
+/// whether there is data to serve.
 #[cfg_attr(not(windows), allow(dead_code))]
 pub async fn wait_until_serving() {
     serving_latch().wait().await
@@ -96,8 +107,48 @@ pub fn is_serving() -> bool {
     serving_latch().is_triggered()
 }
 
-/// Raise the readiness latch. Called by each listener immediately after
-/// a successful bind.
+/// Raise the serving latch. Called by each listener immediately after a
+/// successful bind.
+///
+/// # Why this stays at bind rather than moving behind the first
+/// collection cycle (issue #324)
+///
+/// #324 gave the exporter a real readiness signal (`/-/ready`, and the
+/// `all_smi_up` gauge) and asked whether this latch should move with it,
+/// since #311 documented it as opening before there was anything to
+/// serve. It should not, for three reasons.
+///
+/// First, the two are different questions. The SCM has no readiness
+/// concept: its state machine offers `SERVICE_START_PENDING` and
+/// `SERVICE_RUNNING`, and `SERVICE_RUNNING` is a liveness verdict. The
+/// natural liveness boundary for a network exporter is "the listener
+/// answers". Readiness is now separately queryable at any time by anyone
+/// who actually needs it, which is exactly the liveness/readiness split
+/// Kubernetes and the Prometheus ecosystem already use.
+///
+/// Second, the inconsistency #324 was worried about is resolved at the
+/// other end. Before #324 this latch opened onto an endpoint that served
+/// zero bytes, so `SERVICE_RUNNING` really did promise nothing. Now
+/// `/metrics` carries `all_smi_up 0` plus build info from the first
+/// request onward, so the instant this latch opens there is a defined,
+/// non-empty response. Giving `/metrics` a floor fixed the mismatch;
+/// delaying the latch is not needed to fix it a second time.
+///
+/// Third, moving it has a concrete failure mode that is worse than the
+/// one it would prevent. `crate::service_cmd::scm_host` reports
+/// `StartPending` exactly once, with `wait_hint =
+/// TRANSITION_WAIT_HINT_SECS` (10 s) and `checkpoint: 0`. Because the
+/// checkpoint never increments, that single report is the entire start
+/// budget the SCM grants. A first collection cycle on Windows means cold
+/// COM/WMI initialization plus NVML enumeration, which on a
+/// many-GPU host or a wedged driver can exceed 10 s. The SCM would then
+/// fail the start and apply the configured recovery actions, restarting
+/// the process into the same slow path: a boot loop on precisely the
+/// hosts where the telemetry matters most. Reporting `SERVICE_RUNNING`
+/// for a process that is up and honestly publishing `all_smi_up 0` is
+/// the better trade. The same argument applies to any dependent service
+/// that waits on this one, which would otherwise block on hardware
+/// enumeration.
 pub(crate) fn mark_serving() {
     serving_latch().trigger();
 }

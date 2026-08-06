@@ -32,7 +32,7 @@ use crate::api::FrameBus;
 use crate::api::collection_loop::run_collection_loop;
 use crate::api::handlers::events::events_handler;
 use crate::api::handlers::snapshot::snapshot_handler;
-use crate::api::handlers::{SharedState, metrics_handler};
+use crate::api::handlers::{SharedState, metrics_handler, ready_handler};
 use crate::api::server_state::ApiState;
 use crate::app_state::AppState;
 use crate::cli::ApiArgs;
@@ -232,9 +232,16 @@ pub async fn run_api_mode(args: &ApiArgs, settings: &Settings) {
     // sub-state it needs (see `server_state::ApiState`).
     let api_state = ApiState::new(state, bus);
 
-    // Create the router with shared state
+    // Create the router with shared state.
+    //
+    // `/-/ready` (issue #324) is the readiness gate: 503 until the
+    // collection loop spawned above has written its first cycle into
+    // `AppState`, 200 after. `/metrics` never joins that gate, it answers
+    // 200 throughout and reports the same transition in-band through
+    // `all_smi_up`, so existing scrapers are unaffected.
     let app = Router::new()
         .route("/metrics", get(metrics_handler))
+        .route("/-/ready", get(ready_handler))
         .route("/events", get(events_handler))
         .route("/snapshot", get(snapshot_handler))
         .with_state(api_state)

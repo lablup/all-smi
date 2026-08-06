@@ -71,6 +71,16 @@ pub fn render(snapshots: &[Snapshot]) -> Result<String> {
         // prometheus` byte-for-byte identical to a single `api`
         // scrape taken before any energy samples have been recorded.
         energy_integrator: None,
+        // The snapshot path collects synchronously and only reaches this
+        // serializer once that collection has returned, so by the time
+        // `all_smi_up` is rendered the cycle this output describes has
+        // completed. Reporting 0 here would be false (issue #324).
+        //
+        // `snap.errors` being non-empty does not change this: a partial
+        // collection is still a completed cycle, and per-reader failures
+        // are reported on stderr below rather than by pretending the
+        // exporter never ran.
+        ready: true,
     };
 
     let out = render_prometheus_exposition(&inputs);

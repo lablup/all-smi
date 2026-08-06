@@ -23,6 +23,12 @@
 //! answers the mirror question of when the service may report
 //! `SERVICE_RUNNING`, which is "once a listener is bound".
 //!
+//! That boundary was revisited in issue #324, which added a real
+//! readiness signal, and deliberately left unchanged. See
+//! [`crate::api::shutdown::mark_serving`] for the reasoning; the short
+//! version is that this latch answers "is it serving", `/-/ready` answers
+//! "is it ready", and the SCM only has a question of the first kind.
+//!
 //! Both are one-way transitions: `false` once, `true` forever after.
 //! [`Latch`](crate::api::latch::Latch) is that primitive, and it is a
 //! plain value rather than a process global so its semantics can be unit

@@ -18,11 +18,22 @@
 //! exposition writer in [`crate::api::metrics::render`]. Kept separate from
 //! the SSE / snapshot handlers (issue #193) so adding new routes does not
 //! force a rebuild of this unchanged hot path.
+//!
+//! Status-code contract (issue #324): this endpoint answers `200` for its
+//! entire lifetime, including the window between the listener binding and
+//! the first collection cycle landing. It is deliberately *not* a
+//! readiness probe, because turning it into one would break every scraper
+//! that already treats a non-200 as a failed target. What changed in #324
+//! is that the body is no longer empty in that window: the exposition
+//! carries `all_smi_up 0` plus build info until the first cycle completes,
+//! then `all_smi_up 1` plus the full metric set. Consumers that need a
+//! yes/no gate use `/-/ready` (see [`crate::api::handlers::ready`]).
 
 use axum::extract::State;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+use crate::api::handlers::ready::is_ready;
 use crate::api::metrics::render::{MetricsRenderInputs, render_prometheus_exposition};
 use crate::app_state::AppState;
 
@@ -45,6 +56,11 @@ pub async fn metrics_handler(State(state): State<SharedState>) -> String {
         // counter's HELP/TYPE header lines are only emitted when there
         // is at least one device with recorded samples.
         energy_integrator: Some(state.energy.integrator()),
+        // Same predicate `/-/ready` answers with, read under the same
+        // lock acquisition as the data itself so the gauge cannot
+        // disagree with the samples it is rendered alongside (issue
+        // #324).
+        ready: is_ready(&state),
     };
     render_prometheus_exposition(&inputs)
 }
