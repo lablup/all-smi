@@ -37,7 +37,8 @@ use crate::utils::RuntimeEnvironment;
 
 use super::{
     MetricExporter, chassis::ChassisMetricExporter, cpu::CpuMetricExporter,
-    disk::DiskMetricExporter, energy::EnergyMetricExporter, gpu::GpuMetricExporter,
+    disk::DiskMetricExporter, energy::EnergyMetricExporter,
+    exporter_status::ExporterStatusMetricExporter, gpu::GpuMetricExporter,
     hardware::HardwareMetricExporter, memory::MemoryMetricExporter, mig::MigMetricExporter,
     npu::NpuMetricExporter, process::ProcessMetricExporter, runtime::RuntimeMetricExporter,
     vgpu::VgpuMetricExporter,
@@ -65,15 +66,33 @@ pub struct MetricsRenderInputs<'a> {
     /// `snapshot --format prometheus` runs without a live integrator);
     /// the exporter then omits the metric family entirely.
     pub energy_integrator: Option<&'a PowerIntegrator>,
+    /// Whether at least one collection cycle has populated the source of
+    /// these inputs (issue #324). Drives the `all_smi_up` gauge.
+    ///
+    /// The live `/metrics` handler passes `!AppState::loading`; the
+    /// one-shot `snapshot --format prometheus` path passes `true`
+    /// because it collects synchronously before rendering. Byte-identical
+    /// parity between the two paths therefore still holds for the same
+    /// data *and* the same readiness.
+    pub ready: bool,
 }
 
 /// Render the Prometheus exposition string for the given inputs.
 ///
-/// Output is empty when no exporter writes anything. Every exporter in the
-/// chain self-filters so non-applicable hosts (e.g. non-NVIDIA for
-/// NVLink/MIG/vGPU) stay silent.
+/// The output is never empty: [`ExporterStatusMetricExporter`] emits
+/// `all_smi_up` and `all_smi_build_info` unconditionally (issue #324).
+/// Every *device* exporter in the chain still self-filters, so
+/// non-applicable hosts (e.g. non-NVIDIA for NVLink/MIG/vGPU) contribute
+/// nothing beyond that baseline.
 pub fn render_prometheus_exposition(inputs: &MetricsRenderInputs<'_>) -> String {
     let mut all_metrics = String::new();
+
+    // Baseline first (issue #324), so a consumer that reads only the head
+    // of the response, or scrapes before the first collection cycle has
+    // landed, still learns whether this exporter is up and which build it
+    // is. Everything below this line self-filters; this block does not.
+    let status_exporter = ExporterStatusMetricExporter::new(inputs.ready);
+    all_metrics.push_str(&status_exporter.export_metrics());
 
     // Export GPU/NPU metrics
     if !inputs.gpu_info.is_empty() {
@@ -159,22 +178,70 @@ pub fn render_prometheus_exposition(inputs: &MetricsRenderInputs<'_>) -> String 
 mod tests {
     use super::*;
 
-    #[test]
-    fn empty_inputs_render_empty_string() {
-        let env = RuntimeEnvironment::default();
-        let inputs = MetricsRenderInputs {
+    fn empty_inputs(env: &RuntimeEnvironment, ready: bool) -> MetricsRenderInputs<'_> {
+        MetricsRenderInputs {
             gpu_info: &[],
             process_info: &[],
             cpu_info: &[],
             memory_info: &[],
             storage_info: &[],
-            runtime_environment: &env,
+            runtime_environment: env,
             chassis_info: &[],
             vgpu_info: &[],
             mig_info: &[],
             energy_integrator: None,
-        };
-        let rendered = render_prometheus_exposition(&inputs);
-        assert_eq!(rendered, "");
+            ready,
+        }
+    }
+
+    /// Supersedes the former `empty_inputs_render_empty_string`, which
+    /// asserted the exact behaviour issue #324 removed: an all-empty
+    /// input set used to render zero bytes, so a scrape landing before
+    /// the first collection cycle was indistinguishable from a scrape of
+    /// a host with no devices. The baseline families are now the floor.
+    #[test]
+    fn empty_inputs_still_render_the_baseline() {
+        let env = RuntimeEnvironment::default();
+        let rendered = render_prometheus_exposition(&empty_inputs(&env, false));
+        assert!(
+            !rendered.is_empty(),
+            "the exposition must never be byte-empty (issue #324)"
+        );
+        assert!(rendered.contains("all_smi_up{"), "{rendered}");
+        assert!(rendered.contains("all_smi_build_info{"), "{rendered}");
+    }
+
+    /// Nothing but the baseline: with every device slice empty, the
+    /// self-filtering exporters must still contribute nothing, so the
+    /// added floor cannot be hiding a regression that made some other
+    /// family unconditional.
+    #[test]
+    fn empty_inputs_render_only_the_baseline_families() {
+        let env = RuntimeEnvironment::default();
+        let rendered = render_prometheus_exposition(&empty_inputs(&env, false));
+        for line in rendered.lines().filter(|l| !l.starts_with('#')) {
+            assert!(
+                line.starts_with("all_smi_up{") || line.starts_with("all_smi_build_info{"),
+                "unexpected sample from an empty input set: {line}"
+            );
+        }
+    }
+
+    /// The pre-first-collection window is observable in-band, without
+    /// timing the scrape.
+    #[test]
+    fn ready_flag_drives_the_up_gauge() {
+        let env = RuntimeEnvironment::default();
+        for (ready, expected) in [(false, " 0"), (true, " 1")] {
+            let rendered = render_prometheus_exposition(&empty_inputs(&env, ready));
+            let up_line = rendered
+                .lines()
+                .find(|l| l.starts_with("all_smi_up{"))
+                .expect("all_smi_up sample line");
+            assert!(
+                up_line.ends_with(expected),
+                "ready={ready} should render all_smi_up{expected}, got {up_line}"
+            );
+        }
     }
 }

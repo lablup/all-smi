@@ -1117,6 +1117,31 @@ Metrics are available at `http://localhost:9090/metrics` (TCP) or via Unix socke
 
 For a complete list of all available metrics, see [API.md](API.md).
 
+#### Startup window and readiness
+
+`/metrics` answers `200 OK` for the entire lifetime of the process, including the window between the listener binding and the first collection cycle completing. It never returns an empty body: every response carries two baseline families, so a scrape that lands during startup is distinguishable from a scrape of a host that genuinely has nothing to report.
+
+| Metric | Meaning |
+|--------|---------|
+| `all_smi_up{instance,hostname}` | `0` until the first collection cycle has populated the exporter, `1` afterwards. |
+| `all_smi_build_info{instance,hostname,version,os,arch}` | Always `1`. The content is in the labels; join with `* on (instance) group_left(version)`. |
+
+For a yes/no gate, use the dedicated readiness endpoint instead of inferring it from `/metrics`:
+
+| Endpoint | Before the first collection | After |
+|----------|-----------------------------|-------|
+| `GET /-/ready` | `503 Service Unavailable` with `Retry-After: 1` | `200 OK` |
+
+```bash
+# Block until the exporter has real data, then scrape.
+until curl -sf --max-time 5 localhost:9090/-/ready >/dev/null; do sleep 1; done
+curl -s localhost:9090/metrics
+```
+
+Point Kubernetes `readinessProbe`s, load-balancer health checks, and service-startup gates at `/-/ready`. Pointing them at `/metrics` will pass immediately, before there is anything to serve. The `/-/` prefix follows the Prometheus-ecosystem convention used by Prometheus itself, Alertmanager, and the Pushgateway.
+
+`all-smi`'s own service integrations report "running" once the listener is bound, not once the first collection completes, so that a slow or wedged hardware probe cannot turn into a supervisor restart loop. Readiness is reported separately through the two surfaces above.
+
 #### Streaming (SSE)
 
 Alongside `/metrics`, API mode exposes two JSON endpoints that share the

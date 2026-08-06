@@ -51,6 +51,48 @@ r = session.get('http+unix://%2Ftmp%2Fall-smi.sock/metrics')
 
 **Security**: Socket permissions are set to `0600` (owner-only access).
 
+## Readiness and the Startup Window
+
+`/metrics` answers `200 OK` from the moment the listener binds, which is before the first collection cycle has run. That is deliberate and unchanged: an existing scraper never sees a non-200 from this endpoint. What is guaranteed on top of it is that the body is never empty. Two families are emitted unconditionally on every response, ahead of all device metrics:
+
+| Metric | Type | Value | Labels |
+|--------|------|-------|--------|
+| `all_smi_up` | gauge | `0` until the first collection cycle populates the exporter, `1` afterwards | `instance`, `hostname` |
+| `all_smi_build_info` | gauge | always `1` | `instance`, `hostname`, `version`, `os`, `arch` |
+
+Without these, a scrape landing in the startup window recorded a *successful* scrape with zero samples, which reads as a silent gap in the series rather than a failed target and therefore does not alert.
+
+### `GET /-/ready`
+
+The dedicated readiness gate, for consumers that need a yes/no answer rather than an in-band sample.
+
+| Condition | Status | Headers | Body |
+|-----------|--------|---------|------|
+| No collection cycle completed yet | `503 Service Unavailable` | `Retry-After: 1`, `Cache-Control: no-store` | `all-smi is not ready: no collection cycle has completed yet.` |
+| At least one cycle completed | `200 OK` | `Cache-Control: no-store` | `all-smi is ready.` |
+
+```bash
+# Wait for real data before scraping.
+until curl -sf --max-time 5 localhost:9090/-/ready >/dev/null; do sleep 1; done
+```
+
+Use `/-/ready` for Kubernetes `readinessProbe`s, load-balancer health checks, and service-startup gates. A probe pointed at `/metrics` passes immediately, before there is anything to serve. The path follows the Prometheus-ecosystem convention (`/-/ready` on Prometheus, Alertmanager, and the Pushgateway).
+
+`all_smi_up` and `/-/ready` are two views of one predicate and cannot disagree.
+
+### Useful queries
+
+```promql
+# Exporters that are up but have not produced a collection cycle.
+all_smi_up == 0
+
+# Attach the running version to any series.
+all_smi_gpu_utilization * on (instance) group_left(version) all_smi_build_info
+
+# Version skew across the fleet.
+count by (version) (all_smi_build_info)
+```
+
 ## JSON Endpoints (Streaming + One-Shot)
 
 Alongside `/metrics`, API mode exposes two JSON endpoints that share the

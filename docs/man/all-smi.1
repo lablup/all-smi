@@ -505,10 +505,39 @@ Intel and AMD CPU monitoring on Linux systems
 .SH API ENDPOINTS (API MODE)
 .TP
 .B /metrics
-Prometheus-compatible metrics endpoint with hardware statistics
+Prometheus-compatible metrics endpoint with hardware statistics. Always answers
+.BR "200 OK" ,
+including before the first collection cycle has completed. The body is never
+empty: every response carries
+.B all_smi_up
+(0 until the first collection cycle lands, 1 afterwards) and
+.BR all_smi_build_info ,
+so a scrape taken during startup is distinguishable from a scrape of a host
+with no devices.
 .TP
-.B /health
-Health check endpoint returning "OK"
+.B /-/ready
+Readiness probe. Returns
+.B 503 Service Unavailable
+with
+.B Retry-After: 1
+until the first collection cycle has populated the exporter, and
+.B 200 OK
+afterwards. Use this, not
+.BR /metrics ,
+for a Kubernetes
+.BR readinessProbe ,
+a load-balancer health check, or a startup gate. The
+.B /-/
+prefix follows the Prometheus-ecosystem convention.
+.TP
+.B /snapshot
+One-shot JSON dump of the latest collection cycle. Accepts
+.B ?include=
+and
+.BR ?pretty= .
+.TP
+.B /events
+Server-Sent Events stream, one JSON frame per collection cycle.
 .SH EXAMPLES
 .TP
 Monitor local hardware in interactive TUI:
