@@ -36,7 +36,7 @@ PR #321은 PR #319가 이 이슈를 가리키는 `NotSupported`로 남겨둔 `se
 
 ### 1.1 배경
 
-PR #319는 크로스 플랫폼 `all-smi service` 프레임워크와 그 systemd 구현체를 확립하면서, macOS(이 이슈)와 윈도우(이슈 #311, PR #320이 병행 구현)에 각자의 추적 이슈를 이름 붙인 명시적 `NotSupported` 분기를 남겼다. 이슈 #310은 추가로 Homebrew 관리 경로도 다룬다. `brew services start all-smi`(사용자별, `gui/$UID`)와 `sudo brew services start all-smi`(시스템 도메인, 아무도 로그인하지 않은 채로 재부팅을 견딤)인데, 이는 별도 저장소 `lablup/homebrew-tap`의 폼을라에 `service do` 블록을 추가해야 하고, 이 PR이 직접 할 수 있는 변경이 아니다.
+PR #319는 크로스 플랫폼 `all-smi service` 프레임워크와 그 systemd 구현체를 확립하면서, macOS(이 이슈)와 윈도우(이슈 #311, PR #320이 병행 구현)에 각자의 추적 이슈를 이름 붙인 명시적 `NotSupported` 분기를 남겼다. 이슈 #310은 추가로 Homebrew 관리 경로도 다룬다. `brew services start all-smi`(사용자별, `gui/$UID`)와 `sudo brew services start all-smi`(시스템 도메인, 아무도 로그인하지 않은 채로 재부팅을 견딤)인데, 이는 별도 저장소 `lablup/homebrew-tap`의 포뮬러에 `service do` 블록을 추가해야 하고, 이 PR이 직접 할 수 있는 변경이 아니다.
 
 ### 1.2 기존 문제점
 
@@ -326,7 +326,7 @@ pub const USER_SCOPE_DROPPED_KEYS: &[&str] = &["UserName", "GroupName", "InitGro
 - **시스템 도메인 LaunchDaemon 경로 검증.** `/Library/LaunchDaemons`에 쓴 적도 `sudo launchctl bootstrap system`을 실행한 적도 없다. 이 경로는 단위 테스트와, 루트 없이 올바로 거부하고 아무것도 쓰지 않는지 확인하는 실시간 확인으로만 실행됐다.
 - **재부팅 지속성 검증.** 서브커맨드 형태든 `sudo brew services` 형태든. 시스템 도메인 없이는 도달 불가능함.
 - **`service do` 블록을 `lablup/homebrew-tap`에 적용.** 탭에 아무것도 푸시하지 않았다. 검증된 diff가 PR 설명에 있고, 스크래치 사본을 상대로 로컬에서 `ruby -c`와 `brew style`로 확인했다(패치 안 된 업스트림 파일에 이미 있는 위반 4건과 일치하며, service 블록이 새로 추가한 위반은 없음).
-- **위 블록이 적용된 뒤 `sudo brew services start all-smi`와 탭 폼을라를 종단 간으로 검증.**
+- **위 블록이 적용된 뒤 `sudo brew services start all-smi`와 탭 포뮬러를 종단 간으로 검증.**
 - **실제 Homebrew 경로 거부 검증.** `detect::classify`는 세 Homebrew 접두사 전부에 대해 단위 테스트됐고 macOS 전용 힌트 문구도 어서션되어 있지만, 실제로 거부를 발동시키려고 `/opt/homebrew` 아래에 바이너리를 놓아본 적은 없다.
 
 ### 모니터링 필요
