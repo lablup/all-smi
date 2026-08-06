@@ -327,14 +327,82 @@ async fn events_lag_event_emitted_for_slow_receiver() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn fifty_concurrent_clients_do_not_stall_the_publisher() {
     // Spec (issue #193): "collection tick jitter stays within ±20 ms"
-    // with 50+ concurrent SSE clients. We measure the publisher's tick
-    // jitter while holding 50 simultaneous subscribers; a failing
-    // implementation would show tick-to-tick deltas drifting far above
-    // the 20 ms budget because a slow client would block the send.
-    // Our `FrameBus::publish` is non-blocking by design, so the delta
-    // should stay near the publish interval.
+    // with 50+ concurrent SSE clients. The first version of this test
+    // measured the wrong thing (issue #327): it timed the gap between
+    // consecutive publishes, which is the `sleep` plus scheduler slop,
+    // and never timed `publish` at all, so a publish that blocked for a
+    // second would have sailed through it.
+    //
+    // What `FrameBus::publish` actually does: bump an `AtomicU64`, wrap
+    // the snapshot in one `Arc`, take the `latest` write lock
+    // (uncontended here, because no `/snapshot` request runs alongside),
+    // and call `broadcast::Sender::send`. Broadcast never applies
+    // backpressure: once the 16-slot ring is full the send overwrites
+    // the oldest slot and the lagging receiver is told about the gap
+    // through `RecvError::Lagged`. So publish is O(1) work plus waking
+    // whichever receivers are parked, and it never waits on a client.
+    //
+    // Two separate properties follow from that, each asserted below with
+    // its own budget and its own message:
+    //
+    //   A. Cadence. Holding 50 subscribers must not starve the runtime
+    //      enough to stretch the publisher's loop period. Budgeted over
+    //      the whole loop rather than per tick, because per-tick timing
+    //      on a shared runner is scheduler noise: `tokio::time::sleep`
+    //      guarantees only a lower bound, and the CI flake that led to
+    //      #327 was exactly one such overshoot.
+    //   B. Publish cost. Timed around the `publish` call itself, over a
+    //      burst of calls made while every subscriber is behind, and
+    //      asserted on the mean.
+    const TICKS: u32 = 20;
+    const BURST: u32 = 200;
+    const BURST_SPACING: Duration = Duration::from_millis(1);
     let publish_interval = Duration::from_millis(50);
-    let tick_budget = publish_interval + Duration::from_millis(40);
+    // Nominal loop wall time is TICKS * publish_interval = 1 s. The
+    // worst real datum we have is a single 108.5 ms tick on a two-core
+    // hosted runner with two CI jobs overlapping (run 30994446017), i.e.
+    // ~58 ms of slop on one tick out of twenty. Budgeting the loop as a
+    // whole at twice nominal absorbs a dozen such ticks, so one
+    // descheduled tick cannot fail the run, while a real cadence
+    // collapse (seconds, not milliseconds) still does.
+    let cadence_budget = publish_interval * TICKS * 2;
+    // Budget for the mean cost of a single `publish` call across the
+    // burst. Two anchors bracket it. Below, the measurement: with 50
+    // subscribers attached this path costs a mean of 25-35 µs per call
+    // (p95 ~41 µs), nearly all of it the `Arc` allocation plus waking
+    // fifty parked receivers. Above, the failure mode: a publish that
+    // waited on even one subscriber would pay a scheduler round trip per
+    // subscriber per call, milliseconds at the very best, and would
+    // simply never return for the clients used here, which read nothing
+    // and whose socket buffers are full. 1 ms sits ~35x above the
+    // measurement and at least an order of magnitude below the failure
+    // mode. It is also 2% of the collection interval, so an
+    // implementation that spent any meaningful share of a tick inside
+    // publish fails.
+    //
+    // The assertion is on the mean, not the max, and that is deliberate.
+    // A wall-clock max cannot distinguish a blocked publish from a
+    // measuring thread that the OS descheduled mid-call: those samples
+    // come back quantized to whole scheduler quanta, tens of
+    // milliseconds each, which is the same noise that produced the flake
+    // behind #327. Averaging over BURST samples amortizes it, while a
+    // publish that genuinely waits pays its cost on every single call.
+    // The max is still reported on failure, as a diagnostic rather than
+    // as a trigger. Concretely, across eight instrumented local runs the
+    // mean landed between 25 and 35 µs seven times; the eighth caught a
+    // single 14 ms deschedule inside a timed window and still came out at
+    // 218 µs, comfortably inside budget, where any max-based budget below
+    // 14 ms would have failed that run. Only a few milliseconds of the
+    // burst's ~200 ms wall time sits inside a timed window at all, which
+    // is what keeps that exposure small.
+    let mean_publish_budget = Duration::from_millis(1);
+    // Pure hang guard for the burst, which needs BURST * BURST_SPACING =
+    // 200 ms of sleeping plus a few milliseconds of work. A publish that
+    // awaited a receiver would never return with these clients, so
+    // without a timeout that failure mode is a CI job hanging until the
+    // runner kills it rather than a test failing with a message. 5 s is
+    // 25x the nominal burst, far too loose to fire on scheduling noise.
+    let burst_hang_guard = Duration::from_secs(5);
     let bus = FrameBus::new(publish_interval);
     let (router, _state) = build_router(bus.clone());
     let addr = spawn_server(router).await;
@@ -360,17 +428,16 @@ async fn fifty_concurrent_clients_do_not_stall_the_publisher() {
     while bus.subscriber_count() < 50 && Instant::now() < subscribe_deadline {
         sleep(Duration::from_millis(20)).await;
     }
+    let subscribers = bus.subscriber_count();
     assert!(
-        bus.subscriber_count() >= 50,
-        "expected 50 subscribers, only registered {}",
-        bus.subscriber_count()
+        subscribers >= 50,
+        "expected 50 subscribers, only registered {subscribers}"
     );
 
-    // Measure publisher tick jitter. 20 ticks at 50 ms each = 1 s.
-    let mut last = Instant::now();
-    let mut max_delta = Duration::ZERO;
-    for _ in 0..20 {
-        let snapshot = Snapshot {
+    // One frame's worth of payload. Built outside every timed window so
+    // the measurement covers `publish` and nothing else.
+    fn load_snapshot() -> Snapshot {
+        Snapshot {
             schema: 1,
             timestamp: "2026-04-20T00:00:00Z".to_string(),
             hostname: "host".to_string(),
@@ -381,20 +448,70 @@ async fn fifty_concurrent_clients_do_not_stall_the_publisher() {
             processes: None,
             storage: None,
             errors: Vec::new(),
-        };
-        let t0 = Instant::now();
-        bus.publish(snapshot).await;
-        let delta = t0 - last;
-        if delta > max_delta {
-            max_delta = delta;
         }
-        last = Instant::now();
-        sleep(publish_interval).await;
     }
 
+    // Property A: cadence. Run the publisher at its nominal period and
+    // time the loop as a whole. This measures `sleep` overshoot and
+    // runtime scheduling slop with 50 subscribers attached; it says
+    // nothing about the cost of any individual publish, which property B
+    // measures directly.
+    let cadence_start = Instant::now();
+    for _ in 0..TICKS {
+        bus.publish(load_snapshot()).await;
+        sleep(publish_interval).await;
+    }
+    let cadence_elapsed = cadence_start.elapsed();
     assert!(
-        max_delta <= tick_budget,
-        "tick jitter exceeded {tick_budget:?} (observed {max_delta:?}) with 50 clients — publish is supposed to be non-blocking"
+        cadence_elapsed <= cadence_budget,
+        "publisher cadence: {TICKS} ticks at {publish_interval:?} took {cadence_elapsed:?} with {subscribers} subscribers, over the {cadence_budget:?} whole-loop budget. This measures sleep overshoot and runtime scheduling slop across the loop, not the cost of a single publish (see the separate publish-cost assertion below)."
+    );
+
+    // Property B: publish cost. Publish BURST frames, timing each call
+    // individually from just before `publish` to just after it returns,
+    // while all 50 subscribers sit there reading nothing.
+    //
+    // BURST is more than ten times the 16-slot ring, so the ring is
+    // overwritten many times over and every subscriber spends the burst
+    // behind: exactly the state in which an implementation that applied
+    // backpressure would have to wait for someone.
+    //
+    // The BURST_SPACING sleep between calls is load-bearing, and it sits
+    // outside the timed window. It gives the 50 SSE tasks time to come
+    // back around to `recv()` and register a waker, so each publish pays
+    // the full fifty-way wake. Publishing back to back instead measures
+    // a much cheaper path (~1 µs versus ~28 µs here) because no receiver
+    // has re-parked in between, and there is nothing to wake: that would
+    // make the subscriber count, the whole point of this test, almost
+    // invisible to the measurement.
+    let burst = timeout(burst_hang_guard, async {
+        let mut costs: Vec<Duration> = Vec::with_capacity(BURST as usize);
+        for _ in 0..BURST {
+            let snapshot = load_snapshot();
+            sleep(BURST_SPACING).await;
+            let t0 = Instant::now();
+            bus.publish(snapshot).await;
+            costs.push(t0.elapsed());
+        }
+        costs
+    })
+    .await;
+    let costs = match burst {
+        Ok(costs) => costs,
+        Err(_) => panic!(
+            "publish cost: a burst of {BURST} FrameBus::publish calls spaced {BURST_SPACING:?} apart did not finish within {burst_hang_guard:?} while {subscribers} subscribers were attached and reading nothing. Publish must hand each frame to the broadcast channel and return; it must never wait for a receiver to catch up."
+        ),
+    };
+    let total_publish: Duration = costs.iter().sum();
+    let mean_publish = total_publish / BURST;
+    let worst_publish = costs
+        .iter()
+        .copied()
+        .max()
+        .expect("BURST > 0, so the burst produced at least one sample");
+    assert!(
+        mean_publish <= mean_publish_budget,
+        "publish cost: FrameBus::publish averaged {mean_publish:?} per call over {BURST} calls with {subscribers} subscribers attached and reading nothing ({total_publish:?} spent inside publish in total), over the {mean_publish_budget:?} per-call budget. Publish is a non-blocking broadcast send and should cost tens of microseconds no matter how far behind the subscribers are. Slowest single call was {worst_publish:?}, reported for diagnosis only: an isolated slow sample is usually the OS descheduling the measuring thread, which is why the budget is on the mean."
     );
 
     // Drop all clients; subscriber count should drop back toward zero.
