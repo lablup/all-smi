@@ -79,12 +79,6 @@ libloading = "0.9"
 # each bump.
 libamdgpu_top = "=0.11.5"
 
-[target.'cfg(target_env = "musl")'.dependencies]
-openssl = { version = "0.10.80", features = ["vendored"] }
-
-[target.'cfg(all(target_arch = "aarch64", target_env = "gnu"))'.dependencies]
-openssl = { version = "0.10.80", features = ["vendored"] }
-
 # Windows-specific dependencies
 [target.'cfg(target_os = "windows")'.dependencies]
 wmi = "0.18"
