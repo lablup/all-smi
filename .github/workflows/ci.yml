@@ -280,8 +280,30 @@ jobs:
       - name: System-scope lifecycle
         run: |
           set -eEux
-          BIN="$PWD/target/debug/all-smi"
           UNIT=/etc/systemd/system/all-smi.service
+
+          # Stage the binary outside $HOME before installing it, the way
+          # a tarball install actually would. This is load bearing, not
+          # tidiness: the system unit sets ProtectHome=true, so a service
+          # whose ExecStart points into /home/runner/work/... cannot be
+          # executed at all. systemd fails it with 203/EXEC before the
+          # process starts, and the journal says only "Main process
+          # exited, code=exited, status=203/EXEC".
+          #
+          # That is a genuine property of the hardened unit, not a CI
+          # artifact, and the fix belongs here rather than in the unit:
+          # relaxing ProtectHome to make a test pass would weaken every
+          # real deployment to accommodate a binary location no real
+          # deployment uses. #309's criterion is specifically "from a
+          # plain tarball install", and /usr/local/bin is where that
+          # puts it, so installing from there makes this step a more
+          # faithful test of the criterion rather than a workaround.
+          #
+          # Nobody hit this before because the step was gated behind a
+          # condition ubuntu-latest never meets (#330), so it had never
+          # executed.
+          BIN=/usr/local/bin/all-smi
+          sudo install -m 0755 "$PWD/target/debug/all-smi" "$BIN"
 
           # Same rationale as the user-scope trap: a unit that fails
           # before ExecStart produces an opaque error, so always dump the
@@ -321,10 +343,18 @@ jobs:
           sudo test -f "$UNIT"
           sudo head -1 "$UNIT" | grep -qF "# Managed by 'all-smi service'"
           # ExecStart must point at the binary that ran the install, not
-          # at the packaged /usr/bin path. Matched loosely because
-          # current_exe() canonicalizes and the runner workspace may sit
+          # at a hard-coded packaged path. Matched loosely because
+          # current_exe() canonicalizes and the staged path may sit
           # behind a symlink.
-          sudo grep -q "^ExecStart=.*target/debug/all-smi api$" "$UNIT"
+          sudo grep -q "^ExecStart=.*/all-smi api$" "$UNIT"
+          # ...and specifically not somewhere ProtectHome=true would make
+          # unreachable, which is what 203/EXEC looks like from the
+          # journal.
+          if sudo grep -q "^ExecStart=/home/" "$UNIT"; then
+            echo "::error::ExecStart points into /home, which ProtectHome=true makes unreachable (203/EXEC)"
+            diagnose
+            exit 1
+          fi
           sudo grep -q "^WantedBy=multi-user.target$" "$UNIT"
           # A system manager runs as root and can apply the full
           # hardening set, so unlike user scope none of it is dropped.
@@ -492,6 +522,10 @@ jobs:
           sudo rm -f /etc/systemd/system/all-smi.service || true
           sudo rm -f /etc/all-smi/config.toml /etc/default/all-smi || true
           sudo rmdir /etc/all-smi 2>/dev/null || true
+          # Staged by the system-scope step to keep ExecStart out of
+          # /home, where ProtectHome=true would make it unexecutable.
+          sudo rm -f /usr/local/bin/all-smi || true
+          sudo rm -rf /var/cache/all-smi || true
           sudo systemctl daemon-reload 2>&1 || true
           sudo systemctl reset-failed all-smi.service 2>&1 || true
           echo "::endgroup::"
@@ -517,7 +551,7 @@ jobs:
           # not enforced, so this step never turns a run red by itself.
           echo "--- residue check ---"
           LEFTOVER=0
-          for path in /etc/systemd/system/all-smi.service /etc/all-smi/config.toml /etc/default/all-smi; do
+          for path in /etc/systemd/system/all-smi.service /etc/all-smi/config.toml /etc/default/all-smi /usr/local/bin/all-smi; do
             if sudo test -e "$path"; then echo "::warning::left behind: $path"; LEFTOVER=1; fi
           done
           if systemctl list-unit-files 2>/dev/null | grep -q '^all-smi\.service'; then
