@@ -83,11 +83,36 @@ jobs:
   # ═══════════════════════════════════════════════════════════════
   # Job: systemd service lifecycle smoke test (issue #309)
   # ═══════════════════════════════════════════════════════════════
-  # Exercises `all-smi service` end to end against a real systemd.
-  # Prefers the user scope because it needs no root; GitHub's hosted
-  # runners usually have no user manager, so the system scope is the
-  # fallback and covers the same lifecycle plus /etc/all-smi/config.toml
-  # discovery.
+  # Exercises `all-smi service` end to end against a real systemd, in
+  # BOTH scopes, on every run (issue #330).
+  #
+  # These used to be an either/or: a probe set `user_scope`, the
+  # user-scope step ran when it was true and the system-scope step when
+  # it was false. On `ubuntu-latest` a per-user manager is always
+  # present, so `user_scope` was always true and the system-scope step
+  # had never executed once since #309 added it. Everything in it was
+  # unverified code sitting in the workflow, which is why three #309
+  # acceptance criteria stayed unchecked: crash recovery via `kill -9`,
+  # the privileged tarball install/uninstall lifecycle, and
+  # /etc/all-smi/config.toml actually moving the listener. All three are
+  # reachable on a hosted runner through passwordless sudo, so the
+  # system-scope step now runs unconditionally.
+  #
+  # The probe survives, narrowed to its one honest use: skipping the
+  # user-scope step on a runner that genuinely has no user manager. The
+  # system-scope step no longer consults it.
+  #
+  # Ordering is deliberate, not incidental. User scope runs first
+  # because the system-scope step writes /etc/all-smi/config.toml, and
+  # that path is a discovery candidate for *every* all-smi process on
+  # the host (`LINUX_SYSTEM_CONFIG_PATH` in src/common/paths.rs), so a
+  # user-scope daemon started after it would silently inherit
+  # port 19191. The two scopes are otherwise disjoint: different unit
+  # paths, different managers, different ports (9090 vs 19191).
+  #
+  # `Clean up all systemd state` is `if: always()` so a step that dies
+  # mid-lifecycle cannot leave an enabled unit, a config file, or a
+  # running daemon behind for a later run to trip over.
   #
   # Readiness gating (issues #323, #324, #329). Every wait for "the
   # exporter is up" in this job polls `/-/ready`, never `systemctl
@@ -133,6 +158,9 @@ jobs:
       - name: Build all-smi
         run: cargo build --bin all-smi
 
+      # Gates the user-scope step only. The system-scope step runs
+      # regardless (#330): it needs root, not a user manager, and sudo is
+      # passwordless on hosted runners.
       - name: Probe for a user systemd instance
         id: probe
         run: |
@@ -140,7 +168,7 @@ jobs:
             echo "user_scope=true" >> "$GITHUB_OUTPUT"
           else
             echo "user_scope=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::no user systemd instance on this runner; falling back to the system-scope flow"
+            echo "::notice::no user systemd instance on this runner; skipping the user-scope step (the system-scope step still runs)"
           fi
 
       # ── User scope: install, start, restart, stop, uninstall ──
@@ -239,13 +267,43 @@ jobs:
           "$BIN" service status --user && rc=0 || rc=$?
           test "$rc" -eq 3
 
-      # ── System scope fallback: same lifecycle under sudo ──
+      # ── System scope: the same lifecycle under sudo, plus the three
+      #    things only a privileged daemon can demonstrate ──
+      #
+      # Runs unconditionally (#330). Before that it was gated on the
+      # absence of a user manager, a condition `ubuntu-latest` never
+      # meets, so this step had never executed. It is not a fallback for
+      # the user-scope step: it covers strictly more, namely crash
+      # recovery through `kill -9`, the privileged install/uninstall
+      # lifecycle, and /etc/all-smi/config.toml moving the listener.
+      # Those are #309's three remaining unverified criteria.
       - name: System-scope lifecycle
-        if: steps.probe.outputs.user_scope != 'true'
         run: |
           set -eEux
-          BIN="$PWD/target/debug/all-smi"
           UNIT=/etc/systemd/system/all-smi.service
+
+          # Stage the binary outside $HOME before installing it, the way
+          # a tarball install actually would. This is load bearing, not
+          # tidiness: the system unit sets ProtectHome=true, so a service
+          # whose ExecStart points into /home/runner/work/... cannot be
+          # executed at all. systemd fails it with 203/EXEC before the
+          # process starts, and the journal says only "Main process
+          # exited, code=exited, status=203/EXEC".
+          #
+          # That is a genuine property of the hardened unit, not a CI
+          # artifact, and the fix belongs here rather than in the unit:
+          # relaxing ProtectHome to make a test pass would weaken every
+          # real deployment to accommodate a binary location no real
+          # deployment uses. #309's criterion is specifically "from a
+          # plain tarball install", and /usr/local/bin is where that
+          # puts it, so installing from there makes this step a more
+          # faithful test of the criterion rather than a workaround.
+          #
+          # Nobody hit this before because the step was gated behind a
+          # condition ubuntu-latest never meets (#330), so it had never
+          # executed.
+          BIN=/usr/local/bin/all-smi
+          sudo install -m 0755 "$PWD/target/debug/all-smi" "$BIN"
 
           # Same rationale as the user-scope trap: a unit that fails
           # before ExecStart produces an opaque error, so always dump the
@@ -285,10 +343,18 @@ jobs:
           sudo test -f "$UNIT"
           sudo head -1 "$UNIT" | grep -qF "# Managed by 'all-smi service'"
           # ExecStart must point at the binary that ran the install, not
-          # at the packaged /usr/bin path. Matched loosely because
-          # current_exe() canonicalizes and the runner workspace may sit
+          # at a hard-coded packaged path. Matched loosely because
+          # current_exe() canonicalizes and the staged path may sit
           # behind a symlink.
-          sudo grep -q "^ExecStart=.*target/debug/all-smi api$" "$UNIT"
+          sudo grep -q "^ExecStart=.*/all-smi api$" "$UNIT"
+          # ...and specifically not somewhere ProtectHome=true would make
+          # unreachable, which is what 203/EXEC looks like from the
+          # journal.
+          if sudo grep -q "^ExecStart=/home/" "$UNIT"; then
+            echo "::error::ExecStart points into /home, which ProtectHome=true makes unreachable (203/EXEC)"
+            diagnose
+            exit 1
+          fi
           sudo grep -q "^WantedBy=multi-user.target$" "$UNIT"
           # A system manager runs as root and can apply the full
           # hardening set, so unlike user scope none of it is dropped.
@@ -367,6 +433,18 @@ jobs:
           # the exporter describing itself.
           curl -sf --max-time 10 http://127.0.0.1:19191/metrics | grep -q '^all_smi_memory_total_bytes'
 
+          # #309 asks that api.port in /etc/all-smi/config.toml "moves"
+          # the listener, so answering on 19191 is only half the proof:
+          # a daemon that ignored the file and also happened to bind
+          # 19191, or one that bound both, would pass that alone. Assert
+          # the compiled default is NOT listening.
+          if curl -sf --max-time 5 http://127.0.0.1:9090/metrics >/dev/null 2>&1; then
+            echo "::error::the daemon is still serving on the default port 9090; /etc/all-smi/config.toml did not move the listener"
+            sudo ss -lntp 2>&1 | head -20 || true
+            diagnose
+            exit 1
+          fi
+
           # Crash recovery: systemd must bring it back within RestartSec.
           MAINPID=$(systemctl show all-smi -p MainPID --value)
           sudo kill -9 "$MAINPID"
@@ -419,6 +497,72 @@ jobs:
           sudo "$BIN" service uninstall
           sudo rm -f "$UNIT"
           sudo systemctl daemon-reload
+
+      # ── Unconditional teardown (issue #330) ──
+      #
+      # Every cleanup line above sits on a success path, so any step that
+      # died mid-lifecycle used to leave an enabled unit, a running
+      # daemon on 19191, and /etc/all-smi/config.toml behind. On a hosted
+      # runner that is merely untidy; on a self-hosted one it poisons the
+      # next run, and the failure it causes there looks nothing like its
+      # cause. Now that both scopes run, there is simply more state to
+      # strand, so this is not optional.
+      #
+      # Deliberately best-effort throughout: `|| true` on every line and
+      # `set +e`, because a teardown step that fails turns a green run
+      # red for no reason, and masks the real failure when the run was
+      # already red. It reports what it found instead.
+      - name: Clean up all systemd state
+        if: always()
+        run: |
+          set +e
+          echo "::group::teardown: system scope"
+          sudo systemctl stop all-smi.service 2>&1 || true
+          sudo systemctl disable all-smi.service 2>&1 || true
+          sudo rm -f /etc/systemd/system/all-smi.service || true
+          sudo rm -f /etc/all-smi/config.toml /etc/default/all-smi || true
+          sudo rmdir /etc/all-smi 2>/dev/null || true
+          # Staged by the system-scope step to keep ExecStart out of
+          # /home, where ProtectHome=true would make it unexecutable.
+          sudo rm -f /usr/local/bin/all-smi || true
+          sudo rm -rf /var/cache/all-smi || true
+          sudo systemctl daemon-reload 2>&1 || true
+          sudo systemctl reset-failed all-smi.service 2>&1 || true
+          echo "::endgroup::"
+
+          echo "::group::teardown: user scope"
+          systemctl --user stop all-smi.service 2>&1 || true
+          systemctl --user disable all-smi.service 2>&1 || true
+          rm -f "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/all-smi.service" || true
+          systemctl --user daemon-reload 2>&1 || true
+          echo "::endgroup::"
+
+          # `all-smi service install` never runs useradd: --service-user
+          # only writes User= into the unit and expects the account to
+          # already exist. This is belt and braces so the criterion is
+          # satisfied by construction rather than by that argument
+          # continuing to hold.
+          if id -u all-smi >/dev/null 2>&1; then
+            echo "::warning::an all-smi system user existed; removing it"
+            sudo userdel all-smi 2>&1 || true
+          fi
+
+          # Prove the teardown worked rather than assuming it. Reported,
+          # not enforced, so this step never turns a run red by itself.
+          echo "--- residue check ---"
+          LEFTOVER=0
+          for path in /etc/systemd/system/all-smi.service /etc/all-smi/config.toml /etc/default/all-smi /usr/local/bin/all-smi; do
+            if sudo test -e "$path"; then echo "::warning::left behind: $path"; LEFTOVER=1; fi
+          done
+          if systemctl list-unit-files 2>/dev/null | grep -q '^all-smi\.service'; then
+            echo "::warning::left behind: an all-smi.service unit is still known to systemd"
+            LEFTOVER=1
+          fi
+          if id -u all-smi >/dev/null 2>&1; then
+            echo "::warning::left behind: all-smi system user"; LEFTOVER=1
+          fi
+          if [ "$LEFTOVER" = "0" ]; then echo "clean: no unit, no config, no service user"; fi
+          exit 0
 
   # ═══════════════════════════════════════════════════════════════
   # Job: launchd service smoke test (issue #310)
