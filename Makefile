@@ -69,10 +69,6 @@ docker-test-container-view:
 		cargo build --release && \
 		./target/release/all-smi local"
 
-docker-build-container:
-	@mkdir -p tests/.cargo-cache
-	docker build -t all-smi:latest .
-
 release:
 	cargo build --release
 
