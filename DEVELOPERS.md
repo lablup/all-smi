@@ -381,10 +381,9 @@ make docker-test-container-api
 
 # Test view mode in container
 make docker-test-container-view
-
-# Build Docker image
-docker build -t all-smi:latest .
 ```
+
+> **Note:** These targets run all-smi inside a stock `rust:1.88` container with the source bind-mounted, to exercise its container-awareness code paths. The project does not build or publish a container image of its own. See [Installation](README.md#installation) for the supported ways to install all-smi.
 
 ### Docker Development Tips
 
@@ -405,7 +404,6 @@ The project uses GitHub Actions for CI:
    - Linting (`cargo clippy`)
 
 2. **Build Check**: Verifies release build
-3. **Docker Check**: Validates Docker image build
 
 ### Release Process
 
@@ -416,7 +414,6 @@ Releases are automated via GitHub Actions:
 3. GitHub Actions builds and publishes:
    - Binary releases for multiple platforms
    - Debian/Ubuntu packages
-   - Docker images
    - Homebrew formula updates
 
 ### Platform Builds

@@ -99,6 +99,10 @@ After installation, the binary will be available in your `$PATH` as `all-smi`.
 
 See [Building from Source](DEVELOPERS.md#building-from-source) in the developer documentation.
 
+### A note on containers
+
+all-smi does not ship a container image, and container deployment is not a supported install path. Use one of the six options above, and see [Running as a service](#running-as-a-service) for supervising API mode under systemd, launchd, or the Windows Service Control Manager.
+
 ## Usage
 
 ### Command Overview
