@@ -14,10 +14,7 @@
 
 use std::time::Duration;
 
-use crossterm::{
-    event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind},
-    terminal::size,
-};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
 use crate::app_state::{AppState, FilterInputMode, SortCriteria};
 use crate::cli::ViewArgs;
@@ -26,6 +23,7 @@ use crate::ui::aggregation::user::{UserSortKey, sort_users};
 use crate::ui::filter_dsl::{apply as apply_filter, parse as parse_filter};
 use crate::ui::layout::LayoutCalculator;
 use crate::ui::tabs::{topology_tab_index, users_tab_index};
+use crate::ui::viewport::Viewport;
 
 /// Upper bound on the filter input buffer size (bytes).
 ///
@@ -42,7 +40,7 @@ fn get_visible_process_rows(state: &AppState) -> usize {
         state.visible_process_rows
     } else {
         // Fallback for the first frame before rendering has set the value
-        let (_cols, rows) = size().unwrap_or((80, 24));
+        let rows = Viewport::current().rows;
         (rows / 2).saturating_sub(1) as usize
     }
 }
@@ -935,7 +933,7 @@ fn handle_right_arrow(state: &mut AppState) {
 
             // If we're moving to a node tab (not "All" tab), check if we need to scroll
             if state.current_tab > 0 {
-                let (cols, _) = size().unwrap();
+                let cols = Viewport::current().cols;
                 let mut available_width = cols.saturating_sub(8); // Space for "Tabs: " prefix
 
                 // Reserve space for "All" tab (always visible)
@@ -1077,7 +1075,7 @@ fn handle_page_up(state: &mut AppState, args: &ViewArgs) {
     let is_remote = args.hosts.is_some() || args.hostfile.is_some() || args.replay.is_some();
     if is_remote {
         // Remote mode - page up through GPU list
-        let (_cols, rows) = size().unwrap();
+        let rows = Viewport::current().rows;
         let content_start_row = 19;
         let available_rows = rows.saturating_sub(content_start_row).saturating_sub(1) as usize;
 
@@ -1125,7 +1123,7 @@ fn handle_page_down(state: &mut AppState, args: &ViewArgs) {
     let is_remote = args.hosts.is_some() || args.hostfile.is_some() || args.replay.is_some();
     if is_remote {
         // Remote mode - page down through GPU list
-        let (_cols, rows) = size().unwrap();
+        let rows = Viewport::current().rows;
         let content_start_row = 19;
         let available_rows = rows.saturating_sub(content_start_row).saturating_sub(1) as usize;
 
@@ -1209,15 +1207,14 @@ fn handle_process_header_click(x: u16, y: u16, state: &mut AppState) {
     }
 
     // Get terminal size to calculate process list position
-    let (_cols, rows) = match size() {
-        Ok((c, r)) => (c, r),
-        Err(_) => return,
-    };
+    let rows = Viewport::current().rows;
 
     // Calculate where the process header should be
-    // The header is at half_rows - 1 based on testing
+    // The header is at half_rows - 1 based on testing.
+    // Saturating: a one-row terminal puts `half_rows` at zero, and this
+    // subtraction used to underflow on the mouse-click path (issue #326).
     let half_rows = rows / 2;
-    let process_header_row = half_rows - 1;
+    let process_header_row = half_rows.saturating_sub(1);
 
     // Check if click is on the process header row
     if y != process_header_row {

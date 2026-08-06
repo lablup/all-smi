@@ -1180,4 +1180,157 @@ mod tests {
         let snapshot = make_remote_topology_snapshot(Some("ghost"));
         assert_eq!(topology_target_host(&snapshot), "host1");
     }
+
+    // -----------------------------------------------------------------------
+    // Degenerate and minimum terminal geometry (issue #326).
+    //
+    // `ui::viewport::MIN_COLS` claims to sit above every unchecked width
+    // subtraction in the renderer set. That claim is only worth anything if
+    // it is checked against a snapshot that actually reaches those
+    // renderers, so these drive real device rows rather than the empty
+    // snapshot the smoke tests above use.
+    // -----------------------------------------------------------------------
+
+    fn make_gpu(uuid: &str, name: &str) -> crate::device::GpuInfo {
+        crate::device::GpuInfo {
+            uuid: uuid.to_string(),
+            time: String::new(),
+            name: name.to_string(),
+            device_type: "GPU".to_string(),
+            host_id: "localhost".to_string(),
+            hostname: "testhost".to_string(),
+            instance: "testhost".to_string(),
+            utilization: 42.0,
+            ane_utilization: 5.0,
+            dla_utilization: None,
+            tensorcore_utilization: None,
+            temperature: 61,
+            used_memory: 8 * 1024 * 1024 * 1024,
+            total_memory: 24 * 1024 * 1024 * 1024,
+            frequency: 1400,
+            power_consumption: 120.0,
+            gpu_core_count: Some(38),
+            temperature_threshold_slowdown: Some(93),
+            temperature_threshold_shutdown: Some(98),
+            temperature_threshold_max_operating: Some(87),
+            temperature_threshold_acoustic: None,
+            performance_state: Some(2),
+            numa_node_id: None,
+            gsp_firmware_mode: None,
+            gsp_firmware_version: None,
+            nvlink_remote_devices: Vec::new(),
+            gpm_metrics: None,
+            detail: HashMap::new(),
+        }
+    }
+
+    fn make_cpu() -> crate::device::CpuInfo {
+        use crate::device::{CoreType, CoreUtilization, CpuPlatformType};
+        crate::device::CpuInfo {
+            index: 0,
+            host_id: "localhost".to_string(),
+            hostname: "testhost".to_string(),
+            instance: "testhost".to_string(),
+            cpu_model: "Test CPU".to_string(),
+            architecture: "aarch64".to_string(),
+            platform_type: CpuPlatformType::AppleSilicon,
+            socket_count: 1,
+            total_cores: 4,
+            total_threads: 4,
+            base_frequency_mhz: 2400,
+            max_frequency_mhz: 3600,
+            cache_size_mb: 16,
+            utilization: 37.5,
+            temperature: Some(55),
+            power_consumption: Some(18.0),
+            per_socket_info: Vec::new(),
+            apple_silicon_info: None,
+            per_core_utilization: (0..4)
+                .map(|i| CoreUtilization {
+                    core_id: i,
+                    core_type: CoreType::Standard,
+                    utilization: f64::from(i) * 20.0,
+                })
+                .collect(),
+            time: String::new(),
+        }
+    }
+
+    /// A local-mode snapshot carrying device rows, so `render_main` walks the
+    /// GPU and CPU gauge renderers instead of short-circuiting on empty
+    /// vectors. The Apple-named GPU is deliberate: it selects the
+    /// three-gauge layout in `gpu_renderer`, which is the narrowest-tolerant
+    /// row in the whole renderer set.
+    fn make_populated_snapshot() -> RenderSnapshot {
+        let mut state = AppState::new();
+        state.is_local_mode = true;
+        state.gpu_info = vec![
+            make_gpu("gpu-0", "Apple M3 Max"),
+            make_gpu("gpu-1", "NVIDIA H100 80GB HBM3"),
+        ];
+        state.cpu_info = vec![make_cpu()];
+        RenderSnapshot::capture(&mut state)
+    }
+
+    #[test]
+    fn render_paths_survive_every_size_at_or_above_the_minimum() {
+        use crate::ui::viewport::{MIN_COLS, MIN_ROWS};
+
+        let snapshot = make_populated_snapshot();
+        let args = make_local_args();
+
+        // Bounded sweep across the interesting band just above the floor,
+        // plus a couple of ordinary sizes. Every width in this range crosses
+        // at least one gauge-layout branch.
+        for cols in MIN_COLS..=(MIN_COLS + 12) {
+            for rows in MIN_ROWS..=(MIN_ROWS + 6) {
+                let (main, _) = FrameRenderer::render_main(&snapshot, &args, cols, rows, None);
+                assert!(
+                    !main.is_empty(),
+                    "render_main produced nothing at {cols}x{rows}"
+                );
+                let _ = FrameRenderer::render_loading(&snapshot, false, cols, rows);
+                let _ = FrameRenderer::render_loading(&snapshot, true, cols, rows);
+                let _ = FrameRenderer::render_help(&snapshot, &args, cols, rows);
+                let _ = FrameRenderer::render_alert_panel(&snapshot, cols, rows);
+            }
+        }
+    }
+
+    #[test]
+    fn render_paths_survive_a_resolved_zero_size_pty() {
+        use crate::ui::viewport::Viewport;
+
+        // End to end for the reported reproduction: a pty with no window
+        // size reports 0x0, `Viewport` resolves it, and the frame composes
+        // normally. Before the fix this aborted in `print_function_keys`.
+        let viewport = Viewport::resolve(0, 0);
+        assert!(viewport.is_renderable());
+
+        let snapshot = make_populated_snapshot();
+        let args = make_local_args();
+        let (content, _) =
+            FrameRenderer::render_main(&snapshot, &args, viewport.cols, viewport.rows, None);
+        assert!(content.contains("all-smi"));
+        assert!(
+            content.contains("h:Help"),
+            "the status bar must render on a resolved zero-size pty"
+        );
+    }
+
+    #[test]
+    fn tall_help_popup_survives_a_one_column_terminal() {
+        use crate::ui::viewport::Viewport;
+
+        // The help popup only reaches its two-column shortcut layout once
+        // the terminal is tall enough, so a narrow-and-tall geometry is the
+        // one that exercises `help.rs`'s width arithmetic. Production gates
+        // this size out, which the assertion records.
+        assert!(!Viewport { cols: 1, rows: 40 }.is_renderable());
+
+        let snapshot = make_populated_snapshot();
+        let args = make_local_args();
+        let resolved = Viewport::resolve(0, 40);
+        let _ = FrameRenderer::render_help(&snapshot, &args, resolved.cols, resolved.rows);
+    }
 }

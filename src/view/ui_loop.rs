@@ -16,13 +16,14 @@ use std::collections::HashSet;
 use std::io::Write;
 use std::sync::Arc;
 
-use crossterm::{cursor, event::Event, queue, terminal::size};
+use crossterm::{cursor, event::Event, queue};
 use tokio::sync::{Mutex, Notify};
 
 use crate::app_state::AppState;
 use crate::cli::ViewArgs;
 use crate::common::config::AppConfig;
 use crate::ui::buffer::DifferentialRenderer;
+use crate::ui::viewport::Viewport;
 use crate::view::event_handler::handle_key_event;
 use crate::view::frame_renderer::FrameRenderer;
 use crate::view::render_snapshot::{RenderDecisions, RenderSnapshot};
@@ -48,6 +49,9 @@ pub struct UiLoop {
     previous_gpu_filter_enabled: bool,
     previous_alert_panel_open: bool,
     previous_filter_is_active: bool,
+    /// Whether the last iteration rendered the too-small notice instead of a
+    /// frame, so the transition back can repaint from scratch.
+    previous_too_small: bool,
     /// Cached derived view data (sorted GPU lists, filtered host subsets, etc.)
     view_cache: ViewCache,
     /// Event coordinator for event-driven wakeups
@@ -87,6 +91,7 @@ impl UiLoop {
             previous_gpu_filter_enabled: false,
             previous_alert_panel_open: false,
             previous_filter_is_active: false,
+            previous_too_small: false,
             view_cache: ViewCache::new(),
             event_coordinator,
             #[cfg(target_os = "linux")]
@@ -284,10 +289,44 @@ impl UiLoop {
             // ------------------------------------------------------------------
             // Frame composition: operates entirely on the snapshot, no lock held.
             // ------------------------------------------------------------------
-            let (cols, rows) = match size() {
-                Ok((c, r)) => (c, r),
-                Err(_) => return Err("Failed to get terminal size".into()),
-            };
+            let viewport = Viewport::current();
+            let (cols, rows) = (viewport.cols, viewport.rows);
+
+            // Terminals below the minimum cannot hold a frame: the header,
+            // one content row and the status bar do not fit, and the gauge
+            // renderers have no room to lay out. Show a one-line notice and
+            // skip composition entirely. `UiEvent::Resize` wakes the loop, so
+            // growing the window recovers on its own (issue #326).
+            //
+            // A pty reporting no geometry never lands here. `Viewport`
+            // resolved that to the fallback size above, because "the kernel
+            // does not know how big this window is" is a different statement
+            // from "this window is too small to draw in".
+            if !viewport.is_renderable() {
+                if !self.previous_too_small {
+                    self.previous_too_small = true;
+                    self.view_cache.invalidate_all();
+                    self.differential_renderer.force_clear().ok();
+                }
+                if self
+                    .differential_renderer
+                    .render_differential(&viewport.too_small_notice(), cols, rows)
+                    .is_err()
+                {
+                    break;
+                }
+                continue;
+            }
+
+            // Coming back from the notice: the screen holds one stale line
+            // and the cache was dropped, so repaint from scratch.
+            if self.previous_too_small {
+                self.previous_too_small = false;
+                self.view_cache.invalidate_all();
+                if self.differential_renderer.force_clear().is_err() {
+                    break;
+                }
+            }
 
             if decisions.force_clear {
                 self.view_cache.invalidate_all();

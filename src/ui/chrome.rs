@@ -31,6 +31,17 @@ pub fn print_loading_indicator<W: Write>(
     frame_counter: u64,
     startup_status_lines: &[String],
 ) {
+    // A terminal with no cells has nowhere to put any of this, and every
+    // `MoveTo` below would address a position outside the window. Bail out
+    // rather than emit cursor motion into nothing (issue #326).
+    //
+    // This is only the panic-safety floor. The policy question of what to
+    // show on a terminal that is real but too small to be useful belongs to
+    // `ui::viewport`, which gates this function's callers well above 1x1.
+    if cols == 0 || rows == 0 {
+        return;
+    }
+
     // Center the loading message
     let message = "Loading...";
     let x = (cols.saturating_sub(message.len() as u16)) / 2;
@@ -39,36 +50,42 @@ pub fn print_loading_indicator<W: Write>(
     queue!(stdout, cursor::MoveTo(x, y)).unwrap();
     print_colored_text(stdout, message, Color::Yellow, None, None);
 
-    // Progress bar parameters
-    let bar_width = 40.min(cols as usize - SCREEN_MARGIN); // Ensure it fits on screen
+    // Progress bar parameters. A terminal narrower than SCREEN_MARGIN leaves
+    // no room at all, which `saturating_sub` reports as a zero-width bar.
+    let bar_width = 40.min((cols as usize).saturating_sub(SCREEN_MARGIN));
     let bar_x = (cols.saturating_sub(bar_width as u16)) / 2;
     let bar_y = y + 2; // 2 lines below "Loading..."
 
-    // Create animated progress bar
-    // Lower ANIMATION_SPEED = faster
-    let position = ((frame_counter / ANIMATION_SPEED) % (bar_width as u64 * 2)) as usize;
+    // Skip the bar when it has no width (the modulo below would divide by
+    // zero) or when it would land past the last row.
+    if bar_width > 0 && bar_y < rows {
+        // Create animated progress bar
+        // Lower ANIMATION_SPEED = faster
+        let position = ((frame_counter / ANIMATION_SPEED) % (bar_width as u64 * 2)) as usize;
 
-    // Calculate the sliding block position (ping-pong effect)
-    let block_size = BLOCK_SIZE_MAX.min(bar_width / BLOCK_SIZE_DIVISOR); // Calculate block size relative to bar width
-    let actual_pos = if position < bar_width {
-        position
-    } else {
-        bar_width * 2 - position - 1
-    };
-
-    // Ensure the block doesn't go out of bounds
-    let block_start = actual_pos.min(bar_width.saturating_sub(block_size));
-    let block_end = (block_start + block_size).min(bar_width);
-
-    // Move to progress bar position
-    queue!(stdout, cursor::MoveTo(bar_x, bar_y)).unwrap();
-
-    // Draw the progress bar with thinner characters
-    for i in 0..bar_width {
-        if i >= block_start && i < block_end {
-            print_colored_text(stdout, "━", Color::Cyan, None, None);
+        // Calculate the sliding block position (ping-pong effect)
+        let block_size = BLOCK_SIZE_MAX.min(bar_width / BLOCK_SIZE_DIVISOR); // Calculate block size relative to bar width
+        let actual_pos = if position < bar_width {
+            position
         } else {
-            print_colored_text(stdout, "─", Color::DarkGrey, None, None);
+            // `position` is a modulo of `bar_width * 2`, so this stays >= 0.
+            bar_width * 2 - position - 1
+        };
+
+        // Ensure the block doesn't go out of bounds
+        let block_start = actual_pos.min(bar_width.saturating_sub(block_size));
+        let block_end = (block_start + block_size).min(bar_width);
+
+        // Move to progress bar position
+        queue!(stdout, cursor::MoveTo(bar_x, bar_y)).unwrap();
+
+        // Draw the progress bar with thinner characters
+        for i in 0..bar_width {
+            if i >= block_start && i < block_end {
+                print_colored_text(stdout, "━", Color::Cyan, None, None);
+            } else {
+                print_colored_text(stdout, "─", Color::DarkGrey, None, None);
+            }
         }
     }
 
@@ -76,8 +93,13 @@ pub fn print_loading_indicator<W: Write>(
     if !startup_status_lines.is_empty() {
         let status_start_y = bar_y + 2; // 2 lines below the progress bar
 
-        // Calculate starting position to show last N lines that fit on screen
-        let max_lines = ((rows - status_start_y) - 1).min(10) as usize; // Show max 10 lines
+        // Calculate starting position to show last N lines that fit on screen.
+        // Saturating: on a short terminal `status_start_y` can already be at
+        // or past the last row, which means zero lines fit.
+        let max_lines = rows
+            .saturating_sub(status_start_y)
+            .saturating_sub(1)
+            .min(10) as usize; // Show max 10 lines
         let lines_to_show = startup_status_lines.len().min(max_lines);
         let start_idx = startup_status_lines.len().saturating_sub(lines_to_show);
 
@@ -109,8 +131,19 @@ pub fn print_function_keys<W: Write>(
     state: &AppState,
     is_remote: bool,
 ) {
+    // The status bar occupies the last row. A terminal reporting zero rows
+    // has no last row to occupy, and `rows - 1` used to underflow here and
+    // abort the process (issue #326). Emit nothing instead.
+    //
+    // This is the panic-safety floor only. Deciding that a real-but-tiny
+    // terminal should show a notice rather than a cramped frame is
+    // `ui::viewport`'s job, not this function's.
+    if rows == 0 {
+        return;
+    }
+
     // Move to bottom of screen
-    queue!(stdout, cursor::MoveTo(0, rows - 1)).unwrap();
+    queue!(stdout, cursor::MoveTo(0, rows.saturating_sub(1))).unwrap();
 
     // Precedence on the status bar:
     //
@@ -392,8 +425,26 @@ fn print_filter_bar<W: Write>(stdout: &mut W, cols: u16, state: &AppState) {
 
 #[cfg(test)]
 mod tests {
-    use super::print_function_keys;
+    use super::{print_function_keys, print_loading_indicator};
     use crate::app_state::{AppState, SortCriteria};
+    use crate::ui::viewport::{MIN_COLS, MIN_ROWS};
+
+    /// Every degenerate geometry the chrome has to survive. Zero and one in
+    /// both axes, plus the mixed cases: the panic in issue #326 was on rows,
+    /// not columns, so a width-only sweep would have missed it entirely.
+    const DEGENERATE_SIZES: &[(u16, u16)] = &[
+        (0, 0),
+        (1, 1),
+        (0, 1),
+        (1, 0),
+        (0, 24),
+        (80, 0),
+        (1, 24),
+        (80, 1),
+        (10, 24), // cols == SCREEN_MARGIN: zero-width progress bar
+        (11, 2),
+        (MIN_COLS, MIN_ROWS),
+    ];
 
     #[test]
     fn local_status_bar_advertises_cpu_sort_shortcut_and_indicator() {
@@ -426,5 +477,130 @@ mod tests {
             !rendered.contains("c:CPU"),
             "remote status bar must not advertise the local-only CPU shortcut.\n--- status ---\n{rendered}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Degenerate terminal geometry (issue #326).
+    //
+    // `script -q /dev/null all-smi local` hands the process a pty with no
+    // window size, so crossterm reports 0x0 and `rows - 1` in
+    // `print_function_keys` aborted the process. These drive the real
+    // rendering functions, not a copy of their arithmetic.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn function_keys_survive_every_degenerate_size() {
+        let state = AppState::new();
+        for &(cols, rows) in DEGENERATE_SIZES {
+            for is_remote in [false, true] {
+                let mut output = Vec::new();
+                print_function_keys(&mut output, cols, rows, &state, is_remote);
+                // Reaching here without unwinding is the assertion; before the
+                // fix this underflowed at every `rows == 0` entry.
+                if rows == 0 {
+                    assert!(
+                        output.is_empty(),
+                        "no row exists to draw the status bar on at {cols}x{rows}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn loading_indicator_survives_every_degenerate_size() {
+        // Non-empty status lines are required to reach the `rows -
+        // status_start_y - 1` subtraction, which is the second underflow the
+        // issue names.
+        let status_lines = [
+            "Detecting GPUs...".to_string(),
+            "\u{2713} Found 8 devices".to_string(),
+            "Connecting...".to_string(),
+        ];
+        for &(cols, rows) in DEGENERATE_SIZES {
+            for lines in [&[][..], &status_lines[..]] {
+                let mut output = Vec::new();
+                print_loading_indicator(&mut output, cols, rows, 0, lines);
+                if cols == 0 || rows == 0 {
+                    assert!(
+                        output.is_empty(),
+                        "nothing can be drawn into a {cols}x{rows} terminal"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn loading_indicator_animation_survives_a_zero_width_progress_bar() {
+        // At `cols == SCREEN_MARGIN` the bar has zero width. The frame
+        // counter feeds a `% (bar_width * 2)`, which is a division by zero
+        // unless the bar is skipped. Sweep several counters so the ping-pong
+        // branch is taken too.
+        for frame_counter in [0u64, 1, 7, 40, 4096] {
+            let mut output = Vec::new();
+            print_loading_indicator(&mut output, 10, 24, frame_counter, &[]);
+            assert!(
+                String::from_utf8(output)
+                    .expect("loading screen should be valid UTF-8")
+                    .contains("Loading"),
+                "the message still renders even when the bar does not"
+            );
+        }
+    }
+
+    #[test]
+    fn function_keys_still_render_at_the_minimum_supported_size() {
+        // The floor `ui::viewport` enforces must actually produce a status
+        // bar, otherwise the minimum is set below what the chrome can draw.
+        let state = AppState::new();
+        let mut output = Vec::new();
+        print_function_keys(&mut output, MIN_COLS, MIN_ROWS, &state, false);
+        let rendered = String::from_utf8(output).expect("status bar should be valid UTF-8");
+        assert!(
+            rendered.contains("h:Help"),
+            "the minimum size must fit at least the first hotkey.\n--- status ---\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn function_keys_never_exceed_one_row_of_cells() {
+        // The status bar owns exactly one row, so it must never emit more
+        // printable cells than the terminal is wide. A regression here wraps
+        // the bar onto the row above and corrupts the frame.
+        let state = AppState::new();
+        for cols in [1u16, 2, 5, 13, MIN_COLS, 40, 200] {
+            let mut output = Vec::new();
+            print_function_keys(&mut output, cols, 24, &state, false);
+            let rendered = String::from_utf8(output).expect("status bar should be valid UTF-8");
+            let printable: String = strip_ansi(&rendered);
+            assert!(
+                crate::ui::text::display_width(&printable) <= cols as usize,
+                "status bar overflowed {cols} columns: {printable:?}"
+            );
+        }
+    }
+
+    /// Drop CSI escape sequences and the cursor-motion prefix so only the
+    /// cells that land on screen are measured.
+    fn strip_ansi(input: &str) -> String {
+        let mut out = String::with_capacity(input.len());
+        let mut chars = input.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c != '\u{1b}' {
+                out.push(c);
+                continue;
+            }
+            if chars.peek() == Some(&'[') {
+                chars.next();
+                // A CSI sequence runs until a byte in the range 0x40..=0x7e.
+                for term in chars.by_ref() {
+                    if ('\u{40}'..='\u{7e}').contains(&term) {
+                        break;
+                    }
+                }
+            }
+        }
+        out
     }
 }
