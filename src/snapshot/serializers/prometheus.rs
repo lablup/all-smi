@@ -138,8 +138,15 @@ mod tests {
         }
     }
 
+    /// Supersedes the former `empty_snapshot_renders_empty_string`, the
+    /// snapshot-side twin of `empty_inputs_render_empty_string`. Both
+    /// asserted the behaviour issue #324 removed. A snapshot that
+    /// collected no sections still renders the baseline, and must keep
+    /// reporting `all_smi_up 1`: the collection ran, it simply had
+    /// nothing to report, which is precisely the case that used to be
+    /// indistinguishable from "the exporter has not started yet".
     #[test]
-    fn empty_snapshot_renders_empty_string() {
+    fn empty_snapshot_still_renders_the_baseline() {
         let snap = Snapshot {
             schema: 1,
             timestamp: "2026-04-20T00:00:00Z".to_string(),
@@ -153,7 +160,26 @@ mod tests {
             errors: Vec::new(),
         };
         let rendered = render(&[snap]).unwrap();
-        assert_eq!(rendered, "");
+        assert!(!rendered.is_empty());
+
+        let up = rendered
+            .lines()
+            .find(|l| l.starts_with("all_smi_up{"))
+            .expect("all_smi_up sample line");
+        assert!(
+            up.ends_with(" 1"),
+            "a completed one-shot collection is up, even with no sections: {up}"
+        );
+        assert!(rendered.contains("all_smi_build_info{"));
+
+        // Nothing beyond the baseline: the device exporters must still
+        // self-filter on a snapshot that collected nothing.
+        for line in rendered.lines().filter(|l| !l.starts_with('#')) {
+            assert!(
+                line.starts_with("all_smi_up{") || line.starts_with("all_smi_build_info{"),
+                "unexpected sample from an empty snapshot: {line}"
+            );
+        }
     }
 
     #[test]
