@@ -263,10 +263,9 @@ pub fn print_gpu_info<W: Write>(
         print_colored_text(stdout, &hostname_display, Color::White, None, None);
     }
     print_colored_text(stdout, " Util:", Color::Yellow, None, None);
-    let util_display = if info.utilization < 0.0 {
-        format!("{:>6}", "N/A")
-    } else {
-        format!("{:>5.1}%", info.utilization)
+    let util_display = match info.utilization_reading() {
+        Some(util) => format!("{util:>5.1}%"),
+        None => format!("{:>6}", "N/A"),
     };
     print_colored_text(stdout, &util_display, Color::White, None, None);
     print_colored_text(stdout, " VRAM:", Color::Blue, None, None);
@@ -292,9 +291,9 @@ pub fn print_gpu_info<W: Write>(
     let (temp_display, temp_color) =
         if info.detail.get("metrics_available") == Some(&"false".to_string()) {
             (format!("{:>7}", "N/A"), Color::White)
-        } else if info.temperature == 0 {
-            // SMC didn't yield a usable reading and we have no fallback — show N/A
-            // rather than a misleading "0 °C".
+        } else if info.temperature_reading().is_none() {
+            // No sensor yielded a usable reading and we have no fallback —
+            // show N/A rather than a misleading "0 °C".
             (format!("{:>7}", "N/A"), Color::White)
         } else {
             // Highlight the current temperature when it is within the
@@ -319,24 +318,16 @@ pub fn print_gpu_info<W: Write>(
     // ` Freq:     N/A` instead of letting the field — and every field after
     // it — vanish for the duration of that sample.
     print_colored_text(stdout, " Freq:", Color::Magenta, None, None);
-    if info.frequency == 0 {
-        print_colored_text(stdout, &format!("{:>7}", "N/A"), Color::White, None, None);
-    } else if info.frequency >= 1000 {
-        print_colored_text(
+    match info.frequency_reading() {
+        None => print_colored_text(stdout, &format!("{:>7}", "N/A"), Color::White, None, None),
+        Some(mhz) if mhz >= 1000 => print_colored_text(
             stdout,
-            &format!("{:.2}GHz", info.frequency as f64 / 1000.0),
+            &format!("{:.2}GHz", mhz as f64 / 1000.0),
             Color::White,
             None,
             None,
-        );
-    } else {
-        print_colored_text(
-            stdout,
-            &format!("{}MHz", info.frequency),
-            Color::White,
-            None,
-            None,
-        );
+        ),
+        Some(mhz) => print_colored_text(stdout, &format!("{mhz}MHz"), Color::White, None, None),
     }
 
     print_colored_text(stdout, " Pwr:", Color::Red, None, None);
@@ -344,20 +335,21 @@ pub fn print_gpu_info<W: Write>(
     // Check if power_limit_max is available and display as current/max
     // For Apple Silicon, info.power_consumption contains GPU power only
     let is_apple_silicon = info.name.contains("Apple") || info.name.contains("Metal");
-    let power_display = if info.power_consumption < 0.0 {
-        "N/A".to_string()
-    } else if is_apple_silicon {
-        // Apple Silicon GPU uses very little power, show 2 decimal places
-        // Use fixed width formatting to prevent trailing characters
-        format!("{:5.2}W", info.power_consumption)
-    } else if let Some(power_max_str) = info.detail.get("power_limit_max") {
-        if let Ok(power_max) = power_max_str.parse::<f64>() {
-            format!("{:.0}/{power_max:.0}W", info.power_consumption)
-        } else {
-            format!("{:.0}W", info.power_consumption)
+    let power_display = match info.power_consumption_reading() {
+        None => "N/A".to_string(),
+        Some(power) if is_apple_silicon => {
+            // Apple Silicon GPU uses very little power, show 2 decimal places
+            // Use fixed width formatting to prevent trailing characters
+            format!("{power:5.2}W")
         }
-    } else {
-        format!("{:.0}W", info.power_consumption)
+        Some(power) => match info
+            .detail
+            .get("power_limit_max")
+            .and_then(|s| s.parse::<f64>().ok())
+        {
+            Some(power_max) => format!("{power:.0}/{power_max:.0}W"),
+            None => format!("{power:.0}W"),
+        },
     };
 
     // Dynamically adjust width based on content, with minimum of 8 chars
@@ -446,14 +438,21 @@ pub fn print_gpu_info<W: Write>(
     // Print gauges on one line with proper spacing
     print_colored_text(stdout, "     ", Color::White, None, None); // 5 char left padding
 
-    // Util gauge
+    // Util gauge. An absent reading draws an empty bar labelled N/A rather
+    // than a full-looking zero bar: the row above already says N/A, and a
+    // 0%-filled gauge reads as "idle", which is the confusion this whole
+    // path exists to remove (issue #325).
+    let (util_fill, util_label) = match info.utilization_reading() {
+        Some(util) => (util, format!("{util:.1}%")),
+        None => (0.0, "N/A".to_string()),
+    };
     draw_bar(
         stdout,
         "Util",
-        info.utilization,
+        util_fill,
         100.0,
         gauge_width,
-        Some(format!("{:.1}%", info.utilization)),
+        Some(util_label),
     );
     print_colored_text(stdout, "  ", Color::White, None, None); // 2 space separator
 
@@ -475,9 +474,18 @@ pub fn print_gpu_info<W: Write>(
         let is_ultra = info.name.contains("Ultra");
         let max_ane_power = if is_ultra { 12.0 } else { 6.0 };
 
-        // Convert mW to W and cap at max
-        let ane_power_w = (info.ane_utilization / 1000.0).min(max_ane_power);
-        let ane_percent = (ane_power_w / max_ane_power) * 100.0;
+        // Convert mW to W and cap at max. Absent reading draws empty + N/A,
+        // matching the Util gauge above.
+        let (ane_percent, ane_label) = match info.ane_utilization_reading() {
+            Some(ane_mw) => {
+                let ane_power_w = (ane_mw / 1000.0).min(max_ane_power);
+                (
+                    (ane_power_w / max_ane_power) * 100.0,
+                    format!("{ane_power_w:.1}W"),
+                )
+            }
+            None => (0.0, "N/A".to_string()),
+        };
 
         draw_bar(
             stdout,
@@ -485,7 +493,7 @@ pub fn print_gpu_info<W: Write>(
             ane_percent,
             100.0,
             gauge_width,
-            Some(format!("{ane_power_w:.1}W")),
+            Some(ane_label),
         );
     }
 
@@ -802,6 +810,81 @@ mod tests {
         let renderer = GpuRenderer::new();
         // Just verify it can be created
         let _ = renderer;
+    }
+
+    /// Render a row and return the plain text, stripped of the ANSI colour
+    /// sequences `print_colored_text` emits, so assertions can look at what
+    /// an operator actually reads on screen.
+    fn render_row(info: &GpuInfo) -> String {
+        let mut buf: Vec<u8> = Vec::new();
+        print_gpu_info(&mut buf, 0, info, 120, 0, 0, false);
+        let raw = String::from_utf8_lossy(&buf).into_owned();
+        let mut out = String::with_capacity(raw.len());
+        let mut chars = raw.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == '\u{1b}' {
+                // Skip a CSI sequence: ESC '[' ... final byte in @..~
+                if chars.peek() == Some(&'[') {
+                    chars.next();
+                    for c in chars.by_ref() {
+                        if ('@'..='~').contains(&c) {
+                            break;
+                        }
+                    }
+                }
+                continue;
+            }
+            out.push(c);
+        }
+        out
+    }
+
+    /// Issue #325: with no reading, every live field reads N/A, and the Util
+    /// gauge is labelled N/A rather than drawn as a 0%-filled "idle" bar.
+    #[test]
+    fn absent_readings_render_as_na_not_zero() {
+        let mut gpu = make_gpu(0);
+        gpu.name = "Apple M2 Max GPU".to_string();
+        gpu.utilization = crate::device::types::GPU_METRIC_UNAVAILABLE;
+        gpu.power_consumption = crate::device::types::GPU_METRIC_UNAVAILABLE;
+        gpu.ane_utilization = crate::device::types::GPU_METRIC_UNAVAILABLE;
+        gpu.frequency = 0;
+
+        let rendered = render_row(&gpu);
+
+        assert!(rendered.contains("Util:   N/A"), "{rendered}");
+        assert!(rendered.contains("Temp:    N/A"), "{rendered}");
+        assert!(rendered.contains("Freq:    N/A"), "{rendered}");
+        assert!(rendered.contains("Pwr:     N/A"), "{rendered}");
+        // Neither gauge may claim a value.
+        assert!(
+            !rendered.contains("0.0%"),
+            "util gauge shows 0%: {rendered}"
+        );
+        assert!(!rendered.contains("0.0W"), "ANE gauge shows 0W: {rendered}");
+    }
+
+    /// The complement: a genuine zero reading renders as a zero, so N/A
+    /// unambiguously means "no data" on screen too.
+    #[test]
+    fn zero_readings_render_as_zero() {
+        let mut gpu = make_gpu(45);
+        gpu.name = "Apple M2 Max GPU".to_string();
+        gpu.utilization = 0.0;
+        gpu.power_consumption = 0.0;
+        gpu.ane_utilization = 0.0;
+        gpu.frequency = 338;
+
+        let rendered = render_row(&gpu);
+
+        assert!(rendered.contains("Util:  0.0%"), "{rendered}");
+        assert!(rendered.contains("45°C"), "{rendered}");
+        assert!(rendered.contains("338MHz"), "{rendered}");
+        assert!(rendered.contains("0.00W"), "{rendered}");
+        assert!(
+            !rendered.contains("N/A"),
+            "nothing should be N/A: {rendered}"
+        );
     }
 
     // --- thermal proximity classification ---

@@ -39,29 +39,20 @@ impl MetricsAggregator {
             .map(|gpu| gpu.used_memory as f64 / (1024.0 * 1024.0 * 1024.0))
             .sum();
 
-        let total_power_watts = gpu_info.iter().map(|gpu| gpu.power_consumption).sum();
+        // Every statistic below is computed over the GPUs that actually
+        // reported the field, not over `total_gpus`. Dividing a partial sum
+        // by the full device count silently halves the mean when one card
+        // stops reporting (issue #325).
+        let total_power_watts = super::gpu_readings::total_power_watts(gpu_info);
+        let avg_utilization = super::gpu_readings::mean_utilization(gpu_info);
+        let avg_temperature = super::gpu_readings::mean_temperature(gpu_info);
+        let temp_std_dev = super::gpu_readings::temperature_std_dev(gpu_info);
 
-        let avg_utilization =
-            gpu_info.iter().map(|gpu| gpu.utilization).sum::<f64>() / total_gpus as f64;
-
-        let avg_temperature = gpu_info
+        let reporting_power = gpu_info
             .iter()
-            .map(|gpu| gpu.temperature as f64)
-            .sum::<f64>()
-            / total_gpus as f64;
-
-        // Calculate temperature standard deviation
-        let temp_variance = gpu_info
-            .iter()
-            .map(|gpu| {
-                let diff = gpu.temperature as f64 - avg_temperature;
-                diff * diff
-            })
-            .sum::<f64>()
-            / (total_gpus - 1) as f64;
-        let temp_std_dev = temp_variance.sqrt();
-
-        let avg_power = total_power_watts / total_gpus as f64;
+            .filter(|gpu| gpu.power_consumption_reading().is_some())
+            .count();
+        let avg_power = (reporting_power > 0).then(|| total_power_watts / reporting_power as f64);
 
         GpuClusterMetrics {
             total_gpus,
@@ -236,10 +227,16 @@ pub struct GpuClusterMetrics {
     pub total_memory_gb: f64,
     pub used_memory_gb: f64,
     pub total_power_watts: f64,
-    pub avg_utilization: f64,
-    pub avg_temperature: f64,
-    pub temp_std_dev: f64,
-    pub avg_power: f64,
+    /// `None` when no GPU in the cluster reported a utilization reading.
+    /// Distinct from `Some(0.0)`, which is a cluster of genuinely idle GPUs.
+    pub avg_utilization: Option<f64>,
+    /// `None` when no GPU reported a temperature.
+    pub avg_temperature: Option<f64>,
+    /// `None` when fewer than two GPUs reported a temperature, where the
+    /// sample standard deviation is undefined.
+    pub temp_std_dev: Option<f64>,
+    /// Mean power over the GPUs that reported a rail, `None` when none did.
+    pub avg_power: Option<f64>,
 }
 
 /// Aggregated CPU metrics for the cluster
@@ -319,9 +316,9 @@ mod tests {
         assert_eq!(metrics.total_memory_gb, 32.0);
         assert_eq!(metrics.used_memory_gb, 16.0);
         assert_eq!(metrics.total_power_watts, 500.0);
-        assert_eq!(metrics.avg_utilization, 75.0);
-        assert_eq!(metrics.avg_temperature, 80.0);
-        assert_eq!(metrics.avg_power, 250.0);
+        assert_eq!(metrics.avg_utilization, Some(75.0));
+        assert_eq!(metrics.avg_temperature, Some(80.0));
+        assert_eq!(metrics.avg_power, Some(250.0));
     }
 
     #[test]

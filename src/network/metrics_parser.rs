@@ -18,6 +18,7 @@ use crate::parsing::common::sanitize_label_value;
 use chrono::Local;
 use regex::Regex;
 
+use crate::device::types::GPU_METRIC_UNAVAILABLE;
 use crate::device::{
     AppleSiliconCpuInfo, CpuInfo, CpuPlatformType, GpmMetrics, GpuInfo, MemoryInfo, MigGpuInfo,
     MigInstanceInfo, NvLinkRemoteDevice, NvLinkRemoteType, VgpuHostInfo, VgpuInfo,
@@ -467,15 +468,23 @@ impl MetricsParser {
                 host_id: host.to_string(),      // Host identifier (e.g., "10.82.128.41:9090")
                 hostname: crate::get_label_or_default!(labels, "instance", host), // DNS hostname from instance label
                 instance: crate::get_label_or_default!(labels, "instance", host),
-                utilization: 0.0,
-                ane_utilization: 0.0,
+                // Start every live field at "no reading" rather than at
+                // zero. A scrape only overwrites the fields whose series it
+                // actually contains, so a zero default silently re-fabricated
+                // the exact value the exporter went out of its way to omit:
+                // a remote macOS node with no IOReport would render "0.0%" in
+                // the local TUI instead of N/A (issue #325). Exporters that
+                // do emit the series overwrite these below, so nothing
+                // changes for a node that reports normally.
+                utilization: GPU_METRIC_UNAVAILABLE,
+                ane_utilization: GPU_METRIC_UNAVAILABLE,
                 dla_utilization: None,
                 tensorcore_utilization: None,
                 temperature: 0,
                 used_memory: 0,
                 total_memory: 0,
                 frequency: 0,
-                power_consumption: 0.0,
+                power_consumption: GPU_METRIC_UNAVAILABLE,
                 gpu_core_count: None,
                 // Populated by the new threshold / pstate metric handlers
                 // below when the scraped exposition contains them. Remote
@@ -536,7 +545,11 @@ impl MetricsParser {
                         "firmware",
                         "serial_number",
                         "pci_address",
-                        "pci_device"
+                        "pci_device",
+                        // Apple Silicon: why the live series are missing.
+                        // Carried on the identity series so a remote viewer
+                        // sees the reason and not just the absence (#325).
+                        "native_metrics"
                     ]
                 );
             }
@@ -1592,6 +1605,60 @@ all_smi_ane_utilization{gpu="NVIDIA H200 141GB HBM3", instance="node-0058", uuid
         assert_eq!(gpu.temperature, 65);
         assert_eq!(gpu.power_consumption, 400.5);
         assert_eq!(gpu.ane_utilization, 15.2);
+    }
+
+    /// Issue #325: a remote macOS node with no IOReport omits its GPU value
+    /// series. The viewing side must keep them absent rather than defaulting
+    /// them to zero, or the fix only works locally.
+    #[test]
+    fn test_omitted_gpu_series_stay_absent_after_scrape() {
+        let parser = create_test_parser();
+        let re = create_test_regex();
+        let host = "127.0.0.1:10058";
+
+        // Exactly what the degraded exporter renders: identity plus memory,
+        // no utilization / temperature / power / frequency / ANE.
+        let test_data = r#"
+all_smi_gpu_memory_used_bytes{gpu="Apple M2 Max GPU", instance="mac-1", gpu_uuid="AppleSiliconGPU", gpu_index="0"} 8589934592
+all_smi_gpu_memory_total_bytes{gpu="Apple M2 Max GPU", instance="mac-1", gpu_uuid="AppleSiliconGPU", gpu_index="0"} 34359738368
+all_smi_gpu_info{gpu="Apple M2 Max GPU", instance="mac-1", gpu_uuid="AppleSiliconGPU", gpu_index="0", type="GPU", architecture="Apple Silicon", native_metrics="unavailable"} 1
+"#;
+
+        let parsed = parser.parse_metrics(test_data, host, &re);
+        assert_eq!(parsed.gpu_info.len(), 1);
+        let gpu = &parsed.gpu_info[0];
+
+        assert_eq!(gpu.utilization_reading(), None);
+        assert_eq!(gpu.power_consumption_reading(), None);
+        assert_eq!(gpu.temperature_reading(), None);
+        assert_eq!(gpu.frequency_reading(), None);
+        assert_eq!(gpu.ane_utilization_reading(), None);
+
+        // Memory and the reason label do survive.
+        assert_eq!(gpu.total_memory, 34359738368);
+        assert_eq!(
+            gpu.detail.get("native_metrics").map(String::as_str),
+            Some("unavailable")
+        );
+    }
+
+    /// A remote node that reports a genuine zero must still land as a zero on
+    /// the viewing side, so the two cases stay distinguishable end to end.
+    #[test]
+    fn test_zero_gpu_series_survives_scrape_as_a_reading() {
+        let parser = create_test_parser();
+        let re = create_test_regex();
+        let host = "127.0.0.1:10058";
+
+        let test_data = r#"
+all_smi_gpu_utilization{gpu="Apple M2 Max GPU", instance="mac-1", gpu_uuid="AppleSiliconGPU", gpu_index="0"} 0
+all_smi_gpu_power_consumption_watts{gpu="Apple M2 Max GPU", instance="mac-1", gpu_uuid="AppleSiliconGPU", gpu_index="0"} 0
+"#;
+
+        let parsed = parser.parse_metrics(test_data, host, &re);
+        let gpu = &parsed.gpu_info[0];
+        assert_eq!(gpu.utilization_reading(), Some(0.0));
+        assert_eq!(gpu.power_consumption_reading(), Some(0.0));
     }
 
     #[test]

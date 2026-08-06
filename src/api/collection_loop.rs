@@ -97,8 +97,8 @@ pub async fn run_collection_loop(
             .map(|mut ci| {
                 // Aggregate GPU power into chassis total if not already set.
                 if ci.total_power_watts.is_none() {
-                    let total_gpu_power: f64 =
-                        all_gpu_info.iter().map(|g| g.power_consumption).sum();
+                    let total_gpu_power =
+                        crate::metrics::gpu_readings::total_power_watts(&all_gpu_info);
                     if total_gpu_power > 0.0 {
                         ci.total_power_watts = Some(total_gpu_power);
                     }
@@ -178,11 +178,17 @@ pub(crate) fn integrate_power_samples(state: &mut AppState) {
     // `state.energy`.
     let mut samples: Vec<(EnergyKey, f64)> =
         Vec::with_capacity(state.gpu_info.len() + state.cpu_info.len() + state.chassis_info.len());
+    // Devices with no power reading contribute no sample: the integrator's
+    // "has this device ever been seen?" check is what drives the exporter's
+    // omit-on-no-data behavior, and feeding it the unavailable sentinel would
+    // accumulate negative joules (issue #325).
     for gpu in &state.gpu_info {
-        samples.push((
-            EnergyKey::gpu(gpu.hostname.clone(), gpu.uuid.clone()),
-            gpu.power_consumption,
-        ));
+        if let Some(watts) = gpu.power_consumption_reading() {
+            samples.push((
+                EnergyKey::gpu(gpu.hostname.clone(), gpu.uuid.clone()),
+                watts,
+            ));
+        }
     }
     for cpu in &state.cpu_info {
         if let Some(power) = cpu.power_consumption {

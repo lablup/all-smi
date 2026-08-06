@@ -28,6 +28,7 @@ use crate::device::macos_native::{
     NativeMetricsManager, get_native_metrics_manager, initialize_native_metrics_manager,
 };
 use crate::device::readers::common_cache::{DetailBuilder, DeviceStaticInfo};
+use crate::device::types::GPU_METRIC_UNAVAILABLE;
 use crate::device::{GpuInfo, GpuReader, ProcessInfo};
 use crate::utils::get_hostname;
 use chrono::Local;
@@ -140,119 +141,39 @@ impl GpuReader for AppleSiliconNativeGpuReader {
         // Ensure GPU info is initialized (happens on first call)
         self.ensure_initialized();
 
-        // Try to get metrics from native manager
-        let (metrics, combined_power_mw, cpu_temp, gpu_temp) =
-            if let Some(manager) = self.native_manager.get() {
-                match manager.collect_once() {
-                    Ok(data) => {
-                        let combined_power = data.combined_power_mw;
-                        (
-                            GpuMetrics {
-                                utilization: Some(data.gpu_active_residency),
-                                ane_utilization: Some(data.ane_power_mw),
-                                frequency: Some(data.gpu_frequency),
-                                power_consumption: Some(data.gpu_power_mw / 1000.0),
-                                thermal_pressure_level: data.thermal_pressure_level,
-                            },
-                            Some(combined_power),
-                            data.cpu_temperature,
-                            data.gpu_temperature,
-                        )
-                    }
-                    Err(_) => (GpuMetrics::default(), None, None, None),
-                }
-            } else {
-                (GpuMetrics::default(), None, None, None)
-            };
+        // `None` is the degraded path. Either the native metrics manager
+        // never initialized (no IOReport on this host: a VM, a hardened
+        // sandbox, a hosted macOS runner) and the process-wide singleton is
+        // permanently empty, or a single collection failed. Both mean the
+        // same thing to everything downstream: this reader has no live
+        // numbers to report this cycle.
+        let sample = self
+            .native_manager
+            .get()
+            .and_then(|manager| manager.collect_once().ok())
+            .map(|data| NativeSample {
+                utilization: data.gpu_active_residency,
+                ane_power_mw: data.ane_power_mw,
+                frequency: data.gpu_frequency,
+                power_watts: data.gpu_power_mw / 1000.0,
+                thermal_pressure_level: data.thermal_pressure_level,
+                combined_power_mw: data.combined_power_mw,
+                cpu_temperature: data.cpu_temperature,
+                gpu_temperature: data.gpu_temperature,
+            });
 
-        // Get cached static info
-        let static_info = match self.static_info.get() {
-            Some(info) => info,
-            None => {
-                // Fallback if initialization failed
-                return vec![];
-            }
+        // Static identity comes from sysctl/system_profiler, not from
+        // IOReport, so it survives the degraded path. Only a failure to
+        // identify the GPU at all suppresses the row.
+        let Some(static_info) = self.static_info.get() else {
+            return vec![];
         };
-        let apple_info = self.apple_info.get();
 
-        let mut detail = static_info.detail.clone();
-        detail.insert("architecture".to_string(), "Apple Silicon".to_string());
-        detail.insert("api".to_string(), "Native (IOReport/SMC)".to_string());
-
-        if let Some(ref thermal_level) = metrics.thermal_pressure_level {
-            detail.insert("thermal_pressure".to_string(), thermal_level.clone());
-        }
-
-        // Add combined power (CPU + GPU + ANE) for metrics export
-        if let Some(combined_power) = combined_power_mw {
-            detail.insert("combined_power_mw".to_string(), combined_power.to_string());
-        }
-
-        // Add temperature metrics from SMC
-        if let Some(cpu_t) = cpu_temp {
-            detail.insert("cpu_temperature".to_string(), format!("{cpu_t:.1}"));
-        }
-        if let Some(gpu_t) = gpu_temp {
-            detail.insert("gpu_temperature".to_string(), format!("{gpu_t:.1}"));
-        }
-
-        // Add unified AI acceleration library labels
-        detail.insert("lib_name".to_string(), "Metal".to_string());
-        if let Some(driver_ver) = static_info.detail.get("driver_version")
-            && driver_ver != "Unknown"
-        {
-            let lib_ver = driver_ver
-                .strip_prefix("Metal ")
-                .unwrap_or(driver_ver)
-                .to_string();
-            detail.insert("lib_version".to_string(), lib_ver);
-        }
-
-        // GPU temperature: Apple Silicon's per-die GPU thermistor keys (Tg*) are
-        // not always exposed reliably across chip generations. When SMC didn't
-        // return a usable value, fall back to the CPU die temperature — CPU and
-        // GPU share the same SoC package so the readings are tightly correlated
-        // and this is far more meaningful than reporting 0 °C.
-        let temperature = gpu_temp.or(cpu_temp).map(|t| t.round() as u32).unwrap_or(0);
-
-        vec![GpuInfo {
-            uuid: static_info
-                .uuid
-                .clone()
-                .unwrap_or_else(|| "AppleSiliconGPU".to_string()),
-            time: Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
-            name: static_info.name.clone(),
-            device_type: "GPU".to_string(),
-            host_id: get_hostname(),
-            hostname: get_hostname(),
-            instance: get_hostname(),
-            utilization: metrics.utilization.unwrap_or(0.0),
-            ane_utilization: metrics.ane_utilization.unwrap_or(0.0),
-            dla_utilization: None,
-            tensorcore_utilization: None,
-            temperature,
-            used_memory: get_used_memory(),
-            total_memory: get_total_memory(),
-            frequency: metrics.frequency.unwrap_or(0),
-            power_consumption: metrics.power_consumption.unwrap_or(0.0),
-            gpu_core_count: apple_info.and_then(|i| i.gpu_core_count),
-            // Apple Silicon reports thermal pressure as a qualitative enum
-            // (Nominal / Fair / Serious / Critical) via the `detail` map, not
-            // as NVML-style numeric thresholds. Leave these fields empty.
-            // NVIDIA-specific hardware details (NUMA, GSP firmware, NvLink,
-            // GPM) do not apply to Apple Silicon either.
-            temperature_threshold_slowdown: None,
-            temperature_threshold_shutdown: None,
-            temperature_threshold_max_operating: None,
-            temperature_threshold_acoustic: None,
-            performance_state: None,
-            numa_node_id: None,
-            gsp_firmware_mode: None,
-            gsp_firmware_version: None,
-            nvlink_remote_devices: Vec::new(),
-            gpm_metrics: None,
-            detail,
-        }]
+        vec![build_gpu_info(
+            static_info,
+            self.apple_info.get(),
+            sample.as_ref(),
+        )]
     }
 
     fn get_process_info(&self) -> Vec<ProcessInfo> {
@@ -262,13 +183,140 @@ impl GpuReader for AppleSiliconNativeGpuReader {
     }
 }
 
-#[derive(Default)]
-struct GpuMetrics {
-    utilization: Option<f64>,
-    ane_utilization: Option<f64>,
-    frequency: Option<u32>,
-    power_consumption: Option<f64>,
+/// One successful collection from the native metrics manager.
+///
+/// Every field here is unconditionally present on `NativeMetricsData`, so an
+/// `Option<NativeSample>` carries exactly one bit of information: whether the
+/// native source produced anything at all. The two `Option` members below are
+/// SMC sensors that can individually be missing while IOReport is healthy.
+struct NativeSample {
+    utilization: f64,
+    ane_power_mw: f64,
+    frequency: u32,
+    power_watts: f64,
     thermal_pressure_level: Option<String>,
+    combined_power_mw: f64,
+    cpu_temperature: Option<f64>,
+    gpu_temperature: Option<f64>,
+}
+
+/// Assemble the `GpuInfo` row from cached static identity plus an optional
+/// live sample.
+///
+/// Split out of [`AppleSiliconNativeGpuReader::get_gpu_info`] so the
+/// manager-unavailable path is reachable from a test without needing a host
+/// that lacks IOReport: passing `sample: None` drives exactly the branch a
+/// macOS VM takes. See the `degraded_*` tests at the bottom of this file.
+///
+/// When `sample` is `None` the live fields are filled with this crate's
+/// "no reading" encodings ([`GPU_METRIC_UNAVAILABLE`] for the `f64` fields,
+/// `0` for the `u32` fields) rather than with `0.0`, so that neither the
+/// Prometheus exporter nor the TUI can mistake a dead IOReport subscription
+/// for an idle GPU. The policy is documented on
+/// `crate::device::macos_native::manager`.
+fn build_gpu_info(
+    static_info: &DeviceStaticInfo,
+    apple_info: Option<&AppleSiliconInfo>,
+    sample: Option<&NativeSample>,
+) -> GpuInfo {
+    let mut detail = static_info.detail.clone();
+    detail.insert("architecture".to_string(), "Apple Silicon".to_string());
+    detail.insert("api".to_string(), "Native (IOReport/SMC)".to_string());
+
+    // Explicit, queryable reason for the omitted series. The value series
+    // disappear (Prometheus' own convention for "no data"), but the identity
+    // series `all_smi_gpu_info` is still emitted and now carries why, so a
+    // consumer can tell "this Mac has no IOReport" apart from "all-smi is not
+    // running" without inspecting the absence pattern.
+    detail.insert(
+        "native_metrics".to_string(),
+        if sample.is_some() {
+            "available".to_string()
+        } else {
+            "unavailable".to_string()
+        },
+    );
+
+    if let Some(thermal_level) = sample.and_then(|s| s.thermal_pressure_level.as_ref()) {
+        detail.insert("thermal_pressure".to_string(), thermal_level.clone());
+    }
+
+    // Add combined power (CPU + GPU + ANE) for metrics export
+    if let Some(combined_power) = sample.map(|s| s.combined_power_mw) {
+        detail.insert("combined_power_mw".to_string(), combined_power.to_string());
+    }
+
+    // Add temperature metrics from SMC
+    let cpu_temp = sample.and_then(|s| s.cpu_temperature);
+    let gpu_temp = sample.and_then(|s| s.gpu_temperature);
+    if let Some(cpu_t) = cpu_temp {
+        detail.insert("cpu_temperature".to_string(), format!("{cpu_t:.1}"));
+    }
+    if let Some(gpu_t) = gpu_temp {
+        detail.insert("gpu_temperature".to_string(), format!("{gpu_t:.1}"));
+    }
+
+    // Add unified AI acceleration library labels
+    detail.insert("lib_name".to_string(), "Metal".to_string());
+    if let Some(driver_ver) = static_info.detail.get("driver_version")
+        && driver_ver != "Unknown"
+    {
+        let lib_ver = driver_ver
+            .strip_prefix("Metal ")
+            .unwrap_or(driver_ver)
+            .to_string();
+        detail.insert("lib_version".to_string(), lib_ver);
+    }
+
+    // GPU temperature: Apple Silicon's per-die GPU thermistor keys (Tg*) are
+    // not always exposed reliably across chip generations. When SMC didn't
+    // return a usable value, fall back to the CPU die temperature — CPU and
+    // GPU share the same SoC package so the readings are tightly correlated
+    // and this is far more meaningful than reporting 0 °C. When neither
+    // sensor answered, `0` is the struct's "unknown" encoding for
+    // `temperature` (see `GpuInfo::temperature_reading`), not a reading.
+    let temperature = gpu_temp.or(cpu_temp).map(|t| t.round() as u32).unwrap_or(0);
+
+    GpuInfo {
+        uuid: static_info
+            .uuid
+            .clone()
+            .unwrap_or_else(|| "AppleSiliconGPU".to_string()),
+        time: Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+        name: static_info.name.clone(),
+        device_type: "GPU".to_string(),
+        host_id: get_hostname(),
+        hostname: get_hostname(),
+        instance: get_hostname(),
+        utilization: sample.map_or(GPU_METRIC_UNAVAILABLE, |s| s.utilization),
+        ane_utilization: sample.map_or(GPU_METRIC_UNAVAILABLE, |s| s.ane_power_mw),
+        dla_utilization: None,
+        tensorcore_utilization: None,
+        temperature,
+        // Unified memory is read from sysinfo, not from IOReport, so these
+        // stay valid on the degraded path and the row keeps reporting them.
+        used_memory: get_used_memory(),
+        total_memory: get_total_memory(),
+        frequency: sample.map_or(0, |s| s.frequency),
+        power_consumption: sample.map_or(GPU_METRIC_UNAVAILABLE, |s| s.power_watts),
+        gpu_core_count: apple_info.and_then(|i| i.gpu_core_count),
+        // Apple Silicon reports thermal pressure as a qualitative enum
+        // (Nominal / Fair / Serious / Critical) via the `detail` map, not
+        // as NVML-style numeric thresholds. Leave these fields empty.
+        // NVIDIA-specific hardware details (NUMA, GSP firmware, NvLink,
+        // GPM) do not apply to Apple Silicon either.
+        temperature_threshold_slowdown: None,
+        temperature_threshold_shutdown: None,
+        temperature_threshold_max_operating: None,
+        temperature_threshold_acoustic: None,
+        performance_state: None,
+        numa_node_id: None,
+        gsp_firmware_mode: None,
+        gsp_firmware_version: None,
+        nvlink_remote_devices: Vec::new(),
+        gpm_metrics: None,
+        detail,
+    }
 }
 
 fn get_gpu_name_and_version() -> (String, Option<String>) {
@@ -412,6 +460,184 @@ fn get_used_memory() -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    fn static_info() -> DeviceStaticInfo {
+        DeviceStaticInfo::with_details(
+            "Apple M2 Max GPU".to_string(),
+            None,
+            DetailBuilder::new()
+                .insert("gpu_type", "Integrated")
+                .insert("driver_version", "Metal 3")
+                .build(),
+        )
+    }
+
+    /// A live sample whose live values all happen to be zero: an idle GPU
+    /// with the ANE parked. This is the reading that must stay a reading.
+    fn idle_sample() -> NativeSample {
+        NativeSample {
+            utilization: 0.0,
+            ane_power_mw: 0.0,
+            frequency: 338,
+            power_watts: 0.0,
+            thermal_pressure_level: Some("Nominal".to_string()),
+            combined_power_mw: 1200.0,
+            cpu_temperature: Some(48.6),
+            gpu_temperature: Some(46.2),
+        }
+    }
+
+    /// The macOS-VM case from issue #325: `get_native_metrics_manager()`
+    /// returned `None`, so no sample exists. Every live field must read as
+    /// absent, not as zero.
+    #[test]
+    fn degraded_path_reports_absence_not_zero() {
+        let info = build_gpu_info(&static_info(), None, None);
+
+        assert_eq!(
+            info.utilization_reading(),
+            None,
+            "utilization must be absent"
+        );
+        assert_eq!(
+            info.power_consumption_reading(),
+            None,
+            "power must be absent"
+        );
+        assert_eq!(
+            info.temperature_reading(),
+            None,
+            "temperature must be absent"
+        );
+        assert_eq!(info.frequency_reading(), None, "frequency must be absent");
+        assert_eq!(info.ane_utilization_reading(), None, "ANE must be absent");
+    }
+
+    /// End-to-end across the seam this issue is actually about: a row built
+    /// by the real reader on the degraded path, rendered by the real
+    /// Prometheus exporter. This is what a scrape of a macOS host with no
+    /// IOReport now looks like.
+    #[test]
+    fn degraded_row_renders_no_gpu_value_series() {
+        use crate::api::metrics::{MetricExporter, gpu::GpuMetricExporter};
+
+        let rendered =
+            GpuMetricExporter::new(&[build_gpu_info(&static_info(), None, None)]).export_metrics();
+
+        for family in [
+            "all_smi_gpu_utilization{",
+            "all_smi_gpu_power_consumption_watts{",
+            "all_smi_gpu_temperature_celsius{",
+            "all_smi_gpu_frequency_mhz{",
+            "all_smi_ane_utilization{",
+            "all_smi_ane_power_watts{",
+        ] {
+            assert!(!rendered.contains(family), "{family} leaked:\n{rendered}");
+        }
+        assert!(rendered.contains("native_metrics=\"unavailable\""));
+        assert!(rendered.contains("all_smi_gpu_memory_total_bytes{"));
+    }
+
+    /// Same seam, healthy path: every family is back, including the zeros.
+    #[test]
+    fn healthy_row_renders_every_value_series() {
+        use crate::api::metrics::{MetricExporter, gpu::GpuMetricExporter};
+
+        let rendered =
+            GpuMetricExporter::new(&[build_gpu_info(&static_info(), None, Some(&idle_sample()))])
+                .export_metrics();
+
+        for family in [
+            "all_smi_gpu_utilization{",
+            "all_smi_gpu_power_consumption_watts{",
+            "all_smi_gpu_temperature_celsius{",
+            "all_smi_gpu_frequency_mhz{",
+            "all_smi_ane_utilization{",
+            "all_smi_ane_power_watts{",
+        ] {
+            assert!(rendered.contains(family), "{family} missing:\n{rendered}");
+        }
+        assert!(rendered.contains("native_metrics=\"available\""));
+    }
+
+    /// The row itself must survive: the device exists, its identity and its
+    /// unified-memory figures come from sysctl/sysinfo and are unaffected by
+    /// IOReport. Dropping the whole `GpuInfo` would hide a real GPU.
+    #[test]
+    fn degraded_path_keeps_identity_and_memory() {
+        let info = build_gpu_info(
+            &static_info(),
+            Some(&AppleSiliconInfo {
+                gpu_core_count: Some(38),
+            }),
+            None,
+        );
+
+        assert_eq!(info.name, "Apple M2 Max GPU");
+        assert_eq!(info.device_type, "GPU");
+        assert_eq!(info.gpu_core_count, Some(38));
+        assert!(info.total_memory > 0, "unified memory total must survive");
+        assert_eq!(
+            info.detail.get("native_metrics").map(String::as_str),
+            Some("unavailable"),
+            "the identity series must carry the reason for the omission"
+        );
+        // Values sourced from the dead subscription must not appear at all,
+        // not even as a zero-valued detail label.
+        assert!(!info.detail.contains_key("combined_power_mw"));
+        assert!(!info.detail.contains_key("thermal_pressure"));
+        assert!(!info.detail.contains_key("cpu_temperature"));
+    }
+
+    /// The other half of the contract: a genuine zero from a healthy
+    /// subscription stays a zero and is distinguishable from absence.
+    #[test]
+    fn idle_gpu_reports_zero_as_a_reading() {
+        let info = build_gpu_info(&static_info(), None, Some(&idle_sample()));
+
+        assert_eq!(info.utilization_reading(), Some(0.0));
+        assert_eq!(info.power_consumption_reading(), Some(0.0));
+        assert_eq!(info.ane_utilization_reading(), Some(0.0));
+        assert_eq!(info.frequency_reading(), Some(338));
+        assert_eq!(info.temperature_reading(), Some(46));
+        assert_eq!(
+            info.detail.get("native_metrics").map(String::as_str),
+            Some("available")
+        );
+    }
+
+    /// IOReport healthy but the SMC die sensors missing: temperature alone
+    /// degrades, everything else keeps reporting. Per-sensor, not per-source.
+    #[test]
+    fn missing_smc_sensors_degrade_only_temperature() {
+        let sample = NativeSample {
+            cpu_temperature: None,
+            gpu_temperature: None,
+            utilization: 42.5,
+            ..idle_sample()
+        };
+        let info = build_gpu_info(&static_info(), None, Some(&sample));
+
+        assert_eq!(info.temperature_reading(), None);
+        assert_eq!(info.utilization_reading(), Some(42.5));
+        assert_eq!(info.power_consumption_reading(), Some(0.0));
+    }
+
+    /// The GPU thermistor is preferred, the CPU die temperature is the
+    /// documented fallback. Locking this in so the absence work above cannot
+    /// quietly remove it.
+    #[test]
+    fn cpu_die_temperature_is_the_documented_fallback() {
+        let sample = NativeSample {
+            gpu_temperature: None,
+            cpu_temperature: Some(51.4),
+            ..idle_sample()
+        };
+        let info = build_gpu_info(&static_info(), None, Some(&sample));
+        assert_eq!(info.temperature_reading(), Some(51));
+    }
+
     #[test]
     fn test_gpu_core_count_parsing() {
         // Test known chip patterns

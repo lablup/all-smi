@@ -36,6 +36,58 @@
 //!     println!("CPU Power: {:.2}W", data.cpu_power_mw / 1000.0);
 //! }
 //! ```
+//!
+//! ## Degradation policy when this manager is unavailable (issue #325)
+//!
+//! [`NativeMetricsManager::new`] fails whenever `IOReport::new()` fails,
+//! which is the normal state on a macOS host with no IOReport: a VM, a
+//! hardened sandbox, a hosted CI runner. When it does,
+//! [`initialize_native_metrics_manager`] leaves the singleton empty and
+//! [`get_native_metrics_manager`] returns `None` for the rest of the
+//! process's life. There is no retry and no partial mode.
+//!
+//! **Every reader that depends on this manager must signal absence rather
+//! than substitute a value.** Concretely, the four macOS readers:
+//!
+//! | Reader | Behavior with no manager |
+//! |---|---|
+//! | Memory (`device::memory_macos`) | Unaffected. Reads `sysinfo`, never touches this manager, has no failure path. |
+//! | CPU (`device::cpu_macos`) | Partial. `utilization` still comes from `sysinfo`; the fields this manager feeds (`temperature`, `power_consumption`, per-cluster frequencies) are `Option` and become `None`. Base/max frequency falls back to `sysctl`. |
+//! | Chassis (`device::readers::chassis::apple_silicon_native`) | Absent. `get_chassis_info` returns `None`, so no chassis series is emitted at all. Every field it reports comes from this manager, so there is nothing left to report. |
+//! | GPU (`device::readers::apple_silicon_native`) | Partial, like CPU. The row is still emitted, because identity (`sysctl`) and unified memory (`sysinfo`) remain valid. The live fields carry the "no reading" encoding described below. |
+//!
+//! The rule that unifies them: **a reader emits a row when it can still say
+//! something true about the device, and marks the individual fields it could
+//! not source as absent. It never substitutes `0`.** Zero is a legitimate
+//! reading for an idle GPU or a parked ANE, so a consumer that sees `0` must
+//! be able to trust it.
+//!
+//! `GpuInfo`'s live fields are not `Option`, so absence is encoded in-band
+//! and read back through the accessors on
+//! [`crate::device::GpuInfo`]: `utilization_reading`,
+//! `ane_utilization_reading`, `power_consumption_reading`,
+//! `temperature_reading`, `frequency_reading`. See
+//! [`crate::device::types::GPU_METRIC_UNAVAILABLE`] for why that encoding
+//! exists rather than `Option<f64>`.
+//!
+//! That in-band encoding is an internal detail and must never reach a
+//! consumer. It is translated at each boundary:
+//!
+//! * **Prometheus** (`api::metrics::gpu`): the series is omitted. This is
+//!   Prometheus' own convention for "no data" and the same thing this
+//!   exporter already does for `all_smi_gpu_performance_state` and the
+//!   thermal thresholds. `all_smi_gpu_info` is still emitted, carrying a
+//!   `native_metrics="unavailable"` label, so the device stays discoverable
+//!   and the reason is queryable. `all_smi_up` and `all_smi_build_info`
+//!   (issue #324) mean the body is never empty either way.
+//! * **TUI** (`ui::renderers::gpu_renderer`): the field renders `N/A` and
+//!   its gauge draws empty with an `N/A` label, never a 0%-filled bar.
+//! * **Remote scrape** (`network::metrics_parser`): a `GpuInfo` starts with
+//!   every live field absent and only the series present in the scrape
+//!   overwrite it, so omission survives the round trip instead of being
+//!   re-zeroed on the viewing side.
+//! * **Aggregation** (`metrics::gpu_readings`): absent fields are excluded
+//!   from means and sums rather than folded in as zero.
 
 use super::ioreport::{IOReport, IOReportMetrics};
 use super::metrics::NativeMetricsData;

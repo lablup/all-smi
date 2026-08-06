@@ -338,11 +338,7 @@ fn build_rows(state: &AppState, is_apple: bool, has_ane: bool, has_npu: bool) ->
     // 4. ANE (Apple Silicon -- always shown regardless of current power)
     if has_ane {
         let ane_w = state.ane_power_history.back().copied().unwrap_or_else(|| {
-            state
-                .gpu_info
-                .first()
-                .map(|g| g.ane_utilization / 1000.0)
-                .unwrap_or(0.0)
+            crate::metrics::gpu_readings::first_ane_power_watts(&state.gpu_info).unwrap_or(0.0)
         });
         let ane_history: Vec<f64> = if state.ane_power_history.is_empty() {
             vec![ane_w]
@@ -649,7 +645,7 @@ fn package_power(state: &AppState, is_apple: bool) -> f64 {
         power_mw / 1000.0
     } else {
         // NVIDIA / other: sum GPU board power
-        state.gpu_info.iter().map(|g| g.power_consumption).sum()
+        crate::metrics::gpu_readings::total_power_watts(&state.gpu_info)
     }
 }
 

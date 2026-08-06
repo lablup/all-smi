@@ -18,6 +18,24 @@ use crate::device::{
 use std::collections::HashSet;
 
 pub trait GpuReader: Send + Sync {
+    /// Enumerate the GPUs/NPUs this reader can see.
+    ///
+    /// # Reporting absence (issue #325)
+    ///
+    /// An implementation MUST NOT substitute `0` for a value it could not
+    /// source. `0` is a legitimate reading (an idle GPU, a parked ANE, a
+    /// board drawing no measurable power), so a consumer has to be able to
+    /// trust it. Mark the field absent instead, using the encoding described
+    /// on [`crate::device::types::GPU_METRIC_UNAVAILABLE`], and read values
+    /// back through `GpuInfo::utilization_reading` and its siblings rather
+    /// than touching the raw fields.
+    ///
+    /// Emit the row whenever the reader can still say something true about
+    /// the device (its identity, its memory) and mark only the fields that
+    /// failed. Suppress the row entirely only when the device itself cannot
+    /// be identified. `crate::device::macos_native::manager` documents the
+    /// worked example: what each of the four macOS readers does when their
+    /// shared native source is unavailable.
     fn get_gpu_info(&self) -> Vec<GpuInfo>;
     fn get_process_info(&self) -> Vec<ProcessInfo>;
 

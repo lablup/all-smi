@@ -34,11 +34,25 @@ impl<'a> GpuMetricExporter<'a> {
             ("gpu_index", row.index_str.as_str()),
         ];
 
-        // GPU utilization
-        builder
-            .help("all_smi_gpu_utilization", "GPU utilization percentage")
-            .type_("all_smi_gpu_utilization", "gauge")
-            .metric("all_smi_gpu_utilization", &base_labels, info.utilization);
+        // GPU utilization.
+        //
+        // Omitted when the reader had no source for it, following the same
+        // Prometheus "absence means no data" convention this exporter already
+        // applies to `all_smi_gpu_performance_state` and the thermal
+        // thresholds below. Emitting `0` instead would be indistinguishable
+        // from a genuinely idle GPU (issue #325); `all_smi_gpu_info` is still
+        // emitted for the device, so a consumer can tell "device present but
+        // not reporting" from "device gone" and, on Apple Silicon, read the
+        // reason off the `native_metrics` label.
+        if let Some(utilization) = info.utilization_reading() {
+            builder
+                .help(
+                    "all_smi_gpu_utilization",
+                    "GPU utilization percentage (omitted when the device reports no utilization)",
+                )
+                .type_("all_smi_gpu_utilization", "gauge")
+                .metric("all_smi_gpu_utilization", &base_labels, utilization);
+        }
 
         // Memory metrics
         builder
@@ -62,47 +76,57 @@ impl<'a> GpuMetricExporter<'a> {
                 info.total_memory,
             );
 
-        // Temperature
-        builder
-            .help(
-                "all_smi_gpu_temperature_celsius",
-                "GPU temperature in celsius",
-            )
-            .type_("all_smi_gpu_temperature_celsius", "gauge")
-            .metric(
-                "all_smi_gpu_temperature_celsius",
-                &base_labels,
-                info.temperature,
-            );
+        // Temperature. Omitted when no sensor answered — a powered die never
+        // reads 0 °C, so the old unconditional `0` made a missing SMC/NVML
+        // key look like a cryogenic GPU.
+        if let Some(temperature) = info.temperature_reading() {
+            builder
+                .help(
+                    "all_smi_gpu_temperature_celsius",
+                    "GPU temperature in celsius (omitted when no sensor reports one)",
+                )
+                .type_("all_smi_gpu_temperature_celsius", "gauge")
+                .metric("all_smi_gpu_temperature_celsius", &base_labels, temperature);
+        }
 
-        // Power consumption
-        builder
-            .help(
-                "all_smi_gpu_power_consumption_watts",
-                "GPU power consumption in watts",
-            )
-            .type_("all_smi_gpu_power_consumption_watts", "gauge")
-            .metric(
-                "all_smi_gpu_power_consumption_watts",
-                &base_labels,
-                info.power_consumption,
-            );
+        // Power consumption. Omitted when the device exposes no power rail.
+        if let Some(power) = info.power_consumption_reading() {
+            builder
+                .help(
+                    "all_smi_gpu_power_consumption_watts",
+                    "GPU power consumption in watts (omitted when the device reports no power)",
+                )
+                .type_("all_smi_gpu_power_consumption_watts", "gauge")
+                .metric("all_smi_gpu_power_consumption_watts", &base_labels, power);
+        }
 
-        // Frequency
-        builder
-            .help("all_smi_gpu_frequency_mhz", "GPU frequency in MHz")
-            .type_("all_smi_gpu_frequency_mhz", "gauge")
-            .metric("all_smi_gpu_frequency_mhz", &base_labels, info.frequency);
+        // Frequency. Omitted when the platform has no clock probe. This also
+        // covers the readers that have always reported a static `0` to mean
+        // "no probe" (Rebellions, Intel Gaudi, AMD via WMI), which the TUI
+        // already rendered as N/A; the exposition now agrees with it instead
+        // of publishing a flat 0 MHz line.
+        if let Some(frequency) = info.frequency_reading() {
+            builder
+                .help(
+                    "all_smi_gpu_frequency_mhz",
+                    "GPU frequency in MHz (omitted when the device exposes no clock probe)",
+                )
+                .type_("all_smi_gpu_frequency_mhz", "gauge")
+                .metric("all_smi_gpu_frequency_mhz", &base_labels, frequency);
+        }
 
-        // ANE utilization (Apple Silicon)
-        builder
-            .help("all_smi_ane_utilization", "ANE utilization in mW")
-            .type_("all_smi_ane_utilization", "gauge")
-            .metric(
-                "all_smi_ane_utilization",
-                &base_labels,
-                info.ane_utilization,
-            );
+        // ANE utilization (Apple Silicon). Non-Apple readers set this to a
+        // literal 0.0 meaning "not applicable" and keep emitting it, so this
+        // gate only fires for an Apple Silicon row with no live sample.
+        if let Some(ane) = info.ane_utilization_reading() {
+            builder
+                .help(
+                    "all_smi_ane_utilization",
+                    "ANE utilization in mW (omitted when the native metrics source is unavailable)",
+                )
+                .type_("all_smi_ane_utilization", "gauge")
+                .metric("all_smi_ane_utilization", &base_labels, ane);
+        }
 
         // DLA utilization (if available)
         if let Some(dla_util) = info.dla_utilization {
@@ -126,15 +150,17 @@ impl<'a> GpuMetricExporter<'a> {
             ("gpu_index", row.index_str.as_str()),
         ];
 
-        // ANE power in watts
-        builder
-            .help("all_smi_ane_power_watts", "ANE power consumption in watts")
-            .type_("all_smi_ane_power_watts", "gauge")
-            .metric(
-                "all_smi_ane_power_watts",
-                &base_labels,
-                info.ane_utilization / 1000.0,
-            );
+        // ANE power in watts. Same source as `all_smi_ane_utilization`, so
+        // the two families appear and disappear together.
+        if let Some(ane_mw) = info.ane_utilization_reading() {
+            builder
+                .help(
+                    "all_smi_ane_power_watts",
+                    "ANE power consumption in watts (omitted when the native metrics source is unavailable)",
+                )
+                .type_("all_smi_ane_power_watts", "gauge")
+                .metric("all_smi_ane_power_watts", &base_labels, ane_mw / 1000.0);
+        }
 
         // Thermal pressure level
         if let Some(thermal_level) = info.detail.get("thermal_pressure") {
@@ -586,6 +612,93 @@ mod tests {
         assert!(output.contains("all_smi_gpu_temperature_threshold_shutdown_celsius"));
         assert!(!output.contains("all_smi_gpu_temperature_threshold_max_operating_celsius"));
         assert!(!output.contains("all_smi_gpu_temperature_threshold_acoustic_celsius"));
+    }
+
+    /// Issue #325: an Apple Silicon row whose native metrics manager never
+    /// initialized must omit the value series rather than publish zeros.
+    #[test]
+    fn exporter_omits_series_with_no_reading() {
+        use crate::device::types::GPU_METRIC_UNAVAILABLE;
+
+        let mut gpu = make_nvidia_gpu();
+        gpu.name = "Apple M2 Max GPU".to_string();
+        gpu.utilization = GPU_METRIC_UNAVAILABLE;
+        gpu.power_consumption = GPU_METRIC_UNAVAILABLE;
+        gpu.ane_utilization = GPU_METRIC_UNAVAILABLE;
+        gpu.temperature = 0;
+        gpu.frequency = 0;
+        gpu.detail
+            .insert("native_metrics".to_string(), "unavailable".to_string());
+
+        let output = GpuMetricExporter::new(&[gpu]).export_metrics();
+
+        for family in [
+            "all_smi_gpu_utilization{",
+            "all_smi_gpu_power_consumption_watts{",
+            "all_smi_gpu_temperature_celsius{",
+            "all_smi_gpu_frequency_mhz{",
+            "all_smi_ane_utilization{",
+            "all_smi_ane_power_watts{",
+        ] {
+            assert!(
+                !output.contains(family),
+                "{family} must be omitted, not emitted as 0:\n{output}"
+            );
+        }
+
+        // The sentinel must never appear on the wire in any form.
+        assert!(
+            !output.contains(" -1"),
+            "the in-band unavailable encoding leaked into the exposition:\n{output}"
+        );
+
+        // The device must still be discoverable, and must say why.
+        let info_line = output
+            .lines()
+            .find(|l| l.starts_with("all_smi_gpu_info{"))
+            .expect("identity series must survive");
+        assert!(
+            info_line.contains("native_metrics=\"unavailable\""),
+            "{info_line}"
+        );
+        // Memory comes from sysinfo, not IOReport, so it keeps reporting.
+        assert!(output.contains("all_smi_gpu_memory_total_bytes{"));
+    }
+
+    /// The other half of the contract: a real zero is still published, so
+    /// omission unambiguously means "no data".
+    #[test]
+    fn exporter_emits_genuine_zero_readings() {
+        let mut gpu = make_nvidia_gpu();
+        gpu.utilization = 0.0;
+        gpu.power_consumption = 0.0;
+        gpu.temperature = 42;
+        gpu.frequency = 300;
+
+        let output = GpuMetricExporter::new(&[gpu]).export_metrics();
+
+        let util = output
+            .lines()
+            .find(|l| l.starts_with("all_smi_gpu_utilization{"))
+            .expect("idle GPU must still report 0% utilization");
+        assert!(util.ends_with(" 0"), "expected a zero reading, got {util}");
+
+        let power = output
+            .lines()
+            .find(|l| l.starts_with("all_smi_gpu_power_consumption_watts{"))
+            .expect("a 0 W rail is a reading");
+        assert!(power.ends_with(" 0"), "{power}");
+    }
+
+    /// Non-Apple readers set `ane_utilization` to a literal 0.0 meaning "not
+    /// applicable". That has always been published and must keep being
+    /// published, so this change does not silently alter NVIDIA scrapes.
+    #[test]
+    fn exporter_keeps_emitting_zero_ane_for_non_apple_gpus() {
+        let output = GpuMetricExporter::new(&[make_nvidia_gpu()]).export_metrics();
+        assert!(output.contains("all_smi_ane_utilization{"));
+        // `all_smi_ane_power_watts` stays Apple-only, as before.
+        assert!(!output.contains("all_smi_ane_power_watts{"));
     }
 
     #[test]

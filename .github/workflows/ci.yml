@@ -785,14 +785,19 @@ jobs:
           curl -sf --max-time 10 localhost:9090/metrics | grep -q '^all_smi_build_info'
           # Assert a specific device family rather than only "some line".
           # The runner is a VM with no IOReport, so the native metrics
-          # manager fails to initialize and the GPU and chassis readers
-          # degrade to zeros and to nothing respectively. The memory
-          # reader is pure sysinfo with no failure path at all
-          # (src/device/memory_macos.rs), which makes this the one line
-          # guaranteed to be present on any macOS host. Distinct from the
-          # baseline above: this one proves a collection cycle actually
+          # manager fails to initialize: the chassis reader emits nothing
+          # and the GPU reader omits every series it would have sourced
+          # from IOReport/SMC (issue #325 -- it used to publish those as
+          # zeros, which was indistinguishable from an idle GPU). The
+          # memory reader is pure sysinfo with no failure path at all
+          # (src/device/memory_macos.rs), which makes this the one device
+          # line guaranteed to be present on any macOS host. Distinct from
+          # the baseline above: this one proves a collection cycle actually
           # produced data, which is what `/-/ready` gated on.
           curl -sf --max-time 10 localhost:9090/metrics | grep -q '^all_smi_memory_total_bytes'
+          # And the degradation must stay honest: no fabricated GPU
+          # utilization on a host that cannot measure it.
+          ! curl -sf --max-time 10 localhost:9090/metrics | grep -q '^all_smi_gpu_utilization'
           grep -q "API server listening" "$LOG"
 
           "$BIN" service restart --user

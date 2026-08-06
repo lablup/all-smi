@@ -123,16 +123,18 @@ impl MetricsCoordinator {
         gpu_metrics: &GpuClusterMetrics,
         memory_metrics: &MemoryClusterMetrics,
     ) {
-        // Add new data points
-        state
-            .utilization_history
-            .push_back(gpu_metrics.avg_utilization);
+        // Add new data points. A cycle where no GPU reported contributes no
+        // sample rather than a fabricated 0, which would draw a dip in the
+        // history graph that never happened (issue #325).
+        if let Some(util) = gpu_metrics.avg_utilization {
+            state.utilization_history.push_back(util);
+        }
         state
             .memory_history
             .push_back(memory_metrics.avg_utilization);
-        state
-            .temperature_history
-            .push_back(gpu_metrics.avg_temperature);
+        if let Some(temp) = gpu_metrics.avg_temperature {
+            state.temperature_history.push_back(temp);
+        }
 
         // Maintain history size limits
         self.trim_history(&mut state.utilization_history);
@@ -209,11 +211,11 @@ impl MetricsCoordinator {
     ) -> Vec<String> {
         let mut issues = Vec::new();
 
-        if gpu_metrics.avg_utilization > 95.0 {
+        if gpu_metrics.avg_utilization.is_some_and(|u| u > 95.0) {
             issues.push("GPU utilization critically high (>95%)".to_string());
         }
 
-        if gpu_metrics.avg_temperature > 90.0 {
+        if gpu_metrics.avg_temperature.is_some_and(|t| t > 90.0) {
             issues.push("GPU temperature critically high (>90°C)".to_string());
         }
 
@@ -232,11 +234,11 @@ impl MetricsCoordinator {
     ) -> Vec<String> {
         let mut issues = Vec::new();
 
-        if gpu_metrics.avg_utilization > 85.0 {
+        if gpu_metrics.avg_utilization.is_some_and(|u| u > 85.0) {
             issues.push("GPU utilization high (>85%)".to_string());
         }
 
-        if gpu_metrics.avg_temperature > 80.0 {
+        if gpu_metrics.avg_temperature.is_some_and(|t| t > 80.0) {
             issues.push("GPU temperature high (>80°C)".to_string());
         }
 
@@ -244,7 +246,7 @@ impl MetricsCoordinator {
             issues.push("Memory utilization high (>85%)".to_string());
         }
 
-        if gpu_metrics.temp_std_dev > 10.0 {
+        if gpu_metrics.temp_std_dev.is_some_and(|sd| sd > 10.0) {
             issues.push("High temperature variance across GPUs".to_string());
         }
 
