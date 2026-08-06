@@ -22,15 +22,32 @@
 //! the Dockerfile, so an asset outside that set fails the image build and
 //! nothing else.
 //!
-//! That failure is invisible until after merge: `docker-check` in
-//! `.github/workflows/ci.yml` is gated on `github.event_name == 'push' &&
-//! github.ref == 'refs/heads/main'`, so it never runs on a pull request.
 //! Issue #309 added `packaging/systemd/all-smi.service` as the first such
-//! asset, every PR check passed, and `main` went red on the merge commit
-//! with `couldn't read src/service_cmd/../../packaging/systemd/all-smi.service`.
+//! asset. Every PR check passed and `main` went red on the merge commit
+//! with `couldn't read src/service_cmd/../../packaging/systemd/all-smi.service`,
+//! because `docker-check` was then gated on pushes to main and never ran
+//! on a pull request.
 //!
-//! This test moves that class of break back onto the pull request, where
-//! it costs a few milliseconds instead of a red default branch.
+//! Since #328 that gate is gone and `docker-check` builds the image on
+//! pull requests too, so a real `docker build` now backs every PR. These
+//! tests are still the first line of defence rather than a leftover:
+//! they run in the `test` job, `docker-check` is `needs: test`, and they
+//! finish in milliseconds. For the classes they cover, the 5-6 minute
+//! image build never starts, and the failure message names the offending
+//! asset and the `COPY` line to add instead of surfacing as a raw
+//! BuildKit error partway through a compile.
+//!
+//! Two directions are checked, and they are not the same check:
+//!
+//! - every embedded asset is reachable from some builder-stage `COPY`
+//!   (the #309 break), and
+//! - every builder-stage `COPY` source actually exists in the context
+//!   (a `COPY` left pointing at a path an unrelated change renamed or
+//!   deleted).
+//!
+//! What neither can see, and what the image build on the PR is for: a
+//! missing system dependency in the builder stage, and anything that
+//! only shows up once `cargo` actually runs inside the image.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -148,6 +165,19 @@ fn copy_covers(copied: &str, target: &Path) -> bool {
     target == copied_path.as_path() || target.starts_with(&copied_path)
 }
 
+/// True when a `COPY` source is a shell-style pattern rather than a
+/// literal path.
+///
+/// The COPY-source existence check skips patterns instead of resolving
+/// them. Reproducing BuildKit's glob semantics is more surface than this
+/// test needs, and a false failure here blocks a merge, so the safe
+/// direction is to not judge what cannot be resolved cheaply. This
+/// repository uses literal paths only; if a pattern is ever introduced,
+/// the image build that now runs on every pull request still covers it.
+fn is_glob(source: &str) -> bool {
+    source.contains(['*', '?', '['])
+}
+
 /// Patterns in `.dockerignore` that would strip `target` back out of the
 /// context even though a `COPY` names it.
 ///
@@ -257,10 +287,82 @@ fn embedded_assets_are_inside_the_docker_build_context() {
         failures.is_empty(),
         "These embedded assets are unreachable from the Docker build context, so \
          `docker build` fails at compile time even though every other check passes.\n\
-         Note that the `docker-check` CI job only runs on pushes to main, so this \
-         would otherwise surface as a red default branch after merge.\n\n{detail}\n\n\
+         The `docker-check` CI job would catch this too, but only after a 5-6 minute \
+         image build and with a raw BuildKit error; this test names the fix directly.\
+         \n\n{detail}\n\n\
          Dockerfile builder stage copies: {copies:?}"
     );
+}
+
+/// The reverse of the check above: a `COPY` in the builder stage must
+/// name a path that is actually in the build context.
+///
+/// The other direction catches an asset nothing copies. This one catches
+/// a `COPY` left pointing at a path that an unrelated change renamed or
+/// deleted, which BuildKit rejects before it runs a single build step.
+#[test]
+fn builder_stage_copy_sources_exist_in_the_context() {
+    let root = repo_root();
+
+    let dockerfile = fs::read_to_string(root.join("Dockerfile")).expect("Dockerfile must exist");
+    let copies = builder_copy_sources(&dockerfile);
+    assert!(
+        !copies.is_empty(),
+        "parsed no COPY sources from the Dockerfile builder stage"
+    );
+
+    let ignore_patterns: Vec<String> = fs::read_to_string(root.join(".dockerignore"))
+        .map(|text| text.lines().map(|l| l.to_string()).collect())
+        .unwrap_or_default();
+
+    let mut failures = Vec::new();
+    for source in &copies {
+        if is_glob(source) {
+            continue;
+        }
+        let trimmed = source.trim_end_matches('/');
+        if trimmed == "." || trimmed.is_empty() {
+            continue;
+        }
+        let relative = Path::new(trimmed);
+
+        if !root.join(relative).exists() {
+            failures.push(format!(
+                "  COPY {source}\n    No such path in the build context.\n    \
+                 To fix: drop the COPY line, or repoint it at wherever this path moved to."
+            ));
+            continue;
+        }
+
+        if let Some(pattern) = dockerignore_hit(&ignore_patterns, relative) {
+            failures.push(format!(
+                "  COPY {source}\n    The path exists, but .dockerignore pattern `{pattern}` \
+                 strips it back out of the context.\n    \
+                 To fix: narrow that pattern or add a `!` negation for this path."
+            ));
+        }
+    }
+
+    let detail = failures.join("\n");
+    assert!(
+        failures.is_empty(),
+        "The Dockerfile builder stage copies paths that are not in the build context. \
+         BuildKit rejects such a build before running any build step, so `docker build` \
+         fails for everyone the moment this lands.\n\n{detail}"
+    );
+}
+
+#[test]
+fn glob_copy_sources_are_recognised() {
+    assert!(is_glob("packaging/*.service"));
+    assert!(is_glob("src/**"));
+    assert!(is_glob("file?.txt"));
+    assert!(is_glob("[abc].txt"));
+
+    assert!(!is_glob("src/"));
+    assert!(!is_glob("Cargo.toml"));
+    assert!(!is_glob("packaging/systemd/all-smi.service"));
+    assert!(!is_glob("."));
 }
 
 #[test]
