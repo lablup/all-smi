@@ -63,9 +63,15 @@ impl DataAggregator {
         // up on the Prometheus metric and the TUI top-consumer view,
         // so we use it as the host component of the key (same as
         // other per-GPU exporters).
+        // A GPU with no power reading contributes no sample at all. Feeding
+        // the "unavailable" sentinel into the integrator would accumulate
+        // negative joules and corrupt the running energy total (issue #325);
+        // feeding a 0.0 would silently claim the device drew no energy.
         for gpu in &state.gpu_info {
-            let key = EnergyKey::gpu(gpu.hostname.clone(), gpu.uuid.clone());
-            samples.push((key, gpu.power_consumption));
+            if let Some(watts) = gpu.power_consumption_reading() {
+                let key = EnergyKey::gpu(gpu.hostname.clone(), gpu.uuid.clone());
+                samples.push((key, watts));
+            }
         }
 
         // Per-CPU samples (Apple Silicon, some Intel/AMD chipsets).
@@ -167,12 +173,9 @@ impl DataAggregator {
         if has_gpu_data
             && (state.gpu_info.iter().any(|gpu| gpu.total_memory > 0) || is_apple_silicon)
         {
-            let avg_utilization = state
-                .gpu_info
-                .iter()
-                .map(|gpu| gpu.utilization)
-                .sum::<f64>()
-                / state.gpu_info.len() as f64;
+            // Skip the cycle's GPU samples entirely when nothing reported,
+            // rather than pushing a fabricated 0 into the history graphs.
+            let avg_utilization = crate::metrics::gpu_readings::mean_utilization(&state.gpu_info);
 
             let avg_memory = state
                 .gpu_info
@@ -187,16 +190,15 @@ impl DataAggregator {
                 .sum::<f64>()
                 / state.gpu_info.len() as f64;
 
-            let avg_temperature = state
-                .gpu_info
-                .iter()
-                .map(|gpu| gpu.temperature as f64)
-                .sum::<f64>()
-                / state.gpu_info.len() as f64;
+            let avg_temperature = crate::metrics::gpu_readings::mean_temperature(&state.gpu_info);
 
-            state.utilization_history.push_back(avg_utilization);
+            if let Some(util) = avg_utilization {
+                state.utilization_history.push_back(util);
+            }
             state.memory_history.push_back(avg_memory);
-            state.temperature_history.push_back(avg_temperature);
+            if let Some(temp) = avg_temperature {
+                state.temperature_history.push_back(temp);
+            }
             state
                 .package_power_history
                 .push_back(current_package_power_watts(state));
@@ -293,12 +295,7 @@ impl DataAggregator {
             return 0.0;
         }
 
-        state
-            .gpu_info
-            .iter()
-            .map(|gpu| gpu.utilization)
-            .sum::<f64>()
-            / state.gpu_info.len() as f64
+        crate::metrics::gpu_readings::mean_utilization(&state.gpu_info).unwrap_or(0.0)
     }
 
     /// Calculate average GPU memory usage
@@ -379,18 +376,14 @@ fn current_package_power_watts(state: &AppState) -> f64 {
                     .and_then(|value| value.parse::<f64>().ok())
                     .map(|mw| mw / 1000.0)
             })
-            .unwrap_or_else(|| state.gpu_info.iter().map(|gpu| gpu.power_consumption).sum())
+            .unwrap_or_else(|| crate::metrics::gpu_readings::total_power_watts(&state.gpu_info))
     } else {
-        state.gpu_info.iter().map(|gpu| gpu.power_consumption).sum()
+        crate::metrics::gpu_readings::total_power_watts(&state.gpu_info)
     }
 }
 
 fn current_ane_power_watts(state: &AppState) -> f64 {
-    state
-        .gpu_info
-        .first()
-        .map(|gpu| gpu.ane_utilization / 1000.0)
-        .unwrap_or(0.0)
+    crate::metrics::gpu_readings::first_ane_power_watts(&state.gpu_info).unwrap_or(0.0)
 }
 
 impl Default for DataAggregator {

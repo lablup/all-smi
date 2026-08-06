@@ -17,6 +17,7 @@ use std::io::Write;
 use crossterm::{queue, style::Color, style::Print};
 
 use crate::app_state::AppState;
+use crate::metrics::gpu_readings;
 use crate::ui::buffer::BufferWriter;
 use crate::ui::led_grid;
 use crate::ui::remote_sparkline_panel;
@@ -112,18 +113,10 @@ pub fn draw_system_view<W: Write>(stdout: &mut W, state: &AppState, cols: u16) {
             .next() // Only one GPU entry for Apple Silicon
             .unwrap_or_else(|| {
                 // Fallback to GPU power if combined power not available
-                state
-                    .gpu_info
-                    .iter()
-                    .map(|gpu| gpu.power_consumption)
-                    .sum::<f64>()
+                gpu_readings::total_power_watts(&state.gpu_info)
             })
     } else {
-        state
-            .gpu_info
-            .iter()
-            .map(|gpu| gpu.power_consumption)
-            .sum::<f64>()
+        gpu_readings::total_power_watts(&state.gpu_info)
     };
 
     // Calculate total CPU cores
@@ -154,33 +147,20 @@ pub fn draw_system_view<W: Write>(stdout: &mut W, state: &AppState, cols: u16) {
         .sum::<u64>() as f64
         / (1024.0 * 1024.0 * 1024.0);
 
-    // Calculate averages
-    let avg_utilization = if total_gpus > 0 {
-        state
-            .gpu_info
-            .iter()
-            .map(|gpu| gpu.utilization)
-            .sum::<f64>()
-            / total_gpus as f64
-    } else {
-        0.0
-    };
+    // Calculate averages. These skip devices with no reading rather than
+    // folding a sentinel in, and render N/A when nothing reported at all —
+    // an average over zero reporting GPUs is not 0% (issue #325).
+    let avg_utilization = gpu_readings::mean_utilization(&state.gpu_info);
 
     // Average GPU temperature in °C — shown identically on every platform.
     // On Apple Silicon, gpu.temperature is sourced from the SMC CPU die sensor
     // (CPU/GPU share the same SoC die), so this is a real die temperature
     // rather than the qualitative thermal-pressure text we used to show.
-    let avg_temperature = if total_gpus > 0 {
-        state
-            .gpu_info
-            .iter()
-            .map(|gpu| gpu.temperature as f64)
-            .sum::<f64>()
-            / total_gpus as f64
-    } else {
-        0.0
+    let avg_temperature = gpu_readings::mean_temperature(&state.gpu_info);
+    let avg_temperature_display = match avg_temperature {
+        Some(temp) => format!("{temp:.0}°C"),
+        None => "N/A".to_string(),
     };
-    let avg_temperature_display = format!("{avg_temperature:.0}°C");
 
     // The second-row temperature cell is platform-dependent:
     // - On Apple Silicon (single SoC die) standard deviation is meaningless,
@@ -196,21 +176,15 @@ pub fn draw_system_view<W: Write>(stdout: &mut W, state: &AppState, cols: u16) {
             .unwrap_or_else(|| "Unknown".to_string());
         ("Thermal", thermal_pressure)
     } else {
-        let temp_std_dev = if total_gpus > 1 {
-            let temp_variance = state
-                .gpu_info
-                .iter()
-                .map(|gpu| {
-                    let diff = gpu.temperature as f64 - avg_temperature;
-                    diff * diff
-                })
-                .sum::<f64>()
-                / (total_gpus - 1) as f64;
-            temp_variance.sqrt()
-        } else {
-            0.0
+        let display = match gpu_readings::temperature_std_dev(&state.gpu_info) {
+            Some(sd) => format!("±{sd:.1}°C"),
+            // Fewer than two devices reported a temperature, so the spread
+            // is undefined. Preserves the previous "±0.0°C" for the
+            // single-GPU case, which callers read as "no spread".
+            None if total_gpus <= 1 => "±0.0°C".to_string(),
+            None => "N/A".to_string(),
         };
-        ("Temp. Stdev", format!("±{temp_std_dev:.1}°C"))
+        ("Temp. Stdev", display)
     };
 
     let avg_power = if total_gpus > 0 {
@@ -279,7 +253,14 @@ pub fn draw_system_view<W: Write>(stdout: &mut W, state: &AppState, cols: u16) {
                     format_ram_value(used_system_memory_gb),
                     Color::Green,
                 ),
-                ("GPU Util", format!("{avg_utilization:.1}%"), Color::Blue),
+                (
+                    "GPU Util",
+                    match avg_utilization {
+                        Some(util) => format!("{util:.1}%"),
+                        None => "N/A".to_string(),
+                    },
+                    Color::Blue,
+                ),
                 (
                     "Used VRAM",
                     format_ram_value(used_gpu_memory_gb),

@@ -158,15 +158,21 @@ pub fn render_led_grid_lines(state: &AppState, grid_width: usize, max_rows: usiz
 ///
 /// Uses a single O(G) pass over all GPUs instead of O(N*G) nested filtering.
 fn compute_node_utils(state: &AppState, _nodes: &[&String]) -> HashMap<String, f64> {
-    // Accumulate (sum, count) per host_id in one pass over gpu_info.
+    // Accumulate (sum, count) per host_id in one pass over gpu_info. GPUs
+    // with no utilization reading are left out of both the sum and the
+    // count, so a node whose GPUs stopped reporting shows as unlit rather
+    // than as a node that is genuinely idle (issue #325).
     let mut accum: HashMap<&str, (f64, usize)> = HashMap::with_capacity(state.gpu_info.len());
     for gpu in &state.gpu_info {
-        let entry = accum.entry(gpu.host_id.as_str()).or_insert((0.0, 0));
-        entry.0 += gpu.utilization;
-        entry.1 += 1;
+        if let Some(util) = gpu.utilization_reading() {
+            let entry = accum.entry(gpu.host_id.as_str()).or_insert((0.0, 0));
+            entry.0 += util;
+            entry.1 += 1;
+        }
     }
     accum
         .into_iter()
+        .filter(|(_, (_, count))| *count > 0)
         .map(|(host, (sum, count))| (host.to_string(), sum / count as f64))
         .collect()
 }

@@ -231,7 +231,70 @@ impl Default for ThermalProximityConfig {
     }
 }
 
+/// Sentinel written into [`GpuInfo`]'s non-optional `f64` metric fields
+/// (`utilization`, `ane_utilization`, `power_consumption`) when the reader
+/// could not obtain a reading at all.
+///
+/// These three fields are plain `f64` rather than `Option<f64>` because they
+/// are consumed by roughly sixty call sites (gauges, sparklines, sort
+/// comparators, energy accumulation, three CLI shims) that all treat them as
+/// numbers. A negative value is outside the valid range of every one of them
+/// (a percentage is `0..=100`, a power rail draws `>= 0` watts), so it cannot
+/// collide with a real reading. Read them through
+/// [`GpuInfo::utilization_reading`], [`GpuInfo::ane_utilization_reading`] and
+/// [`GpuInfo::power_consumption_reading`] rather than comparing against this
+/// constant directly.
+///
+/// This value must never reach the Prometheus exposition: the exporter omits
+/// the series instead. See the module docs on
+/// `crate::device::macos_native::manager` for the full policy.
+pub const GPU_METRIC_UNAVAILABLE: f64 = -1.0;
+
 impl GpuInfo {
+    /// GPU utilization percentage, or `None` when the reader had no source
+    /// for it. A genuinely idle GPU returns `Some(0.0)`.
+    pub fn utilization_reading(&self) -> Option<f64> {
+        (self.utilization >= 0.0).then_some(self.utilization)
+    }
+
+    /// ANE power draw in milliwatts (Apple Silicon), or `None` when the
+    /// reader had no source for it. An idle ANE returns `Some(0.0)`.
+    ///
+    /// Non-Apple readers set this to `0.0` to mean "not applicable", which is
+    /// indistinguishable from an idle ANE and is preserved as `Some(0.0)` for
+    /// backward compatibility with existing scrapes.
+    pub fn ane_utilization_reading(&self) -> Option<f64> {
+        (self.ane_utilization >= 0.0).then_some(self.ane_utilization)
+    }
+
+    /// GPU power draw in watts, or `None` when the reader had no source for
+    /// it. A GPU parked at zero watts returns `Some(0.0)`.
+    pub fn power_consumption_reading(&self) -> Option<f64> {
+        (self.power_consumption >= 0.0).then_some(self.power_consumption)
+    }
+
+    /// GPU temperature in Celsius, or `None` when no sensor produced a value.
+    ///
+    /// `temperature` is a `u32` and therefore cannot carry a negative
+    /// sentinel, so `0` is the unavailable marker. That is the convention the
+    /// TUI renderer, the alert engine and the filter DSL already applied
+    /// before this accessor existed: a powered SoC or board never reads
+    /// 0 °C, and 0 is what a missing SMC/NVML key decodes to.
+    pub fn temperature_reading(&self) -> Option<u32> {
+        (self.temperature > 0).then_some(self.temperature)
+    }
+
+    /// GPU core clock in MHz, or `None` when the platform exposes no
+    /// frequency probe.
+    ///
+    /// As with [`GpuInfo::temperature_reading`], `0` is the unavailable
+    /// marker: Rebellions, Intel Gaudi and AMD-via-WMI already report a
+    /// static `0` to mean "no probe", and a clock-gated GPU still reports its
+    /// nominal clock rather than 0 MHz.
+    pub fn frequency_reading(&self) -> Option<u32> {
+        (self.frequency > 0).then_some(self.frequency)
+    }
+
     /// Classify the current temperature against the reported thresholds.
     ///
     /// Returns [`ThermalProximity::Normal`] when no threshold data is

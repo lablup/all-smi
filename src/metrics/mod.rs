@@ -16,3 +16,4 @@ pub mod aggregator;
 pub mod coordinator;
 pub mod energy;
 pub mod energy_wal;
+pub mod gpu_readings;

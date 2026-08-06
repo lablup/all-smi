@@ -201,10 +201,10 @@ impl Alerter {
     }
 
     fn evaluate_temperature(&mut self, gpu: &GpuInfo, out: &mut Vec<AlertTransition>) {
-        let temp = gpu.temperature as f64;
-        if gpu.temperature == 0 {
-            return; // N/A — don't alert on missing data.
-        }
+        // N/A — don't alert on missing data.
+        let Some(temp) = gpu.temperature_reading().map(f64::from) else {
+            return;
+        };
         let warn_on = self.config.temp_warn_c as f64;
         let crit_on = self.config.temp_crit_c as f64;
         let warn_off = warn_on - self.config.hysteresis_c as f64;
@@ -296,10 +296,9 @@ impl Alerter {
         if self.config.util_idle_warn_mins == 0 {
             return;
         }
-        let util = gpu.utilization;
-        if util < 0.0 {
+        let Some(util) = gpu.utilization_reading() else {
             return;
-        }
+        };
         let threshold_pct = self.config.util_idle_pct as f64;
         let warn_after =
             std::time::Duration::from_secs(self.config.util_idle_warn_mins as u64 * 60);
@@ -383,7 +382,11 @@ impl Alerter {
         if limit <= 0.0 {
             return;
         }
-        let value = gpu.power_consumption;
+        // No power reading means no power alert: an absent rail must not
+        // read as a device sitting comfortably under the limit.
+        let Some(value) = gpu.power_consumption_reading() else {
+            return;
+        };
         // `hysteresis_c` is named after the °C unit used by the
         // temperature rule but is reused verbatim here as a watt delta.
         // The numeric value (default: 2) is appropriate for both rules;

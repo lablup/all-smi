@@ -210,18 +210,10 @@ use crate::device::types::{CpuInfo, GpuInfo, ProcessInfo};
 
 impl DeviceRowView for GpuInfo {
     fn temp_field(&self) -> Option<f64> {
-        if self.temperature == 0 {
-            None
-        } else {
-            Some(self.temperature as f64)
-        }
+        self.temperature_reading().map(|t| t as f64)
     }
     fn util_field(&self) -> Option<f64> {
-        if self.utilization < 0.0 {
-            None
-        } else {
-            Some(self.utilization)
-        }
+        self.utilization_reading()
     }
     fn mem_pct_field(&self) -> Option<f64> {
         if self.total_memory == 0 {
@@ -240,7 +232,7 @@ impl DeviceRowView for GpuInfo {
         }
     }
     fn power_field(&self) -> Option<f64> {
-        Some(self.power_consumption)
+        self.power_consumption_reading()
     }
     fn host_field(&self) -> Option<&str> {
         if self.hostname.is_empty() {

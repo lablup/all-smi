@@ -335,10 +335,10 @@ fn draw_power_sparkline<W: Write>(stdout: &mut W, state: &AppState) {
                     .map(|mw| mw / 1000.0)
             })
             .next()
-            .unwrap_or_else(|| state.gpu_info.iter().map(|g| g.power_consumption).sum())
+            .unwrap_or_else(|| crate::metrics::gpu_readings::total_power_watts(&state.gpu_info))
     } else {
         // Linux/NVIDIA: aggregate GPU power
-        state.gpu_info.iter().map(|g| g.power_consumption).sum()
+        crate::metrics::gpu_readings::total_power_watts(&state.gpu_info)
     };
 
     let value_str = format!("{power_watts:>5.1}W");
