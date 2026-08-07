@@ -352,12 +352,14 @@ impl AdlRuntime {
             return AdapterProbe::CallFailed;
         }
         let mut buffer = AdapterInfoArray::for_count(count as usize);
+        // Read before the pointer is taken so no borrow of `buffer` is
+        // created while the pointer ADL writes through is live.
+        let input_size = buffer.input_size();
         // SAFETY: `buffer` starts with at least `count` zeroed
         // `AdapterInfo` entries plus headroom (see `AdapterInfoArray`),
         // `input_size` reports the requested size, and the compile-time
         // assertions in `ffi` pin the layout the driver will write.
-        let status =
-            unsafe { adapter_info_get(self.context, buffer.as_mut_ptr(), buffer.input_size()) };
+        let status = unsafe { adapter_info_get(self.context, buffer.as_mut_ptr(), input_size) };
         if status != ADL_OK {
             return AdapterProbe::CallFailed;
         }

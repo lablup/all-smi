@@ -48,7 +48,8 @@
 //! device paths, a wrong one reads them as garbage.
 //! [`AdapterInfoArray::validated`] performs that check at runtime, per
 //! entry, so a wrong stride is caught on the second entry even when the
-//! first happens to parse. Whenever verification fails the reader
+//! first happens to parse, and a row ADL never wrote is a failure
+//! rather than an empty adapter. Whenever verification fails the reader
 //! declines multi-GPU attribution, leaving the DXGI and PDH baseline
 //! (the pre-#353 behavior, which a single-GPU machine keeps
 //! unconditionally), and the `amd.adl.adapters` doctor check dumps the
@@ -227,7 +228,7 @@ const _: () = assert!(
 /// the module docs), which is why nothing consumes an `AdapterInfo`
 /// without it first passing [`AdapterInfoArray::validated`].
 #[repr(C)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AdapterInfo {
     /// Size of the structure. Some ADL revisions fill it in, some leave
     /// the caller's zero; [`Self::looks_sane`] accepts either but
@@ -335,11 +336,33 @@ pub fn adl_string_lossy(bytes: &[u8]) -> String {
 }
 
 impl AdapterInfo {
+    /// Whether ADL left this row exactly as [`AdapterInfoArray::for_count`]
+    /// pre-filled it: every byte still zero.
+    ///
+    /// A row ADL actually wrote always carries something, a UDID, a
+    /// marketing name, a vendor id, so an untouched row means ADL
+    /// filled fewer rows than `iInputSize` asked for. That is what
+    /// happens when the real `sizeof(AdapterInfo)` is larger than the
+    /// one transcribed here: ADL derives its row count as
+    /// `iInputSize / sizeof` and stops early, leaving the tail blank.
+    /// Since that is precisely the transcription error the runtime
+    /// verification exists to catch, [`Self::looks_sane`] treats a
+    /// blank row as a failure rather than as an empty adapter. Without
+    /// it a short write reads as a table of valid rows whose strings
+    /// are all legitimately empty, and the `amd.adl.adapters` doctor
+    /// check would report PASS over a buffer the driver never touched.
+    pub fn is_blank(&self) -> bool {
+        *self == Self::default()
+    }
+
     /// Whether this entry is consistent with the layout declared above.
     ///
-    /// Three independent signals, all of which a correct layout passes
+    /// Four independent signals, all of which a correct layout passes
     /// trivially and a wrong one fails almost surely:
     ///
+    /// - the row must not be blank, i.e. ADL must have written it at
+    ///   all (see [`Self::is_blank`] for why a short write is a layout
+    ///   signal and not an empty adapter);
     /// - the four string fields must be NUL-terminated printable ASCII
     ///   (a shifted or misdeclared layout puts binary data there);
     /// - `iSize`, when the driver fills it in, must equal our
@@ -353,6 +376,9 @@ impl AdapterInfo {
     /// time, per entry, so one odd row cannot disable attribution for
     /// the whole machine.
     pub fn looks_sane(&self) -> bool {
+        if self.is_blank() {
+            return false;
+        }
         let size_ok = self.i_size == 0 || self.i_size as usize == std::mem::size_of::<Self>();
         let index_ok = (0..256).contains(&self.i_adapter_index);
         size_ok
@@ -420,7 +446,11 @@ impl AdapterInfoArray {
     /// *size* the first row still parses (offsets within it are right)
     /// and it is the second row onward that garbles, so on the
     /// multi-adapter machines this struct exists for, the later rows
-    /// are the stride check.
+    /// are the stride check. A size wrong in the other direction (ours
+    /// larger than the driver's) makes ADL write fewer rows than we
+    /// requested rather than garbled ones, so the later rows stay
+    /// blank; [`AdapterInfo::is_blank`] is what turns that into a
+    /// failure instead of a table of empty adapters.
     pub fn validated(&self) -> Option<&[AdapterInfo]> {
         let entries = self.requested_entries();
         entries
@@ -687,6 +717,45 @@ mod tests {
         // And the pointer handed to ADL must be the first entry.
         let base = array.as_mut_ptr() as usize;
         assert_eq!(base, array.entries.as_ptr() as usize);
+    }
+
+    #[test]
+    fn a_row_the_driver_never_wrote_is_not_a_valid_empty_adapter() {
+        // Every arm of `looks_sane` is individually satisfied by the
+        // zero row `for_count` pre-fills the buffer with: `iSize` is 0
+        // (accepted), `iAdapterIndex` is 0 (in range), and each string
+        // field is a NUL at offset 0, which `adl_string` documents as
+        // the empty string rather than garbage. The blank check is the
+        // only thing standing between that and a table of "valid"
+        // adapters ADL never touched.
+        let blank = AdapterInfo::default();
+        assert!(blank.is_blank());
+        assert!(!blank.looks_sane());
+        assert_eq!(adl_string(&blank.str_udid), Some(""));
+
+        // And one written byte anywhere is enough to stop being blank.
+        let written = sane_entry(0, r"PCI\VEN_1002&DEV_744C\6&ABCD&0&19");
+        assert!(!written.is_blank());
+        assert!(written.looks_sane());
+    }
+
+    #[test]
+    fn a_short_write_leaving_trailing_rows_blank_fails_verification() {
+        // The failure mode of transcribing a struct *larger* than the
+        // driver's: ADL derives its row count as `iInputSize / sizeof`,
+        // stops early, and leaves our tail untouched. Nothing garbles,
+        // so the per-row string checks alone would pass the table; the
+        // short write itself is the layout evidence.
+        let mut array = AdapterInfoArray::for_count(3);
+        array.entries[0] = sane_entry(0, r"PCI\VEN_1002&DEV_744C\6&ABCD&0&19");
+        array.entries[1] = sane_entry(1, r"PCI\VEN_1002&DEV_164E\4&FEDC&0&41");
+        // entries[2] is still the zero we handed the driver.
+        assert!(array.validated().is_none());
+
+        // The doctor still gets the raw rows to report, blank ones
+        // included, since "ADL wrote two of the three rows we asked
+        // for" is exactly the evidence that names the error.
+        assert_eq!(array.requested_entries().len(), 3);
     }
 
     #[test]
