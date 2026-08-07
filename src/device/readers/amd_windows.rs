@@ -12,18 +12,26 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! AMD GPU reader for Windows using WMI
+//! AMD GPU reader for Windows.
 //!
-//! This module provides basic AMD GPU information on Windows via WMI.
-//! Note: Detailed metrics like utilization and temperature require AMD ADL SDK,
-//! which is not currently implemented.
+//! `Win32_VideoController` supplies the card's identity (name, PCI ids,
+//! driver version) and nothing else of substance: no utilization, no
+//! temperature, and a `uint32` `AdapterRAM` field that saturates at
+//! 4 GB. The vendor-neutral [`windows_gpu_perf`] layer is applied on top
+//! to fill in the true VRAM size (DXGI), device utilization and
+//! system-wide used VRAM (PDH), and per-process GPU memory.
+//!
+//! Temperature, power, fan speed, and clocks are still absent here:
+//! WDDM does not publish them, and they need AMD's own ADL library.
 
 use crate::device::GpuReader;
+use crate::device::readers::windows_gpu_perf::{self, ids::AdapterLuid};
 use crate::device::types::{GpuInfo, ProcessInfo};
 use crate::utils::get_hostname;
 use chrono::Local;
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::sync::Mutex;
 use wmi::WMIConnection;
 
 // Thread-local WMI connection for reuse within the same thread
@@ -69,7 +77,17 @@ struct VideoControllerName {
     name: Option<String>,
 }
 
-pub struct AmdWindowsGpuReader {}
+pub struct AmdWindowsGpuReader {
+    /// Adapter LUID to `(device index, GPU uuid)`, recorded by
+    /// `get_gpu_info` so `get_process_info` can attribute a PDH
+    /// per-process row to the right card without re-querying WMI or
+    /// consuming a second PDH collection.
+    ///
+    /// Empty until the first `get_gpu_info` call, so a
+    /// `get_process_info` that runs first simply reports nothing and the
+    /// next poll fills it in.
+    adapter_index: Mutex<HashMap<AdapterLuid, (usize, String)>>,
+}
 
 impl Default for AmdWindowsGpuReader {
     fn default() -> Self {
@@ -79,7 +97,9 @@ impl Default for AmdWindowsGpuReader {
 
 impl AmdWindowsGpuReader {
     pub fn new() -> Self {
-        Self {}
+        Self {
+            adapter_index: Mutex::new(HashMap::new()),
+        }
     }
 
     fn query_amd_gpus(&self) -> Vec<GpuInfo> {
@@ -112,22 +132,13 @@ impl AmdWindowsGpuReader {
                     .clone()
                     .unwrap_or_else(|| format!("AMD-GPU-{idx}"));
 
-                // Get adapter RAM (in bytes)
-                // LIMITATION: Win32_VideoController.AdapterRAM is a 32-bit uint32 in WMI,
-                // which can only represent up to 4GB (4,294,967,295 bytes). For GPUs with
-                // more than 4GB VRAM, this value will be incorrect (wrapped or capped).
-                // Unfortunately, there's no standard WMI alternative for accurate VRAM
-                // reporting on AMD GPUs without the AMD ADL SDK.
+                // Baseline VRAM size. `Win32_VideoController.AdapterRAM`
+                // is a `uint32` in the WMI schema, so anything above 4 GB
+                // arrives saturated or wrapped. This value is only a
+                // fallback: `windows_gpu_perf` overwrites it with DXGI's
+                // 64-bit `DedicatedVideoMemory` whenever DXGI answers,
+                // which is every machine with a working display driver.
                 let total_memory = controller.adapter_r_a_m.unwrap_or(0);
-
-                // Warn if the reported VRAM is suspiciously close to 4GB limit or 0
-                const FOUR_GB: u64 = 4 * 1024 * 1024 * 1024; // 4,294,967,296 bytes
-                if total_memory == 0 {
-                    eprintln!("AMD GPU '{name}': VRAM size unavailable (reported as 0)");
-                } else if total_memory >= FOUR_GB - (512 * 1024 * 1024) {
-                    // If reported value is >= 3.5GB, it might be capped/wrapped for >4GB GPU
-                    eprintln!("AMD GPU '{name}': VRAM reported as {total_memory} bytes, may be inaccurate for >4GB GPUs due to WMI 32-bit limitation");
-                }
 
                 // Build detail map
                 let mut detail = HashMap::new();
@@ -145,10 +156,24 @@ impl AmdWindowsGpuReader {
                     detail.insert("DAC Type".to_string(), dac_type.clone());
                 }
 
-                // Add note about limited metrics
+                // `Metrics Source` advertises which backends produced
+                // this card's numbers; `windows_gpu_perf` appends to it
+                // as DXGI and PDH contribute. The per-field `Source: *`
+                // keys mirror the Intel Windows reader so both vendors
+                // expose provenance the same way.
+                detail.insert("Metrics Source".to_string(), "WMI".to_string());
                 detail.insert(
                     "Note".to_string(),
-                    "Detailed metrics require AMD ADL SDK".to_string(),
+                    "Temperature, power, and fan need the AMD ADL library".to_string(),
+                );
+                detail.insert("Source: Utilization".to_string(), "unavailable".to_string());
+                detail.insert("Source: Temperature".to_string(), "unavailable".to_string());
+                detail.insert("Source: Power".to_string(), "unavailable".to_string());
+                detail.insert("Source: Frequency".to_string(), "unavailable".to_string());
+                detail.insert("Source: Fan".to_string(), "unavailable".to_string());
+                detail.insert(
+                    "Source: Memory".to_string(),
+                    if total_memory > 0 { "WMI" } else { "unavailable" }.to_string(),
                 );
 
                 gpu_list.push(GpuInfo {
@@ -192,19 +217,39 @@ impl AmdWindowsGpuReader {
         })
         .unwrap_or_default()
     }
+
+    /// Layer the vendor-neutral DXGI and PDH metrics onto the WMI
+    /// baseline, and record the LUID mapping `get_process_info` needs.
+    fn augment_with_windows_perf(&self, gpus: &mut [GpuInfo]) {
+        let adapter_index = windows_gpu_perf::augment_gpus(gpus);
+        if let Ok(mut guard) = self.adapter_index.lock() {
+            *guard = adapter_index;
+        }
+    }
 }
 
 impl GpuReader for AmdWindowsGpuReader {
     fn get_gpu_info(&self) -> Vec<GpuInfo> {
         // Query fresh data each time (timestamp updates)
         // But we could cache the static parts if needed
-        self.query_amd_gpus()
+        let mut gpus = self.query_amd_gpus();
+        self.augment_with_windows_perf(&mut gpus);
+        gpus
     }
 
     fn get_process_info(&self) -> Vec<ProcessInfo> {
-        // GPU process information is not available via WMI
-        // This would require AMD ADL SDK
-        Vec::new()
+        // Per-process GPU memory comes from the PDH `GPU Process
+        // Memory` counter, reusing the sample `get_gpu_info` already
+        // took. The closure covers one-shot callers that never call
+        // `get_gpu_info` at all, such as
+        // `all-smi snapshot --include process`.
+        let Ok(adapter_index) = self.adapter_index.lock() else {
+            return Vec::new();
+        };
+        windows_gpu_perf::process_rows_with(&adapter_index, || {
+            let mut gpus = self.query_amd_gpus();
+            windows_gpu_perf::augment_gpus(&mut gpus)
+        })
     }
 }
 

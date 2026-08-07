@@ -104,6 +104,7 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "whoami",
+ "windows",
  "windows-service",
  "wmi",
  "zstd",
