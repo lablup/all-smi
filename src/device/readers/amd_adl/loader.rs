@@ -263,6 +263,14 @@ impl AdlRuntime {
         if unsafe { (self.number_of_adapters)(self.context, &mut count) } != ADL_OK || count <= 0 {
             return;
         }
+        // Bound the driver's count the way `probe_adapter_info` does.
+        // The loop below makes one `ADL2_Overdrive_Caps` call per index
+        // and may make one PMLog read per index, all while holding the
+        // process-wide runtime lock, so a garbage count would wedge the
+        // refresh loop rather than merely waste a little work. Clamping
+        // instead of rejecting keeps a machine with an implausibly long
+        // adapter list working on its first rows.
+        let count = count.min(MAX_ADAPTER_ROWS);
 
         let mut preferred = Vec::new();
         let mut fallback = Vec::new();
@@ -302,10 +310,18 @@ impl AdlRuntime {
         // writes a larger table than this file declares cannot smash
         // the stack of a long-running daemon.
         let mut buffer = Box::<AdlPmLogDataBuffer>::default();
-        // SAFETY: `buffer.output` begins a correctly aligned allocation
-        // at least as large as ADLPMLogDataOutput, with headroom beyond
-        // it; the compile-time assertions in `ffi` pin the layout.
-        let status = unsafe { (self.query_pmlog)(self.context, index, &raw mut buffer.output) };
+        // The pointer is derived from the whole padded buffer and then
+        // narrowed by a cast, not from the `output` field: a pointer
+        // derived from the field alone is valid only for that field's
+        // 2052 bytes, which would put the headroom out of bounds for
+        // exactly the oversized write the headroom exists to absorb.
+        let output = (&raw mut *buffer).cast::<AdlPmLogDataOutput>();
+        // SAFETY: `output` addresses the start of a correctly aligned
+        // allocation at least as large as ADLPMLogDataOutput, with
+        // headroom beyond it. `AdlPmLogDataBuffer` is `#[repr(C)]` with
+        // `output` first, which the `ffi` tests pin, and the
+        // compile-time assertions in `ffi` pin the layout itself.
+        let status = unsafe { (self.query_pmlog)(self.context, index, output) };
         if status != ADL_OK {
             return None;
         }

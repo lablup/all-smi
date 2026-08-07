@@ -400,9 +400,10 @@ impl AdapterInfo {
 /// by its own larger `sizeof` in disregard of `iInputSize` still lands
 /// inside our allocation instead of behind it.
 ///
-/// Callers must keep `requested` small enough that
-/// `requested * size_of::<AdapterInfo>()` fits a `c_int`; the loader
-/// bounds the adapter count long before this matters.
+/// A `requested` count whose byte size does not fit a `c_int`
+/// advertises 0 rather than wrapping, so the driver is never handed a
+/// plausible-looking size that exceeds the allocation; the loader
+/// bounds the adapter count long before that matters.
 pub struct AdapterInfoArray {
     entries: Vec<AdapterInfo>,
     requested: usize,
@@ -428,8 +429,20 @@ impl AdapterInfoArray {
     /// caller asked for, *not* the (larger) allocation. Reporting the
     /// true request keeps the driver's own bounds accounting honest;
     /// the headroom exists for drivers that ignore it.
+    ///
+    /// The conversion is checked rather than a truncating cast: this is
+    /// the one number here that, if it ever exceeded the allocation,
+    /// would be a buffer overflow inside a closed-source driver, so a
+    /// silent wrap must not be able to produce it. A request too large
+    /// to express in a `c_int` reports 0, which makes the driver write
+    /// nothing and leaves every row blank, which
+    /// [`AdapterInfo::looks_sane`] then rejects. The loader bounds the
+    /// adapter count long before this matters.
     pub fn input_size(&self) -> c_int {
-        (self.requested * std::mem::size_of::<AdapterInfo>()) as c_int
+        self.requested
+            .checked_mul(std::mem::size_of::<AdapterInfo>())
+            .and_then(|bytes| c_int::try_from(bytes).ok())
+            .unwrap_or(0)
     }
 
     /// The requested rows without any validation. For diagnostics only:
@@ -717,6 +730,20 @@ mod tests {
         // And the pointer handed to ADL must be the first entry.
         let base = array.as_mut_ptr() as usize;
         assert_eq!(base, array.entries.as_ptr() as usize);
+    }
+
+    #[test]
+    fn an_inexpressible_request_size_advertises_zero_rather_than_wrapping() {
+        // `input_size` is the number the driver writes against, so it
+        // must never exceed the allocation. A count large enough to
+        // overflow `c_int` reports 0 (the driver writes nothing and the
+        // untouched rows fail verification) instead of wrapping into a
+        // plausible-looking positive size.
+        let array = AdapterInfoArray {
+            entries: Vec::new(),
+            requested: usize::MAX / 8,
+        };
+        assert_eq!(array.input_size(), 0);
     }
 
     #[test]

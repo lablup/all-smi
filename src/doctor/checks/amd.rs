@@ -129,14 +129,32 @@ fn check_adl_adapters(_ctx: &CheckCtx) -> CheckResult {
                     .collect::<Vec<_>>()
                     .join("; ");
                 if !layout_ok {
+                    // The two failures point at opposite corrections,
+                    // so name which one was seen. A blank row means ADL
+                    // wrote fewer rows than `iInputSize` asked for,
+                    // which is what a declared AdapterInfo larger than
+                    // the driver's produces; garbled strings are the
+                    // other direction.
+                    let blank = rows.iter().filter(|row| row.is_blank()).count();
+                    let shape = if blank > 0 {
+                        format!(
+                            "the driver left {blank} of {} row(s) untouched, which is what a \
+                             declared AdapterInfo larger than the driver's produces",
+                            rows.len()
+                        )
+                    } else {
+                        "the rows were written but their string fields are not legible, which is \
+                         what a wrong field offset or stride produces"
+                            .to_string()
+                    };
                     return CheckResult::Warn(
                         format!(
                             "AdapterInfo layout verification FAILED; multi-GPU attribution is \
-                             disabled. raw rows: {dump}"
+                             disabled. {shape}. raw rows: {dump}"
                         ),
                         Some(
-                            "this is what a wrong transcribed struct layout looks like; please \
-                             report the raw rows so the layout can be corrected"
+                            "please report the raw rows so the transcribed layout in \
+                             device/readers/amd_adl/ffi.rs can be corrected"
                                 .to_string(),
                         ),
                     );

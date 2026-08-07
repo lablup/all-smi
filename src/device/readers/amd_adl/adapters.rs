@@ -146,38 +146,71 @@ fn plausible_bdf(adapter: &AdlAdapter) -> bool {
 /// Groups are sorted by bus/device/function and their indices sorted
 /// ascending, so the output is deterministic regardless of the order
 /// the driver enumerated in.
+///
+/// A group whose rows carry two different non-empty PNP instance paths
+/// is dropped rather than returned. Grouping trusts the PCI
+/// bus/device/function to identify a physical card, so a driver that
+/// leaves those fields unfilled collapses every card into one group.
+/// The caller then samples telemetry from the first index of the group
+/// that answers PMLog, which can be a different physical card's index,
+/// and one card's temperature, power, and fan would be reported for
+/// another GPU with nothing in the output saying so. Two different
+/// instance paths under one PCI address is the observable signature of
+/// that state, and dropping the group is the same answer the rest of
+/// this module gives everywhere else: decline rather than guess. Rows
+/// of one real card share their instance path; a secondary
+/// display-output row may leave it blank, which is backfilled and is
+/// not a conflict, and case differences are not a conflict either,
+/// since WMI and ADL do not agree on case.
 pub fn group_by_card(adapters: &[AdlAdapter]) -> Vec<CardGroup> {
     let mut groups: Vec<CardGroup> = Vec::new();
+    // Parallel to `groups`: whether the group saw contradictory PNP
+    // strings and therefore cannot be trusted to be one card.
+    let mut conflicting: Vec<bool> = Vec::new();
     for adapter in adapters {
         if !plausible_bdf(adapter) {
             continue;
         }
-        match groups.iter_mut().find(|group| {
+        let existing = groups.iter().position(|group| {
             group.bus == adapter.bus
                 && group.device == adapter.device
                 && group.function == adapter.function
-        }) {
-            Some(group) => {
+        });
+        match existing {
+            Some(position) => {
+                let group = &mut groups[position];
                 group.indices.push(adapter.index);
                 // Prefer any row that actually carries the string; a
                 // secondary display-output row can leave one blank.
-                if group.pnp_string.is_empty() && !adapter.pnp_string.is_empty() {
-                    group.pnp_string = adapter.pnp_string.clone();
+                if !adapter.pnp_string.is_empty() {
+                    if group.pnp_string.is_empty() {
+                        group.pnp_string = adapter.pnp_string.clone();
+                    } else if !group.pnp_string.eq_ignore_ascii_case(&adapter.pnp_string) {
+                        conflicting[position] = true;
+                    }
                 }
                 if group.adapter_name.is_empty() && !adapter.adapter_name.is_empty() {
                     group.adapter_name = adapter.adapter_name.clone();
                 }
             }
-            None => groups.push(CardGroup {
-                bus: adapter.bus,
-                device: adapter.device,
-                function: adapter.function,
-                adapter_name: adapter.adapter_name.clone(),
-                pnp_string: adapter.pnp_string.clone(),
-                indices: vec![adapter.index],
-            }),
+            None => {
+                groups.push(CardGroup {
+                    bus: adapter.bus,
+                    device: adapter.device,
+                    function: adapter.function,
+                    adapter_name: adapter.adapter_name.clone(),
+                    pnp_string: adapter.pnp_string.clone(),
+                    indices: vec![adapter.index],
+                });
+                conflicting.push(false);
+            }
         }
     }
+    let mut groups: Vec<CardGroup> = groups
+        .into_iter()
+        .zip(conflicting)
+        .filter_map(|(group, conflicted)| (!conflicted).then_some(group))
+        .collect();
     for group in &mut groups {
         group.indices.sort_unstable();
         group.indices.dedup();
@@ -397,6 +430,43 @@ mod tests {
         let groups = group_by_card(&adapters);
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].pnp_string, DGPU_PNP);
+    }
+
+    #[test]
+    fn a_bdf_group_with_contradictory_pnp_strings_is_dropped_rather_than_merged() {
+        // A driver that leaves bus/device/function unfilled puts two
+        // physical cards under one PCI address. Merging them yields a
+        // card whose index list spans both, and the caller samples the
+        // first index that answers, so one card's telemetry would be
+        // reported for the other GPU with nothing in the output saying
+        // so. Two different instance paths under one address is the
+        // signature of that state.
+        let adapters = vec![
+            adapter(0, (0, 0, 0), APU_PNP),
+            adapter(1, (0, 0, 0), DGPU_PNP),
+        ];
+        assert!(group_by_card(&adapters).is_empty());
+        // With no trustworthy group left, attribution declines rather
+        // than guessing.
+        assert_eq!(
+            plan_attribution(&[DGPU_PNP, APU_PNP], Some(&adapters)),
+            AttributionPlan::Decline
+        );
+    }
+
+    #[test]
+    fn a_case_differing_pnp_string_on_a_sibling_row_is_not_a_conflict() {
+        // WMI and ADL do not agree on case, and neither need two rows
+        // of one card; only a genuinely different instance path is a
+        // conflict.
+        let lowered = DGPU_PNP.to_lowercase();
+        let adapters = vec![
+            adapter(0, (3, 0, 0), DGPU_PNP),
+            adapter(1, (3, 0, 0), &lowered),
+        ];
+        let groups = group_by_card(&adapters);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].indices, vec![0, 1]);
     }
 
     #[test]
