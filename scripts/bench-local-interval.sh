@@ -530,6 +530,15 @@ intel_hybrid_topology() {
 # the groups and their CPU ranges are unaffected. The fallback is per-part-ID
 # text rather than one shared placeholder precisely so a missing label can
 # never collapse two real groups into one.
+#
+# Groups come out ordered by part ID, which is a registry value carrying no
+# performance ranking, so unlike the cpufreq path above the first group here is
+# not the fastest one. On this GB10 the two orderings agree, 0xd85 (X925)
+# sorting below 0xd87 (A725), but that is a coincidence of the registry rather
+# than something to read meaning into. The label and CPU list carry the
+# information; their order does not. Nothing better is available on this path,
+# since it is reached only when both signals that could rank the clusters,
+# cpufreq and cpu_capacity, are unreadable.
 arm_part_topology() {
   local keep="$1" pairs names lines
   pairs="$(awk '
