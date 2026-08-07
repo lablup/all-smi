@@ -75,9 +75,8 @@ pub struct DxgiAdapter {
 /// to the WMI baseline, not one that should emit diagnostics on every
 /// poll.
 pub fn enumerate() -> Vec<DxgiAdapter> {
-    let factory: IDXGIFactory1 = match unsafe { CreateDXGIFactory1() } {
-        Ok(factory) => factory,
-        Err(_) => return Vec::new(),
+    let Some(factory) = factory() else {
+        return Vec::new();
     };
 
     let mut adapters = Vec::new();
@@ -122,6 +121,46 @@ pub fn enumerate() -> Vec<DxgiAdapter> {
     }
 
     adapters
+}
+
+/// Process-wide DXGI factory, created once.
+///
+/// `CreateDXGIFactory1` is the most expensive call in this module: it is
+/// COM object creation and can pull in graphics driver DLLs. Doing it on
+/// every poll (as often as once per second) was pure waste, since the
+/// factory is reusable.
+///
+/// `IDXGIFactory1::IsCurrent` reports whether the adapter set has
+/// changed since creation, so a hot-plugged or disabled GPU is picked up
+/// by rebuilding rather than by paying for a new factory unconditionally.
+static FACTORY: once_cell::sync::OnceCell<std::sync::Mutex<Option<SendFactory>>> =
+    once_cell::sync::OnceCell::new();
+
+/// COM interface pointers are not `Send` in general. This one is only
+/// ever touched under the `Mutex` below, on whichever thread the
+/// collector happens to be, and DXGI factories are free-threaded.
+struct SendFactory(IDXGIFactory1);
+unsafe impl Send for SendFactory {}
+
+fn factory() -> Option<IDXGIFactory1> {
+    let cell = FACTORY.get_or_init(|| std::sync::Mutex::new(None));
+    let mut guard = match cell.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+
+    // Rebuild when the cached factory has gone stale, which is DXGI's
+    // way of saying the adapter set changed.
+    if let Some(existing) = guard.as_ref() {
+        if unsafe { existing.0.IsCurrent() }.as_bool() {
+            return Some(existing.0.clone());
+        }
+        *guard = None;
+    }
+
+    let created: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }.ok()?;
+    *guard = Some(SendFactory(created.clone()));
+    Some(created)
 }
 
 /// Read the local-segment video memory info, when the adapter supports
