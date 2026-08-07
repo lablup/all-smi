@@ -29,6 +29,7 @@ static CHECKS: &[&Check] = &[
     &BUILD_GATE,
     &ADL_LIBRARY,
     &ADL_SENSORS,
+    &ADL_ADAPTERS,
 ];
 
 pub fn checks() -> &'static [&'static Check] {
@@ -78,6 +79,84 @@ static ADL_SENSORS: Check = Check {
     severity_on_fail: Severity::Info,
     run: check_adl_sensors,
 };
+
+static ADL_ADAPTERS: Check = Check {
+    id: "amd.adl.adapters",
+    title: "AMD ADL adapter inventory",
+    severity_on_fail: Severity::Info,
+    run: check_adl_adapters,
+};
+
+/// Dump the raw `AdapterInfo` rows: index, PCI bus/device/function,
+/// `strAdapterName`, and `strPNPString` per adapter.
+///
+/// This is the field-verification path for the `AdapterInfo` layout in
+/// `device/readers/amd_adl/ffi.rs`, the same role `amd.adl.sensors`
+/// plays for the PMLog sensor index mapping: the layout is transcribed
+/// from AMD's public headers and nothing in CI can check it (no job
+/// compiles all-smi for Windows, no test can call the real library),
+/// so an operator on real hardware is the verifier. Legible device
+/// paths in the dump confirm the layout; garbage refutes it, which is
+/// why the rows are printed even, and especially, when runtime
+/// verification fails. The dump also shows the grouping and the PNP
+/// strings that multi-GPU attribution matches against the GPU uuids,
+/// so a wrong match can be diagnosed from the same output.
+fn check_adl_adapters(_ctx: &CheckCtx) -> CheckResult {
+    #[cfg(target_os = "windows")]
+    {
+        use crate::device::readers::amd_adl::loader::AdapterProbe;
+        use crate::device::readers::amd_adl::{adapters, loader};
+
+        let Some(probe) = loader::adapter_info_probe() else {
+            return CheckResult::Skip("ADL unavailable (see amd.adl.library)".to_string());
+        };
+        match probe {
+            AdapterProbe::NoEntryPoint => CheckResult::Skip(
+                "atiadlxx.dll does not export ADL2_Adapter_AdapterInfo_Get; multi-GPU \
+                 attribution is unavailable on this driver"
+                    .to_string(),
+            ),
+            AdapterProbe::CallFailed => CheckResult::Warn(
+                "ADL2_Adapter_AdapterInfo_Get failed or reported an implausible adapter count"
+                    .to_string(),
+                Some("single-GPU sensor augmentation is unaffected".to_string()),
+            ),
+            AdapterProbe::Rows { rows, layout_ok } => {
+                let dump = rows
+                    .iter()
+                    .enumerate()
+                    .map(|(slot, row)| adapters::describe_raw_entry(slot, row))
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                if !layout_ok {
+                    return CheckResult::Warn(
+                        format!(
+                            "AdapterInfo layout verification FAILED; multi-GPU attribution is \
+                             disabled. raw rows: {dump}"
+                        ),
+                        Some(
+                            "this is what a wrong transcribed struct layout looks like; please \
+                             report the raw rows so the layout can be corrected"
+                                .to_string(),
+                        ),
+                    );
+                }
+                let parsed = adapters::parse_adapters(&rows);
+                let groups = adapters::group_by_card(&parsed);
+                CheckResult::Pass(format!(
+                    "{} adapter row(s) across {} physical card(s); {}",
+                    rows.len(),
+                    groups.len(),
+                    dump
+                ))
+            }
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        CheckResult::Skip("ADL is Windows-only".to_string())
+    }
+}
 
 /// Report whether `atiadlxx.dll` loaded and an ADL2 context was created.
 fn check_adl_library(_ctx: &CheckCtx) -> CheckResult {

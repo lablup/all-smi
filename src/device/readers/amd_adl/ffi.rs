@@ -24,17 +24,45 @@
 //! Every additional `#[repr(C)]` struct declared against a library we
 //! cannot compile against, cannot run, and have no CI coverage for is
 //! unverifiable risk: a layout mistake is memory corruption, not a
-//! compile error. So this module declares exactly one output struct plus
-//! scalar-only entry points.
+//! compile error. So this module declares exactly two output structs
+//! plus scalar-only entry points, and both structs carry a defence
+//! beyond the compile-time assertions.
 //!
-//! Notably absent is `AdapterInfo`, the 1568-byte struct that
-//! `ADL2_Adapter_AdapterInfo_Get` fills in. It carries the PCI bus /
-//! device / function numbers and the PNP string that would let an ADL
-//! adapter be matched to a specific card. Declaring it would be the
-//! single largest ABI liability in this file, and ADL sizes its write by
-//! its own `sizeof`, so getting it wrong overflows our buffer. The
-//! reader avoids needing it by only augmenting when the machine has
-//! exactly one AMD GPU; see the module docs in the parent.
+//! ## `AdapterInfo`, and why declaring it became acceptable
+//!
+//! Earlier revisions refused to declare [`AdapterInfo`], the struct that
+//! carries the PCI bus / device / function numbers and the PNP string
+//! tying an ADL adapter index to a physical card, on the grounds that
+//! ADL sizes its write by its own `sizeof` and a wrong layout overflows
+//! the buffer. That reasoning was half right. Unlike
+//! `ADL2_New_QueryPMLogData_Get`, which takes a bare pointer,
+//! `ADL2_Adapter_AdapterInfo_Get` takes the buffer size as its
+//! `iInputSize` parameter, so a correct input size, plus the same
+//! padded-buffer pattern proven on [`AdlPmLogDataBuffer`], reduces the
+//! failure mode from a buffer overflow to reading fields at wrong
+//! offsets: garbage, not corruption.
+//!
+//! And the struct is self-verifying against exactly that residual
+//! failure. Four of its fields are 256-byte NUL-terminated ASCII
+//! strings at known offsets; a correct layout reads them as legible
+//! device paths, a wrong one reads them as garbage.
+//! [`AdapterInfoArray::validated`] performs that check at runtime, per
+//! entry, so a wrong stride is caught on the second entry even when the
+//! first happens to parse. Whenever verification fails the reader
+//! declines multi-GPU attribution, leaving the DXGI and PDH baseline
+//! (the pre-#353 behavior, which a single-GPU machine keeps
+//! unconditionally), and the `amd.adl.adapters` doctor check dumps the
+//! same fields so the transcribed layout can be confirmed or refuted
+//! from real hardware.
+//!
+//! The declared layout is the **Windows** variant: `adl_structures.h`
+//! appends `iExist`, the two driver-path strings, `strPNPString`, and
+//! `iOSDisplayIndex` under `#if defined(_WIN32) || defined(_WIN64)`,
+//! and appends a different tail on Linux, so the struct is 1572 bytes
+//! here and a different size elsewhere. That is fine: the only caller
+//! sits behind `cfg(target_os = "windows")`, and the declaration stays
+//! unconditional so its assertions and tests run on the Linux runner,
+//! the only runner this repository has.
 //!
 //! ## Calling convention
 //!
@@ -50,10 +78,8 @@ use std::ffi::c_int;
 #[cfg(target_os = "windows")]
 use std::ffi::c_void;
 
-/// `ADL_MAX_PATH` from `adl_defines.h`. Not used by any struct declared
-/// here; kept as documentation of the value the omitted `AdapterInfo`
-/// layout depends on.
-#[allow(dead_code)]
+/// `ADL_MAX_PATH` from `adl_defines.h`: the length of every string
+/// field in [`AdapterInfo`].
 pub const ADL_MAX_PATH: usize = 256;
 
 /// `ADL_PMLOG_MAX_SENSORS` from `adl_structures.h`.
@@ -128,12 +154,12 @@ const _: () = assert!(
 
 /// A PMLog output buffer with trailing headroom.
 ///
-/// The module docs above refuse to declare `AdapterInfo` because ADL
-/// sizes its write by its own `sizeof` and a short buffer is a memory
-/// smash rather than an error. That reasoning applies to
-/// `ADLPMLogDataOutput` too: `ADL2_New_QueryPMLogData_Get` takes a bare
-/// pointer with no length, so if a future driver ships a larger
+/// `ADL2_New_QueryPMLogData_Get` takes a bare pointer with no length,
+/// so ADL sizes its write by its own `sizeof` and a short buffer is a
+/// memory smash rather than an error: if a future driver ships a larger
 /// `ADL_PMLOG_MAX_SENSORS` it would write past a tightly-sized buffer.
+/// (This is the risk the module docs describe for `AdapterInfo`, in its
+/// worse no-`iInputSize` form.)
 ///
 /// Raising `ADL_PMLOG_MAX_SENSORS` would break every existing consumer,
 /// so it is unlikely, but "unlikely" is not a reason to hand a driver an
@@ -180,6 +206,229 @@ const _: () = assert!(
     std::mem::size_of::<AdlPmLogDataBuffer>() > std::mem::size_of::<AdlPmLogDataOutput>(),
     "the headroom must actually extend the allocation"
 );
+
+/// `AdapterInfo` from `adl_structures.h`, **Windows layout**.
+///
+/// Transcribed field by field from AMD's public header. Everything is a
+/// 32-bit `int` or a `char[ADL_MAX_PATH]` array, so the natural
+/// alignment is 4 and there is no padding anywhere; the compile-time
+/// assertions below pin every load-bearing offset and the 1572-byte
+/// total. The header's `#if defined(_WIN32) || defined(_WIN64)` block
+/// contributes the last five fields; the Linux variant has a different
+/// tail and a different size, and is deliberately not declared because
+/// nothing outside `cfg(target_os = "windows")` ever calls the entry
+/// point that fills this in.
+///
+/// The string fields are declared `[u8; ADL_MAX_PATH]` rather than C's
+/// signed `char`: the two types have identical size and alignment, and
+/// `u8` is what the byte-level string handling in [`adl_string`] wants.
+///
+/// This transcription cannot be checked by any compiler or CI job (see
+/// the module docs), which is why nothing consumes an `AdapterInfo`
+/// without it first passing [`AdapterInfoArray::validated`].
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct AdapterInfo {
+    /// Size of the structure. Some ADL revisions fill it in, some leave
+    /// the caller's zero; [`Self::looks_sane`] accepts either but
+    /// rejects a positive value that disagrees with our layout.
+    pub i_size: c_int,
+    /// The ADL adapter index this row describes.
+    pub i_adapter_index: c_int,
+    /// Unique driver-assigned device identifier.
+    pub str_udid: [u8; ADL_MAX_PATH],
+    /// PCI bus number.
+    pub i_bus_number: c_int,
+    /// PCI device number.
+    pub i_device_number: c_int,
+    /// PCI function number.
+    pub i_function_number: c_int,
+    pub i_vendor_id: c_int,
+    /// Marketing name, e.g. "AMD Radeon RX 7900 XTX".
+    pub str_adapter_name: [u8; ADL_MAX_PATH],
+    /// OS display name, e.g. `\\.\DISPLAY1`.
+    pub str_display_name: [u8; ADL_MAX_PATH],
+    pub i_present: c_int,
+    // --- Windows-only tail below ---
+    pub i_exist: c_int,
+    pub str_driver_path: [u8; ADL_MAX_PATH],
+    pub str_driver_path_ext: [u8; ADL_MAX_PATH],
+    /// The Windows PNP device instance path, e.g.
+    /// `PCI\VEN_1002&DEV_744C&SUBSYS_...\6&...&0&00000019`. The same
+    /// string WMI reports as `PNPDeviceID`, which `amd_windows` stores
+    /// as the GPU uuid; this field is what makes the ADL-to-GPU join
+    /// exact.
+    pub str_pnp_string: [u8; ADL_MAX_PATH],
+    pub i_os_display_index: c_int,
+}
+
+impl Default for AdapterInfo {
+    fn default() -> Self {
+        Self {
+            i_size: 0,
+            i_adapter_index: 0,
+            str_udid: [0; ADL_MAX_PATH],
+            i_bus_number: 0,
+            i_device_number: 0,
+            i_function_number: 0,
+            i_vendor_id: 0,
+            str_adapter_name: [0; ADL_MAX_PATH],
+            str_display_name: [0; ADL_MAX_PATH],
+            i_present: 0,
+            i_exist: 0,
+            str_driver_path: [0; ADL_MAX_PATH],
+            str_driver_path_ext: [0; ADL_MAX_PATH],
+            str_pnp_string: [0; ADL_MAX_PATH],
+            i_os_display_index: 0,
+        }
+    }
+}
+
+// AdapterInfo layout assertions. 9 ints (36 bytes) + 6 char[256] arrays
+// (1536 bytes) = 1572, every field naturally 4-aligned, no padding.
+// Note this is NOT the 1568 some derivations arrive at by dropping
+// `iAdapterIndex`. The string offsets are individually pinned because
+// the runtime self-verification and the GPU matching both read through
+// them.
+const _: () = assert!(
+    std::mem::size_of::<AdapterInfo>() == 1572,
+    "AdapterInfo (Windows layout) is 1572 bytes in AMD's headers"
+);
+const _: () = assert!(
+    std::mem::align_of::<AdapterInfo>() == 4,
+    "AdapterInfo must be 4-byte aligned, or the adapter array strides wrong"
+);
+const _: () = assert!(std::mem::offset_of!(AdapterInfo, str_udid) == 8);
+const _: () = assert!(std::mem::offset_of!(AdapterInfo, i_bus_number) == 264);
+const _: () = assert!(std::mem::offset_of!(AdapterInfo, i_device_number) == 268);
+const _: () = assert!(std::mem::offset_of!(AdapterInfo, i_function_number) == 272);
+const _: () = assert!(std::mem::offset_of!(AdapterInfo, i_vendor_id) == 276);
+const _: () = assert!(std::mem::offset_of!(AdapterInfo, str_adapter_name) == 280);
+const _: () = assert!(std::mem::offset_of!(AdapterInfo, str_display_name) == 536);
+const _: () = assert!(std::mem::offset_of!(AdapterInfo, i_present) == 792);
+const _: () = assert!(std::mem::offset_of!(AdapterInfo, str_pnp_string) == 1312);
+const _: () = assert!(std::mem::offset_of!(AdapterInfo, i_os_display_index) == 1568);
+
+/// The NUL-terminated printable-ASCII prefix of an ADL string field, or
+/// `None` when the bytes do not look like a string at all: no
+/// terminator anywhere, or a non-printable byte before it. Garbage
+/// here is the signature of a misdeclared layout, which is exactly what
+/// [`AdapterInfo::looks_sane`] uses it to detect. An empty string (NUL
+/// at offset 0) is a valid string, not garbage.
+pub fn adl_string(bytes: &[u8]) -> Option<&str> {
+    let len = bytes.iter().position(|&b| b == 0)?;
+    let prefix = &bytes[..len];
+    if !prefix.iter().all(|&b| (0x20..=0x7E).contains(&b)) {
+        return None;
+    }
+    // Printable ASCII is valid UTF-8 by construction.
+    std::str::from_utf8(prefix).ok()
+}
+
+/// Best-effort rendering of an ADL string field for diagnostics: up to
+/// the first NUL, or the whole array when no NUL exists, with invalid
+/// UTF-8 replaced. Used by the `amd.adl.adapters` doctor dump, where
+/// garbage bytes are precisely the evidence being collected.
+pub fn adl_string_lossy(bytes: &[u8]) -> String {
+    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+    String::from_utf8_lossy(&bytes[..end]).into_owned()
+}
+
+impl AdapterInfo {
+    /// Whether this entry is consistent with the layout declared above.
+    ///
+    /// Three independent signals, all of which a correct layout passes
+    /// trivially and a wrong one fails almost surely:
+    ///
+    /// - the four string fields must be NUL-terminated printable ASCII
+    ///   (a shifted or misdeclared layout puts binary data there);
+    /// - `iSize`, when the driver fills it in, must equal our
+    ///   `size_of` (zero is accepted: the PMLog path has seen drivers
+    ///   leave size fields untouched);
+    /// - `iAdapterIndex` must be a plausible small index rather than,
+    ///   say, the first four bytes of a string that landed there.
+    ///
+    /// This is a *layout* check, not a data-quality check: plausibility
+    /// of the PCI bus/device/function values is judged at grouping
+    /// time, per entry, so one odd row cannot disable attribution for
+    /// the whole machine.
+    pub fn looks_sane(&self) -> bool {
+        let size_ok = self.i_size == 0 || self.i_size as usize == std::mem::size_of::<Self>();
+        let index_ok = (0..256).contains(&self.i_adapter_index);
+        size_ok
+            && index_ok
+            && adl_string(&self.str_udid).is_some()
+            && adl_string(&self.str_adapter_name).is_some()
+            && adl_string(&self.str_display_name).is_some()
+            && adl_string(&self.str_pnp_string).is_some()
+    }
+}
+
+/// An `AdapterInfo` array with trailing headroom, the counterpart of
+/// [`AdlPmLogDataBuffer`] for `ADL2_Adapter_AdapterInfo_Get`.
+///
+/// That entry point does take an `iInputSize` parameter, so unlike the
+/// PMLog call the driver is *told* how large the buffer is. The
+/// headroom (a full second copy of the requested rows, plus slack) is
+/// kept anyway: it is cheap, and it means a driver that sizes its write
+/// by its own larger `sizeof` in disregard of `iInputSize` still lands
+/// inside our allocation instead of behind it.
+///
+/// Callers must keep `requested` small enough that
+/// `requested * size_of::<AdapterInfo>()` fits a `c_int`; the loader
+/// bounds the adapter count long before this matters.
+pub struct AdapterInfoArray {
+    entries: Vec<AdapterInfo>,
+    requested: usize,
+}
+
+impl AdapterInfoArray {
+    /// Allocate a zeroed buffer for `requested` adapter rows plus
+    /// headroom.
+    pub fn for_count(requested: usize) -> Self {
+        let allocated = requested * 2 + 4;
+        Self {
+            entries: vec![AdapterInfo::default(); allocated],
+            requested,
+        }
+    }
+
+    /// Base pointer handed to `ADL2_Adapter_AdapterInfo_Get`.
+    pub fn as_mut_ptr(&mut self) -> *mut AdapterInfo {
+        self.entries.as_mut_ptr()
+    }
+
+    /// The `iInputSize` argument: the size of the `requested` rows the
+    /// caller asked for, *not* the (larger) allocation. Reporting the
+    /// true request keeps the driver's own bounds accounting honest;
+    /// the headroom exists for drivers that ignore it.
+    pub fn input_size(&self) -> c_int {
+        (self.requested * std::mem::size_of::<AdapterInfo>()) as c_int
+    }
+
+    /// The requested rows without any validation. For diagnostics only:
+    /// the doctor dump wants to show exactly what the driver wrote even
+    /// (especially) when it fails verification.
+    pub fn requested_entries(&self) -> &[AdapterInfo] {
+        &self.entries[..self.requested]
+    }
+
+    /// The filled-in rows, or `None` when any row fails
+    /// [`AdapterInfo::looks_sane`].
+    ///
+    /// Every row is checked, not just the first: with a wrong struct
+    /// *size* the first row still parses (offsets within it are right)
+    /// and it is the second row onward that garbles, so on the
+    /// multi-adapter machines this struct exists for, the later rows
+    /// are the stride check.
+    pub fn validated(&self) -> Option<&[AdapterInfo]> {
+        let entries = self.requested_entries();
+        entries
+            .iter()
+            .all(AdapterInfo::looks_sane)
+            .then_some(entries)
+    }
+}
 
 // The entry points are only callable where the library exists, so they
 // are declared for Windows alone. The struct layouts above stay
@@ -233,6 +482,21 @@ pub type Adl2NewQueryPmLogDataGet = unsafe extern "C" fn(
     context: AdlContextHandle,
     adapter_index: c_int,
     output: *mut AdlPmLogDataOutput,
+) -> c_int;
+
+/// `ADL2_Adapter_AdapterInfo_Get`.
+///
+/// Fills `info` with one [`AdapterInfo`] per adapter index.
+/// `input_size` is the byte size of the buffer the caller allocated,
+/// conventionally `count * sizeof(AdapterInfo)` after asking
+/// `ADL2_Adapter_NumberOfAdapters_Get` for the count. Called through
+/// [`AdapterInfoArray`], which over-allocates and reports the honest
+/// request size.
+#[cfg(target_os = "windows")]
+pub type Adl2AdapterAdapterInfoGet = unsafe extern "C" fn(
+    context: AdlContextHandle,
+    info: *mut AdapterInfo,
+    input_size: c_int,
 ) -> c_int;
 
 #[cfg(test)]
@@ -300,5 +564,143 @@ mod tests {
         let output = AdlPmLogDataOutput::default();
         assert!(output.sensors.iter().all(|s| s.supported == 0));
         assert_eq!(output.sensors.len(), ADL_PMLOG_MAX_SENSORS);
+    }
+
+    /// Write a NUL-terminated ASCII string into an ADL char array.
+    fn fill(field: &mut [u8; ADL_MAX_PATH], text: &str) {
+        field.fill(0);
+        field[..text.len()].copy_from_slice(text.as_bytes());
+    }
+
+    /// An entry that looks like what a real driver writes.
+    fn sane_entry(index: i32, pnp: &str) -> AdapterInfo {
+        let mut entry = AdapterInfo {
+            i_adapter_index: index,
+            i_bus_number: 3,
+            i_device_number: 0,
+            i_function_number: 0,
+            i_vendor_id: 1002,
+            i_present: 1,
+            i_exist: 1,
+            ..AdapterInfo::default()
+        };
+        fill(
+            &mut entry.str_udid,
+            "PCI_VEN_1002&DEV_744C&REV_C8_6&12A2C3D4&0&19A",
+        );
+        fill(&mut entry.str_adapter_name, "AMD Radeon RX 7900 XTX");
+        fill(&mut entry.str_display_name, r"\\.\DISPLAY1");
+        fill(&mut entry.str_pnp_string, pnp);
+        entry
+    }
+
+    #[test]
+    fn the_four_string_fields_sit_at_their_transcribed_offsets() {
+        // The runtime self-verification and the GPU matching both read
+        // through these offsets, so pin them against an instance and
+        // not just via the const assertions: this is the test the issue
+        // asks for, phrased so a failure names the field.
+        let info = AdapterInfo::default();
+        let base = &info as *const AdapterInfo as usize;
+        for (name, offset, expected) in [
+            ("strUDID", info.str_udid.as_ptr() as usize - base, 8),
+            (
+                "strAdapterName",
+                info.str_adapter_name.as_ptr() as usize - base,
+                280,
+            ),
+            (
+                "strDisplayName",
+                info.str_display_name.as_ptr() as usize - base,
+                536,
+            ),
+            (
+                "strPNPString",
+                info.str_pnp_string.as_ptr() as usize - base,
+                1312,
+            ),
+        ] {
+            assert_eq!(offset, expected, "{name} is misplaced");
+        }
+    }
+
+    #[test]
+    fn adl_strings_accept_device_paths_and_reject_binary_garbage() {
+        let mut field = [0u8; ADL_MAX_PATH];
+        assert_eq!(adl_string(&field), Some(""));
+
+        fill(&mut field, r"PCI\VEN_1002&DEV_744C");
+        assert_eq!(adl_string(&field), Some(r"PCI\VEN_1002&DEV_744C"));
+
+        // No terminator anywhere: what a shifted layout reads out of
+        // the middle of a neighbouring field.
+        let unterminated = [b'A'; ADL_MAX_PATH];
+        assert_eq!(adl_string(&unterminated), None);
+
+        // Binary bytes before the terminator: an int reinterpreted as
+        // the start of a string.
+        let mut binary = [0u8; ADL_MAX_PATH];
+        binary[0] = 0x01;
+        binary[1] = 0x9F;
+        assert_eq!(adl_string(&binary), None);
+
+        // The lossy variant renders both anyway; it exists to collect
+        // evidence, not to gatekeep.
+        assert_eq!(adl_string_lossy(&field), r"PCI\VEN_1002&DEV_744C");
+        assert_eq!(adl_string_lossy(&unterminated).len(), ADL_MAX_PATH);
+    }
+
+    #[test]
+    fn a_realistic_entry_passes_and_layout_garbage_fails() {
+        assert!(sane_entry(0, r"PCI\VEN_1002&DEV_744C\6&ABCD&0&19").looks_sane());
+
+        // iSize agreeing with our size_of, or left at zero, are both
+        // fine; a positive disagreement is the ABI-drift signal.
+        let mut entry = sane_entry(0, r"PCI\VEN_1002&DEV_744C\6&ABCD&0&19");
+        entry.i_size = std::mem::size_of::<AdapterInfo>() as c_int;
+        assert!(entry.looks_sane());
+        entry.i_size = 1568; // the off-by-one-int derivation
+        assert!(!entry.looks_sane());
+
+        // An adapter index that is really string bytes.
+        let mut entry = sane_entry(0, r"PCI\VEN_1002&DEV_744C\6&ABCD&0&19");
+        entry.i_adapter_index = i32::from_le_bytes(*b"PCI\\");
+        assert!(!entry.looks_sane());
+
+        // A string field holding unterminated bytes.
+        let mut entry = sane_entry(0, r"PCI\VEN_1002&DEV_744C\6&ABCD&0&19");
+        entry.str_pnp_string = [b'x'; ADL_MAX_PATH];
+        assert!(!entry.looks_sane());
+    }
+
+    #[test]
+    fn the_adapter_array_reports_the_requested_size_but_allocates_more() {
+        let mut array = AdapterInfoArray::for_count(3);
+        assert_eq!(
+            array.input_size() as usize,
+            3 * std::mem::size_of::<AdapterInfo>()
+        );
+        assert_eq!(array.requested_entries().len(), 3);
+        // The headroom: the allocation must hold at least a full second
+        // copy of the requested rows.
+        assert!(array.entries.len() >= 2 * array.requested);
+        // And the pointer handed to ADL must be the first entry.
+        let base = array.as_mut_ptr() as usize;
+        assert_eq!(base, array.entries.as_ptr() as usize);
+    }
+
+    #[test]
+    fn validation_rejects_the_whole_table_when_any_row_is_garbage() {
+        let mut array = AdapterInfoArray::for_count(2);
+        array.entries[0] = sane_entry(0, r"PCI\VEN_1002&DEV_744C\6&ABCD&0&19");
+        array.entries[1] = sane_entry(1, r"PCI\VEN_1002&DEV_164E\4&FEDC&0&41");
+        assert!(array.validated().is_some());
+        assert_eq!(array.validated().unwrap().len(), 2);
+
+        // A wrong stride leaves the first row parseable and garbles the
+        // second; that must reject everything, because a layout that is
+        // wrong for one row is wrong for all of them.
+        array.entries[1].str_udid = [0xFF; ADL_MAX_PATH];
+        assert!(array.validated().is_none());
     }
 }

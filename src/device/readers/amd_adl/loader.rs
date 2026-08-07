@@ -35,13 +35,17 @@
 //!
 //! The DLL load and `ADL2_Main_Control_Create` happen once for the
 //! process. The capability scan that picks an adapter index happens once
-//! and is then cached. A steady-state poll is therefore a single
-//! `ADL2_New_QueryPMLogData_Get`, which reads the telemetry block the
-//! driver already maintains for its own overlay and submits no work to
-//! the GPU.
+//! and is then cached, as is the `AdapterInfo` inventory the multi-GPU
+//! path matches against (both on the same slow refresh interval). A
+//! steady-state poll is therefore one `ADL2_New_QueryPMLogData_Get` on
+//! a single-GPU host, and one per matched card on a multi-GPU host,
+//! each reading the telemetry block the driver already maintains for
+//! its own overlay; nothing submits work to the GPU.
 
+use super::adapters::{self, AdlAdapter};
 use super::ffi::{
-    ADL_OK, Adl2AdapterNumberOfAdaptersGet, Adl2MainControlCreate, Adl2NewQueryPmLogDataGet,
+    ADL_OK, AdapterInfo, AdapterInfoArray, Adl2AdapterAdapterInfoGet,
+    Adl2AdapterNumberOfAdaptersGet, Adl2MainControlCreate, Adl2NewQueryPmLogDataGet,
     Adl2OverdriveCaps, AdlContextHandle, AdlPmLogDataBuffer, AdlPmLogDataOutput,
 };
 use libloading::os::windows::LOAD_LIBRARY_SEARCH_SYSTEM32;
@@ -73,6 +77,17 @@ const MIN_OVERDRIVE_VERSION: c_int = 7;
 /// ADL exposes no staleness signal, so a slow retry stands in for one.
 const RESCAN_INTERVAL: Duration = Duration::from_secs(60);
 
+/// Upper bound on the adapter count accepted from the driver.
+///
+/// A real machine has a handful of ADL rows (one per display output
+/// per card; a four-card workstation with six outputs each is 24).
+/// The bound keeps a garbage count from demanding an absurd
+/// `AdapterInfo` allocation, and it keeps
+/// `AdapterInfoArray::input_size` far away from `c_int` overflow. A
+/// count beyond it is treated as a failed call, which multi-GPU
+/// attribution answers by declining.
+const MAX_ADAPTER_ROWS: c_int = 64;
+
 /// Allocator handed to `ADL2_Main_Control_Create`.
 ///
 /// Allocates from the process heap rather than Rust's global allocator.
@@ -83,9 +98,11 @@ const RESCAN_INTERVAL: Duration = Duration::from_secs(60);
 /// the UCRT allocator is built on, so it stays compatible either way.
 ///
 /// ADL only invokes this for buffers it allocates on the caller's
-/// behalf, which is the `AdapterInfo` family this reader never calls, so
-/// in practice it should never run. It exists because
-/// `ADL2_Main_Control_Create` requires a non-null callback.
+/// behalf, such as `ADL2_Adapter_AdapterInfoX2_Get`. This reader calls
+/// none of those: even its `ADL2_Adapter_AdapterInfo_Get` use hands ADL
+/// a caller-allocated buffer, so in practice the callback should never
+/// run. It exists because `ADL2_Main_Control_Create` requires a
+/// non-null callback.
 ///
 /// # Safety
 ///
@@ -114,6 +131,12 @@ struct AdlRuntime {
     number_of_adapters: Adl2AdapterNumberOfAdaptersGet,
     overdrive_caps: Adl2OverdriveCaps,
     query_pmlog: Adl2NewQueryPmLogDataGet,
+    /// `ADL2_Adapter_AdapterInfo_Get`, or `None` when the installed
+    /// driver does not export it. Looked up leniently, unlike the
+    /// mandatory symbols above: a driver without it simply cannot
+    /// attribute on multi-GPU hosts, and must not lose the single-GPU
+    /// sensor path over that.
+    adapter_info_get: Option<Adl2AdapterAdapterInfoGet>,
     /// Adapter index chosen by the first capability scan.
     ///
     /// A single card exposes several ADL adapter indices, one per
@@ -128,6 +151,17 @@ struct AdlRuntime {
     /// disabling ADL for the life of the process. See the constant for
     /// why that matters.
     last_scan: Option<Instant>,
+    /// Validated adapter inventory, or `None` when the last fetch
+    /// failed (entry point missing, call error, or layout
+    /// verification rejecting the rows).
+    adapter_inventory: Option<Vec<AdlAdapter>>,
+    /// When the inventory was last fetched. Refreshed after
+    /// [`RESCAN_INTERVAL`] whether the fetch succeeded or not: adapter
+    /// topology changes (driver update, TDR reset, eGPU hotplug)
+    /// invalidate a success just as a service starting before the
+    /// driver invalidates a failure, and the refresh is one
+    /// registry-backed call per minute.
+    inventory_scanned_at: Option<Instant>,
 }
 
 // ADL context handles are plain opaque pointers rather than thread-affine
@@ -160,7 +194,7 @@ impl AdlRuntime {
         // SAFETY: symbol lookups against a successfully loaded library.
         // The signatures are transcribed from AMD's public headers; see
         // the `ffi` module.
-        let (create, number_of_adapters, overdrive_caps, query_pmlog) = unsafe {
+        let (create, number_of_adapters, overdrive_caps, query_pmlog, adapter_info_get) = unsafe {
             let create = *library
                 .get::<Adl2MainControlCreate>(b"ADL2_Main_Control_Create\0")
                 .ok()?;
@@ -173,7 +207,19 @@ impl AdlRuntime {
             let query_pmlog = *library
                 .get::<Adl2NewQueryPmLogDataGet>(b"ADL2_New_QueryPMLogData_Get\0")
                 .ok()?;
-            (create, number_of_adapters, overdrive_caps, query_pmlog)
+            // Optional: absent on drivers old enough, and only needed
+            // for multi-GPU attribution.
+            let adapter_info_get = library
+                .get::<Adl2AdapterAdapterInfoGet>(b"ADL2_Adapter_AdapterInfo_Get\0")
+                .ok()
+                .map(|symbol| *symbol);
+            (
+                create,
+                number_of_adapters,
+                overdrive_caps,
+                query_pmlog,
+                adapter_info_get,
+            )
         };
 
         let mut context: AdlContextHandle = std::ptr::null_mut();
@@ -191,8 +237,11 @@ impl AdlRuntime {
             number_of_adapters,
             overdrive_caps,
             query_pmlog,
+            adapter_info_get,
             chosen_index: None,
             last_scan: None,
+            adapter_inventory: None,
+            inventory_scanned_at: None,
         })
     }
 
@@ -289,6 +338,78 @@ impl AdlRuntime {
             }
         }
     }
+
+    /// One raw `AdapterInfo` fetch, uncached.
+    fn probe_adapter_info(&self) -> AdapterProbe {
+        let Some(adapter_info_get) = self.adapter_info_get else {
+            return AdapterProbe::NoEntryPoint;
+        };
+        let mut count: c_int = 0;
+        // SAFETY: valid context and out pointer.
+        if unsafe { (self.number_of_adapters)(self.context, &mut count) } != ADL_OK
+            || !(1..=MAX_ADAPTER_ROWS).contains(&count)
+        {
+            return AdapterProbe::CallFailed;
+        }
+        let mut buffer = AdapterInfoArray::for_count(count as usize);
+        // SAFETY: `buffer` starts with at least `count` zeroed
+        // `AdapterInfo` entries plus headroom (see `AdapterInfoArray`),
+        // `input_size` reports the requested size, and the compile-time
+        // assertions in `ffi` pin the layout the driver will write.
+        let status =
+            unsafe { adapter_info_get(self.context, buffer.as_mut_ptr(), buffer.input_size()) };
+        if status != ADL_OK {
+            return AdapterProbe::CallFailed;
+        }
+        let layout_ok = buffer.validated().is_some();
+        AdapterProbe::Rows {
+            rows: buffer.requested_entries().to_vec(),
+            layout_ok,
+        }
+    }
+
+    /// The validated adapter inventory, refreshed on the slow interval.
+    ///
+    /// `None` covers every way of not having one: the entry point is
+    /// missing, the call failed, or layout verification rejected the
+    /// rows. All of them mean multi-GPU attribution declines, which is
+    /// the designed failure mode.
+    fn adapter_inventory(&mut self) -> Option<&[AdlAdapter]> {
+        let due = match self.inventory_scanned_at {
+            None => true,
+            Some(at) => at.elapsed() >= RESCAN_INTERVAL,
+        };
+        if due {
+            self.inventory_scanned_at = Some(Instant::now());
+            self.adapter_inventory = match self.probe_adapter_info() {
+                AdapterProbe::Rows {
+                    rows,
+                    layout_ok: true,
+                } => Some(adapters::parse_adapters(&rows)),
+                _ => None,
+            };
+        }
+        self.adapter_inventory.as_deref()
+    }
+}
+
+/// Outcome of one raw `AdapterInfo` fetch, granular enough for the
+/// `amd.adl.adapters` doctor check to name the stage that failed.
+pub enum AdapterProbe {
+    /// The driver's `atiadlxx.dll` does not export
+    /// `ADL2_Adapter_AdapterInfo_Get`.
+    NoEntryPoint,
+    /// The count or info call returned an error, or the count was
+    /// implausible.
+    CallFailed,
+    /// The call succeeded. `layout_ok` reports whether every row passed
+    /// `AdapterInfo::looks_sane`; the rows are returned either way,
+    /// because when verification fails the raw bytes are exactly the
+    /// evidence the doctor exists to collect.
+    Rows {
+        rows: Vec<AdapterInfo>,
+        layout_ok: bool,
+    },
 }
 
 /// Process-wide runtime. `None` once loading has failed, so a machine
@@ -307,6 +428,43 @@ pub fn sample() -> Option<AdlPmLogDataOutput> {
         Err(poisoned) => poisoned.into_inner(),
     };
     guard.as_mut()?.sample()
+}
+
+/// Take one PMLog sample from a specific adapter index, bypassing the
+/// capability scan. Used by the multi-GPU path, where the index comes
+/// from `AdapterInfo`-based matching rather than from the scan.
+pub fn sample_adapter(index: i32) -> Option<AdlPmLogDataOutput> {
+    let guard = match runtime().lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    guard.as_ref()?.read_pmlog(index)
+}
+
+/// The validated adapter inventory, or `None` when it is unavailable
+/// for any reason (no library, no entry point, failed call, or failed
+/// layout verification). Cloned out so the runtime lock is not held
+/// across the caller's matching work.
+pub fn adapter_inventory() -> Option<Vec<AdlAdapter>> {
+    let mut guard = match runtime().lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    guard
+        .as_mut()?
+        .adapter_inventory()
+        .map(<[AdlAdapter]>::to_vec)
+}
+
+/// One raw, uncached `AdapterInfo` fetch for the `amd.adl.adapters`
+/// doctor check. `None` when the library itself is unavailable (see
+/// [`library_available`] for separating that case).
+pub fn adapter_info_probe() -> Option<AdapterProbe> {
+    let guard = match runtime().lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    Some(guard.as_ref()?.probe_adapter_info())
 }
 
 /// Whether `atiadlxx.dll` loaded and a context was created. Used by the
