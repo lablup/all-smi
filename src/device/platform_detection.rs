@@ -113,7 +113,14 @@ fn detect_nvidia() -> bool {
     false
 }
 
-#[cfg(all(target_os = "linux", not(target_env = "musl")))]
+/// Check whether at least one AMD GPU is present.
+///
+/// Only compiled on glibc Linux with the default-on `amd` cargo feature, which
+/// is where the `libamdgpu_top` dependency exists. Consumers that need a
+/// configuration-independent answer should use
+/// [`introspection::snapshot`], whose `amd` field is `false` whenever the
+/// backend is compiled out.
+#[cfg(all(target_os = "linux", not(target_env = "musl"), feature = "amd"))]
 pub fn has_amd() -> bool {
     static CACHE: OnceLock<bool> = OnceLock::new();
     *CACHE.get_or_init(detect_amd)
@@ -154,7 +161,7 @@ fn detect_intel_gpu() -> bool {
     }
 }
 
-#[cfg(all(target_os = "linux", not(target_env = "musl")))]
+#[cfg(all(target_os = "linux", not(target_env = "musl"), feature = "amd"))]
 fn detect_amd() -> bool {
     // On Linux, check for AMD GPUs
     if std::env::consts::OS == "linux" {
@@ -663,8 +670,9 @@ pub mod introspection {
         pub nvidia: bool,
         pub jetson: bool,
         /// `true` on glibc Linux targets when AMD is detected; always
-        /// `false` on musl builds because the `libamdgpu_top` dep is
-        /// compiled out.
+        /// `false` on musl builds, and on builds with the default-on `amd`
+        /// cargo feature disabled, because the `libamdgpu_top` dep is
+        /// compiled out in both cases.
         pub amd: bool,
         pub apple_silicon: bool,
         pub gaudi: bool,
@@ -696,12 +704,16 @@ pub mod introspection {
         }
     }
 
-    #[cfg(all(target_os = "linux", not(target_env = "musl")))]
+    // These two arms must stay exact complements: the positive one is
+    // compiled only where `super::has_amd` exists, the negative one
+    // everywhere else. Any drift produces either a duplicate definition or a
+    // missing `detect_amd`.
+    #[cfg(all(target_os = "linux", not(target_env = "musl"), feature = "amd"))]
     fn detect_amd() -> bool {
         super::has_amd()
     }
 
-    #[cfg(not(all(target_os = "linux", not(target_env = "musl"))))]
+    #[cfg(not(all(target_os = "linux", not(target_env = "musl"), feature = "amd")))]
     fn detect_amd() -> bool {
         false
     }

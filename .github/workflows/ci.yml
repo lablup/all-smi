@@ -1105,3 +1105,19 @@ jobs:
 
       - name: Build library-only (no default features)
         run: cargo build --no-default-features --lib
+
+      # Guards issue #345: with the `amd` feature off, `libamdgpu_top` must
+      # not be linked, so the binary must not carry libdrm as a NEEDED entry.
+      # `--no-default-features` also drops `cli` and therefore the binary, so
+      # the comparable artifact is built with `cli` re-enabled. This step
+      # overwrites target/release/all-smi from the step above; nothing later
+      # in this job consumes that artifact.
+      - name: Verify the AMD backend is droppable (no libdrm linkage)
+        run: |
+          cargo build --release --no-default-features --features cli --bin all-smi
+          echo "NEEDED entries without the amd feature:"
+          objdump -p target/release/all-smi | grep NEEDED || true
+          if objdump -p target/release/all-smi | grep -q 'NEEDED.*libdrm'; then
+            echo "::error::libdrm is still linked with --no-default-features --features cli"
+            exit 1
+          fi

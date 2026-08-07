@@ -46,7 +46,10 @@ pub mod tpu_sysfs;
 #[cfg(target_os = "linux")]
 pub mod tenstorrent;
 
-#[cfg(all(target_os = "linux", not(target_env = "musl")))]
+// Gated on glibc Linux plus the default-on `amd` cargo feature (issue #345).
+// Disabling the feature drops the `libamdgpu_top` dependency and with it the
+// `libdrm.so.2` / `libdrm_amdgpu.so.1` link-time requirements.
+#[cfg(all(target_os = "linux", not(target_env = "musl"), feature = "amd"))]
 pub mod amd;
 
 #[cfg(target_os = "windows")]

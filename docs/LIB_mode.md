@@ -44,18 +44,44 @@ The `all-smi` library provides a unified, cross-platform API for monitoring hard
 
 ## Installation
 
-Add `all-smi` to your `Cargo.toml`:
+Add `all-smi` to your `Cargo.toml`. The package is `all-smi`; the library is imported as `all_smi`.
 
 ```toml
 [dependencies]
-all_smi = "0.15"
+all-smi = "0.25"
 ```
 
 Or using cargo:
 
 ```bash
-cargo add all_smi
+cargo add all-smi
 ```
+
+### Cargo features
+
+| Feature | Default | Effect on a library consumer |
+|---------|---------|------------------------------|
+| `cli` | on | CLI parsing, TUI, and the `axum` API server. A library-only consumer usually does not need it. |
+| `amd` | on | AMD GPU backend on glibc Linux via `libamdgpu_top`. Adds `libdrm.so.2` and `libdrm_amdgpu.so.1` as link-time requirements. |
+| `mock` | off | Builds the mock server binary. |
+| `furiosa` | off | Furiosa NPU backend. |
+| `level_zero` | off | Intel Level Zero (Sysman) backend, loaded at runtime via `dlopen`. |
+
+`amd` is on by default so that adding this crate keeps AMD GPU monitoring without extra configuration. The cost is that `libamdgpu_top` links `libdrm.so.2` and `libdrm_amdgpu.so.1` unconditionally, and those become hard `NEEDED` entries on your binary too. A host that does not have AMD's userspace DRM libraries then fails to start your program with a loader error before `main` runs, which no amount of runtime handling can catch. Turn the feature off if your binary must run on hosts without those libraries:
+
+```toml
+[dependencies]
+all-smi = { version = "0.25", default-features = false }
+```
+
+`default-features = false` turns off `cli` as well, so ask for it back if you need it:
+
+```toml
+[dependencies]
+all-smi = { version = "0.25", default-features = false, features = ["cli"] }
+```
+
+Confirm the result on Linux with `objdump -p <your-binary> | grep NEEDED`; neither `libdrm.so.2` nor `libdrm_amdgpu.so.1` should be listed. Everything except the AMD GPU readers is unaffected: NVIDIA, Apple Silicon, Intel, Tenstorrent, Rebellions, Furiosa, TPU, CPU, and memory collection all behave the same, and `GpuInfo` simply never reports AMD devices. AMD support on Windows goes through ADL/WMI and does not depend on this feature. The prebuilt musl artifacts have never included the AMD backend, so they are already free of the `libdrm` linkage.
 
 ## Quick Start
 
@@ -662,7 +688,7 @@ fn print_chassis_info() -> Result<()> {
 
 | Platform | Device Types | Requirements |
 |----------|--------------|--------------|
-| Linux | NVIDIA GPU, AMD GPU, Intel Gaudi, Furiosa, Rebellions, Tenstorrent, TPU | Vendor SDKs |
+| Linux | NVIDIA GPU, AMD GPU, Intel Gaudi, Furiosa, Rebellions, Tenstorrent, TPU | Vendor SDKs. AMD needs a glibc target and the `amd` feature (see [Cargo features](#cargo-features)) |
 | macOS | Apple Silicon GPU/ANE | macOS 12+ |
 | Windows | NVIDIA GPU | NVML |
 

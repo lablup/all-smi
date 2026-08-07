@@ -87,11 +87,12 @@ cargo build --release --bin all-smi-mock-server --features="mock"
 
 ### Optional Build Features
 
-The default build (`default = ["cli"]`) includes the full CLI, TUI, and API server. Additional opt-in Cargo features:
+The default build (`default = ["cli", "amd"]`) includes the full CLI, TUI, API server, and the AMD GPU backend. Cargo features:
 
 | Feature | Default | Purpose |
 |---------|---------|---------|
 | `cli` | on | CLI parsing, TUI (`crossterm`), and the `axum` API server. Disable for a lean library-only build. |
+| `amd` | on | AMD GPU backend on glibc Linux via the `libamdgpu_top` crate. Disable to drop the `libdrm.so.2` / `libdrm_amdgpu.so.1` runtime dependency. |
 | `mock` | off | Builds the `all-smi-mock-server` binary that simulates GPU/NPU clusters. |
 | `furiosa` | off | Furiosa NPU backend via the `furiosa-smi-rs` crate (Linux targets). |
 | `level_zero` | off | Intel oneAPI Level Zero (Sysman) backend for Intel client GPUs. Dynamically loads `libze_loader.so.1` (Linux) / `ze_loader.dll` (Windows) at runtime; a missing runtime degrades silently to the sysfs/WMI baseline. |
@@ -100,6 +101,30 @@ The default build (`default = ["cli"]`) includes the full CLI, TUI, and API serv
 # Example: build with the Intel Level Zero backend enabled
 cargo build --release --features level_zero
 ```
+
+#### Dropping the AMD backend (`amd`)
+
+`libamdgpu_top` pulls in `libdrm_amdgpu_sys`, which links `libdrm.so.2` and `libdrm_amdgpu.so.1` unconditionally. Those become hard `NEEDED` entries on every Linux binary that links this crate, so a host without AMD's userspace DRM libraries fails to start with a loader error before `main` runs, which the program cannot catch or report. Turning `amd` off removes the dependency and both `NEEDED` entries.
+
+```bash
+# Library-only build with no AMD backend and no libdrm linkage
+cargo build --release --no-default-features
+
+# CLI without the AMD backend: --no-default-features also drops `cli`,
+# so re-enable it explicitly
+cargo build --release --no-default-features --features cli
+```
+
+For a downstream crate the same rule applies. `default-features = false` turns off `cli` as well as `amd`, so a consumer that wants the CLI but not AMD must ask for `cli` back:
+
+```toml
+[dependencies]
+all-smi = { version = "0.25", default-features = false, features = ["cli"] }
+```
+
+Verify the result with `objdump -p target/release/all-smi | grep NEEDED`; neither `libdrm.so.2` nor `libdrm_amdgpu.so.1` should appear.
+
+The musl release artifacts (`all-smi-linux-x86_64-musl`, `all-smi-linux-aarch64-musl`) have never included AMD support and stay the simplest option for minimal containers. `all-smi doctor` reports which gate applied: `amd.build.target_env` and `amd.libamdgpu_top.abi` distinguish a musl build from a glibc build without the `amd` feature, and `doctor --bundle` lists the enabled features. Windows AMD support goes through ADL/WMI and is unaffected by this feature.
 
 ### Platform-Specific Builds
 

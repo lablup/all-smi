@@ -77,7 +77,13 @@ libloading = "0.9"
 # patch releases (0.11.4 renamed get_all_proc_usage → update_proc_usage, #205).
 # 0.11.5 fixes a file-descriptor leak (#218). Re-evaluate the exact version on
 # each bump.
-libamdgpu_top = "=0.11.5"
+#
+# Optional and gated behind the default-on `amd` feature (issue #345). It stays
+# a hard link, not a `dlopen`, because `libdrm_amdgpu_sys` links `libdrm.so.2`
+# and `libdrm_amdgpu.so.1` unconditionally, so every dependent inherits them as
+# `NEEDED` entries. Making the dep optional is what lets a downstream crate that
+# does not need AMD drop those entries; see the `amd` feature comment below.
+libamdgpu_top = { version = "=0.11.5", optional = true }
 
 # Windows-specific dependencies
 [target.'cfg(target_os = "windows")'.dependencies]
@@ -120,8 +126,30 @@ tokio = { version = "1.52.3", features = ["full", "test-util"] }
 tonic-prost-build = "0.14"
 
 [features]
-default = ["cli"]
+default = ["cli", "amd"]
 cli = ["dep:clap", "dep:crossterm", "dep:axum", "dep:tower-http", "dep:anyhow", "dep:toml", "dep:dirs"]
+# AMD GPU backend via `libamdgpu_top`. Default ON, unlike `furiosa` and
+# `level_zero`, so every existing distribution path (the glibc release
+# binaries, `cargo install all-smi`, the Homebrew formula, a plain
+# `cargo build`) keeps AMD support with no packaging change.
+#
+# The reason it is a feature at all is that `libamdgpu_top` pulls in
+# `libdrm_amdgpu_sys`, which links `libdrm.so.2` and `libdrm_amdgpu.so.1`
+# unconditionally. Those become hard `NEEDED` entries on every binary that
+# depends on this crate, so a host with no AMD GPU (the common case) fails to
+# start with a loader error before `main` runs, and cannot degrade gracefully.
+# A downstream crate that declares `default-features = false` now stops
+# inheriting them. Note that `--no-default-features` also drops `cli`; a
+# consumer that wants the CLI but not AMD needs
+# `default-features = false, features = ["cli"]`.
+#
+# Disabling it compiles out `src/device/readers/amd.rs`, the `has_amd`
+# detector, and the AMD arm of `reader_factory`, which is the same shape the
+# musl release artifacts have always shipped. `all-smi doctor` reports the
+# feature-off state distinctly from the musl state via `amd.build.target_env`
+# and `amd.libamdgpu_top.abi`. Windows AMD support (`amd_adl` / WMI) is
+# unaffected: it never used `libamdgpu_top`.
+amd = ["dep:libamdgpu_top"]
 mock = ["cli", "dep:rand", "dep:hyper", "dep:hyper-util"]
 # Opt-in Furiosa NPU support. Surfaced by the `furiosa.*` doctor checks
 # (issue #188) and used by the Linux-target `furiosa-smi-rs` optional dep.

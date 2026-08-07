@@ -536,9 +536,20 @@ pub const MAX_HISTORY_SIZE: usize = 60;
 
 ```toml
 [features]
-default = []
-mock = []  # Enables mock server binary
+default = ["cli", "amd"]
+# CLI parsing, TUI, and the axum API server
+cli = ["dep:clap", "dep:crossterm", "dep:axum", "dep:tower-http", "dep:anyhow", "dep:toml", "dep:dirs"]
+# AMD GPU backend via libamdgpu_top (glibc Linux)
+amd = ["dep:libamdgpu_top"]
+# Enables the mock server binary
+mock = ["cli", "dep:rand", "dep:hyper", "dep:hyper-util"]
+# Furiosa NPU backend
+furiosa = ["furiosa-smi-rs"]
+# Intel Level Zero (Sysman) backend
+level_zero = []
 ```
+
+`amd` is the only backend feature that defaults to on. It exists because `libamdgpu_top` links `libdrm.so.2` and `libdrm_amdgpu.so.1` unconditionally, which every dependent binary inherits as `NEEDED` entries; a consumer that must run on hosts without those libraries builds with `default-features = false` (see `docs/LIB_mode.md`). Disabling it compiles out `src/device/readers/amd.rs`, `platform_detection::has_amd`, and the AMD arm of `reader_factory`, which is the same shape the musl artifacts already ship. Windows AMD support goes through `amd_adl`/WMI and is independent of this feature.
 
 ### Binary Targets
 
