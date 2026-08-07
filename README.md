@@ -506,6 +506,8 @@ netsh advfirewall firewall delete rule name="all-smi"
   - AMD GPU support is available in **glibc builds only** (`x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`)
   - **Not available in musl builds** (`x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`) due to library compatibility
   - For static binaries with AMD GPU support, use the glibc builds
+- **Runtime Library Dependency:** the AMD backend links `libdrm.so.2` and `libdrm_amdgpu.so.1`, so a glibc build refuses to start on a host that lacks them, even one with no AMD GPU. Install `libdrm2 libdrm-amdgpu1` (Debian/Ubuntu) or `libdrm` (RHEL/Fedora), or use a build without the backend
+- **Opting Out (`amd` cargo feature):** the backend sits behind the `amd` feature, which is **on by default**, so the release binaries, `cargo install all-smi`, and the Homebrew formula are unchanged. Build with `--no-default-features` to drop it along with both `libdrm` entries. Note that `--no-default-features` also drops `cli`, so a CLI build without AMD is `cargo build --release --no-default-features --features cli`, and a library consumer wanting the CLI but not AMD uses `all-smi = { version = "0.25", default-features = false, features = ["cli"] }`. The musl artifacts have never carried AMD support and remain the simplest choice for minimal containers. `all-smi doctor` names the gate that applied in `amd.build.target_env`
 - **Permissions:** Add user to `video` and `render` groups as an alternative to sudo:
   ```bash
   sudo usermod -a -G video,render $USER

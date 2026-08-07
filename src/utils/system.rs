@@ -98,8 +98,9 @@ pub fn ensure_sudo_permissions() {
     if cfg!(target_os = "macos") {
         // macOS uses native APIs (IOReport, SMC) that don't require sudo
     } else if cfg!(target_os = "linux") {
-        // On Linux, check if we have AMD GPUs that require sudo (glibc only)
-        #[cfg(all(target_os = "linux", not(target_env = "musl")))]
+        // On Linux, check if we have AMD GPUs that require sudo (glibc only,
+        // and only when the default-on `amd` feature is enabled)
+        #[cfg(all(target_os = "linux", not(target_env = "musl"), feature = "amd"))]
         {
             use crate::device::platform_detection::has_amd;
 
@@ -171,8 +172,9 @@ pub fn ensure_sudo_permissions_with_fallback() -> bool {
         // macOS uses native APIs (IOReport, SMC) that don't require sudo
         true
     } else if cfg!(target_os = "linux") {
-        // On Linux, check if we have AMD GPUs that require sudo (glibc only)
-        #[cfg(all(target_os = "linux", not(target_env = "musl")))]
+        // On Linux, check if we have AMD GPUs that require sudo (glibc only,
+        // and only when the default-on `amd` feature is enabled)
+        #[cfg(all(target_os = "linux", not(target_env = "musl"), feature = "amd"))]
         {
             use crate::device::platform_detection::has_amd;
 
@@ -188,7 +190,8 @@ pub fn ensure_sudo_permissions_with_fallback() -> bool {
                 return true;
             }
         }
-        // For musl builds or when AMD GPU is not detected, no sudo needed
+        // For musl builds, builds without the `amd` feature, or when no AMD
+        // GPU is detected, no sudo is needed
         true
     } else {
         true

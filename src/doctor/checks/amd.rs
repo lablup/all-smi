@@ -12,7 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! `amd.*` checks — ROCm, libamdgpu_top, DRI access, musl-build gating.
+//! `amd.*` checks: ROCm, libamdgpu_top, DRI access, and build-time gating
+//! (the musl target gate and the default-on `amd` cargo feature).
 
 #[cfg(target_os = "linux")]
 use std::time::Duration;
@@ -25,7 +26,7 @@ static CHECKS: &[&Check] = &[
     &ROCM_VERSION,
     &LIBAMDGPU_TOP_ABI,
     &DRI_PERMS,
-    &MUSL_GATE,
+    &BUILD_GATE,
     &ADL_LIBRARY,
     &ADL_SENSORS,
 ];
@@ -55,11 +56,13 @@ static DRI_PERMS: Check = Check {
     run: check_dri_perms,
 };
 
-static MUSL_GATE: Check = Check {
+// The check id stays `amd.build.target_env` for compatibility with existing
+// bundles and docs even though it now reports the `amd` cargo feature as well.
+static BUILD_GATE: Check = Check {
     id: "amd.build.target_env",
     title: "AMD build-time availability",
     severity_on_fail: Severity::Warn,
-    run: check_musl_gate,
+    run: check_build_gate,
 };
 
 static ADL_LIBRARY: Check = Check {
@@ -226,7 +229,10 @@ fn check_rocm(_ctx: &CheckCtx) -> CheckResult {
 }
 
 fn check_libamdgpu_top(_ctx: &CheckCtx) -> CheckResult {
-    #[cfg(all(target_os = "linux", not(target_env = "musl")))]
+    // Three distinct Linux outcomes, so a user never gets told the wrong
+    // reason for a missing AMD backend: linked, compiled out by the musl
+    // target gate, or compiled out by the `amd` cargo feature (issue #345).
+    #[cfg(all(target_os = "linux", not(target_env = "musl"), feature = "amd"))]
     {
         // The `libamdgpu_top` crate is linked at compile time; if this
         // binary was built with AMD support the dep is present. Surface
@@ -235,6 +241,14 @@ fn check_libamdgpu_top(_ctx: &CheckCtx) -> CheckResult {
             "linked libamdgpu_top {}",
             env!("CARGO_PKG_VERSION")
         ))
+    }
+    #[cfg(all(target_os = "linux", not(target_env = "musl"), not(feature = "amd")))]
+    {
+        CheckResult::Skip(
+            "libamdgpu_top not linked: built without the `amd` cargo feature (see \
+             amd.build.target_env)"
+                .to_string(),
+        )
     }
     #[cfg(all(target_os = "linux", target_env = "musl"))]
     {
@@ -280,7 +294,13 @@ fn check_dri_perms(_ctx: &CheckCtx) -> CheckResult {
     }
 }
 
-fn check_musl_gate(_ctx: &CheckCtx) -> CheckResult {
+/// Report which build-time gate, if any, compiled the AMD backend out.
+///
+/// Two independent gates can remove it: the musl target gate, and the
+/// default-on `amd` cargo feature (issue #345). The three arms below are
+/// mutually exclusive and exhaustive, and each names the gate that actually
+/// applies so `all-smi doctor` never blames the wrong one.
+fn check_build_gate(_ctx: &CheckCtx) -> CheckResult {
     #[cfg(target_env = "musl")]
     {
         CheckResult::Warn(
@@ -288,7 +308,22 @@ fn check_musl_gate(_ctx: &CheckCtx) -> CheckResult {
             Some("use a glibc build (x86_64-unknown-linux-gnu) for AMD GPU monitoring".to_string()),
         )
     }
-    #[cfg(not(target_env = "musl"))]
+    #[cfg(all(target_os = "linux", not(target_env = "musl"), not(feature = "amd")))]
+    {
+        CheckResult::Warn(
+            "glibc build without the `amd` cargo feature: AMD support compiled out".to_string(),
+            Some(
+                "rebuild with the default features, or add `--features amd`, for AMD GPU \
+                 monitoring; the feature is off here because something disabled it (typically a \
+                 downstream `default-features = false`) to avoid linking libdrm"
+                    .to_string(),
+            ),
+        )
+    }
+    #[cfg(all(
+        not(target_env = "musl"),
+        any(not(target_os = "linux"), feature = "amd")
+    ))]
     {
         CheckResult::Pass("glibc or non-Linux target — AMD support available".to_string())
     }

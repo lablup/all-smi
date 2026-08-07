@@ -47,10 +47,10 @@ use crate::device::readers::intel_gpu_linux;
 #[cfg(target_os = "windows")]
 use crate::device::readers::intel_gpu_windows;
 
-#[cfg(all(target_os = "linux", not(target_env = "musl")))]
+#[cfg(all(target_os = "linux", not(target_env = "musl"), feature = "amd"))]
 use crate::device::platform_detection::has_amd;
 
-#[cfg(all(target_os = "linux", not(target_env = "musl")))]
+#[cfg(all(target_os = "linux", not(target_env = "musl"), feature = "amd"))]
 use crate::device::readers::amd;
 
 pub fn get_gpu_readers() -> Vec<Box<dyn GpuReader>> {
@@ -100,8 +100,9 @@ pub fn get_gpu_readers() -> Vec<Box<dyn GpuReader>> {
                 readers.push(Box::new(google_tpu::GoogleTpuReader::new()));
             }
 
-            // Check for AMD GPU support (glibc only, not musl))
-            #[cfg(all(target_os = "linux", not(target_env = "musl")))]
+            // Check for AMD GPU support (glibc only, not musl, and only when
+            // the default-on `amd` feature is enabled)
+            #[cfg(all(target_os = "linux", not(target_env = "musl"), feature = "amd"))]
             if has_amd() {
                 readers.push(Box::new(amd::AmdGpuReader::new()));
             }

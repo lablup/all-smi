@@ -324,6 +324,11 @@ fn enabled_features() -> Vec<&'static str> {
     let mut v: Vec<&'static str> = Vec::new();
     #[cfg(feature = "cli")]
     v.push("cli");
+    // Recorded so a support bundle shows whether the AMD backend was compiled
+    // in; its absence here is the first thing to check when AMD GPUs are
+    // missing from a glibc build (issue #345).
+    #[cfg(feature = "amd")]
+    v.push("amd");
     #[cfg(feature = "mock")]
     v.push("mock");
     #[cfg(feature = "furiosa")]
