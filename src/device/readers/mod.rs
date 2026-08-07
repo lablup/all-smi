@@ -97,3 +97,11 @@ pub mod intel_gpu_windows;
 // actually has. Same shape as `intel_gpu_sysfs` above.
 #[cfg(any(target_os = "windows", test))]
 pub mod windows_gpu_perf;
+
+// AMD ADL sensor augmentation (temperature, power, fan, clocks) layered
+// on top of `windows_gpu_perf`. Gated the same way and for the same
+// reason: the sensor-index mapping and the field application are the
+// parts most likely to be wrong, so they must reach the Linux test
+// runner.
+#[cfg(any(target_os = "windows", test))]
+pub mod amd_adl;

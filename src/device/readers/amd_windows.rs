@@ -234,6 +234,11 @@ impl GpuReader for AmdWindowsGpuReader {
         // But we could cache the static parts if needed
         let mut gpus = self.query_amd_gpus();
         self.augment_with_windows_perf(&mut gpus);
+        // ADL last: it reads the hardware's own telemetry rather than
+        // the OS's accounting of it, so where both produce a figure the
+        // vendor number wins. It is also the only source for
+        // temperature, power, fan, and clocks.
+        crate::device::readers::amd_adl::augment(&mut gpus);
         gpus
     }
 

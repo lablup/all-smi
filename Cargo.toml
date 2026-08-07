@@ -94,6 +94,7 @@ windows = { version = "0.62", features = [
     "Win32_Graphics_Dxgi",
     "Win32_Graphics_Dxgi_Common",
     "Win32_System_Performance",
+    "Win32_System_Memory",
 ] }
 # Service Control Manager integration for `all-smi service` (issue #311).
 # Mullvad's crate, MIT OR Apache-2.0, MSRV 1.71 against this project's

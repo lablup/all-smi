@@ -21,7 +21,14 @@ use std::time::Duration;
 use crate::doctor::exec::try_exec;
 use crate::doctor::types::{Check, CheckCtx, CheckResult, Severity};
 
-static CHECKS: &[&Check] = &[&ROCM_VERSION, &LIBAMDGPU_TOP_ABI, &DRI_PERMS, &MUSL_GATE];
+static CHECKS: &[&Check] = &[
+    &ROCM_VERSION,
+    &LIBAMDGPU_TOP_ABI,
+    &DRI_PERMS,
+    &MUSL_GATE,
+    &ADL_LIBRARY,
+    &ADL_SENSORS,
+];
 
 pub fn checks() -> &'static [&'static Check] {
     CHECKS
@@ -54,6 +61,138 @@ static MUSL_GATE: Check = Check {
     severity_on_fail: Severity::Warn,
     run: check_musl_gate,
 };
+
+static ADL_LIBRARY: Check = Check {
+    id: "amd.adl.library",
+    title: "AMD ADL library (atiadlxx.dll)",
+    severity_on_fail: Severity::Info,
+    run: check_adl_library,
+};
+
+static ADL_SENSORS: Check = Check {
+    id: "amd.adl.sensors",
+    title: "AMD ADL PMLog sensors",
+    severity_on_fail: Severity::Info,
+    run: check_adl_sensors,
+};
+
+/// Report whether `atiadlxx.dll` loaded and an ADL2 context was created.
+fn check_adl_library(_ctx: &CheckCtx) -> CheckResult {
+    #[cfg(target_os = "windows")]
+    {
+        use crate::device::readers::amd_adl::loader;
+
+        let path = loader::dll_path();
+        if !std::path::Path::new(path).exists() {
+            return CheckResult::Skip(format!(
+                "{path} not present; install AMD's graphics driver for temperature, power, fan, \
+                 and clock readings"
+            ));
+        }
+        if !loader::library_available() {
+            return CheckResult::Warn(
+                format!("{path} exists but ADL2_Main_Control_Create failed"),
+                Some(
+                    "the driver install may be partial; reinstalling AMD Software usually \
+                     restores it"
+                        .to_string(),
+                ),
+            );
+        }
+        match loader::selected_adapter_index() {
+            Some(index) => CheckResult::Pass(format!(
+                "{path} loaded, PMLog-capable adapter index {index}"
+            )),
+            None => CheckResult::Warn(
+                format!("{path} loaded but no adapter exposes the PMLog sensor table"),
+                Some(
+                    "expected on pre-Vega cards, whose sensors live behind the legacy Overdrive \
+                     5/6/7 entry points that all-smi does not implement"
+                        .to_string(),
+                ),
+            ),
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        CheckResult::Skip("ADL is Windows-only".to_string())
+    }
+}
+
+/// Dump the PMLog sensor table as raw `index=value` pairs.
+///
+/// This is the field-verification path for the sensor index mapping in
+/// `device/readers/amd_adl/sensors.rs`. Those indices are transcribed
+/// from AMD's public headers and cannot be checked by anything in CI:
+/// no job compiles all-smi for Windows and no test can call the real
+/// library. Printing the raw table lets an operator on real hardware
+/// confirm or correct the mapping without a code change shipping first.
+///
+/// The dump is deliberately unfiltered and shows indices rather than
+/// names, because an unexpected index is exactly the evidence needed.
+fn check_adl_sensors(_ctx: &CheckCtx) -> CheckResult {
+    #[cfg(target_os = "windows")]
+    {
+        use crate::device::readers::amd_adl::{loader, sensors};
+
+        let Some(output) = loader::sample() else {
+            return CheckResult::Skip(
+                "no PMLog sample available (see amd.adl.library)".to_string(),
+            );
+        };
+
+        let raw = sensors::supported_raw(&output);
+        if raw.is_empty() {
+            return CheckResult::Warn(
+                "PMLog returned a table with no supported sensors".to_string(),
+                None,
+            );
+        }
+
+        let readout = sensors::extract(&output);
+        let dump = raw
+            .iter()
+            .map(|(index, value)| format!("{index}={value}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        let interpreted = format!(
+            "edge={:?}C hotspot={:?}C mem={:?}C power={:?}W fan={:?}rpm gfx={:?}MHz \
+             mclk={:?}MHz activity={:?}%",
+            readout.temperature_edge_c,
+            readout.temperature_hotspot_c,
+            readout.temperature_mem_c,
+            readout.power_w,
+            readout.fan_rpm,
+            readout.clock_gfx_mhz,
+            readout.clock_mem_mhz,
+            readout.activity_gfx_pct,
+        );
+
+        let count = raw.len();
+        if readout.is_empty() {
+            return CheckResult::Warn(
+                format!(
+                    "{count} sensor(s) reported supported but none passed the range guard. \
+                     raw: {dump}"
+                ),
+                Some(
+                    "this is what a shifted ADLSensorType enum looks like; please report the raw \
+                     dump so the index mapping can be corrected"
+                        .to_string(),
+                ),
+            );
+        }
+
+        CheckResult::Pass(format!(
+            "{count} supported sensor(s); interpreted: {interpreted}; raw: {dump}"
+        ))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        CheckResult::Skip("ADL is Windows-only".to_string())
+    }
+}
 
 fn check_rocm(_ctx: &CheckCtx) -> CheckResult {
     #[cfg(target_os = "linux")]
