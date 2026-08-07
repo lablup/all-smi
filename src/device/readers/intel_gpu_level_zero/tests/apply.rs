@@ -220,6 +220,30 @@ fn duty_cycle_only_fan_leaves_the_typed_field_unset() {
 }
 
 #[test]
+fn windows_duty_cycle_only_fan_clears_a_stale_tachometer_reading() {
+    // `overwrite_existing` replaces the detail string unconditionally, so
+    // the typed field has to follow it. Keeping an RPM from an earlier
+    // sample would leave the exporter publishing a number the detail
+    // string no longer agrees with.
+    let mut gpu = make_baseline_gpu_info();
+    gpu.fan_speed_rpm = Some(1450);
+    gpu.detail
+        .insert("Fan Speed".to_string(), "1450 RPM".to_string());
+    let readout = LevelZeroReadout {
+        fan: Some(LevelZeroFanReadout {
+            rpm: None,
+            percent: Some(40),
+            source: "Level Zero Sysman",
+        }),
+        ..Default::default()
+    };
+    apply_to_gpu_info(&mut gpu, &readout, ApplyPlatform::Windows);
+
+    assert_eq!(gpu.detail.get("Fan Speed").map(String::as_str), Some("40%"));
+    assert!(gpu.fan_speed_rpm.is_none());
+}
+
+#[test]
 fn linux_l0_fan_fills_a_gap_the_hwmon_baseline_left() {
     // No hwmon tachometer means no `Fan Speed` detail key, so the
     // overwrite guard does not fire and Level Zero supplies both

@@ -17,19 +17,24 @@ use crate::device::GpuInfo;
 use crate::parsing::common::{sanitize_label_name, sanitize_label_value};
 
 /// Legacy `detail` key every reader used before `GpuInfo::fan_speed_rpm`
-/// existed, and still writes alongside it. Read here only as a fallback for
-/// mock servers and older remote nodes whose payload carries the string but
-/// not the typed field.
-const FAN_SPEED_DETAIL_KEY: &str = "Fan Speed";
+/// existed, and still writes alongside it. `sanitize_label_name` turns the
+/// key into the `fan_speed` label on `all_smi_gpu_info`, which is how a node
+/// running an older build puts the reading on the wire.
+pub(crate) const FAN_SPEED_DETAIL_KEY: &str = "Fan Speed";
 
 /// Recover an RPM reading from the legacy `Fan Speed` detail string.
+///
+/// Shared with `network::metrics_parser` so the exporter and the remote
+/// parser cannot disagree about the format, the same way
+/// `ProcessMetricExporter::parse_start_time_seconds_public` is shared with
+/// `ParsedProcessRow::from_local_process`.
 ///
 /// Readers spell the value `"1450 RPM"`, and the Level Zero reader appends a
 /// duty cycle when it has one (`"1600 RPM (40%)"`), so the number is parsed
 /// from the text before the ` RPM` marker rather than by stripping a suffix.
 /// A duty-cycle-only value (`"40%"`) carries no tachometer reading and
 /// returns `None`, as does anything non-numeric or negative.
-fn parse_fan_speed_detail(value: &str) -> Option<f64> {
+pub(crate) fn parse_fan_speed_detail(value: &str) -> Option<f64> {
     let (rpm, _) = value.split_once(" RPM")?;
     let rpm = rpm.trim().parse::<f64>().ok()?;
     (rpm.is_finite() && rpm >= 0.0).then_some(rpm)
@@ -365,11 +370,17 @@ impl<'a> GpuMetricExporter<'a> {
 
         // Fan speed, same shape as the P-state block above: prefer the
         // structured `fan_speed_rpm` field the AMD / Intel readers now
-        // populate, fall back to the legacy `Fan Speed` detail string so
-        // mock servers and remote nodes running a build that predates the
-        // field keep exporting the series. Omitted entirely when neither is
-        // available, so a passively cooled card is distinguishable from a
-        // stalled fan by absence rather than by a 0 reading.
+        // populate, fall back to the legacy `Fan Speed` detail string. The
+        // fallback covers any `GpuInfo` that carries the legacy string
+        // without the typed field, such as one deserialized from a snapshot
+        // recorded before the field existed. A remote node running an older
+        // build is handled upstream in `network::metrics_parser` instead:
+        // this exporter only ever runs over locally read `GpuInfo`, and the
+        // remote node's reading arrives as the `fan_speed` label on
+        // `all_smi_gpu_info`, so it never reaches this branch. Omitted
+        // entirely when neither is available, so a passively cooled card is
+        // distinguishable from a stalled fan by absence rather than by a 0
+        // reading.
         if let Some(rpm) = info.fan_speed_rpm {
             builder
                 .help(

@@ -81,6 +81,13 @@ pub struct GpuInfo {
     /// duty-cycle percentage. Callers must render nothing in that case
     /// rather than substituting `0`, which is indistinguishable from a
     /// stalled fan on a card that does have one.
+    ///
+    /// This is the per-device GPU tachometer and is deliberately separate
+    /// from `ChassisInfo::fan_speeds`, which models host and enclosure fans
+    /// (for example the macOS SMC fans read in
+    /// `src/device/macos_native/smc.rs`) and is exported as
+    /// `all_smi_chassis_fan_speed_rpm`. A machine can report both, so the
+    /// two never share a field or a metric name.
     #[serde(default)]
     pub fan_speed_rpm: Option<u32>,
     /// NUMA node the GPU is attached to. `None` when the host has no NUMA
