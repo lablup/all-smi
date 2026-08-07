@@ -42,43 +42,67 @@
 
 use super::ffi::{
     ADL_OK, Adl2AdapterNumberOfAdaptersGet, Adl2MainControlCreate, Adl2NewQueryPmLogDataGet,
-    Adl2OverdriveCaps, AdlContextHandle, AdlPmLogDataOutput,
+    Adl2OverdriveCaps, AdlContextHandle, AdlPmLogDataBuffer, AdlPmLogDataOutput,
 };
+use libloading::os::windows::LOAD_LIBRARY_SEARCH_SYSTEM32;
 use once_cell::sync::OnceCell;
 use std::ffi::{c_int, c_void};
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
+use windows::Win32::System::Memory::{GetProcessHeap, HEAP_FLAGS, HeapAlloc};
 
 /// Absolute path, never a bare name. See the module docs.
 const ADL_DLL_PATH: &str = r"C:\Windows\System32\atiadlxx.dll";
 
 /// The Overdrive generation that introduced the PMLog sensor table.
-/// Earlier generations expose temperature through the OD5 / OD6 / OD7
-/// entry points, which this reader deliberately does not implement.
+/// Used only to *rank* candidate adapters, never to exclude one; see
+/// [`AdlRuntime::scan_for_capable_adapter`].
 const MIN_OVERDRIVE_VERSION: c_int = 7;
+
+/// How long to wait before re-scanning after a scan found nothing.
+///
+/// The scan must not latch permanently. all-smi can run as a Windows
+/// service and start before the display driver has brought the adapter
+/// up, in which case the very first scan legitimately finds nothing; a
+/// permanent latch would then report "no PMLog-capable adapter" for the
+/// entire lifetime of the process and misdiagnose a healthy card as
+/// pre-Vega. The same applies after a driver update or a TDR reset
+/// invalidates the cached index.
+///
+/// This is the ADL counterpart to the DXGI factory's `IsCurrent` check.
+/// ADL exposes no staleness signal, so a slow retry stands in for one.
+const RESCAN_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Allocator handed to `ADL2_Main_Control_Create`.
 ///
-/// ADL only calls this for buffers it allocates on the caller's behalf,
-/// which in practice is the `AdapterInfo` family. This reader never
-/// calls into that family, so the callback is expected to stay
-/// unused; it exists because `ADL2_Main_Control_Create` requires a
-/// non-null callback.
+/// Allocates from the process heap rather than Rust's global allocator.
+/// Two reasons, both about who might free this memory: swapping in a
+/// different `#[global_allocator]` (routine in a polling daemon) would
+/// make Rust's allocator incompatible with the CRT `free` that ADL's own
+/// teardown would use, and `HeapAlloc(GetProcessHeap(), ...)` is what
+/// the UCRT allocator is built on, so it stays compatible either way.
+///
+/// ADL only invokes this for buffers it allocates on the caller's
+/// behalf, which is the `AdapterInfo` family this reader never calls, so
+/// in practice it should never run. It exists because
+/// `ADL2_Main_Control_Create` requires a non-null callback.
 ///
 /// # Safety
 ///
-/// Called by ADL with a byte count. Returns null on a non-positive or
-/// unrepresentable size, which ADL treats as allocation failure.
+/// Called by ADL with a byte count. Returns null on a non-positive size,
+/// which ADL treats as allocation failure.
 unsafe extern "system" fn adl_malloc(size: c_int) -> *mut c_void {
     if size <= 0 {
         return std::ptr::null_mut();
     }
-    // 16-byte alignment covers every ADL struct. The matching free is
-    // ADL's contract for the caller to provide and is not wired up,
-    // because nothing here requests an ADL-allocated buffer.
-    match std::alloc::Layout::from_size_align(size as usize, 16) {
-        // SAFETY: layout has a non-zero size.
-        Ok(layout) => unsafe { std::alloc::alloc(layout) as *mut c_void },
-        Err(_) => std::ptr::null_mut(),
+    // SAFETY: GetProcessHeap cannot fail for the current process, and
+    // HeapAlloc with a positive size either returns a valid block or
+    // null.
+    unsafe {
+        let Ok(heap) = GetProcessHeap() else {
+            return std::ptr::null_mut();
+        };
+        HeapAlloc(heap, HEAP_FLAGS(0), size as usize)
     }
 }
 
@@ -97,9 +121,13 @@ struct AdlRuntime {
     /// first PMLog-capable index avoids rescanning every poll and keeps
     /// the steady-state cost to one call.
     chosen_index: Option<c_int>,
-    /// Set once the capability scan has run, so a machine with no
-    /// PMLog-capable adapter does not rescan forever.
-    scanned: bool,
+    /// When the last capability scan ran, or `None` if it never has.
+    ///
+    /// Deliberately a timestamp rather than a boolean latch: a scan that
+    /// finds nothing is retried after [`RESCAN_INTERVAL`] instead of
+    /// disabling ADL for the life of the process. See the constant for
+    /// why that matters.
+    last_scan: Option<Instant>,
 }
 
 // ADL context handles are plain opaque pointers rather than thread-affine
@@ -108,10 +136,26 @@ unsafe impl Send for AdlRuntime {}
 
 impl AdlRuntime {
     fn open() -> Option<Self> {
-        // SAFETY: loading a shared library runs its initialisers. The
-        // path is absolute and inside System32, so only a caller who
-        // already has write access there could substitute the binary.
-        let library = unsafe { libloading::Library::new(ADL_DLL_PATH) }.ok()?;
+        // SAFETY: loading a shared library runs its initialisers.
+        //
+        // The absolute path pins `atiadlxx.dll` itself, but with default
+        // flags that module's own imports (it pulls in `atiadlxy.dll`)
+        // resolve through the standard search order, which begins with
+        // the *application* directory. That would leave the hijacking
+        // hole this module claims to close: an attacker able to write
+        // next to `all-smi.exe` gets execution through the dependency
+        // rather than through the named DLL.
+        //
+        // `LOAD_LIBRARY_SEARCH_SYSTEM32` restricts the whole dependency
+        // chain to System32.
+        let library = unsafe {
+            libloading::os::windows::Library::load_with_flags(
+                ADL_DLL_PATH,
+                LOAD_LIBRARY_SEARCH_SYSTEM32,
+            )
+        }
+        .ok()?;
+        let library: libloading::Library = library.into();
 
         // SAFETY: symbol lookups against a successfully loaded library.
         // The signatures are transcribed from AMD's public headers; see
@@ -148,14 +192,22 @@ impl AdlRuntime {
             overdrive_caps,
             query_pmlog,
             chosen_index: None,
-            scanned: false,
+            last_scan: None,
         })
     }
 
-    /// Find the first adapter index whose Overdrive generation exposes
-    /// the PMLog table.
+    /// Find an adapter index that answers `ADL2_New_QueryPMLogData_Get`.
+    ///
+    /// `ADL2_Overdrive_Caps` is consulted but is deliberately **not** a
+    /// gate. Workstation SKUs and APUs commonly report `iSupported = 0`,
+    /// meaning "no user-facing tuning", while still serving the sensor
+    /// table perfectly well; excluding them would silently drop exactly
+    /// the professional cards this tool is aimed at. A successful PMLog
+    /// read is the only capability test that means anything, so caps
+    /// only decides which indices to try *first*.
     fn scan_for_capable_adapter(&mut self) {
-        self.scanned = true;
+        self.last_scan = Some(Instant::now());
+        self.chosen_index = None;
 
         let mut count: c_int = 0;
         // SAFETY: valid context and out pointer.
@@ -163,6 +215,8 @@ impl AdlRuntime {
             return;
         }
 
+        let mut preferred = Vec::new();
+        let mut fallback = Vec::new();
         for index in 0..count {
             let (mut supported, mut enabled, mut version) = (0, 0, 0);
             // SAFETY: valid context and three out pointers.
@@ -175,12 +229,17 @@ impl AdlRuntime {
                     &mut version,
                 )
             };
-            if status != ADL_OK || supported == 0 || version < MIN_OVERDRIVE_VERSION {
-                continue;
+            // `enabled` reports whether the user turned Overdrive tuning
+            // on. Reading sensors does not require it, so it is ignored.
+            let _ = enabled;
+            if status == ADL_OK && supported != 0 && version >= MIN_OVERDRIVE_VERSION {
+                preferred.push(index);
+            } else {
+                fallback.push(index);
             }
-            // `enabled` reports whether the user has turned Overdrive
-            // tuning on. Reading sensors does not require it, so it is
-            // deliberately not part of the gate.
+        }
+
+        for index in preferred.into_iter().chain(fallback) {
             if self.read_pmlog(index).is_some() {
                 self.chosen_index = Some(index);
                 return;
@@ -189,19 +248,46 @@ impl AdlRuntime {
     }
 
     fn read_pmlog(&self, index: c_int) -> Option<AdlPmLogDataOutput> {
-        let mut output = AdlPmLogDataOutput::default();
-        // SAFETY: `output` is a correctly sized and aligned
-        // ADLPMLogDataOutput; the compile-time assertions in `ffi` pin
-        // its layout.
-        let status = unsafe { (self.query_pmlog)(self.context, index, &mut output) };
-        (status == ADL_OK).then_some(output)
+        // Boxed rather than a stack temporary: the buffer carries
+        // trailing headroom (see `AdlPmLogDataBuffer`) so a driver that
+        // writes a larger table than this file declares cannot smash
+        // the stack of a long-running daemon.
+        let mut buffer = Box::<AdlPmLogDataBuffer>::default();
+        // SAFETY: `buffer.output` begins a correctly aligned allocation
+        // at least as large as ADLPMLogDataOutput, with headroom beyond
+        // it; the compile-time assertions in `ffi` pin the layout.
+        let status = unsafe { (self.query_pmlog)(self.context, index, &raw mut buffer.output) };
+        if status != ADL_OK {
+            return None;
+        }
+        buffer.validated().copied()
     }
 
     fn sample(&mut self) -> Option<AdlPmLogDataOutput> {
-        if !self.scanned {
+        let due_for_scan = match (self.chosen_index, self.last_scan) {
+            // Never scanned.
+            (_, None) => true,
+            // A previous scan found nothing; retry on the slow interval
+            // rather than giving up for the life of the process.
+            (None, Some(at)) => at.elapsed() >= RESCAN_INTERVAL,
+            (Some(_), _) => false,
+        };
+        if due_for_scan {
             self.scan_for_capable_adapter();
         }
-        self.read_pmlog(self.chosen_index?)
+
+        let index = self.chosen_index?;
+        match self.read_pmlog(index) {
+            Some(output) => Some(output),
+            None => {
+                // The cached index stopped answering: a driver update or
+                // a TDR reset can invalidate it. Drop it so the next
+                // poll rescans instead of failing forever.
+                self.chosen_index = None;
+                self.last_scan = None;
+                None
+            }
+        }
     }
 }
 
@@ -240,7 +326,7 @@ pub fn selected_adapter_index() -> Option<i32> {
         Err(poisoned) => poisoned.into_inner(),
     };
     let runtime = guard.as_mut()?;
-    if !runtime.scanned {
+    if runtime.last_scan.is_none() {
         runtime.scan_for_capable_adapter();
     }
     runtime.chosen_index

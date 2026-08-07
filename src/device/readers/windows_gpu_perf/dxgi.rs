@@ -136,9 +136,20 @@ pub fn enumerate() -> Vec<DxgiAdapter> {
 static FACTORY: once_cell::sync::OnceCell<std::sync::Mutex<Option<SendFactory>>> =
     once_cell::sync::OnceCell::new();
 
-/// COM interface pointers are not `Send` in general. This one is only
-/// ever touched under the `Mutex` below, on whichever thread the
-/// collector happens to be, and DXGI factories are free-threaded.
+/// COM interface pointers are not `Send` in general, and this one does
+/// escape the mutex: [`factory`] returns a clone, and [`enumerate`]
+/// calls `EnumAdapters1` and `GetDesc1` on it after the lock is
+/// released.
+///
+/// What makes that sound is that DXGI objects are free-threaded. They
+/// come straight from a `dxgi.dll` export rather than through
+/// `CoCreateInstance`, so no apartment marshalling is involved and their
+/// methods may be called from any thread. The `Mutex` here protects the
+/// cache slot, not the object.
+///
+/// Reference counting is likewise fine: `Clone` is `AddRef` and dropping
+/// the cached value is `Release`, so a clone taken before a rebuild
+/// keeps its factory alive independently.
 struct SendFactory(IDXGIFactory1);
 unsafe impl Send for SendFactory {}
 

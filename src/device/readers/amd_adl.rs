@@ -92,10 +92,23 @@ pub fn apply_to_gpu_info(gpu: &mut GpuInfo, readout: &AdlReadout) {
         return;
     }
 
-    if let Some(temperature) = readout.primary_temperature_c() {
-        gpu.temperature = temperature;
+    let mut applied: Vec<&str> = Vec::new();
+
+    if let Some((temperature, source)) = readout.primary_temperature_c() {
+        // `GpuInfo.temperature` is unsigned. A sub-zero die on a
+        // cold-started machine is a real reading but cannot be
+        // represented, so it floors at 0 and the true value stays
+        // visible in the detail below.
+        gpu.temperature = temperature.max(0) as u32;
         gpu.detail
-            .insert("Source: Temperature".to_string(), "ADL".to_string());
+            .insert("Temperature (C)".to_string(), temperature.to_string());
+        // The label names which sensor was used. Edge, gfx, and hotspot
+        // are not interchangeable (hotspot runs 15-30 C higher), and an
+        // aggregated multi-host view would otherwise mix them with
+        // nothing to tell them apart.
+        gpu.detail
+            .insert("Source: Temperature".to_string(), source.to_string());
+        applied.push("temperature");
     }
     // Hotspot and memory temperatures have no dedicated `GpuInfo` field
     // but are the numbers that actually throttle a modern card, so they
@@ -113,12 +126,14 @@ pub fn apply_to_gpu_info(gpu: &mut GpuInfo, readout: &AdlReadout) {
         gpu.power_consumption = power;
         gpu.detail
             .insert("Source: Power".to_string(), "ADL".to_string());
+        applied.push("power");
     }
 
     if let Some(clock) = readout.clock_gfx_mhz {
         gpu.frequency = clock;
         gpu.detail
             .insert("Source: Frequency".to_string(), "ADL".to_string());
+        applied.push("clocks");
     }
     if let Some(clock) = readout.clock_mem_mhz {
         gpu.detail
@@ -132,12 +147,14 @@ pub fn apply_to_gpu_info(gpu: &mut GpuInfo, readout: &AdlReadout) {
             .insert("Fan Speed (RPM)".to_string(), rpm.to_string());
         gpu.detail
             .insert("Source: Fan".to_string(), "ADL".to_string());
+        applied.push("fan");
     }
 
     if let Some(activity) = readout.activity_gfx_pct {
         gpu.utilization = activity;
         gpu.detail
             .insert("Source: Utilization".to_string(), "ADL".to_string());
+        applied.push("utilization");
     }
     if let Some(activity) = readout.activity_mem_pct {
         gpu.detail.insert(
@@ -147,11 +164,12 @@ pub fn apply_to_gpu_info(gpu: &mut GpuInfo, readout: &AdlReadout) {
     }
 
     note_metrics_source(&mut gpu.detail, "ADL");
-    // The legacy `Note` key advertised the missing vendor library. Now
-    // that it is wired up, say what is actually still missing.
+    // Name only what ADL actually produced. A card publishing just one
+    // sensor must not carry a Note claiming all four, which would
+    // contradict the per-field `Source: *` keys sitting beside it.
     gpu.detail.insert(
         "Note".to_string(),
-        "Temperature, power, fan, and clocks via AMD ADL (PMLog)".to_string(),
+        format!("via AMD ADL (PMLog): {}", applied.join(", ")),
     );
 }
 
@@ -230,6 +248,7 @@ mod tests {
     fn full_readout() -> AdlReadout {
         AdlReadout {
             temperature_edge_c: Some(62),
+            temperature_gfx_c: None,
             temperature_hotspot_c: Some(81),
             temperature_mem_c: Some(70),
             power_w: Some(310.0),
@@ -255,7 +274,7 @@ mod tests {
         assert_eq!(gpu.detail["Memory Clock (MHz)"], "1250");
         assert_eq!(gpu.detail["Memory Controller Activity (%)"], "44");
 
-        assert_eq!(gpu.detail["Source: Temperature"], "ADL");
+        assert_eq!(gpu.detail["Source: Temperature"], "ADL (edge)");
         assert_eq!(gpu.detail["Source: Power"], "ADL");
         assert_eq!(gpu.detail["Source: Frequency"], "ADL");
         assert_eq!(gpu.detail["Source: Fan"], "ADL");
@@ -291,6 +310,46 @@ mod tests {
         assert_eq!(gpu.detail["Source: Power"], "unavailable");
         assert_eq!(gpu.power_consumption, 0.0);
         assert_eq!(gpu.detail["Metrics Source"], "WMI + DXGI + PDH + ADL");
+    }
+
+    #[test]
+    fn the_note_names_only_the_fields_adl_actually_produced() {
+        // A card publishing one sensor must not carry a Note claiming
+        // all four, which would contradict the `Source: *` keys sitting
+        // right beside it.
+        let mut gpu = baseline_gpu();
+        apply_to_gpu_info(
+            &mut gpu,
+            &AdlReadout {
+                temperature_edge_c: Some(55),
+                ..Default::default()
+            },
+        );
+        assert_eq!(gpu.detail["Note"], "via AMD ADL (PMLog): temperature");
+        assert_eq!(gpu.detail["Source: Power"], "unavailable");
+
+        let mut full = baseline_gpu();
+        apply_to_gpu_info(&mut full, &full_readout());
+        assert_eq!(
+            full.detail["Note"],
+            "via AMD ADL (PMLog): temperature, power, clocks, fan, utilization"
+        );
+    }
+
+    #[test]
+    fn a_sub_zero_die_floors_the_unsigned_field_but_keeps_the_real_value() {
+        let mut gpu = baseline_gpu();
+        apply_to_gpu_info(
+            &mut gpu,
+            &AdlReadout {
+                temperature_edge_c: Some(-8),
+                ..Default::default()
+            },
+        );
+        // `GpuInfo.temperature` is u32 and cannot hold it.
+        assert_eq!(gpu.temperature, 0);
+        // The true reading survives where it can be represented.
+        assert_eq!(gpu.detail["Temperature (C)"], "-8");
     }
 
     #[test]
