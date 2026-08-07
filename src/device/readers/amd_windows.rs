@@ -203,6 +203,7 @@ impl AmdWindowsGpuReader {
                     temperature_threshold_max_operating: None,
                     temperature_threshold_acoustic: None,
                     performance_state: None,
+                    fan_speed_rpm: None,
                     numa_node_id: None,
                     gsp_firmware_mode: None,
                     gsp_firmware_version: None,

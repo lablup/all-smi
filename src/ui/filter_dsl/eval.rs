@@ -355,6 +355,7 @@ mod tests {
             temperature_threshold_max_operating: None,
             temperature_threshold_acoustic: None,
             performance_state: Some(0),
+            fan_speed_rpm: None,
             numa_node_id: Some(0),
             gsp_firmware_mode: None,
             gsp_firmware_version: None,

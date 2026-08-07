@@ -65,7 +65,7 @@ use crate::device::readers::intel_gpu_sysfs::{
     MemoryVariant, has_nonzero_u64, read_energy_uj, read_fan_rpm, read_frequency_mhz,
     read_memory_bytes, read_power_watts, read_resource2_total_bytes, read_temperature_celsius,
 };
-use crate::device::types::{GpuInfo, ProcessInfo};
+use crate::device::types::{GpuInfo, MAX_GPU_FAN_RPM, ProcessInfo};
 use crate::utils::get_hostname;
 use chrono::Local;
 use std::collections::HashMap;
@@ -438,6 +438,11 @@ impl GpuReader for IntelGpuReader {
             power_consumption = power_consumption.clamp(0.0, MAX_GPU_POWER_WATTS);
             let total_memory = total_memory.min(MAX_GPU_MEMORY_BYTES);
             used_memory = used_memory.min(total_memory);
+            // Same defence for the fan tachometer: `read_fan_rpm` only
+            // rejects a missing/unparseable file, not an implausibly large
+            // one, so a garbled `fan1_input` could otherwise reach the
+            // typed field and the exporter unclamped.
+            let fan_rpm = fan_rpm.map(|rpm| rpm.min(MAX_GPU_FAN_RPM));
 
             sources::decorate_static_sources(
                 &mut detail,
@@ -541,6 +546,12 @@ impl GpuReader for IntelGpuReader {
                 temperature_threshold_max_operating: None,
                 temperature_threshold_acoustic: None,
                 performance_state: None,
+                // Same hwmon tachometer value that `decorate_static_sources`
+                // wrote into the `Fan Speed` detail string above. The typed
+                // field feeds the TUI and the exporter; the detail entry
+                // stays for snapshots and for the cross-reader overwrite
+                // guard in `intel_gpu_level_zero::apply_fan`.
+                fan_speed_rpm: fan_rpm,
                 // NVIDIA-only hardware details.
                 numa_node_id: None,
                 gsp_firmware_mode: None,

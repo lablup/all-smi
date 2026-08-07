@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use super::{LevelZeroFanReadout, LevelZeroMemoryKind, LevelZeroReadout};
-use crate::device::types::GpuInfo;
+use crate::device::types::{GpuInfo, MAX_GPU_FAN_RPM};
 
 #[derive(Debug, Clone, Copy)]
 pub enum ApplyPlatform {
@@ -118,12 +118,25 @@ fn apply_fan(gpu_info: &mut GpuInfo, fan: Option<LevelZeroFanReadout>, overwrite
     if !overwrite_existing && gpu_info.detail.contains_key("Fan Speed") {
         return;
     }
-    let value = match (fan.rpm, fan.percent) {
+    // Clamped so a garbled Sysman sample can never propagate `u32::MAX`
+    // into the exporter or the TUI; see the sysfs readers for the same
+    // defence-in-depth pattern and `MAX_GPU_FAN_RPM` for the shared bound.
+    let rpm = fan.rpm.map(|rpm| rpm.min(MAX_GPU_FAN_RPM));
+    let value = match (rpm, fan.percent) {
         (Some(rpm), Some(percent)) => format!("{rpm} RPM ({percent}%)"),
         (Some(rpm), None) => format!("{rpm} RPM"),
         (None, Some(percent)) => format!("{percent}%"),
         (None, None) => return,
     };
     gpu_info.detail.insert("Fan Speed".to_string(), value);
+    // The typed field only ever carries a tachometer reading. A
+    // duty-cycle-only readout (`rpm == None`) clears it rather than storing
+    // a percentage in a field named `_rpm`; the percentage still reaches
+    // snapshots through the detail string above. The assignment is
+    // unconditional precisely so the field cannot keep an RPM from an
+    // earlier sample that the detail string just replaced on the
+    // `overwrite_existing` path, which would leave the two describing
+    // different samples and the exporter publishing the stale number.
+    gpu_info.fan_speed_rpm = rpm;
     set_source(gpu_info, "Fan", fan.source);
 }

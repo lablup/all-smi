@@ -18,7 +18,7 @@ use crate::parsing::common::sanitize_label_value;
 use chrono::Local;
 use regex::Regex;
 
-use crate::device::types::GPU_METRIC_UNAVAILABLE;
+use crate::device::types::{GPU_METRIC_UNAVAILABLE, MAX_GPU_FAN_RPM};
 use crate::device::{
     AppleSiliconCpuInfo, CpuInfo, CpuPlatformType, GpmMetrics, GpuInfo, MemoryInfo, MigGpuInfo,
     MigInstanceInfo, NvLinkRemoteDevice, NvLinkRemoteType, VgpuHostInfo, VgpuInfo,
@@ -495,6 +495,7 @@ impl MetricsParser {
                 temperature_threshold_max_operating: None,
                 temperature_threshold_acoustic: None,
                 performance_state: None,
+                fan_speed_rpm: None,
                 // Hardware details (issue #132) land via dedicated
                 // `all_smi_gpu_numa_node_id`, `all_smi_gpu_gsp_firmware_*`,
                 // `all_smi_nvlink_remote_device_type`, and GPM metric
@@ -552,6 +553,32 @@ impl MetricsParser {
                         "native_metrics"
                     ]
                 );
+
+                // A node running a build that predates
+                // `GpuInfo::fan_speed_rpm` never emits
+                // `all_smi_gpu_fan_speed_rpm`. Its reading rides here
+                // instead: the exporter turns every `detail` key into a
+                // label on this series, so `Fan Speed` arrives as
+                // `fan_speed`. Recovering it is what lets a mixed old/new
+                // fleet show fan speed in the viewer.
+                //
+                // Gap-filling only. The dedicated metric stays
+                // authoritative whichever order the two lines arrive in:
+                // this branch yields to a value already in the field, and
+                // the `gpu_fan_speed_rpm` handler assigns unconditionally,
+                // so it overwrites anything recovered here. The exporter
+                // happens to emit `all_smi_gpu_info` before the fan metric,
+                // so on a node publishing both it is that overwrite which
+                // decides. `parse_fan_speed_detail` itself enforces the same
+                // integer-and-range bound the `gpu_fan_speed_rpm` handler
+                // applies below, so a legacy label cannot smuggle in a value
+                // the metric path would have rejected.
+                if gpu_info.fan_speed_rpm.is_none()
+                    && let Some(fan) = labels.get(FAN_SPEED_LEGACY_LABEL)
+                    && let Some(rpm) = crate::api::metrics::gpu::parse_fan_speed_detail(fan)
+                {
+                    gpu_info.fan_speed_rpm = saturating_u32(rpm);
+                }
             }
             // Thermal thresholds and P-state. Any round-number reading < 0 is
             // rejected via saturating_cast; the exporter only emits positive
@@ -577,6 +604,17 @@ impl MetricsParser {
                 // exporter only emits integer performance state indices.
                 if (0.0..=15.0).contains(&value) && value.fract() == 0.0 => {
                     gpu_info.performance_state = saturating_u32(value);
+                }
+            "gpu_fan_speed_rpm"
+                // The exporter only emits a non-negative integer RPM, and
+                // omits the series entirely for a card with no tachometer.
+                // Reject fractional and out-of-range readings so a hostile
+                // upstream cannot inject a value that widens the TUI row or
+                // renders as a nonsense fan speed. Shares `MAX_GPU_FAN_RPM`
+                // with the reader-side clamps and the exporter's detail
+                // fallback so all three agree on one bound.
+                if (0.0..=f64::from(MAX_GPU_FAN_RPM)).contains(&value) && value.fract() == 0.0 => {
+                    gpu_info.fan_speed_rpm = saturating_u32(value);
                 }
             "gpu_numa_node_id" => {
                 // NUMA node ids are non-negative on every real system.
@@ -1094,6 +1132,12 @@ const MAX_NUMA_NODE_ID: i32 = 4096;
 /// truncates any obviously pathological label.
 const MAX_GSP_VERSION_LEN: usize = 128;
 
+/// Label that `all_smi_gpu_info` carries the legacy `Fan Speed` detail
+/// under, after `sanitize_label_name` has run over the key. Held in sync
+/// with the exporter's spelling by
+/// `legacy_fan_speed_label_matches_the_exporter_spelling`.
+const FAN_SPEED_LEGACY_LABEL: &str = "fan_speed";
+
 /// Lazily populate the GPM metrics slot on a [`GpuInfo`] so we do not
 /// allocate an empty struct unless at least one GPM field was observed.
 fn ensure_gpm_metrics(gpu_info: &mut GpuInfo) -> &mut GpmMetrics {
@@ -1555,6 +1599,42 @@ mod tests {
         Regex::new(r"^all_smi_([^\{]+)\{([^}]+)\} ([\d\.]+)$").unwrap()
     }
 
+    /// Minimal agent-side [`GpuInfo`] used to drive genuine
+    /// exporter -> parser round-trip assertions.
+    fn create_test_gpu_info() -> GpuInfo {
+        GpuInfo {
+            uuid: "GPU-RT".to_string(),
+            time: "2026-01-01 00:00:00".to_string(),
+            name: "AMD Radeon RX 7900 XTX".to_string(),
+            device_type: "GPU".to_string(),
+            host_id: "node-9".to_string(),
+            hostname: "node-9".to_string(),
+            instance: "node-9".to_string(),
+            utilization: 30.0,
+            ane_utilization: 0.0,
+            dla_utilization: None,
+            tensorcore_utilization: None,
+            temperature: 61,
+            used_memory: 1024,
+            total_memory: 8192,
+            frequency: 2400,
+            power_consumption: 210.0,
+            gpu_core_count: None,
+            temperature_threshold_slowdown: None,
+            temperature_threshold_shutdown: None,
+            temperature_threshold_max_operating: None,
+            temperature_threshold_acoustic: None,
+            performance_state: None,
+            fan_speed_rpm: None,
+            numa_node_id: None,
+            gsp_firmware_mode: None,
+            gsp_firmware_version: None,
+            nvlink_remote_devices: Vec::new(),
+            gpm_metrics: None,
+            detail: HashMap::new(),
+        }
+    }
+
     #[test]
     fn test_parse_labels() {
         let parser = create_test_parser();
@@ -1685,6 +1765,149 @@ all_smi_gpu_performance_state{gpu="NVIDIA A100", instance="node-1", uuid="GPU-T"
         assert_eq!(gpu.temperature_threshold_max_operating, Some(85));
         assert_eq!(gpu.temperature_threshold_acoustic, Some(77));
         assert_eq!(gpu.performance_state, Some(2));
+    }
+
+    #[test]
+    fn test_parse_gpu_fan_speed_round_trips_through_the_exporter() {
+        // Exporter -> exposition -> parser must return the same RPM the
+        // agent read locally, so a remote node's fan speed is not lost the
+        // way the old `detail`-only representation lost it.
+        use crate::api::metrics::{MetricExporter, gpu::GpuMetricExporter};
+
+        let parser = create_test_parser();
+        let re = create_test_regex();
+        let host = "127.0.0.1:10058";
+
+        let mut source = create_test_gpu_info();
+        source.fan_speed_rpm = Some(1450);
+        let exposition = GpuMetricExporter::new(&[source]).export_metrics();
+        assert!(
+            exposition.contains("all_smi_gpu_fan_speed_rpm{"),
+            "exporter did not emit the series:\n{exposition}"
+        );
+
+        let parsed = parser.parse_metrics(&exposition, host, &re);
+        assert_eq!(parsed.gpu_info.len(), 1);
+        assert_eq!(parsed.gpu_info[0].fan_speed_rpm, Some(1450));
+    }
+
+    #[test]
+    fn test_parse_gpu_fan_speed_absent_stays_none() {
+        // A card with no tachometer, or a remote node running a build that
+        // predates the metric, must leave the field `None` rather than 0.
+        use crate::api::metrics::{MetricExporter, gpu::GpuMetricExporter};
+
+        let parser = create_test_parser();
+        let re = create_test_regex();
+        let host = "127.0.0.1:10058";
+
+        let exposition = GpuMetricExporter::new(&[create_test_gpu_info()]).export_metrics();
+        let parsed = parser.parse_metrics(&exposition, host, &re);
+        assert_eq!(parsed.gpu_info.len(), 1);
+        assert!(parsed.gpu_info[0].fan_speed_rpm.is_none());
+    }
+
+    #[test]
+    fn parser_rejects_out_of_range_fan_speed() {
+        // A hostile upstream must not be able to widen the TUI row or
+        // publish a nonsense tachometer reading.
+        let parser = create_test_parser();
+        let re = create_test_regex();
+        let host = "127.0.0.1:10058";
+
+        for bad_value in ["4294967295", "100001", "1450.5"] {
+            let test_data = format!(
+                "all_smi_gpu_utilization{{gpu=\"GPU\", instance=\"n\", uuid=\"GPU-FAN\", index=\"0\"}} 0\n\
+                 all_smi_gpu_fan_speed_rpm{{gpu=\"GPU\", instance=\"n\", uuid=\"GPU-FAN\", index=\"0\"}} {bad_value}\n"
+            );
+            let parsed = parser.parse_metrics(&test_data, host, &re);
+            assert_eq!(parsed.gpu_info.len(), 1);
+            assert!(
+                parsed.gpu_info[0].fan_speed_rpm.is_none(),
+                "expected None for fan speed {bad_value}, got {:?}",
+                parsed.gpu_info[0].fan_speed_rpm
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_fan_speed_label_matches_the_exporter_spelling() {
+        // The recovery below reads a label name the exporter derives from
+        // the detail key by sanitizing it. The two spellings must not
+        // diverge: if `FAN_SPEED_DETAIL_KEY` is ever renamed, this fails
+        // here instead of silently dropping every legacy node's reading.
+        use crate::api::metrics::gpu::FAN_SPEED_DETAIL_KEY;
+        use crate::parsing::common::sanitize_label_name;
+
+        assert_eq!(
+            sanitize_label_name(FAN_SPEED_DETAIL_KEY),
+            FAN_SPEED_LEGACY_LABEL
+        );
+    }
+
+    #[test]
+    fn test_parse_recovers_fan_speed_from_a_legacy_node() {
+        // A node predating `GpuInfo::fan_speed_rpm` emits no dedicated
+        // metric; its reading only exists as a `detail`-derived label on
+        // `all_smi_gpu_info`.
+        let parser = create_test_parser();
+        let re = create_test_regex();
+        let host = "127.0.0.1:10058";
+
+        let test_data = "\
+all_smi_gpu_utilization{gpu=\"GPU\", instance=\"n\", uuid=\"GPU-FAN\", index=\"0\"} 0\n\
+all_smi_gpu_info{gpu=\"GPU\", instance=\"n\", uuid=\"GPU-FAN\", index=\"0\", type=\"GPU\", fan_speed=\"1450 RPM\"} 1\n";
+
+        let parsed = parser.parse_metrics(test_data, host, &re);
+        assert_eq!(parsed.gpu_info.len(), 1);
+        assert_eq!(parsed.gpu_info[0].fan_speed_rpm, Some(1450));
+    }
+
+    #[test]
+    fn test_dedicated_fan_speed_metric_wins_over_the_legacy_label() {
+        // A node publishing both must be read from the dedicated metric.
+        // The exporter emits `all_smi_gpu_info` before the fan metric, so
+        // that order is the one that matters in practice, but the reverse
+        // is asserted too: neither the recovery's gap-filling guard nor the
+        // metric handler's unconditional write may depend on line order.
+        let parser = create_test_parser();
+        let re = create_test_regex();
+        let host = "127.0.0.1:10058";
+
+        let fan_metric = "all_smi_gpu_fan_speed_rpm{gpu=\"GPU\", instance=\"n\", uuid=\"GPU-FAN\", index=\"0\"} 1200\n";
+        let info_line = "all_smi_gpu_info{gpu=\"GPU\", instance=\"n\", uuid=\"GPU-FAN\", index=\"0\", type=\"GPU\", fan_speed=\"9999 RPM\"} 1\n";
+
+        for (label, test_data) in [
+            ("exporter order", format!("{info_line}{fan_metric}")),
+            ("reversed", format!("{fan_metric}{info_line}")),
+        ] {
+            let parsed = parser.parse_metrics(&test_data, host, &re);
+            assert_eq!(parsed.gpu_info.len(), 1, "{label}");
+            assert_eq!(parsed.gpu_info[0].fan_speed_rpm, Some(1200), "{label}");
+        }
+    }
+
+    #[test]
+    fn test_legacy_fan_speed_label_rejects_non_tachometer_and_out_of_range_values() {
+        // The recovery repeats the dedicated metric's bounds, so a legacy
+        // label cannot smuggle in a value the metric path would reject.
+        let parser = create_test_parser();
+        let re = create_test_regex();
+        let host = "127.0.0.1:10058";
+
+        for bad_value in ["40%", "4294967295 RPM", "1450.5 RPM", "garbage"] {
+            let test_data = format!(
+                "all_smi_gpu_utilization{{gpu=\"GPU\", instance=\"n\", uuid=\"GPU-FAN\", index=\"0\"}} 0\n\
+                 all_smi_gpu_info{{gpu=\"GPU\", instance=\"n\", uuid=\"GPU-FAN\", index=\"0\", type=\"GPU\", fan_speed=\"{bad_value}\"}} 1\n"
+            );
+            let parsed = parser.parse_metrics(&test_data, host, &re);
+            assert_eq!(parsed.gpu_info.len(), 1);
+            assert!(
+                parsed.gpu_info[0].fan_speed_rpm.is_none(),
+                "expected None for legacy fan speed {bad_value}, got {:?}",
+                parsed.gpu_info[0].fan_speed_rpm
+            );
+        }
     }
 
     #[test]

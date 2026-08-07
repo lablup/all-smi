@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use super::*;
-use crate::device::types::GpuInfo;
+use crate::device::types::{GpuInfo, MAX_GPU_FAN_RPM};
 use std::collections::HashMap;
 
 fn make_baseline_gpu_info() -> GpuInfo {
@@ -40,6 +40,7 @@ fn make_baseline_gpu_info() -> GpuInfo {
         temperature_threshold_max_operating: None,
         temperature_threshold_acoustic: None,
         performance_state: None,
+        fan_speed_rpm: None,
         numa_node_id: None,
         gsp_firmware_mode: None,
         gsp_firmware_version: None,
@@ -60,6 +61,9 @@ fn linux_fresh_sysman_overwrites_fields() {
         "Metrics Source".to_string(),
         "sysfs (engine counters)".to_string(),
     );
+    // Mirror what the Linux sysfs baseline actually produces: the typed
+    // field and the detail string are written together from one hwmon read.
+    gpu.fan_speed_rpm = Some(1400);
     gpu.detail
         .insert("Fan Speed".to_string(), "1400 RPM".to_string());
 
@@ -105,6 +109,11 @@ fn linux_fresh_sysman_overwrites_fields() {
         gpu.detail.get("Fan Speed").map(String::as_str),
         Some("1400 RPM"),
         "Linux hwmon fan must keep priority over L0 fan"
+    );
+    assert_eq!(
+        gpu.fan_speed_rpm,
+        Some(1400),
+        "the typed field must follow the same priority as the detail string"
     );
 }
 
@@ -180,9 +189,105 @@ fn windows_overwrites_wmi_gaps() {
         gpu.detail.get("Fan Speed").map(String::as_str),
         Some("1600 RPM (40%)")
     );
+    // The duty cycle only ever rides in the detail string; the typed field
+    // carries the tachometer reading on its own.
+    assert_eq!(gpu.fan_speed_rpm, Some(1600));
     assert_eq!(
         gpu.detail.get("Metrics Source").map(String::as_str),
         Some("WMI + Level Zero Sysman")
+    );
+}
+
+#[test]
+fn duty_cycle_only_fan_leaves_the_typed_field_unset() {
+    // Some drivers report a fan percentage with no tachometer. A
+    // percentage stored in a field named `_rpm` would be exported as a
+    // wildly wrong RPM, so the field stays `None` while the percentage
+    // still reaches snapshots through the detail string.
+    let mut gpu = make_baseline_gpu_info();
+    let readout = LevelZeroReadout {
+        fan: Some(LevelZeroFanReadout {
+            rpm: None,
+            percent: Some(40),
+            source: "Level Zero Sysman",
+        }),
+        ..Default::default()
+    };
+    apply_to_gpu_info(&mut gpu, &readout, ApplyPlatform::Windows);
+
+    assert_eq!(gpu.detail.get("Fan Speed").map(String::as_str), Some("40%"));
+    assert!(gpu.fan_speed_rpm.is_none());
+}
+
+#[test]
+fn windows_duty_cycle_only_fan_clears_a_stale_tachometer_reading() {
+    // `overwrite_existing` replaces the detail string unconditionally, so
+    // the typed field has to follow it. Keeping an RPM from an earlier
+    // sample would leave the exporter publishing a number the detail
+    // string no longer agrees with.
+    let mut gpu = make_baseline_gpu_info();
+    gpu.fan_speed_rpm = Some(1450);
+    gpu.detail
+        .insert("Fan Speed".to_string(), "1450 RPM".to_string());
+    let readout = LevelZeroReadout {
+        fan: Some(LevelZeroFanReadout {
+            rpm: None,
+            percent: Some(40),
+            source: "Level Zero Sysman",
+        }),
+        ..Default::default()
+    };
+    apply_to_gpu_info(&mut gpu, &readout, ApplyPlatform::Windows);
+
+    assert_eq!(gpu.detail.get("Fan Speed").map(String::as_str), Some("40%"));
+    assert!(gpu.fan_speed_rpm.is_none());
+}
+
+#[test]
+fn linux_l0_fan_fills_a_gap_the_hwmon_baseline_left() {
+    // No hwmon tachometer means no `Fan Speed` detail key, so the
+    // overwrite guard does not fire and Level Zero supplies both
+    // representations.
+    let mut gpu = make_baseline_gpu_info();
+    assert!(gpu.fan_speed_rpm.is_none());
+    let readout = LevelZeroReadout {
+        fan: Some(LevelZeroFanReadout {
+            rpm: Some(1800),
+            percent: None,
+            source: "Level Zero Sysman",
+        }),
+        ..Default::default()
+    };
+    apply_to_gpu_info(&mut gpu, &readout, ApplyPlatform::Linux);
+
+    assert_eq!(gpu.fan_speed_rpm, Some(1800));
+    assert_eq!(
+        gpu.detail.get("Fan Speed").map(String::as_str),
+        Some("1800 RPM")
+    );
+}
+
+#[test]
+fn a_garbled_l0_fan_reading_is_clamped_before_either_write() {
+    // A corrupted Sysman sample must never reach `GpuInfo::fan_speed_rpm`
+    // or the `Fan Speed` detail string unclamped, and the two must keep
+    // agreeing with each other after the clamp the same way they do for a
+    // normal reading.
+    let mut gpu = make_baseline_gpu_info();
+    let readout = LevelZeroReadout {
+        fan: Some(LevelZeroFanReadout {
+            rpm: Some(u32::MAX),
+            percent: None,
+            source: "Level Zero Sysman",
+        }),
+        ..Default::default()
+    };
+    apply_to_gpu_info(&mut gpu, &readout, ApplyPlatform::Linux);
+
+    assert_eq!(gpu.fan_speed_rpm, Some(MAX_GPU_FAN_RPM));
+    assert_eq!(
+        gpu.detail.get("Fan Speed").map(String::as_str),
+        Some(format!("{MAX_GPU_FAN_RPM} RPM").as_str())
     );
 }
 

@@ -75,6 +75,21 @@ pub struct GpuInfo {
     /// P-state (e.g. non-NVIDIA, MIG child devices, driver too old).
     #[serde(default)]
     pub performance_state: Option<u32>,
+    /// Current fan speed in revolutions per minute. `None` when the device
+    /// or driver does not report a fan tachometer: passively cooled
+    /// datacenter cards have no fan at all, and some drivers expose only a
+    /// duty-cycle percentage. Callers must render nothing in that case
+    /// rather than substituting `0`, which is indistinguishable from a
+    /// stalled fan on a card that does have one.
+    ///
+    /// This is the per-device GPU tachometer and is deliberately separate
+    /// from `ChassisInfo::fan_speeds`, which models host and enclosure fans
+    /// (for example the macOS SMC fans read in
+    /// `src/device/macos_native/smc.rs`) and is exported as
+    /// `all_smi_chassis_fan_speed_rpm`. A machine can report both, so the
+    /// two never share a field or a metric name.
+    #[serde(default)]
+    pub fan_speed_rpm: Option<u32>,
     /// NUMA node the GPU is attached to. `None` when the host has no NUMA
     /// topology (non-Linux platforms, driver too old, or an NVML
     /// `NotSupported` response). Valid values are non-negative; a value of
@@ -249,6 +264,20 @@ impl Default for ThermalProximityConfig {
 /// the series instead. See the module docs on
 /// `crate::device::macos_native::manager` for the full policy.
 pub const GPU_METRIC_UNAVAILABLE: f64 = -1.0;
+
+/// Upper bound on a plausible [`GpuInfo::fan_speed_rpm`] reading, shared by
+/// every producer and consumer of the value so none of them can disagree
+/// about what counts as a garbled tachometer read: the reader clamps
+/// (`intel_gpu_linux`, `amd`, `amd_adl`, `intel_gpu_level_zero::apply`) cap a
+/// raw sensor value before it ever reaches [`GpuInfo`], the exporter
+/// (`api::metrics::gpu`) applies the same bound to its legacy detail-string
+/// fallback, and the remote scrape parser (`network::metrics_parser`)
+/// applies it again to a value arriving over the wire. Blower fans on
+/// workstation cards top out around 6 000 RPM and the small high-static fans
+/// on some accelerators reach roughly 20 000; 100 000 is far beyond any real
+/// tachometer while still rejecting values like `u32::MAX` that would blow
+/// out the TUI column width.
+pub const MAX_GPU_FAN_RPM: u32 = 100_000;
 
 impl GpuInfo {
     /// GPU utilization percentage, or `None` when the reader had no source

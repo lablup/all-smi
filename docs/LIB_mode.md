@@ -325,6 +325,7 @@ fn print_gpu_details() -> Result<()> {
 | `frequency` | `u32` | Current frequency in MHz |
 | `power_consumption` | `f64` | Power consumption in Watts |
 | `gpu_core_count` | `Option<u32>` | Number of GPU cores |
+| `fan_speed_rpm` | `Option<u32>` | Fan speed in RPM; `None` when the device has no fan tachometer |
 | `detail` | `HashMap<String, String>` | Platform-specific details |
 
 ### ProcessInfo
