@@ -148,12 +148,14 @@ pub fn apply_to_gpu_info(gpu: &mut GpuInfo, readout: &AdlReadout) {
     }
 
     if let Some(rpm) = readout.fan_rpm {
-        // `GpuInfo` has no fan field, so this rides in `detail`. The key
-        // and value format match `amd.rs`, `intel_gpu_linux`, and the
-        // Level Zero reader exactly. A divergent key would sit outside
-        // the `contains_key("Fan Speed")` guard those readers coordinate
-        // overwrites through, and would need special-casing by whatever
-        // eventually promotes fan speed to a real field.
+        // Written twice from one value: the typed field the TUI and the
+        // Prometheus exporter read, and the `Fan Speed` detail string that
+        // snapshots and the `contains_key("Fan Speed")` overwrite guard in
+        // `intel_gpu_level_zero::apply_fan` still coordinate through. The
+        // key and value format match `amd.rs`, `intel_gpu_linux`, and the
+        // Level Zero reader exactly; a divergent key would sit outside that
+        // guard.
+        gpu.fan_speed_rpm = Some(rpm);
         gpu.detail
             .insert("Fan Speed".to_string(), format!("{rpm} RPM"));
         gpu.detail
@@ -247,6 +249,7 @@ mod tests {
             temperature_threshold_max_operating: None,
             temperature_threshold_acoustic: None,
             performance_state: None,
+            fan_speed_rpm: None,
             numa_node_id: None,
             gsp_firmware_mode: None,
             gsp_firmware_version: None,
@@ -281,6 +284,7 @@ mod tests {
         assert_eq!(gpu.frequency, 2400);
         assert_eq!(gpu.detail["Hotspot Temperature"], "81 C");
         assert_eq!(gpu.detail["Memory Temperature"], "70 C");
+        assert_eq!(gpu.fan_speed_rpm, Some(1450));
         assert_eq!(gpu.detail["Fan Speed"], "1450 RPM");
         assert_eq!(gpu.detail["Memory Clock"], "1250 MHz");
         assert_eq!(gpu.detail["Memory Controller Activity"], "44%");
@@ -306,9 +310,9 @@ mod tests {
         // 1. `intel_gpu_level_zero::apply_fan` guards an overwrite with
         //    `detail.contains_key("Fan Speed")`. A reader using a
         //    different key silently opts out of that coordination.
-        // 2. Anything that later promotes fan speed to a real `GpuInfo`
-        //    field has to special-case each spelling instead of reading
-        //    one key.
+        // 2. The Prometheus exporter falls back to parsing this string
+        //    when a payload predates `GpuInfo::fan_speed_rpm`, so a
+        //    divergent spelling drops the metric for older nodes.
         let mut gpu = baseline_gpu();
         apply_to_gpu_info(&mut gpu, &full_readout());
 
@@ -430,6 +434,10 @@ mod tests {
         assert_eq!(gpu.detail["Metrics Source"], "WMI + DXGI + PDH");
         assert_eq!(gpu.detail["Source: Temperature"], "unavailable");
         assert!(!gpu.detail.contains_key("Hotspot Temperature"));
+        // The typed field must stay unset too, so the exporter omits the
+        // series rather than publishing a 0 RPM reading.
+        assert!(gpu.fan_speed_rpm.is_none());
+        assert!(!gpu.detail.contains_key("Fan Speed"));
     }
 
     #[test]

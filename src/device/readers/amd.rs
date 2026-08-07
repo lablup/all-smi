@@ -407,6 +407,14 @@ impl GpuReader for AmdGpuReader {
             );
 
             // Add dynamic sensor data to details
+            //
+            // The tachometer reading is published twice on purpose: once as
+            // the typed `GpuInfo::fan_speed_rpm` field that the TUI and the
+            // Prometheus exporter read, and once as the `Fan Speed` detail
+            // string that snapshots and the cross-reader overwrite guard in
+            // `intel_gpu_level_zero::apply_fan` still depend on. Both come
+            // from the same `sensors.fan_rpm` value so they cannot disagree.
+            let mut fan_speed_rpm = None;
             if let Some(ref sensors) = sensors {
                 if let Some(link) = sensors.current_link {
                     detail.insert(
@@ -415,6 +423,7 @@ impl GpuReader for AmdGpuReader {
                     );
                 }
                 if let Some(fan) = sensors.fan_rpm {
+                    fan_speed_rpm = Some(fan);
                     detail.insert("Fan Speed".to_string(), format!("{fan} RPM"));
                 }
                 if let Some(mclk) = sensors.mclk {
@@ -519,6 +528,7 @@ impl GpuReader for AmdGpuReader {
                 temperature_threshold_max_operating: None,
                 temperature_threshold_acoustic: None,
                 performance_state: None,
+                fan_speed_rpm,
                 // NVIDIA-specific hardware details (NUMA, GSP firmware,
                 // NvLink, GPM) do not apply to AMD — leave them at the
                 // "unavailable" defaults so consumers render them as

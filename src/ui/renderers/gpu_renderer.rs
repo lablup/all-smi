@@ -43,13 +43,14 @@ impl GpuRenderer {
 }
 
 /// Compute the number of terminal lines [`print_gpu_info`] will emit for a
-/// single GPU, including any optional thermal/P-state row, the extended
+/// single GPU, including any optional thermal/fan/P-state row, the extended
 /// hardware-details row (issue #132), and any nested vGPU / MIG section.
 ///
 /// Layout pieces, in render order:
 ///   1. The base info line (always 1 line).
-///   2. The optional thermal/P-state row (1 line when any of the 5 thermal
-///      fields or the P-state is populated; 0 otherwise).
+///   2. The optional thermal/fan/P-state row (1 line when any of the 4
+///      temperature thresholds, the fan speed, or the P-state is populated;
+///      0 otherwise).
 ///   3. The optional hardware-details row (1 line when NUMA, GSP firmware,
 ///      or NvLink topology is populated; 0 otherwise).
 ///   4. The gauge row (always 1 line).
@@ -92,13 +93,8 @@ pub fn gpu_render_line_count_with_lookup(
     // Base: info line + gauges line.
     let mut lines: usize = 2;
 
-    // Optional thermal-threshold / P-state row.
-    let has_thermal_or_pstate = gpu.temperature_threshold_slowdown.is_some()
-        || gpu.temperature_threshold_shutdown.is_some()
-        || gpu.temperature_threshold_max_operating.is_some()
-        || gpu.temperature_threshold_acoustic.is_some()
-        || gpu.performance_state.is_some();
-    if has_thermal_or_pstate {
+    // Optional thermal-threshold / fan / P-state row.
+    if gpu_has_thermal_pstate_row(gpu) {
         lines += 1;
     }
 
@@ -405,12 +401,12 @@ pub fn print_gpu_info<W: Write>(
 
     queue!(stdout, Print("\r\n")).unwrap();
 
-    // Optional secondary row: thermal thresholds + current P-state.
+    // Optional secondary row: thermal thresholds, fan speed, current P-state.
     //
-    // Only rendered when at least one piece of threshold/P-state data is
-    // available, so Apple Silicon / AMD / Jetson rows that never populate
-    // these fields keep their current two-row layout. The row is indented
-    // to line up under the device name so it visually hangs off the GPU.
+    // Only rendered when at least one piece of that data is available, so
+    // Apple Silicon / Jetson rows that never populate these fields keep
+    // their current two-row layout. The row is indented to line up under
+    // the device name so it visually hangs off the GPU.
     render_thermal_pstate_row(stdout, info);
 
     // Optional tertiary row: extended hardware details (issue #132).
@@ -516,16 +512,25 @@ pub fn print_gpu_info<W: Write>(
     queue!(stdout, Print("\r\n")).unwrap();
 }
 
-/// Render the compact thermal-threshold / P-state row beneath a GPU. No-op
-/// when the GPU reports none of the new NVML fields — so non-NVIDIA rows
-/// and older drivers skip the row entirely and the TUI keeps its historical
-/// two-line layout.
+/// Return true when a GPU carries at least one field rendered on the
+/// thermal / fan / P-state row. Shared by [`render_thermal_pstate_row`] and
+/// the layout calculator so the reserved line count and what is actually
+/// drawn can never drift apart.
+fn gpu_has_thermal_pstate_row(gpu: &GpuInfo) -> bool {
+    gpu.temperature_threshold_slowdown.is_some()
+        || gpu.temperature_threshold_shutdown.is_some()
+        || gpu.temperature_threshold_max_operating.is_some()
+        || gpu.temperature_threshold_acoustic.is_some()
+        || gpu.fan_speed_rpm.is_some()
+        || gpu.performance_state.is_some()
+}
+
+/// Render the compact thermal-threshold / fan / P-state row beneath a GPU.
+/// No-op when the GPU reports none of those fields, so rows whose reader
+/// populates neither the NVML thresholds nor a fan tachometer skip the row
+/// entirely and the TUI keeps its historical two-line layout.
 fn render_thermal_pstate_row<W: Write>(stdout: &mut W, info: &GpuInfo) {
-    let has_any_threshold = info.temperature_threshold_slowdown.is_some()
-        || info.temperature_threshold_shutdown.is_some()
-        || info.temperature_threshold_max_operating.is_some()
-        || info.temperature_threshold_acoustic.is_some();
-    if !has_any_threshold && info.performance_state.is_none() {
+    if !gpu_has_thermal_pstate_row(info) {
         return;
     }
 
@@ -585,6 +590,18 @@ fn render_thermal_pstate_row<W: Write>(stdout: &mut W, info: &GpuInfo) {
         emitted_any = true;
         print_colored_text(stdout, "Acoustic:", Color::DarkCyan, None, None);
         print_colored_text(stdout, &format!("{acoustic}°C"), Color::White, None, None);
+    }
+
+    // Fan tachometer, when the device has one. Rendered only for a real
+    // reading: a passively cooled card reports `None` and gets no field at
+    // all rather than a "0rpm" that reads as a seized fan.
+    if let Some(rpm) = info.fan_speed_rpm {
+        if emitted_any {
+            print_colored_text(stdout, " ", Color::White, None, None);
+        }
+        emitted_any = true;
+        print_colored_text(stdout, "Fan:", Color::DarkMagenta, None, None);
+        print_colored_text(stdout, &format!("{rpm}rpm"), Color::White, None, None);
     }
 
     if let Some(pstate) = info.performance_state {
@@ -772,6 +789,7 @@ mod tests {
             temperature_threshold_max_operating: Some(87),
             temperature_threshold_acoustic: None,
             performance_state: Some(2),
+            fan_speed_rpm: None,
             numa_node_id: None,
             gsp_firmware_mode: None,
             gsp_firmware_version: None,
@@ -1075,6 +1093,70 @@ mod tests {
     }
 
     #[test]
+    fn render_thermal_pstate_row_includes_fan_speed_when_present() {
+        let mut gpu = make_gpu(50);
+        gpu.fan_speed_rpm = Some(1450);
+        let mut buf: Vec<u8> = Vec::new();
+        render_thermal_pstate_row(&mut buf, &gpu);
+        let rendered = String::from_utf8(buf).expect("valid utf-8");
+        assert!(rendered.contains("Fan:"), "{rendered}");
+        assert!(rendered.contains("1450rpm"), "{rendered}");
+    }
+
+    #[test]
+    fn render_thermal_pstate_row_omits_fan_speed_when_absent() {
+        // A passively cooled card must render no fan field at all rather
+        // than "0rpm", which reads as a seized fan.
+        let mut gpu = make_gpu(50);
+        gpu.fan_speed_rpm = None;
+        let mut buf: Vec<u8> = Vec::new();
+        render_thermal_pstate_row(&mut buf, &gpu);
+        let rendered = String::from_utf8(buf).expect("valid utf-8");
+        assert!(!rendered.contains("Fan:"), "{rendered}");
+        assert!(!rendered.contains("rpm"), "{rendered}");
+    }
+
+    #[test]
+    fn render_fan_only_row_has_no_double_leading_space() {
+        // AMD and Intel cards report a fan but none of the NVML fields, so
+        // fan speed is frequently the first (and only) field on the row.
+        let mut gpu = make_gpu(50);
+        gpu.temperature_threshold_slowdown = None;
+        gpu.temperature_threshold_shutdown = None;
+        gpu.temperature_threshold_max_operating = None;
+        gpu.temperature_threshold_acoustic = None;
+        gpu.performance_state = None;
+        gpu.fan_speed_rpm = Some(1450);
+        let mut buf: Vec<u8> = Vec::new();
+        render_thermal_pstate_row(&mut buf, &gpu);
+        let raw = String::from_utf8(buf).expect("valid utf-8");
+        let plain = strip_ansi(&raw);
+
+        assert!(plain.contains("Fan:1450rpm"), "{plain:?}");
+        assert!(!plain.contains("P-State:"), "{plain:?}");
+        let after_indent = plain.trim_start_matches(' ');
+        assert!(
+            !after_indent.starts_with(' '),
+            "double leading space detected in {plain:?}"
+        );
+    }
+
+    #[test]
+    fn render_thermal_pstate_row_separates_fan_from_its_neighbours() {
+        // With every field populated the row must not run "87°C" straight
+        // into "Fan:" or "1450rpm" into "P-State:".
+        let mut gpu = make_gpu(50);
+        gpu.temperature_threshold_acoustic = Some(75);
+        gpu.fan_speed_rpm = Some(1450);
+        gpu.performance_state = Some(2);
+        let mut buf: Vec<u8> = Vec::new();
+        render_thermal_pstate_row(&mut buf, &gpu);
+        let plain = strip_ansi(&String::from_utf8(buf).expect("valid utf-8"));
+
+        assert!(plain.contains("75°C Fan:1450rpm P-State:P2"), "{plain:?}");
+    }
+
+    #[test]
     fn render_thermal_pstate_row_includes_acoustic_when_present() {
         let mut gpu = make_gpu(50);
         gpu.temperature_threshold_acoustic = Some(75);
@@ -1133,12 +1215,16 @@ mod tests {
 
     #[test]
     fn line_count_grows_to_three_when_thermal_or_pstate_present() {
-        // Each of the 5 new fields independently bumps the row count to 3.
+        // Each of the 6 optional fields independently bumps the row count
+        // to 3. Fan speed is included because AMD and Intel cards report it
+        // while reporting none of the NVML thresholds, so it is the only
+        // thing that opens the row for them.
         for setter in [
             |g: &mut GpuInfo| g.temperature_threshold_slowdown = Some(93),
             |g: &mut GpuInfo| g.temperature_threshold_shutdown = Some(98),
             |g: &mut GpuInfo| g.temperature_threshold_max_operating = Some(87),
             |g: &mut GpuInfo| g.temperature_threshold_acoustic = Some(75),
+            |g: &mut GpuInfo| g.fan_speed_rpm = Some(1450),
             |g: &mut GpuInfo| g.performance_state = Some(2),
         ] {
             let mut gpu = make_gpu(40);

@@ -75,6 +75,14 @@ pub struct GpuInfo {
     /// P-state (e.g. non-NVIDIA, MIG child devices, driver too old).
     #[serde(default)]
     pub performance_state: Option<u32>,
+    /// Current fan speed in revolutions per minute. `None` when the device
+    /// or driver does not report a fan tachometer: passively cooled
+    /// datacenter cards have no fan at all, and some drivers expose only a
+    /// duty-cycle percentage. Callers must render nothing in that case
+    /// rather than substituting `0`, which is indistinguishable from a
+    /// stalled fan on a card that does have one.
+    #[serde(default)]
+    pub fan_speed_rpm: Option<u32>,
     /// NUMA node the GPU is attached to. `None` when the host has no NUMA
     /// topology (non-Linux platforms, driver too old, or an NVML
     /// `NotSupported` response). Valid values are non-negative; a value of

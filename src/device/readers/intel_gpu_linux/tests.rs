@@ -253,6 +253,54 @@ fn get_gpu_info_reads_xe_temp2() {
 }
 
 #[test]
+fn get_gpu_info_publishes_fan_speed_as_field_and_detail() {
+    // One hwmon read has to reach both consumers: the typed field the TUI
+    // and the Prometheus exporter read, and the legacy `Fan Speed` detail
+    // string that snapshots and the Level Zero overwrite guard use. They
+    // must never disagree, so both are asserted from one fixture.
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let card = make_card(root, 0, "0x8086", "i915", "0x56A0");
+    let hwmon = card.join("device").join("hwmon").join("hwmon0");
+    fs::create_dir_all(&hwmon).unwrap();
+    fs::write(hwmon.join("fan1_input"), "1730\n").unwrap();
+
+    let reader = IntelGpuReader::new_from_root(root);
+    let info = reader.get_gpu_info();
+
+    assert_eq!(info.len(), 1);
+    assert_eq!(info[0].fan_speed_rpm, Some(1730));
+    assert_eq!(
+        info[0].detail.get("Fan Speed").map(String::as_str),
+        Some("1730 RPM")
+    );
+    assert_eq!(
+        info[0].detail.get("Source: Fan").map(String::as_str),
+        Some("hwmon")
+    );
+}
+
+#[test]
+fn get_gpu_info_leaves_fan_speed_unset_without_a_tachometer() {
+    // A card with no `fan1_input` must report `None`, not 0: the exporter
+    // omits the series and the TUI renders no fan field at all.
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    make_card(root, 0, "0x8086", "i915", "0x56A0");
+
+    let reader = IntelGpuReader::new_from_root(root);
+    let info = reader.get_gpu_info();
+
+    assert_eq!(info.len(), 1);
+    assert!(info[0].fan_speed_rpm.is_none());
+    assert!(!info[0].detail.contains_key("Fan Speed"));
+    assert_eq!(
+        info[0].detail.get("Source: Fan").map(String::as_str),
+        Some("unavailable")
+    );
+}
+
+#[test]
 fn get_gpu_info_integrated_reports_zero_memory() {
     let dir = tempdir().unwrap();
     let root = dir.path();

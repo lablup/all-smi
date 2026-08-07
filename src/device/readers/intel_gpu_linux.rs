@@ -541,6 +541,12 @@ impl GpuReader for IntelGpuReader {
                 temperature_threshold_max_operating: None,
                 temperature_threshold_acoustic: None,
                 performance_state: None,
+                // Same hwmon tachometer value that `decorate_static_sources`
+                // wrote into the `Fan Speed` detail string above. The typed
+                // field feeds the TUI and the exporter; the detail entry
+                // stays for snapshots and for the cross-reader overwrite
+                // guard in `intel_gpu_level_zero::apply_fan`.
+                fan_speed_rpm: fan_rpm,
                 // NVIDIA-only hardware details.
                 numa_node_id: None,
                 gsp_firmware_mode: None,

@@ -350,6 +350,10 @@ impl NvidiaGpuReader {
                         temperature_threshold_max_operating: thresholds.max_operating,
                         temperature_threshold_acoustic: thresholds.acoustic,
                         performance_state,
+                        // NVML exposes fan speed as a duty-cycle percentage,
+                        // not a tachometer reading, so there is no RPM to
+                        // publish here.
+                        fan_speed_rpm: None,
                         numa_node_id: hw.numa_node_id,
                         gsp_firmware_mode: hw.gsp_firmware_mode,
                         gsp_firmware_version: hw.gsp_firmware_version,
@@ -827,6 +831,7 @@ fn get_gpu_info_nvidia_smi() -> Vec<GpuInfo> {
                     temperature_threshold_max_operating: None,
                     temperature_threshold_acoustic: None,
                     performance_state: None,
+                    fan_speed_rpm: None,
                     // Hardware details (issue #132) are only available via
                     // NVML — the CSV fallback cannot surface them. Leave
                     // them at the "unavailable" defaults so downstream

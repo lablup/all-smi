@@ -125,5 +125,14 @@ fn apply_fan(gpu_info: &mut GpuInfo, fan: Option<LevelZeroFanReadout>, overwrite
         (None, None) => return,
     };
     gpu_info.detail.insert("Fan Speed".to_string(), value);
+    // The typed field only ever carries a tachometer reading. A
+    // duty-cycle-only readout (`rpm == None`) leaves it untouched rather
+    // than storing a percentage in a field named `_rpm`; the percentage
+    // still reaches snapshots through the detail string above. Both writes
+    // sit behind the same early returns, so the field and the detail entry
+    // always describe the same sample.
+    if let Some(rpm) = fan.rpm {
+        gpu_info.fan_speed_rpm = Some(rpm);
+    }
     set_source(gpu_info, "Fan", fan.source);
 }

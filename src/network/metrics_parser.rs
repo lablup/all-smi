@@ -495,6 +495,7 @@ impl MetricsParser {
                 temperature_threshold_max_operating: None,
                 temperature_threshold_acoustic: None,
                 performance_state: None,
+                fan_speed_rpm: None,
                 // Hardware details (issue #132) land via dedicated
                 // `all_smi_gpu_numa_node_id`, `all_smi_gpu_gsp_firmware_*`,
                 // `all_smi_nvlink_remote_device_type`, and GPM metric
@@ -577,6 +578,15 @@ impl MetricsParser {
                 // exporter only emits integer performance state indices.
                 if (0.0..=15.0).contains(&value) && value.fract() == 0.0 => {
                     gpu_info.performance_state = saturating_u32(value);
+                }
+            "gpu_fan_speed_rpm"
+                // The exporter only emits a non-negative integer RPM, and
+                // omits the series entirely for a card with no tachometer.
+                // Reject fractional and out-of-range readings so a hostile
+                // upstream cannot inject a value that widens the TUI row or
+                // renders as a nonsense fan speed.
+                if (0.0..=MAX_GPU_FAN_RPM).contains(&value) && value.fract() == 0.0 => {
+                    gpu_info.fan_speed_rpm = saturating_u32(value);
                 }
             "gpu_numa_node_id" => {
                 // NUMA node ids are non-negative on every real system.
@@ -1094,6 +1104,13 @@ const MAX_NUMA_NODE_ID: i32 = 4096;
 /// truncates any obviously pathological label.
 const MAX_GSP_VERSION_LEN: usize = 128;
 
+/// Maximum GPU fan speed in RPM accepted from a remote scrape. Blower fans
+/// on workstation cards top out around 6 000 RPM and the small high-static
+/// fans on some accelerators reach roughly 20 000; 100 000 is far beyond any
+/// real tachometer while still rejecting values like `u32::MAX` that would
+/// blow out the TUI column width.
+const MAX_GPU_FAN_RPM: f64 = 100_000.0;
+
 /// Lazily populate the GPM metrics slot on a [`GpuInfo`] so we do not
 /// allocate an empty struct unless at least one GPM field was observed.
 fn ensure_gpm_metrics(gpu_info: &mut GpuInfo) -> &mut GpmMetrics {
@@ -1555,6 +1572,42 @@ mod tests {
         Regex::new(r"^all_smi_([^\{]+)\{([^}]+)\} ([\d\.]+)$").unwrap()
     }
 
+    /// Minimal agent-side [`GpuInfo`] used to drive genuine
+    /// exporter -> parser round-trip assertions.
+    fn create_test_gpu_info() -> GpuInfo {
+        GpuInfo {
+            uuid: "GPU-RT".to_string(),
+            time: "2026-01-01 00:00:00".to_string(),
+            name: "AMD Radeon RX 7900 XTX".to_string(),
+            device_type: "GPU".to_string(),
+            host_id: "node-9".to_string(),
+            hostname: "node-9".to_string(),
+            instance: "node-9".to_string(),
+            utilization: 30.0,
+            ane_utilization: 0.0,
+            dla_utilization: None,
+            tensorcore_utilization: None,
+            temperature: 61,
+            used_memory: 1024,
+            total_memory: 8192,
+            frequency: 2400,
+            power_consumption: 210.0,
+            gpu_core_count: None,
+            temperature_threshold_slowdown: None,
+            temperature_threshold_shutdown: None,
+            temperature_threshold_max_operating: None,
+            temperature_threshold_acoustic: None,
+            performance_state: None,
+            fan_speed_rpm: None,
+            numa_node_id: None,
+            gsp_firmware_mode: None,
+            gsp_firmware_version: None,
+            nvlink_remote_devices: Vec::new(),
+            gpm_metrics: None,
+            detail: HashMap::new(),
+        }
+    }
+
     #[test]
     fn test_parse_labels() {
         let parser = create_test_parser();
@@ -1685,6 +1738,69 @@ all_smi_gpu_performance_state{gpu="NVIDIA A100", instance="node-1", uuid="GPU-T"
         assert_eq!(gpu.temperature_threshold_max_operating, Some(85));
         assert_eq!(gpu.temperature_threshold_acoustic, Some(77));
         assert_eq!(gpu.performance_state, Some(2));
+    }
+
+    #[test]
+    fn test_parse_gpu_fan_speed_round_trips_through_the_exporter() {
+        // Exporter -> exposition -> parser must return the same RPM the
+        // agent read locally, so a remote node's fan speed is not lost the
+        // way the old `detail`-only representation lost it.
+        use crate::api::metrics::{MetricExporter, gpu::GpuMetricExporter};
+
+        let parser = create_test_parser();
+        let re = create_test_regex();
+        let host = "127.0.0.1:10058";
+
+        let mut source = create_test_gpu_info();
+        source.fan_speed_rpm = Some(1450);
+        let exposition = GpuMetricExporter::new(&[source]).export_metrics();
+        assert!(
+            exposition.contains("all_smi_gpu_fan_speed_rpm{"),
+            "exporter did not emit the series:\n{exposition}"
+        );
+
+        let parsed = parser.parse_metrics(&exposition, host, &re);
+        assert_eq!(parsed.gpu_info.len(), 1);
+        assert_eq!(parsed.gpu_info[0].fan_speed_rpm, Some(1450));
+    }
+
+    #[test]
+    fn test_parse_gpu_fan_speed_absent_stays_none() {
+        // A card with no tachometer, or a remote node running a build that
+        // predates the metric, must leave the field `None` rather than 0.
+        use crate::api::metrics::{MetricExporter, gpu::GpuMetricExporter};
+
+        let parser = create_test_parser();
+        let re = create_test_regex();
+        let host = "127.0.0.1:10058";
+
+        let exposition = GpuMetricExporter::new(&[create_test_gpu_info()]).export_metrics();
+        let parsed = parser.parse_metrics(&exposition, host, &re);
+        assert_eq!(parsed.gpu_info.len(), 1);
+        assert!(parsed.gpu_info[0].fan_speed_rpm.is_none());
+    }
+
+    #[test]
+    fn parser_rejects_out_of_range_fan_speed() {
+        // A hostile upstream must not be able to widen the TUI row or
+        // publish a nonsense tachometer reading.
+        let parser = create_test_parser();
+        let re = create_test_regex();
+        let host = "127.0.0.1:10058";
+
+        for bad_value in ["4294967295", "100001", "1450.5"] {
+            let test_data = format!(
+                "all_smi_gpu_utilization{{gpu=\"GPU\", instance=\"n\", uuid=\"GPU-FAN\", index=\"0\"}} 0\n\
+                 all_smi_gpu_fan_speed_rpm{{gpu=\"GPU\", instance=\"n\", uuid=\"GPU-FAN\", index=\"0\"}} {bad_value}\n"
+            );
+            let parsed = parser.parse_metrics(&test_data, host, &re);
+            assert_eq!(parsed.gpu_info.len(), 1);
+            assert!(
+                parsed.gpu_info[0].fan_speed_rpm.is_none(),
+                "expected None for fan speed {bad_value}, got {:?}",
+                parsed.gpu_info[0].fan_speed_rpm
+            );
+        }
     }
 
     #[test]

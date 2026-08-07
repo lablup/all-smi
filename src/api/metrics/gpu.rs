@@ -16,6 +16,25 @@ use super::{MetricBuilder, MetricExporter};
 use crate::device::GpuInfo;
 use crate::parsing::common::{sanitize_label_name, sanitize_label_value};
 
+/// Legacy `detail` key every reader used before `GpuInfo::fan_speed_rpm`
+/// existed, and still writes alongside it. Read here only as a fallback for
+/// mock servers and older remote nodes whose payload carries the string but
+/// not the typed field.
+const FAN_SPEED_DETAIL_KEY: &str = "Fan Speed";
+
+/// Recover an RPM reading from the legacy `Fan Speed` detail string.
+///
+/// Readers spell the value `"1450 RPM"`, and the Level Zero reader appends a
+/// duty cycle when it has one (`"1600 RPM (40%)"`), so the number is parsed
+/// from the text before the ` RPM` marker rather than by stripping a suffix.
+/// A duty-cycle-only value (`"40%"`) carries no tachometer reading and
+/// returns `None`, as does anything non-numeric or negative.
+fn parse_fan_speed_detail(value: &str) -> Option<f64> {
+    let (rpm, _) = value.split_once(" RPM")?;
+    let rpm = rpm.trim().parse::<f64>().ok()?;
+    (rpm.is_finite() && rpm >= 0.0).then_some(rpm)
+}
+
 pub struct GpuMetricExporter<'a> {
     pub gpu_info: &'a [GpuInfo],
 }
@@ -343,6 +362,33 @@ impl<'a> GpuMetricExporter<'a> {
                 .type_("all_smi_gpu_performance_state", "gauge")
                 .metric("all_smi_gpu_performance_state", &base_labels, state_num);
         }
+
+        // Fan speed, same shape as the P-state block above: prefer the
+        // structured `fan_speed_rpm` field the AMD / Intel readers now
+        // populate, fall back to the legacy `Fan Speed` detail string so
+        // mock servers and remote nodes running a build that predates the
+        // field keep exporting the series. Omitted entirely when neither is
+        // available, so a passively cooled card is distinguishable from a
+        // stalled fan by absence rather than by a 0 reading.
+        if let Some(rpm) = info.fan_speed_rpm {
+            builder
+                .help(
+                    "all_smi_gpu_fan_speed_rpm",
+                    "GPU fan speed in revolutions per minute (metric is omitted when the device reports no tachometer)",
+                )
+                .type_("all_smi_gpu_fan_speed_rpm", "gauge")
+                .metric("all_smi_gpu_fan_speed_rpm", &base_labels, rpm);
+        } else if let Some(fan) = info.detail.get(FAN_SPEED_DETAIL_KEY)
+            && let Some(rpm) = parse_fan_speed_detail(fan)
+        {
+            builder
+                .help(
+                    "all_smi_gpu_fan_speed_rpm",
+                    "GPU fan speed in revolutions per minute (metric is omitted when the device reports no tachometer)",
+                )
+                .type_("all_smi_gpu_fan_speed_rpm", "gauge")
+                .metric("all_smi_gpu_fan_speed_rpm", &base_labels, rpm);
+        }
     }
 
     /// Export extended NVML temperature thresholds and the P-state gauge.
@@ -504,6 +550,7 @@ mod tests {
             temperature_threshold_max_operating: Some(85),
             temperature_threshold_acoustic: Some(77),
             performance_state: Some(2),
+            fan_speed_rpm: None,
             numa_node_id: None,
             gsp_firmware_mode: None,
             gsp_firmware_version: None,
@@ -577,6 +624,101 @@ mod tests {
         assert!(
             pstate_line.ends_with(" 2"),
             "expected P2, got {pstate_line}"
+        );
+    }
+
+    #[test]
+    fn fan_speed_detail_parser_accepts_every_reader_value_shape() {
+        // `amd.rs`, `intel_gpu_linux`, and `amd_adl` all write "<rpm> RPM";
+        // the Level Zero reader appends the duty cycle when it has one.
+        assert_eq!(parse_fan_speed_detail("1450 RPM"), Some(1450.0));
+        assert_eq!(parse_fan_speed_detail("1600 RPM (40%)"), Some(1600.0));
+        // Duty cycle only: no tachometer reading to publish.
+        assert_eq!(parse_fan_speed_detail("40%"), None);
+        // Garbage and out-of-domain values must not reach the exposition.
+        assert_eq!(parse_fan_speed_detail("unknown RPM"), None);
+        assert_eq!(parse_fan_speed_detail("-1 RPM"), None);
+        assert_eq!(parse_fan_speed_detail(""), None);
+    }
+
+    #[test]
+    fn exporter_emits_fan_speed_from_structured_field() {
+        let mut gpu = make_nvidia_gpu();
+        gpu.fan_speed_rpm = Some(1450);
+        let output = GpuMetricExporter::new(&[gpu]).export_metrics();
+
+        let line = output
+            .lines()
+            .find(|l| l.starts_with("all_smi_gpu_fan_speed_rpm{"))
+            .unwrap_or_else(|| panic!("fan speed metric missing:\n{output}"));
+        assert!(line.ends_with(" 1450"), "expected 1450 RPM, got {line}");
+        // Same label set as the other per-device gauges so dashboards can
+        // join on it.
+        assert!(line.contains("gpu=\"NVIDIA A100\""));
+        assert!(line.contains("instance=\"node-1\""));
+        assert!(line.contains("gpu_uuid=\"GPU-ABC\""));
+        assert!(line.contains("gpu_index=\"0\""));
+    }
+
+    #[test]
+    fn exporter_omits_fan_speed_when_device_reports_none() {
+        // A passively cooled card has no fan at all. Absence, not 0, is how
+        // that is expressed on the wire.
+        let gpu = make_nvidia_gpu();
+        assert!(gpu.fan_speed_rpm.is_none());
+        let output = GpuMetricExporter::new(&[gpu]).export_metrics();
+        assert!(
+            !output.contains("all_smi_gpu_fan_speed_rpm"),
+            "fan speed must be omitted without data:\n{output}"
+        );
+    }
+
+    #[test]
+    fn exporter_emits_fan_speed_from_detail_fallback() {
+        // Mock servers and remote nodes running a build that predates the
+        // typed field only carry the legacy detail string.
+        let mut gpu = make_nvidia_gpu();
+        gpu.fan_speed_rpm = None;
+        gpu.detail
+            .insert("Fan Speed".to_string(), "1450 RPM".to_string());
+        let output = GpuMetricExporter::new(&[gpu]).export_metrics();
+
+        let line = output
+            .lines()
+            .find(|l| l.starts_with("all_smi_gpu_fan_speed_rpm{"))
+            .unwrap_or_else(|| panic!("fan speed fallback missing:\n{output}"));
+        assert!(line.ends_with(" 1450"), "expected 1450 RPM, got {line}");
+    }
+
+    #[test]
+    fn exporter_prefers_structured_fan_speed_over_the_detail_string() {
+        let mut gpu = make_nvidia_gpu();
+        gpu.fan_speed_rpm = Some(1450);
+        gpu.detail
+            .insert("Fan Speed".to_string(), "9999 RPM".to_string());
+        let output = GpuMetricExporter::new(&[gpu]).export_metrics();
+
+        let lines: Vec<&str> = output
+            .lines()
+            .filter(|l| l.starts_with("all_smi_gpu_fan_speed_rpm{"))
+            .collect();
+        assert_eq!(lines.len(), 1, "exactly one sample per device: {lines:?}");
+        assert!(lines[0].ends_with(" 1450"), "{}", lines[0]);
+    }
+
+    #[test]
+    fn exporter_omits_fan_speed_for_a_duty_cycle_only_detail() {
+        // The Level Zero reader writes a bare percentage when the driver
+        // exposes no tachometer. That is not an RPM and must not be
+        // published as one.
+        let mut gpu = make_nvidia_gpu();
+        gpu.fan_speed_rpm = None;
+        gpu.detail
+            .insert("Fan Speed".to_string(), "40%".to_string());
+        let output = GpuMetricExporter::new(&[gpu]).export_metrics();
+        assert!(
+            !output.contains("all_smi_gpu_fan_speed_rpm"),
+            "a duty cycle is not an RPM reading:\n{output}"
         );
     }
 

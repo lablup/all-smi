@@ -224,7 +224,10 @@ live in argv.
 | `all_smi_gpu_temperature_celsius`     | GPU temperature            | celsius | `gpu_index`, `gpu_name`                   |
 | `all_smi_gpu_power_consumption_watts` | GPU power consumption      | watts   | `gpu_index`, `gpu_name`                   |
 | `all_smi_gpu_frequency_mhz`           | GPU frequency              | MHz     | `gpu_index`, `gpu_name`                   |
+| `all_smi_gpu_fan_speed_rpm`           | GPU fan speed              | RPM     | `gpu`, `instance`, `gpu_uuid`, `gpu_index` |
 | `all_smi_gpu_info`                    | GPU device information     | info    | `gpu_index`, `gpu_name`, `driver_version` |
+
+`all_smi_gpu_fan_speed_rpm` is emitted only by devices that expose a fan tachometer: AMD via amdgpu on Linux and ADL on Windows, and Intel via hwmon `fan1_input` or Level Zero Sysman. Passively cooled datacenter cards and drivers that report only a duty-cycle percentage omit the series entirely, so absence means "no tachometer" rather than "fan stopped".
 
 ### Unified AI Acceleration Library Labels
 
@@ -397,7 +400,6 @@ AMD GPUs (Radeon and Instinct series) provide comprehensive monitoring through R
 
 | Metric                        | Description                              | Unit    | Labels                                      |
 |-------------------------------|------------------------------------------|---------|---------------------------------------------|
-| `all_smi_gpu_fan_speed_rpm`   | GPU fan speed                            | RPM     | `gpu_index`, `gpu_name`                     |
 | `all_smi_amd_rocm_version`    | AMD ROCm version installed               | info    | `instance`, `version`                       |
 | `all_smi_gpu_memory_gtt_bytes`| GTT (GPU Translation Table) memory usage | bytes   | `gpu_index`, `gpu_name`                     |
 | `all_smi_gpu_memory_vram_bytes`| VRAM (Video RAM) usage                  | bytes   | `gpu_index`, `gpu_name`                     |
