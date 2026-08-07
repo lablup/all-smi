@@ -42,7 +42,6 @@ use crate::utils::get_hostname;
 use chrono::Local;
 use serde::Deserialize;
 use std::collections::HashMap;
-#[cfg(feature = "level_zero")]
 use std::sync::Mutex;
 use wmi::WMIConnection;
 
@@ -100,6 +99,10 @@ pub struct IntelWindowsGpuReader {
     #[cfg(feature = "level_zero")]
     level_zero_state:
         Mutex<HashMap<String, crate::device::readers::intel_gpu_level_zero::LevelZeroState>>,
+    /// Adapter LUID to `(device index, GPU uuid)`, recorded by
+    /// `get_gpu_info` so `get_process_info` can attribute a PDH
+    /// per-process row to the right card.
+    adapter_index: Mutex<crate::device::readers::windows_gpu_perf::AdapterIndex>,
 }
 
 impl Default for IntelWindowsGpuReader {
@@ -113,6 +116,7 @@ impl IntelWindowsGpuReader {
         Self {
             #[cfg(feature = "level_zero")]
             level_zero_state: Mutex::new(HashMap::new()),
+            adapter_index: Mutex::new(Default::default()),
         }
     }
 
@@ -256,16 +260,28 @@ impl IntelWindowsGpuReader {
 impl GpuReader for IntelWindowsGpuReader {
     fn get_gpu_info(&self) -> Vec<GpuInfo> {
         let mut gpus = self.query_intel_gpus();
+        // The vendor-neutral DXGI / PDH layer runs first so the Level
+        // Zero augmentation below overwrites it wherever both produce a
+        // reading. L0 talks to the driver directly and is the more
+        // authoritative source for utilization and power; DXGI remains
+        // the only source of a correct 64-bit VRAM size either way.
+        let adapter_index = crate::device::readers::windows_gpu_perf::augment_gpus(&mut gpus);
+        if let Ok(mut guard) = self.adapter_index.lock() {
+            *guard = adapter_index;
+        }
         #[cfg(feature = "level_zero")]
         self.augment_with_level_zero(&mut gpus);
         gpus
     }
 
     fn get_process_info(&self) -> Vec<ProcessInfo> {
-        // Per-process GPU memory on Windows requires PDH / D3DKMT or
-        // Level Zero. Not available via Win32_VideoController. Mirrors
-        // the AMD-on-Windows reader.
-        Vec::new()
+        // Per-process dedicated GPU memory comes from the PDH `GPU
+        // Process Memory` counter, reusing the sample `get_gpu_info`
+        // already took. Mirrors the AMD-on-Windows reader.
+        let Ok(adapter_index) = self.adapter_index.lock() else {
+            return Vec::new();
+        };
+        crate::device::readers::windows_gpu_perf::process_rows(&adapter_index)
     }
 }
 

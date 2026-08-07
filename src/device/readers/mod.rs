@@ -85,3 +85,15 @@ pub mod intel_gpu_sysfs;
 
 #[cfg(target_os = "windows")]
 pub mod intel_gpu_windows;
+
+// Vendor-neutral Windows GPU metrics (DXGI + PDH).
+//
+// The `test` arm is load-bearing, not incidental. No CI job builds this
+// crate for Windows at all, so the counter-instance parsing, the
+// utilization aggregation, and the WMI-to-adapter pairing would ship
+// with zero automated coverage if this were gated on Windows alone.
+// Compiling it under `cfg(test)` everywhere puts that logic in front of
+// the Linux test runner, which is the only runner this repository
+// actually has. Same shape as `intel_gpu_sysfs` above.
+#[cfg(any(target_os = "windows", test))]
+pub mod windows_gpu_perf;
