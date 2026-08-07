@@ -239,14 +239,17 @@ impl GpuReader for AmdWindowsGpuReader {
 
     fn get_process_info(&self) -> Vec<ProcessInfo> {
         // Per-process GPU memory comes from the PDH `GPU Process
-        // Memory` counter. `latest()` reuses the sample `get_gpu_info`
-        // already took: collecting again here would consume a second
-        // PDH collection and halve the interval the utilization rate is
-        // computed over.
+        // Memory` counter, reusing the sample `get_gpu_info` already
+        // took. The closure covers one-shot callers that never call
+        // `get_gpu_info` at all, such as
+        // `all-smi snapshot --include process`.
         let Ok(adapter_index) = self.adapter_index.lock() else {
             return Vec::new();
         };
-        windows_gpu_perf::process_rows(&adapter_index)
+        windows_gpu_perf::process_rows_with(&adapter_index, || {
+            let mut gpus = self.query_amd_gpus();
+            windows_gpu_perf::augment_gpus(&mut gpus)
+        })
     }
 }
 

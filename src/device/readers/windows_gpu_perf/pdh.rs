@@ -66,6 +66,15 @@ use windows::core::{PCWSTR, w};
 
 /// `PDH_CSTATUS_VALID_DATA`, the per-item success status.
 const PDH_CSTATUS_VALID_DATA: u32 = 0;
+/// `PDH_CSTATUS_NEW_DATA`, the *other* per-item success status.
+///
+/// `pdhmsg.h` defines both 0 and 1 as valid, and MSDN's
+/// `PDH_FMT_COUNTERVALUE` page documents `NEW_DATA` as "the counter was
+/// updated since the last collection". That is precisely the case for a
+/// GPU under load, so treating it as an error would silently drop every
+/// interesting sample and degrade the whole feature back to the WMI
+/// baseline while the doctor check still reported success.
+const PDH_CSTATUS_NEW_DATA: u32 = 1;
 /// `PDH_MORE_DATA`, returned by the buffer-sizing probe call.
 const PDH_MORE_DATA: u32 = 0x8000_07D2;
 
@@ -208,61 +217,89 @@ fn read_counter_array(counter: PDH_HCOUNTER) -> Vec<(String, f64)> {
         return Vec::new();
     }
 
-    let mut buffer_size = 0u32;
-    let mut item_count = 0u32;
-    let status = unsafe {
-        PdhGetFormattedCounterArrayW(
-            counter,
-            PDH_FMT_DOUBLE,
-            &mut buffer_size,
-            &mut item_count,
-            None,
-        )
-    };
-    if status != PDH_MORE_DATA || buffer_size == 0 {
-        // No instances at all is the normal case on a machine with no
-        // WDDM GPU, and on GitHub-hosted Windows runners.
-        return Vec::new();
+    // The instance set is snapshotted into the query by
+    // `PdhCollectQueryData`, so the size returned by the probe should
+    // still be valid on the fetch. Retry once anyway: if the size did
+    // grow, a single extra attempt recovers the poll instead of silently
+    // dropping the whole counter family.
+    for _ in 0..2 {
+        let mut buffer_size = 0u32;
+        let mut item_count = 0u32;
+        let status = unsafe {
+            PdhGetFormattedCounterArrayW(
+                counter,
+                PDH_FMT_DOUBLE,
+                &mut buffer_size,
+                &mut item_count,
+                None,
+            )
+        };
+        if status != PDH_MORE_DATA || buffer_size == 0 {
+            // No instances at all is the normal case on a machine with
+            // no WDDM GPU, and on GitHub-hosted Windows runners.
+            return Vec::new();
+        }
+
+        let item_size = std::mem::size_of::<PDH_FMT_COUNTERVALUE_ITEM_W>();
+        let capacity = (buffer_size as usize).div_ceil(item_size);
+        // Allocating as `Vec<PDH_FMT_COUNTERVALUE_ITEM_W>` rather than
+        // `Vec<u8>` also buys the 8-byte alignment the `f64` in the
+        // union requires.
+        let mut items: Vec<PDH_FMT_COUNTERVALUE_ITEM_W> = Vec::with_capacity(capacity);
+
+        let status = unsafe {
+            PdhGetFormattedCounterArrayW(
+                counter,
+                PDH_FMT_DOUBLE,
+                &mut buffer_size,
+                &mut item_count,
+                Some(items.as_mut_ptr()),
+            )
+        };
+        if status == PDH_MORE_DATA {
+            continue;
+        }
+        if status != 0 {
+            return Vec::new();
+        }
+
+        // SAFETY: PDH reported `item_count` initialised items, and the
+        // allocation covers `buffer_size` bytes which by PDH's own
+        // contract is at least `item_count * item_size`. The `min`
+        // holds the invariant even if PDH were to over-report.
+        let item_count = (item_count as usize).min(capacity);
+        unsafe { items.set_len(item_count) };
+
+        return items
+            .iter()
+            .filter_map(|item| {
+                // Both 0 and 1 are documented success statuses; see the
+                // constants above.
+                if !matches!(
+                    item.FmtValue.CStatus,
+                    PDH_CSTATUS_VALID_DATA | PDH_CSTATUS_NEW_DATA
+                ) {
+                    return None;
+                }
+                // PDH always fills `szName` for a returned item, but
+                // `PWSTR::to_string` calls `wcslen` with no null check,
+                // so a null would be a segfault rather than an error.
+                if item.szName.is_null() {
+                    return None;
+                }
+                // SAFETY: the array was requested with PDH_FMT_DOUBLE,
+                // so the union holds the double variant.
+                let value = unsafe { item.FmtValue.Anonymous.doubleValue };
+                // SAFETY: szName points into the tail of the same
+                // allocation, which outlives this eager iteration, and
+                // `to_string` copies into an owned String.
+                let name = unsafe { item.szName.to_string() }.ok()?;
+                Some((name, value))
+            })
+            .collect();
     }
 
-    let item_size = std::mem::size_of::<PDH_FMT_COUNTERVALUE_ITEM_W>();
-    let capacity = (buffer_size as usize).div_ceil(item_size);
-    let mut items: Vec<PDH_FMT_COUNTERVALUE_ITEM_W> = Vec::with_capacity(capacity);
-
-    let status = unsafe {
-        PdhGetFormattedCounterArrayW(
-            counter,
-            PDH_FMT_DOUBLE,
-            &mut buffer_size,
-            &mut item_count,
-            Some(items.as_mut_ptr()),
-        )
-    };
-    if status != 0 {
-        return Vec::new();
-    }
-
-    // SAFETY: PDH reported `item_count` initialised items, and the
-    // allocation covers `buffer_size` bytes which by PDH's own contract
-    // is at least `item_count * item_size`.
-    let item_count = (item_count as usize).min(capacity);
-    unsafe { items.set_len(item_count) };
-
-    items
-        .iter()
-        .filter_map(|item| {
-            if item.FmtValue.CStatus != PDH_CSTATUS_VALID_DATA {
-                return None;
-            }
-            // SAFETY: the array was requested with PDH_FMT_DOUBLE, so
-            // the union holds the double variant.
-            let value = unsafe { item.FmtValue.Anonymous.doubleValue };
-            // SAFETY: szName points into the tail of the same buffer,
-            // which is alive for the duration of this iteration.
-            let name = unsafe { item.szName.to_string() }.ok()?;
-            Some((name, value))
-        })
-        .collect()
+    Vec::new()
 }
 
 /// Process-wide sampler. `None` once opening the query has failed, so a

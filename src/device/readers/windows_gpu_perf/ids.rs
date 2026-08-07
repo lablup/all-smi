@@ -357,9 +357,19 @@ pub fn aggregate_adapter_memory(
 ///    names, but driver updates occasionally add or drop a suffix.
 /// 3. **Ordinal position** in the full adapter list, as a last resort.
 ///
-/// `ordinal` is the caller's index among the WMI rows it is iterating,
-/// which for a single-GPU machine (the overwhelming majority) makes
-/// even the weakest strategy correct.
+/// `ordinal` is the caller's index among the WMI rows it is iterating.
+///
+/// Note that `ordinal` indexes a *vendor-filtered* list (the AMD reader
+/// only iterates AMD controllers) while `adapters` is the *unfiltered*
+/// DXGI enumeration, so the two are not generally aligned. Every
+/// weaker-than-PCI strategy is therefore constrained to adapters whose
+/// vendor id agrees with the WMI row, and when the vendor cannot be
+/// determined at all the function gives up rather than guessing.
+///
+/// Returning `None` costs only the augmentation: the caller keeps the
+/// WMI baseline, which is honestly empty. Guessing wrong is worse than
+/// that, because it silently reports one card's memory and utilization
+/// against another.
 pub fn match_adapter<'a>(
     adapters: &'a [AdapterIdentity],
     pnp_device_id: Option<&str>,
@@ -370,36 +380,58 @@ pub fn match_adapter<'a>(
         return None;
     }
 
-    if let Some(ids) = pnp_device_id.and_then(parse_pnp_device_id) {
-        let matches: Vec<&AdapterIdentity> = adapters
+    let ids = pnp_device_id.and_then(parse_pnp_device_id);
+
+    // Strongest: exact PCI vendor and device.
+    if let Some(ids) = ids {
+        let exact: Vec<&AdapterIdentity> = adapters
             .iter()
             .filter(|a| a.vendor_id == ids.vendor && a.device_id == ids.device)
             .collect();
-        match matches.len() {
+        match exact.len() {
             0 => {}
-            1 => return Some(matches[0]),
-            _ => return Some(matches.get(ordinal).copied().unwrap_or(matches[0])),
+            1 => return Some(exact[0]),
+            // Two identical cards. Their WMI rows and DXGI entries are
+            // both vendor-homogeneous here, so the ordinal is meaningful
+            // within this subset.
+            _ => return Some(exact.get(ordinal).copied().unwrap_or(exact[0])),
         }
+    }
+
+    // Everything below may only consider adapters from the same vendor.
+    // Without a vendor there is nothing to constrain a guess with.
+    let ids = ids?;
+    let same_vendor: Vec<&AdapterIdentity> = adapters
+        .iter()
+        .filter(|a| a.vendor_id == ids.vendor)
+        .collect();
+    if same_vendor.is_empty() {
+        return None;
     }
 
     let trimmed = name.trim();
     if !trimmed.is_empty() {
-        if let Some(hit) = adapters
+        if let Some(hit) = same_vendor
             .iter()
             .find(|a| a.description.trim().eq_ignore_ascii_case(trimmed))
         {
             return Some(hit);
         }
         let lowered = trimmed.to_lowercase();
-        if let Some(hit) = adapters.iter().find(|a| {
-            let description = a.description.to_lowercase();
-            description.contains(&lowered) || lowered.contains(&description)
+        if let Some(hit) = same_vendor.iter().find(|a| {
+            let description = a.description.trim().to_lowercase();
+            // An empty description would make `lowered.contains` true
+            // for every row and swallow the whole list, so require a
+            // real string on both sides.
+            !description.is_empty()
+                && (description.contains(&lowered) || lowered.contains(&description))
         }) {
             return Some(hit);
         }
     }
 
-    adapters.get(ordinal)
+    // Last resort, still inside the vendor subset.
+    same_vendor.get(ordinal).copied()
 }
 
 #[cfg(test)]
@@ -624,28 +656,78 @@ mod tests {
     }
 
     #[test]
-    fn falls_back_to_name_then_ordinal() {
+    fn falls_back_to_name_within_the_same_vendor() {
         let adapters = vec![
             identity(1, 0x8086, 0x56A0, "Intel(R) Arc(TM) A770 Graphics"),
-            identity(2, 0x1002, 0x744C, "AMD Radeon RX 7900 XTX"),
+            // Same vendor as the WMI row below, but a device id the row
+            // does not carry, so only the name can pair them.
+            identity(2, 0x1002, 0x1234, "AMD Radeon RX 7900 XTX"),
         ];
-        // No PNPDeviceID at all: fall through to the name.
-        let hit = match_adapter(&adapters, None, "AMD Radeon RX 7900 XTX", 0).unwrap();
-        assert_eq!(hit.luid, AdapterLuid::new(0, 2));
-
-        // PCI ids that match nothing, and a name that matches nothing:
-        // ordinal is the last resort.
         let hit = match_adapter(
             &adapters,
-            Some(r"PCI\VEN_DEAD&DEV_BEEF"),
-            "Some Unknown Display Adapter",
-            1,
+            Some(r"PCI\VEN_1002&DEV_744C"),
+            "AMD Radeon RX 7900 XTX",
+            0,
         )
         .unwrap();
         assert_eq!(hit.luid, AdapterLuid::new(0, 2));
+    }
 
-        // An out-of-range ordinal yields nothing rather than panicking.
-        assert!(match_adapter(&adapters, None, "Unknown", 9).is_none());
+    #[test]
+    fn never_pairs_across_vendors() {
+        // The heart of the mis-attribution risk: `ordinal` indexes the
+        // caller's vendor-filtered WMI rows while `adapters` is the full
+        // DXGI list, so an unconstrained ordinal fallback would hand an
+        // AMD row the Intel iGPU's memory and utilization. Reporting
+        // nothing (and keeping the honest WMI baseline) is required.
+        let adapters = vec![
+            identity(1, 0x8086, 0x56A0, "Intel(R) Arc(TM) A770 Graphics"),
+            identity(2, 0x10DE, 0x2684, "NVIDIA GeForce RTX 4090"),
+        ];
+        assert!(
+            match_adapter(
+                &adapters,
+                Some(r"PCI\VEN_1002&DEV_744C"),
+                "AMD Radeon RX 7900 XTX",
+                0
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn declines_to_guess_without_a_vendor() {
+        let adapters = vec![identity(1, 0x1002, 0x744C, "AMD Radeon RX 7900 XTX")];
+        // `amd_windows` synthesizes `AMD-GPU-{idx}` as the uuid when a
+        // controller has no PNPDeviceID; that parses to no vendor, so
+        // there is nothing to constrain a match with.
+        assert!(match_adapter(&adapters, None, "AMD Radeon RX 7900 XTX", 0).is_none());
+        assert!(match_adapter(&adapters, Some("AMD-GPU-0"), "AMD Radeon RX 7900 XTX", 0).is_none());
+    }
+
+    #[test]
+    fn an_empty_adapter_description_does_not_swallow_every_row() {
+        // `widestring_to_string` yields "" for a NUL-first Description.
+        // A naive containment check treats "" as a substring of
+        // everything, so one such adapter would capture every WMI row.
+        let adapters = vec![
+            identity(1, 0x1002, 0x1111, ""),
+            identity(2, 0x1002, 0x2222, "AMD Radeon RX 7900 XTX"),
+        ];
+        let hit = match_adapter(
+            &adapters,
+            Some(r"PCI\VEN_1002&DEV_744C"),
+            "AMD Radeon RX 7900 XTX",
+            9,
+        )
+        .unwrap();
+        assert_eq!(hit.luid, AdapterLuid::new(0, 2));
+    }
+
+    #[test]
+    fn out_of_range_and_empty_inputs_yield_nothing() {
+        let adapters = vec![identity(1, 0x1002, 0x744C, "AMD Radeon RX 7900 XTX")];
+        assert!(match_adapter(&adapters, Some(r"PCI\VEN_1002&DEV_9999"), "Unknown", 9).is_none());
         assert!(match_adapter(&[], None, "anything", 0).is_none());
     }
 }

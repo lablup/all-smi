@@ -28,7 +28,7 @@
 
 use super::ids::{AdapterIdentity, AdapterLuid};
 use windows::Win32::Graphics::Dxgi::{
-    CreateDXGIFactory1, DXGI_ADAPTER_DESC1, DXGI_ADAPTER_FLAG, DXGI_ADAPTER_FLAG_SOFTWARE,
+    CreateDXGIFactory1, DXGI_ADAPTER_DESC1, DXGI_ADAPTER_FLAG_SOFTWARE,
     DXGI_MEMORY_SEGMENT_GROUP_LOCAL, DXGI_QUERY_VIDEO_MEMORY_INFO, IDXGIAdapter1, IDXGIAdapter3,
     IDXGIFactory1,
 };
@@ -39,7 +39,16 @@ use windows::core::Interface;
 pub struct DxgiAdapter {
     pub identity: AdapterIdentity,
     /// `DXGI_ADAPTER_DESC1::DedicatedVideoMemory`, in bytes.
+    ///
+    /// Zero on integrated graphics, which have no dedicated pool. Use
+    /// [`Self::shared_system_memory`] for those.
     pub dedicated_video_memory: u64,
+    /// `DXGI_ADAPTER_DESC1::SharedSystemMemory`, in bytes.
+    ///
+    /// The system RAM the adapter may address. For an integrated GPU
+    /// this is the only meaningful capacity figure, and it is what Task
+    /// Manager labels "Shared GPU memory".
+    pub shared_system_memory: u64,
     /// `DXGI_QUERY_VIDEO_MEMORY_INFO::Budget` for the local memory
     /// segment, in bytes, when `IDXGIAdapter3` is available.
     ///
@@ -85,7 +94,11 @@ pub fn enumerate() -> Vec<DxgiAdapter> {
             Err(_) => continue,
         };
 
-        if DXGI_ADAPTER_FLAG(desc.Flags as i32) == DXGI_ADAPTER_FLAG_SOFTWARE {
+        // Mask, do not compare for equality: `DXGI_ADAPTER_FLAG_REMOTE`
+        // is bit 0 and `_SOFTWARE` is bit 1, so an adapter reporting
+        // both would slip past an `==` test and be admitted as
+        // hardware.
+        if desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32 != 0 {
             continue;
         }
 
@@ -102,6 +115,7 @@ pub fn enumerate() -> Vec<DxgiAdapter> {
                 description: widestring_to_string(&desc.Description),
             },
             dedicated_video_memory: desc.DedicatedVideoMemory as u64,
+            shared_system_memory: desc.SharedSystemMemory as u64,
             process_budget,
             process_current_usage,
         });

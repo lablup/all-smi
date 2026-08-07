@@ -38,6 +38,17 @@
 //! overwrite afterwards. Each field records where it came from in the
 //! `Source: *` detail keys the Intel reader already established.
 //!
+//! ## Known limitation: one-shot invocations report no utilization
+//!
+//! Utilization is a PDH rate counter, so it only exists once two
+//! collections can be differenced. Any caller that samples exactly once
+//! and exits, `all-smi snapshot` at its default `--samples 1` or a
+//! library consumer doing a single `get_gpu_info`, therefore sees the
+//! WMI baseline utilization rather than a real figure. The polling
+//! paths (`view` and `api`) are unaffected from their second poll
+//! onward. Memory figures are gauges and are correct from the first
+//! collection either way.
+//!
 //! ## Platform gating
 //!
 //! The DXGI and PDH FFI submodules are Windows-only. Everything else
@@ -69,8 +80,15 @@ use std::collections::HashMap;
 #[derive(Clone, Debug)]
 pub struct AdapterMetrics {
     pub identity: AdapterIdentity,
-    /// True dedicated VRAM size in bytes, from DXGI.
+    /// Adapter capacity in bytes, from DXGI.
     pub total_memory: Option<u64>,
+    /// Whether [`Self::total_memory`] is a dedicated VRAM pool or the
+    /// shared system-memory aperture an integrated GPU uses.
+    ///
+    /// Recorded so the provenance the reader publishes does not claim
+    /// more than the number delivers: "DXGI" and "DXGI (shared)" mean
+    /// materially different things to someone reading a memory gauge.
+    pub memory_is_shared: bool,
     /// System-wide dedicated VRAM in use, in bytes, from the PDH
     /// `GPU Adapter Memory` counter.
     pub used_memory: Option<u64>,
@@ -119,13 +137,41 @@ impl Snapshot {
     }
 }
 
-/// Take a fresh sample and cache it for [`latest`].
+/// How long a snapshot stays fresh enough to be reused instead of
+/// taking another PDH collection.
 ///
-/// Cheap to call once per poll; do not call it twice in one poll, as
-/// each call consumes one PDH collection and the utilization rate is
-/// computed between consecutive collections.
+/// This is not an optimisation, it is a correctness requirement.
+/// `Utilization Percentage` is a rate computed between consecutive
+/// collections, so two collections microseconds apart yield a rate over
+/// a microsecond, which reads as 0 or as a clamped 100 rather than as
+/// the load over the poll interval.
+///
+/// More than one reader can be registered at once: `get_gpu_readers`
+/// tests for AMD and Intel adapters with independent `if`s, and a laptop
+/// with an Intel iGPU beside a Radeon dGPU (or an AMD APU beside an Arc
+/// card) registers both. The collectors then call `get_gpu_info` on each
+/// in turn within the same poll. Without coalescing, whichever reader
+/// runs second would always see a near-zero interval, deterministically,
+/// and its utilization would be useless. `get_gpu_info_by_uuid`'s
+/// default body has the same shape when called in a loop.
+///
+/// 500 ms is comfortably below all-smi's fastest poll interval (1 s for
+/// local monitoring) so consecutive polls still each get a fresh
+/// collection, and comfortably above the time it takes to walk a
+/// handful of readers.
+#[cfg(target_os = "windows")]
+const SNAPSHOT_COALESCE_WINDOW: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Take a sample, reusing the cached one when it is younger than
+/// [`SNAPSHOT_COALESCE_WINDOW`].
+///
+/// Safe to call from every registered reader in the same poll: only the
+/// first call collects, and the rest share its result.
 #[cfg(target_os = "windows")]
 pub fn snapshot() -> Snapshot {
+    if let Some(cached) = cached_snapshot(SNAPSHOT_COALESCE_WINDOW) {
+        return cached;
+    }
     let dxgi_adapters = dxgi::enumerate();
     let sample = pdh::sample();
 
@@ -133,10 +179,22 @@ pub fn snapshot() -> Snapshot {
         .into_iter()
         .map(|adapter| {
             let luid = adapter.identity.luid;
+            // Integrated graphics report no dedicated pool at all and
+            // address system RAM instead, so falling back to
+            // `SharedSystemMemory` is the difference between a correct
+            // capacity and leaving the wrong 32-bit WMI value in place
+            // for every Intel iGPU.
+            let (total_memory, memory_is_shared) = if adapter.dedicated_video_memory > 0 {
+                (Some(adapter.dedicated_video_memory), false)
+            } else if adapter.shared_system_memory > 0 {
+                (Some(adapter.shared_system_memory), true)
+            } else {
+                (None, false)
+            };
             AdapterMetrics {
                 identity: adapter.identity,
-                total_memory: (adapter.dedicated_video_memory > 0)
-                    .then_some(adapter.dedicated_video_memory),
+                total_memory,
+                memory_is_shared,
                 used_memory: sample.adapter_memory.get(&luid).copied(),
                 utilization: sample.utilization.get(&luid).copied(),
                 process_budget: adapter.process_budget,
@@ -160,7 +218,7 @@ pub fn snapshot() -> Snapshot {
         adapters,
         processes,
     };
-    cache_snapshot(&snapshot);
+    store_snapshot(&snapshot);
     snapshot
 }
 
@@ -173,33 +231,53 @@ pub fn snapshot() -> Snapshot {
 }
 
 #[cfg(target_os = "windows")]
-static LAST_SNAPSHOT: once_cell::sync::OnceCell<std::sync::Mutex<Snapshot>> =
-    once_cell::sync::OnceCell::new();
+type SnapshotCache = std::sync::Mutex<Option<(std::time::Instant, Snapshot)>>;
 
 #[cfg(target_os = "windows")]
-fn cache_snapshot(snapshot: &Snapshot) {
-    let cell = LAST_SNAPSHOT.get_or_init(|| std::sync::Mutex::new(Snapshot::default()));
-    let mut guard = match cell.lock() {
+static LAST_SNAPSHOT: once_cell::sync::OnceCell<SnapshotCache> = once_cell::sync::OnceCell::new();
+
+#[cfg(target_os = "windows")]
+fn snapshot_cache() -> &'static SnapshotCache {
+    LAST_SNAPSHOT.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+/// The cached snapshot, if it is younger than `max_age`.
+#[cfg(target_os = "windows")]
+fn cached_snapshot(max_age: std::time::Duration) -> Option<Snapshot> {
+    let guard = match snapshot_cache().lock() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
     };
-    *guard = snapshot.clone();
+    guard
+        .as_ref()
+        .and_then(|(taken_at, snapshot)| (taken_at.elapsed() < max_age).then(|| snapshot.clone()))
+}
+
+#[cfg(target_os = "windows")]
+fn store_snapshot(snapshot: &Snapshot) {
+    let mut guard = match snapshot_cache().lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    *guard = Some((std::time::Instant::now(), snapshot.clone()));
 }
 
 /// The most recent [`snapshot`], without consuming a PDH collection.
 ///
-/// `get_process_info` uses this so that a poll which already called
-/// `snapshot` from `get_gpu_info` does not disturb the utilization rate
-/// by collecting twice.
+/// `get_process_info` uses this so a poll that already sampled from
+/// `get_gpu_info` does not disturb the utilization rate. Unlike
+/// [`snapshot`] this never collects, and returns an empty snapshot when
+/// nothing has been sampled yet.
 #[cfg(target_os = "windows")]
 pub fn latest() -> Snapshot {
-    let Some(cell) = LAST_SNAPSHOT.get() else {
-        return Snapshot::default();
+    let guard = match snapshot_cache().lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
     };
-    match cell.lock() {
-        Ok(guard) => guard.clone(),
-        Err(poisoned) => poisoned.into_inner().clone(),
-    }
+    guard
+        .as_ref()
+        .map(|(_, snapshot)| snapshot.clone())
+        .unwrap_or_default()
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -250,8 +328,15 @@ pub fn apply_to_gpu_info(gpu: &mut GpuInfo, metrics: &AdapterMetrics) {
 
     if let Some(total) = metrics.total_memory {
         gpu.total_memory = total;
-        gpu.detail
-            .insert("Source: Memory".to_string(), "DXGI".to_string());
+        gpu.detail.insert(
+            "Source: Memory".to_string(),
+            if metrics.memory_is_shared {
+                "DXGI (shared)"
+            } else {
+                "DXGI"
+            }
+            .to_string(),
+        );
         touched_dxgi = true;
     }
 
@@ -272,8 +357,20 @@ pub fn apply_to_gpu_info(gpu: &mut GpuInfo, metrics: &AdapterMetrics) {
 
     if let Some(used) = metrics.used_memory {
         gpu.used_memory = used;
-        gpu.detail
-            .insert("Source: Memory Used".to_string(), "PDH".to_string());
+        // On an integrated GPU the `GPU Adapter Memory\Dedicated Usage`
+        // counter tracks only the small stolen-memory carve-out, not the
+        // shared aperture the total now reports. Say so rather than
+        // labelling it plain "PDH", which would imply the two numbers
+        // are the same kind of quantity.
+        gpu.detail.insert(
+            "Source: Memory Used".to_string(),
+            if metrics.memory_is_shared {
+                "PDH (dedicated carve-out only)"
+            } else {
+                "PDH"
+            }
+            .to_string(),
+        );
         touched_pdh = true;
     }
 
@@ -338,13 +435,55 @@ pub fn augment_gpus(gpus: &mut [GpuInfo]) -> AdapterIndex {
     pair_and_apply(gpus, &snapshot)
 }
 
-/// Build per-process GPU memory rows from the most recent snapshot.
+/// Build the merged per-process rows a reader's `get_process_info`
+/// should return.
 ///
-/// Uses [`latest`] rather than sampling again: a second collection in
-/// the same poll would halve the interval the utilization rate is
-/// computed over.
-pub fn process_rows(adapter_index: &AdapterIndex) -> Vec<ProcessInfo> {
-    process_rows_from(&latest(), adapter_index)
+/// Two things happen here beyond reading the snapshot:
+///
+/// 1. If `adapter_index` is empty, nothing has paired adapters yet. That
+///    is the case for one-shot entry points such as
+///    `all-smi snapshot --include process`, which never call
+///    `get_gpu_info`. Rather than reporting an empty list forever, the
+///    caller is given a chance to populate the index first via
+///    `refresh`.
+/// 2. The GPU rows are merged against the system process table, matching
+///    what `nvidia`, `nvidia_jetson`, and `tenstorrent` do inside their
+///    own `get_process_info`. The API and snapshot collectors consume
+///    `get_process_info` directly without merging, so returning bare
+///    skeleton rows would export processes with empty names and zeroed
+///    CPU and RSS.
+pub fn process_rows_with<F>(adapter_index: &AdapterIndex, refresh: F) -> Vec<ProcessInfo>
+where
+    F: FnOnce() -> AdapterIndex,
+{
+    let owned;
+    let adapter_index = if adapter_index.is_empty() {
+        owned = refresh();
+        &owned
+    } else {
+        adapter_index
+    };
+    if adapter_index.is_empty() {
+        return Vec::new();
+    }
+
+    let gpu_rows = process_rows_from(&latest(), adapter_index);
+    if gpu_rows.is_empty() {
+        return Vec::new();
+    }
+
+    let gpu_pids: std::collections::HashSet<u32> = gpu_rows.iter().map(|row| row.pid).collect();
+    let all_processes = crate::utils::system::with_global_system(|system| {
+        system.refresh_processes_specifics(
+            sysinfo::ProcessesToUpdate::All,
+            true,
+            sysinfo::ProcessRefreshKind::everything().with_user(sysinfo::UpdateKind::Always),
+        );
+        system.refresh_memory();
+        crate::device::process_list::get_all_processes(system, &gpu_pids)
+    });
+
+    crate::device::process_list::merge_gpu_processes(all_processes, gpu_rows)
 }
 
 /// Attribute each per-process sample to the card its LUID names.
@@ -464,6 +603,7 @@ mod tests {
                 description: "AMD Radeon RX 7900 XTX".to_string(),
             },
             total_memory: total,
+            memory_is_shared: false,
             used_memory: used,
             utilization,
             process_budget: None,
@@ -660,7 +800,7 @@ mod tests {
         // Windows they touch real hardware, so only assert they return.
         let mut gpus = vec![blank_gpu()];
         let index = augment_gpus(&mut gpus);
-        let _ = process_rows(&index);
+        let _ = process_rows_with(&index, AdapterIndex::new);
         let _ = pdh_query_available();
         let _ = latest();
 
@@ -670,12 +810,41 @@ mod tests {
             assert!(latest().is_empty());
             assert!(!pdh_query_available());
             assert!(index.is_empty());
-            assert!(process_rows(&index).is_empty());
+            // An empty index triggers the refresh closure; when that
+            // also comes back empty the result must be no rows rather
+            // than a panic or a wasted system-process enumeration.
+            assert!(process_rows_with(&index, AdapterIndex::new).is_empty());
             // An inert layer must leave the WMI baseline exactly as it
             // found it.
             assert_eq!(gpus[0].total_memory, 4_294_967_295);
             assert_eq!(gpus[0].detail["Metrics Source"], "WMI");
         }
+    }
+
+    #[test]
+    fn an_empty_index_consults_the_refresh_closure_exactly_once() {
+        use std::cell::Cell;
+
+        // The one-shot path (`all-smi snapshot --include process`) never
+        // calls `get_gpu_info`, so the index starts empty and the
+        // closure is what populates it.
+        let calls = Cell::new(0);
+        let rows = process_rows_with(&AdapterIndex::new(), || {
+            calls.set(calls.get() + 1);
+            AdapterIndex::new()
+        });
+        assert_eq!(calls.get(), 1);
+        assert!(rows.is_empty());
+
+        // A populated index must not pay for the refresh at all.
+        let calls = Cell::new(0);
+        let mut populated = AdapterIndex::new();
+        populated.insert(AdapterLuid::new(0, 1), (0, "uuid".to_string()));
+        let _ = process_rows_with(&populated, || {
+            calls.set(calls.get() + 1);
+            AdapterIndex::new()
+        });
+        assert_eq!(calls.get(), 0);
     }
 
     #[test]

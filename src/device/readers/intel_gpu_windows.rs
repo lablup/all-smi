@@ -278,10 +278,14 @@ impl GpuReader for IntelWindowsGpuReader {
         // Per-process dedicated GPU memory comes from the PDH `GPU
         // Process Memory` counter, reusing the sample `get_gpu_info`
         // already took. Mirrors the AMD-on-Windows reader.
+        use crate::device::readers::windows_gpu_perf;
         let Ok(adapter_index) = self.adapter_index.lock() else {
             return Vec::new();
         };
-        crate::device::readers::windows_gpu_perf::process_rows(&adapter_index)
+        windows_gpu_perf::process_rows_with(&adapter_index, || {
+            let mut gpus = self.query_intel_gpus();
+            windows_gpu_perf::augment_gpus(&mut gpus)
+        })
     }
 }
 
