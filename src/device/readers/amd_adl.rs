@@ -100,8 +100,15 @@ pub fn apply_to_gpu_info(gpu: &mut GpuInfo, readout: &AdlReadout) {
         // represented, so it floors at 0 and the true value stays
         // visible in the detail below.
         gpu.temperature = temperature.max(0) as u32;
-        gpu.detail
-            .insert("Temperature (C)".to_string(), temperature.to_string());
+        if temperature < 0 {
+            // A sub-zero die is real on a cold-started machine but
+            // cannot be represented in the unsigned field, which floors
+            // at 0 above. Surface the true reading only in that case,
+            // rather than adding a key that duplicates `temperature` on
+            // every normal poll.
+            gpu.detail
+                .insert("Temperature".to_string(), format!("{temperature} C"));
+        }
         // The label names which sensor was used. Edge, gfx, and hotspot
         // are not interchangeable (hotspot runs 15-30 C higher), and an
         // aggregated multi-host view would otherwise mix them with
@@ -115,11 +122,11 @@ pub fn apply_to_gpu_info(gpu: &mut GpuInfo, readout: &AdlReadout) {
     // are surfaced as details rather than dropped.
     if let Some(hotspot) = readout.temperature_hotspot_c {
         gpu.detail
-            .insert("Hotspot Temperature (C)".to_string(), hotspot.to_string());
+            .insert("Hotspot Temperature".to_string(), format!("{hotspot} C"));
     }
     if let Some(memory) = readout.temperature_mem_c {
         gpu.detail
-            .insert("Memory Temperature (C)".to_string(), memory.to_string());
+            .insert("Memory Temperature".to_string(), format!("{memory} C"));
     }
 
     if let Some(power) = readout.power_w {
@@ -137,14 +144,18 @@ pub fn apply_to_gpu_info(gpu: &mut GpuInfo, readout: &AdlReadout) {
     }
     if let Some(clock) = readout.clock_mem_mhz {
         gpu.detail
-            .insert("Memory Clock (MHz)".to_string(), clock.to_string());
+            .insert("Memory Clock".to_string(), format!("{clock} MHz"));
     }
 
     if let Some(rpm) = readout.fan_rpm {
-        // `GpuInfo` has no fan field; the Intel reader already
-        // advertises fan provenance the same way.
+        // `GpuInfo` has no fan field, so this rides in `detail`. The key
+        // and value format match `amd.rs`, `intel_gpu_linux`, and the
+        // Level Zero reader exactly. A divergent key would sit outside
+        // the `contains_key("Fan Speed")` guard those readers coordinate
+        // overwrites through, and would need special-casing by whatever
+        // eventually promotes fan speed to a real field.
         gpu.detail
-            .insert("Fan Speed (RPM)".to_string(), rpm.to_string());
+            .insert("Fan Speed".to_string(), format!("{rpm} RPM"));
         gpu.detail
             .insert("Source: Fan".to_string(), "ADL".to_string());
         applied.push("fan");
@@ -158,8 +169,8 @@ pub fn apply_to_gpu_info(gpu: &mut GpuInfo, readout: &AdlReadout) {
     }
     if let Some(activity) = readout.activity_mem_pct {
         gpu.detail.insert(
-            "Memory Controller Activity (%)".to_string(),
-            format!("{activity:.0}"),
+            "Memory Controller Activity".to_string(),
+            format!("{activity:.0}%"),
         );
     }
 
@@ -268,17 +279,70 @@ mod tests {
         assert_eq!(gpu.temperature, 62);
         assert_eq!(gpu.power_consumption, 310.0);
         assert_eq!(gpu.frequency, 2400);
-        assert_eq!(gpu.detail["Hotspot Temperature (C)"], "81");
-        assert_eq!(gpu.detail["Memory Temperature (C)"], "70");
-        assert_eq!(gpu.detail["Fan Speed (RPM)"], "1450");
-        assert_eq!(gpu.detail["Memory Clock (MHz)"], "1250");
-        assert_eq!(gpu.detail["Memory Controller Activity (%)"], "44");
+        assert_eq!(gpu.detail["Hotspot Temperature"], "81 C");
+        assert_eq!(gpu.detail["Memory Temperature"], "70 C");
+        assert_eq!(gpu.detail["Fan Speed"], "1450 RPM");
+        assert_eq!(gpu.detail["Memory Clock"], "1250 MHz");
+        assert_eq!(gpu.detail["Memory Controller Activity"], "44%");
 
         assert_eq!(gpu.detail["Source: Temperature"], "ADL (edge)");
         assert_eq!(gpu.detail["Source: Power"], "ADL");
         assert_eq!(gpu.detail["Source: Frequency"], "ADL");
         assert_eq!(gpu.detail["Source: Fan"], "ADL");
         assert_eq!(gpu.detail["Metrics Source"], "WMI + DXGI + PDH + ADL");
+    }
+
+    #[test]
+    fn detail_keys_follow_the_shared_reader_convention() {
+        // Every reader that publishes these quantities uses the same
+        // key with the unit carried in the *value*, not the key:
+        // `amd.rs` (Linux) writes `Fan Speed` = "1450 RPM" and
+        // `Memory Clock` = "1250 MHz", and `intel_gpu_linux` and the
+        // Level Zero reader match it.
+        //
+        // Two concrete costs of diverging, which is why this is locked
+        // by a test rather than left to convention:
+        //
+        // 1. `intel_gpu_level_zero::apply_fan` guards an overwrite with
+        //    `detail.contains_key("Fan Speed")`. A reader using a
+        //    different key silently opts out of that coordination.
+        // 2. Anything that later promotes fan speed to a real `GpuInfo`
+        //    field has to special-case each spelling instead of reading
+        //    one key.
+        let mut gpu = baseline_gpu();
+        apply_to_gpu_info(&mut gpu, &full_readout());
+
+        for (key, expected) in [
+            ("Fan Speed", "1450 RPM"),
+            ("Memory Clock", "1250 MHz"),
+            ("Hotspot Temperature", "81 C"),
+            ("Memory Temperature", "70 C"),
+            ("Memory Controller Activity", "44%"),
+        ] {
+            assert_eq!(gpu.detail.get(key).map(String::as_str), Some(expected));
+        }
+
+        // The unit must not migrate back into the key.
+        for stale in [
+            "Fan Speed (RPM)",
+            "Memory Clock (MHz)",
+            "Hotspot Temperature (C)",
+            "Memory Temperature (C)",
+            "Memory Controller Activity (%)",
+        ] {
+            assert!(!gpu.detail.contains_key(stale), "{stale} should not exist");
+        }
+    }
+
+    #[test]
+    fn a_normal_temperature_adds_no_redundant_detail_key() {
+        // `Temperature` exists only to preserve a sub-zero reading the
+        // unsigned `GpuInfo.temperature` cannot hold. On every normal
+        // poll it would just duplicate that field, so it is absent.
+        let mut gpu = baseline_gpu();
+        apply_to_gpu_info(&mut gpu, &full_readout());
+        assert_eq!(gpu.temperature, 62);
+        assert!(!gpu.detail.contains_key("Temperature"));
     }
 
     #[test]
@@ -349,7 +413,7 @@ mod tests {
         // `GpuInfo.temperature` is u32 and cannot hold it.
         assert_eq!(gpu.temperature, 0);
         // The true reading survives where it can be represented.
-        assert_eq!(gpu.detail["Temperature (C)"], "-8");
+        assert_eq!(gpu.detail["Temperature"], "-8 C");
     }
 
     #[test]
@@ -365,7 +429,7 @@ mod tests {
         assert_eq!(gpu.utilization, before.utilization);
         assert_eq!(gpu.detail["Metrics Source"], "WMI + DXGI + PDH");
         assert_eq!(gpu.detail["Source: Temperature"], "unavailable");
-        assert!(!gpu.detail.contains_key("Hotspot Temperature (C)"));
+        assert!(!gpu.detail.contains_key("Hotspot Temperature"));
     }
 
     #[test]
