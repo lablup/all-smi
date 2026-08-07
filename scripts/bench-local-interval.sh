@@ -341,6 +341,35 @@ if [ -n "$CPUSET" ]; then
   esac
 fi
 
+# Collapse a space-separated CPU list into ranges: "3 5 4 6" becomes "3-6".
+#
+# Held as awk source in a shell variable because awk has no include and both
+# groupers below need it, one bucketing by tolerance and one by exact equality.
+# Maintaining two copies of an insertion sort and a run-collapse loop invites
+# the failure where a fix lands in one grouper and not the other, and the two
+# disagree only on the hosts that reach the second path.
+AWK_RANGES='
+    function ranges(s,   a, n, i, j, t, out) {
+      n = split(s, a, " ")
+      # One group can merge several input rows, whose CPU runs interleave, so
+      # sort numerically before collapsing rather than trusting input order.
+      for (i = 2; i <= n; i++) {
+        t = a[i] + 0
+        for (j = i - 1; j >= 1 && a[j] + 0 > t; j--) a[j + 1] = a[j]
+        a[j + 1] = t
+      }
+      out = ""
+      i = 1
+      while (i <= n) {
+        j = i
+        while (j + 1 <= n && a[j + 1] + 0 == a[j] + 0 + 1) j++
+        out = out (out == "" ? "" : ",") (i == j ? a[i] : a[i] "-" a[j])
+        i = j + 1
+      }
+      return out
+    }
+'
+
 # Report core types, so a reader can tell a heterogeneous host from a uniform
 # one. Grouping by maximum frequency separates ARM big.LITTLE clusters and
 # Intel P/E cores alike; cpu_capacity is the device-tree fallback for ARM
@@ -402,26 +431,7 @@ linux_topology() {
   # TOLERANCE of the group's fastest member instead, comparing against that
   # fixed representative rather than the previous row so a long run of small
   # steps cannot drift one bucket across a real cluster boundary.
-  printf '%s' "$lines" | sort -k1,1nr -k2,2n | awk -v src="$src" -v tol=0.05 '
-    function ranges(s,   a, n, i, j, t, out) {
-      n = split(s, a, " ")
-      # A bucket can merge several keys, whose CPU runs interleave, so sort
-      # numerically before collapsing rather than trusting the input order.
-      for (i = 2; i <= n; i++) {
-        t = a[i] + 0
-        for (j = i - 1; j >= 1 && a[j] + 0 > t; j--) a[j + 1] = a[j]
-        a[j + 1] = t
-      }
-      out = ""
-      i = 1
-      while (i <= n) {
-        j = i
-        while (j + 1 <= n && a[j + 1] + 0 == a[j] + 0 + 1) j++
-        out = out (out == "" ? "" : ",") (i == j ? a[i] : a[i] "-" a[j])
-        i = j + 1
-      }
-      return out
-    }
+  printf '%s' "$lines" | sort -k1,1nr -k2,2n | awk -v src="$src" -v tol=0.05 "$AWK_RANGES"'
     {
       if (g == 0 || $1 + 0 < rep * (1 - tol)) { g++; rep = $1 + 0; gkey[g] = $1 + 0 }
       gcnt[g]++
@@ -447,26 +457,7 @@ linux_topology() {
 # exist here and could wrongly merge two genuinely different groups that
 # happen to sort near each other.
 group_exact() {
-  sort -k1,1n -k2,2n | awk '
-    function ranges(s,   a, n, i, j, t, out) {
-      n = split(s, a, " ")
-      # A group can merge several input lines, whose CPU numbers interleave,
-      # so sort numerically before collapsing rather than trusting input order.
-      for (i = 2; i <= n; i++) {
-        t = a[i] + 0
-        for (j = i - 1; j >= 1 && a[j] + 0 > t; j--) a[j + 1] = a[j]
-        a[j + 1] = t
-      }
-      out = ""
-      i = 1
-      while (i <= n) {
-        j = i
-        while (j + 1 <= n && a[j + 1] + 0 == a[j] + 0 + 1) j++
-        out = out (out == "" ? "" : ",") (i == j ? a[i] : a[i] "-" a[j])
-        i = j + 1
-      }
-      return out
-    }
+  sort -k1,1n -k2,2n | awk "$AWK_RANGES"'
     {
       key = $1 + 0
       label = $0
