@@ -52,6 +52,66 @@ use std::collections::HashSet;
 use super::ffi;
 use crate::device::readers::windows_gpu_perf::ids::{PciIds, parse_pnp_device_id};
 
+/// Upper bound on the adapter count accepted from the driver.
+///
+/// A real machine has a handful of ADL rows (one per display output per
+/// card; a four-card workstation with six outputs each is 24). The bound
+/// keeps a garbage count from demanding an absurd `AdapterInfo`
+/// allocation, and it keeps `ffi::AdapterInfoArray::input_size` far away
+/// from `c_int` overflow. Kept here, not in `loader`, so
+/// [`plausible_adapter_count`] and [`clamp_scan_count`] are testable on
+/// the Linux runner even though every caller lives behind
+/// `cfg(target_os = "windows")`.
+pub const MAX_ADAPTER_ROWS: i32 = 64;
+
+/// Whether a driver-reported adapter count is plausible enough to trust
+/// for identity-bearing `AdapterInfo` attribution.
+///
+/// Used by `loader::probe_adapter_info`: a count outside
+/// `1..=MAX_ADAPTER_ROWS` is treated as a failed call, which multi-GPU
+/// attribution then answers by declining rather than guessing at a
+/// buffer size for a count that does not look real.
+pub fn plausible_adapter_count(count: i32) -> bool {
+    (1..=MAX_ADAPTER_ROWS).contains(&count)
+}
+
+/// Clamp a driver-reported adapter count for the PMLog capability scan.
+///
+/// Unlike [`plausible_adapter_count`], an implausibly large count here is
+/// clamped rather than rejected outright. `loader::scan_for_capable_adapter`
+/// makes one `ADL2_Overdrive_Caps` call per index and may make one PMLog
+/// read per index, all while holding the process-wide runtime lock, so a
+/// garbage count would wedge the refresh loop rather than merely waste a
+/// little work; clamping instead of rejecting keeps a machine with an
+/// implausibly long adapter list working on its first rows, since the
+/// scan only needs *one* PMLog-capable index, not an exhaustive one.
+pub fn clamp_scan_count(count: i32) -> i32 {
+    count.min(MAX_ADAPTER_ROWS)
+}
+
+/// Describe which direction a failed `AdapterInfo` layout verification
+/// points in, for the `amd.adl.adapters` doctor check.
+///
+/// The two failure modes call for opposite corrections. A blank row
+/// means ADL wrote fewer rows than `iInputSize` asked for, which is what
+/// a declared `AdapterInfo` larger than the driver's produces; legible
+/// bytes with an illegible string mean the opposite, a wrong field
+/// offset or stride.
+pub fn describe_layout_failure(rows: &[ffi::AdapterInfo]) -> String {
+    let blank = rows.iter().filter(|row| row.is_blank()).count();
+    if blank > 0 {
+        format!(
+            "the driver left {blank} of {} row(s) untouched, which is what a declared \
+             AdapterInfo larger than the driver's produces",
+            rows.len()
+        )
+    } else {
+        "the rows were written but their string fields are not legible, which is what a \
+         wrong field offset or stride produces"
+            .to_string()
+    }
+}
+
 /// One ADL adapter row in owned, parsed form.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AdlAdapter {
@@ -675,6 +735,60 @@ mod tests {
         // into the matcher.
         entry.str_pnp_string = [0xFF; ffi::ADL_MAX_PATH];
         assert_eq!(parse_adapters(&[entry])[0].pnp_string, "");
+    }
+
+    #[test]
+    fn adapter_count_is_plausible_only_within_the_positive_bound() {
+        assert!(!plausible_adapter_count(0));
+        assert!(!plausible_adapter_count(-1));
+        assert!(plausible_adapter_count(1));
+        assert!(plausible_adapter_count(MAX_ADAPTER_ROWS));
+        assert!(!plausible_adapter_count(MAX_ADAPTER_ROWS + 1));
+    }
+
+    #[test]
+    fn scan_count_clamps_to_the_upper_bound_without_rejecting_it() {
+        // Below the bound: untouched.
+        assert_eq!(clamp_scan_count(3), 3);
+        // At the bound: untouched.
+        assert_eq!(clamp_scan_count(MAX_ADAPTER_ROWS), MAX_ADAPTER_ROWS);
+        // Above the bound: clamped, not rejected, unlike
+        // `plausible_adapter_count`.
+        assert_eq!(clamp_scan_count(MAX_ADAPTER_ROWS + 1), MAX_ADAPTER_ROWS);
+        assert_eq!(clamp_scan_count(10_000), MAX_ADAPTER_ROWS);
+    }
+
+    /// A non-blank `AdapterInfo` row: enough for `describe_layout_failure`
+    /// to see it as written, regardless of whether it would also pass
+    /// `looks_sane`.
+    fn written_row(index: i32) -> ffi::AdapterInfo {
+        let mut entry = ffi::AdapterInfo {
+            i_adapter_index: index,
+            i_bus_number: 3,
+            ..ffi::AdapterInfo::default()
+        };
+        entry.str_adapter_name[..4].copy_from_slice(b"card");
+        entry
+    }
+
+    #[test]
+    fn layout_failure_names_a_short_write_when_rows_are_blank() {
+        let rows = vec![
+            written_row(0),
+            ffi::AdapterInfo::default(),
+            ffi::AdapterInfo::default(),
+        ];
+        let shape = describe_layout_failure(&rows);
+        assert!(shape.contains("2 of 3"), "{shape}");
+        assert!(shape.contains("untouched"), "{shape}");
+    }
+
+    #[test]
+    fn layout_failure_names_garbled_strings_when_no_row_is_blank() {
+        let rows = vec![written_row(0), written_row(1)];
+        let shape = describe_layout_failure(&rows);
+        assert!(!shape.contains("untouched"), "{shape}");
+        assert!(shape.contains("not legible"), "{shape}");
     }
 
     #[test]

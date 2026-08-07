@@ -351,6 +351,30 @@ impl AdapterInfo {
     /// it a short write reads as a table of valid rows whose strings
     /// are all legitimately empty, and the `amd.adl.adapters` doctor
     /// check would report PASS over a buffer the driver never touched.
+    ///
+    /// ## Open risk: this may be too strict for a real driver
+    ///
+    /// AMD's own ADL SDK sample zero-fills its `AdapterInfo` array
+    /// before calling `ADL2_Adapter_AdapterInfo_Get` and then filters
+    /// the result by `iPresent` / `ADL2_Adapter_Active_Get` rather than
+    /// assuming every requested row comes back populated. That implies
+    /// a real driver may legitimately leave some rows untouched even on
+    /// correctly enumerated, healthy hardware, in which case this check
+    /// would disable multi-GPU attribution on a host whose layout is
+    /// actually right.
+    ///
+    /// This must **not** be relaxed on that suspicion alone: tolerating
+    /// blank rows again reopens exactly the short-write detection hole
+    /// `is_blank` exists to close (see the module docs and the history
+    /// of this check). The evidence that would justify revisiting it is
+    /// specific: an `amd.adl.adapters` dump from real hardware showing
+    /// blank rows *interleaved with* otherwise legible, `looks_sane`-passing
+    /// rows in the same call. That pattern is the signature of a driver
+    /// that legitimately leaves some rows unused; a `sizeof` mismatch
+    /// instead produces a run of blank rows from some index onward with
+    /// nothing legible past it. Until that evidence exists, a blank row
+    /// is treated as a layout failure, not as a normal driver response,
+    /// and the fix belongs in the caller's requested count, not here.
     pub fn is_blank(&self) -> bool {
         *self == Self::default()
     }
@@ -370,6 +394,22 @@ impl AdapterInfo {
     ///   leave size fields untouched);
     /// - `iAdapterIndex` must be a plausible small index rather than,
     ///   say, the first four bytes of a string that landed there.
+    ///
+    /// Only 4 of the struct's 6 string fields are checked here:
+    /// `strUDID`, `strAdapterName`, `strDisplayName`, and
+    /// `strPNPString`. `strDriverPath` (offset 800) and
+    /// `strDriverPathExt` (offset 1056) are skipped deliberately, not
+    /// by oversight. They sit strictly between `strDisplayName` (536)
+    /// and `strPNPString` (1312), so `strPNPString` parsing correctly
+    /// already means the stride carried it through both skipped fields
+    /// intact; the marginal detection gain from checking them too is
+    /// small. Each additional strictness arm is also a new way for this
+    /// check to decline on real hardware nobody has tested yet, which
+    /// cuts against this module's stated bias toward declining rather
+    /// than guessing only when the alternative is *wrong* data, not
+    /// merely *unverified* code paths. Revisit once a real host has
+    /// produced a passing `amd.adl.adapters` dump to check the omitted
+    /// fields against.
     ///
     /// This is a *layout* check, not a data-quality check: plausibility
     /// of the PCI bus/device/function values is judged at grouping

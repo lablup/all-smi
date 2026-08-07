@@ -129,24 +129,12 @@ fn check_adl_adapters(_ctx: &CheckCtx) -> CheckResult {
                     .collect::<Vec<_>>()
                     .join("; ");
                 if !layout_ok {
-                    // The two failures point at opposite corrections,
-                    // so name which one was seen. A blank row means ADL
-                    // wrote fewer rows than `iInputSize` asked for,
-                    // which is what a declared AdapterInfo larger than
-                    // the driver's produces; garbled strings are the
-                    // other direction.
-                    let blank = rows.iter().filter(|row| row.is_blank()).count();
-                    let shape = if blank > 0 {
-                        format!(
-                            "the driver left {blank} of {} row(s) untouched, which is what a \
-                             declared AdapterInfo larger than the driver's produces",
-                            rows.len()
-                        )
-                    } else {
-                        "the rows were written but their string fields are not legible, which is \
-                         what a wrong field offset or stride produces"
-                            .to_string()
-                    };
+                    // The two failures point at opposite corrections, so
+                    // name which one was seen. See
+                    // `adapters::describe_layout_failure`, which is
+                    // where this is tested: this whole function is
+                    // Windows-gated and cannot run on the Linux runner.
+                    let shape = adapters::describe_layout_failure(&rows);
                     return CheckResult::Warn(
                         format!(
                             "AdapterInfo layout verification FAILED; multi-GPU attribution is \

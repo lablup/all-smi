@@ -77,17 +77,6 @@ const MIN_OVERDRIVE_VERSION: c_int = 7;
 /// ADL exposes no staleness signal, so a slow retry stands in for one.
 const RESCAN_INTERVAL: Duration = Duration::from_secs(60);
 
-/// Upper bound on the adapter count accepted from the driver.
-///
-/// A real machine has a handful of ADL rows (one per display output
-/// per card; a four-card workstation with six outputs each is 24).
-/// The bound keeps a garbage count from demanding an absurd
-/// `AdapterInfo` allocation, and it keeps
-/// `AdapterInfoArray::input_size` far away from `c_int` overflow. A
-/// count beyond it is treated as a failed call, which multi-GPU
-/// attribution answers by declining.
-const MAX_ADAPTER_ROWS: c_int = 64;
-
 /// Allocator handed to `ADL2_Main_Control_Create`.
 ///
 /// Allocates from the process heap rather than Rust's global allocator.
@@ -263,14 +252,10 @@ impl AdlRuntime {
         if unsafe { (self.number_of_adapters)(self.context, &mut count) } != ADL_OK || count <= 0 {
             return;
         }
-        // Bound the driver's count the way `probe_adapter_info` does.
-        // The loop below makes one `ADL2_Overdrive_Caps` call per index
-        // and may make one PMLog read per index, all while holding the
-        // process-wide runtime lock, so a garbage count would wedge the
-        // refresh loop rather than merely waste a little work. Clamping
-        // instead of rejecting keeps a machine with an implausibly long
-        // adapter list working on its first rows.
-        let count = count.min(MAX_ADAPTER_ROWS);
+        // Bound the driver's count the way `probe_adapter_info` does;
+        // see `adapters::clamp_scan_count` for why this clamps rather
+        // than rejects.
+        let count = adapters::clamp_scan_count(count);
 
         let mut preferred = Vec::new();
         let mut fallback = Vec::new();
@@ -363,7 +348,7 @@ impl AdlRuntime {
         let mut count: c_int = 0;
         // SAFETY: valid context and out pointer.
         if unsafe { (self.number_of_adapters)(self.context, &mut count) } != ADL_OK
-            || !(1..=MAX_ADAPTER_ROWS).contains(&count)
+            || !adapters::plausible_adapter_count(count)
         {
             return AdapterProbe::CallFailed;
         }
