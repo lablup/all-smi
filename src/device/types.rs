@@ -265,6 +265,20 @@ impl Default for ThermalProximityConfig {
 /// `crate::device::macos_native::manager` for the full policy.
 pub const GPU_METRIC_UNAVAILABLE: f64 = -1.0;
 
+/// Upper bound on a plausible [`GpuInfo::fan_speed_rpm`] reading, shared by
+/// every producer and consumer of the value so none of them can disagree
+/// about what counts as a garbled tachometer read: the reader clamps
+/// (`intel_gpu_linux`, `amd`, `amd_adl`, `intel_gpu_level_zero::apply`) cap a
+/// raw sensor value before it ever reaches [`GpuInfo`], the exporter
+/// (`api::metrics::gpu`) applies the same bound to its legacy detail-string
+/// fallback, and the remote scrape parser (`network::metrics_parser`)
+/// applies it again to a value arriving over the wire. Blower fans on
+/// workstation cards top out around 6 000 RPM and the small high-static fans
+/// on some accelerators reach roughly 20 000; 100 000 is far beyond any real
+/// tachometer while still rejecting values like `u32::MAX` that would blow
+/// out the TUI column width.
+pub const MAX_GPU_FAN_RPM: u32 = 100_000;
+
 impl GpuInfo {
     /// GPU utilization percentage, or `None` when the reader had no source
     /// for it. A genuinely idle GPU returns `Some(0.0)`.

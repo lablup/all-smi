@@ -18,7 +18,7 @@ use crate::parsing::common::sanitize_label_value;
 use chrono::Local;
 use regex::Regex;
 
-use crate::device::types::GPU_METRIC_UNAVAILABLE;
+use crate::device::types::{GPU_METRIC_UNAVAILABLE, MAX_GPU_FAN_RPM};
 use crate::device::{
     AppleSiliconCpuInfo, CpuInfo, CpuPlatformType, GpmMetrics, GpuInfo, MemoryInfo, MigGpuInfo,
     MigInstanceInfo, NvLinkRemoteDevice, NvLinkRemoteType, VgpuHostInfo, VgpuInfo,
@@ -569,14 +569,13 @@ impl MetricsParser {
                 // so it overwrites anything recovered here. The exporter
                 // happens to emit `all_smi_gpu_info` before the fan metric,
                 // so on a node publishing both it is that overwrite which
-                // decides. The same bounds the metric handler applies are
-                // repeated here so a legacy label cannot smuggle in a value
+                // decides. `parse_fan_speed_detail` itself enforces the same
+                // integer-and-range bound the `gpu_fan_speed_rpm` handler
+                // applies below, so a legacy label cannot smuggle in a value
                 // the metric path would have rejected.
                 if gpu_info.fan_speed_rpm.is_none()
                     && let Some(fan) = labels.get(FAN_SPEED_LEGACY_LABEL)
                     && let Some(rpm) = crate::api::metrics::gpu::parse_fan_speed_detail(fan)
-                    && (0.0..=MAX_GPU_FAN_RPM).contains(&rpm)
-                    && rpm.fract() == 0.0
                 {
                     gpu_info.fan_speed_rpm = saturating_u32(rpm);
                 }
@@ -611,8 +610,10 @@ impl MetricsParser {
                 // omits the series entirely for a card with no tachometer.
                 // Reject fractional and out-of-range readings so a hostile
                 // upstream cannot inject a value that widens the TUI row or
-                // renders as a nonsense fan speed.
-                if (0.0..=MAX_GPU_FAN_RPM).contains(&value) && value.fract() == 0.0 => {
+                // renders as a nonsense fan speed. Shares `MAX_GPU_FAN_RPM`
+                // with the reader-side clamps and the exporter's detail
+                // fallback so all three agree on one bound.
+                if (0.0..=f64::from(MAX_GPU_FAN_RPM)).contains(&value) && value.fract() == 0.0 => {
                     gpu_info.fan_speed_rpm = saturating_u32(value);
                 }
             "gpu_numa_node_id" => {
@@ -1130,13 +1131,6 @@ const MAX_NUMA_NODE_ID: i32 = 4096;
 /// scrape. NVIDIA's GSP version strings are well under 32 bytes; 128
 /// truncates any obviously pathological label.
 const MAX_GSP_VERSION_LEN: usize = 128;
-
-/// Maximum GPU fan speed in RPM accepted from a remote scrape. Blower fans
-/// on workstation cards top out around 6 000 RPM and the small high-static
-/// fans on some accelerators reach roughly 20 000; 100 000 is far beyond any
-/// real tachometer while still rejecting values like `u32::MAX` that would
-/// blow out the TUI column width.
-const MAX_GPU_FAN_RPM: f64 = 100_000.0;
 
 /// Label that `all_smi_gpu_info` carries the legacy `Fan Speed` detail
 /// under, after `sanitize_label_name` has run over the key. Held in sync

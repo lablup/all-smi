@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use super::{LevelZeroFanReadout, LevelZeroMemoryKind, LevelZeroReadout};
-use crate::device::types::GpuInfo;
+use crate::device::types::{GpuInfo, MAX_GPU_FAN_RPM};
 
 #[derive(Debug, Clone, Copy)]
 pub enum ApplyPlatform {
@@ -118,7 +118,11 @@ fn apply_fan(gpu_info: &mut GpuInfo, fan: Option<LevelZeroFanReadout>, overwrite
     if !overwrite_existing && gpu_info.detail.contains_key("Fan Speed") {
         return;
     }
-    let value = match (fan.rpm, fan.percent) {
+    // Clamped so a garbled Sysman sample can never propagate `u32::MAX`
+    // into the exporter or the TUI; see the sysfs readers for the same
+    // defence-in-depth pattern and `MAX_GPU_FAN_RPM` for the shared bound.
+    let rpm = fan.rpm.map(|rpm| rpm.min(MAX_GPU_FAN_RPM));
+    let value = match (rpm, fan.percent) {
         (Some(rpm), Some(percent)) => format!("{rpm} RPM ({percent}%)"),
         (Some(rpm), None) => format!("{rpm} RPM"),
         (None, Some(percent)) => format!("{percent}%"),
@@ -133,6 +137,6 @@ fn apply_fan(gpu_info: &mut GpuInfo, fan: Option<LevelZeroFanReadout>, overwrite
     // earlier sample that the detail string just replaced on the
     // `overwrite_existing` path, which would leave the two describing
     // different samples and the exporter publishing the stale number.
-    gpu_info.fan_speed_rpm = fan.rpm;
+    gpu_info.fan_speed_rpm = rpm;
     set_source(gpu_info, "Fan", fan.source);
 }

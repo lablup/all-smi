@@ -65,7 +65,7 @@ pub mod sensors;
 pub mod loader;
 
 use crate::device::readers::windows_gpu_perf::note_metrics_source;
-use crate::device::types::GpuInfo;
+use crate::device::types::{GpuInfo, MAX_GPU_FAN_RPM};
 use sensors::AdlReadout;
 
 /// Whether an ADL readout can be attributed to a specific card.
@@ -148,6 +148,11 @@ pub fn apply_to_gpu_info(gpu: &mut GpuInfo, readout: &AdlReadout) {
     }
 
     if let Some(rpm) = readout.fan_rpm {
+        // Clamped so a garbled PMLog sample can never propagate `u32::MAX`
+        // into the exporter or the TUI; see the sysfs readers for the same
+        // defence-in-depth pattern and `MAX_GPU_FAN_RPM` for the shared
+        // bound.
+        let rpm = rpm.min(MAX_GPU_FAN_RPM);
         // Written twice from one value: the typed field the TUI and the
         // Prometheus exporter read, and the `Fan Speed` detail string that
         // snapshots and the `contains_key("Fan Speed")` overwrite guard in
@@ -347,6 +352,24 @@ mod tests {
         apply_to_gpu_info(&mut gpu, &full_readout());
         assert_eq!(gpu.temperature, 62);
         assert!(!gpu.detail.contains_key("Temperature"));
+    }
+
+    #[test]
+    fn a_garbled_fan_reading_is_clamped_before_either_write() {
+        // A corrupted PMLog sample must never reach `GpuInfo::fan_speed_rpm`
+        // or the `Fan Speed` detail string unclamped, and the two must keep
+        // agreeing with each other after the clamp the same way they do for
+        // a normal reading.
+        let mut gpu = baseline_gpu();
+        apply_to_gpu_info(
+            &mut gpu,
+            &AdlReadout {
+                fan_rpm: Some(u32::MAX),
+                ..Default::default()
+            },
+        );
+        assert_eq!(gpu.fan_speed_rpm, Some(MAX_GPU_FAN_RPM));
+        assert_eq!(gpu.detail["Fan Speed"], format!("{MAX_GPU_FAN_RPM} RPM"));
     }
 
     #[test]

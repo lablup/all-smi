@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use super::*;
-use crate::device::types::GpuInfo;
+use crate::device::types::{GpuInfo, MAX_GPU_FAN_RPM};
 use std::collections::HashMap;
 
 fn make_baseline_gpu_info() -> GpuInfo {
@@ -264,6 +264,30 @@ fn linux_l0_fan_fills_a_gap_the_hwmon_baseline_left() {
     assert_eq!(
         gpu.detail.get("Fan Speed").map(String::as_str),
         Some("1800 RPM")
+    );
+}
+
+#[test]
+fn a_garbled_l0_fan_reading_is_clamped_before_either_write() {
+    // A corrupted Sysman sample must never reach `GpuInfo::fan_speed_rpm`
+    // or the `Fan Speed` detail string unclamped, and the two must keep
+    // agreeing with each other after the clamp the same way they do for a
+    // normal reading.
+    let mut gpu = make_baseline_gpu_info();
+    let readout = LevelZeroReadout {
+        fan: Some(LevelZeroFanReadout {
+            rpm: Some(u32::MAX),
+            percent: None,
+            source: "Level Zero Sysman",
+        }),
+        ..Default::default()
+    };
+    apply_to_gpu_info(&mut gpu, &readout, ApplyPlatform::Linux);
+
+    assert_eq!(gpu.fan_speed_rpm, Some(MAX_GPU_FAN_RPM));
+    assert_eq!(
+        gpu.detail.get("Fan Speed").map(String::as_str),
+        Some(format!("{MAX_GPU_FAN_RPM} RPM").as_str())
     );
 }
 

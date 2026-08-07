@@ -14,6 +14,7 @@
 
 use super::{MetricBuilder, MetricExporter};
 use crate::device::GpuInfo;
+use crate::device::types::MAX_GPU_FAN_RPM;
 use crate::parsing::common::{sanitize_label_name, sanitize_label_value};
 
 /// Legacy `detail` key every reader used before `GpuInfo::fan_speed_rpm`
@@ -34,10 +35,21 @@ pub(crate) const FAN_SPEED_DETAIL_KEY: &str = "Fan Speed";
 /// from the text before the ` RPM` marker rather than by stripping a suffix.
 /// A duty-cycle-only value (`"40%"`) carries no tachometer reading and
 /// returns `None`, as does anything non-numeric or negative.
+///
+/// The result is also bounded by [`MAX_GPU_FAN_RPM`] and rejected when
+/// fractional, the same checks `network::metrics_parser` applies to the
+/// structured `all_smi_gpu_fan_speed_rpm` metric. Enforcing them here,
+/// rather than leaving each caller to repeat them, is what keeps this
+/// function's two call sites (the exporter's own detail fallback below and
+/// the parser's legacy-node recovery) from disagreeing about what counts as
+/// a valid reading: a fractional or out-of-range detail string (a garbled
+/// reader value, or a hostile snapshot) can no longer be exported here only
+/// for every downstream parser to silently drop it.
 pub(crate) fn parse_fan_speed_detail(value: &str) -> Option<f64> {
     let (rpm, _) = value.split_once(" RPM")?;
     let rpm = rpm.trim().parse::<f64>().ok()?;
-    (rpm.is_finite() && rpm >= 0.0).then_some(rpm)
+    (rpm.is_finite() && rpm.fract() == 0.0 && (0.0..=f64::from(MAX_GPU_FAN_RPM)).contains(&rpm))
+        .then_some(rpm)
 }
 
 pub struct GpuMetricExporter<'a> {
@@ -653,6 +665,30 @@ mod tests {
     }
 
     #[test]
+    fn fan_speed_detail_parser_rejects_fractional_and_out_of_range_values() {
+        // A fractional value would be exported as e.g. "1450.5" on the
+        // wire, which every all-smi parser then silently drops because it
+        // requires an integer. Rejecting it here, at the one function both
+        // the exporter and `network::metrics_parser` call, means a garbled
+        // detail string can no longer be published only for downstream
+        // consumers to lose it. An out-of-range value is the reader-side
+        // clamp's failure mode (a corrupted sysfs/PMLog/Sysman read) and
+        // must be rejected the same way.
+        assert_eq!(parse_fan_speed_detail("1450.5 RPM"), None);
+        assert_eq!(parse_fan_speed_detail("1600.25 RPM (40%)"), None);
+        assert_eq!(parse_fan_speed_detail("4294967295 RPM"), None);
+        assert_eq!(
+            parse_fan_speed_detail(&format!("{} RPM", MAX_GPU_FAN_RPM as u64 + 1)),
+            None
+        );
+        // The bound is inclusive.
+        assert_eq!(
+            parse_fan_speed_detail(&format!("{MAX_GPU_FAN_RPM} RPM")),
+            Some(f64::from(MAX_GPU_FAN_RPM))
+        );
+    }
+
+    #[test]
     fn exporter_emits_fan_speed_from_structured_field() {
         let mut gpu = make_nvidia_gpu();
         gpu.fan_speed_rpm = Some(1450);
@@ -730,6 +766,43 @@ mod tests {
         assert!(
             !output.contains("all_smi_gpu_fan_speed_rpm"),
             "a duty cycle is not an RPM reading:\n{output}"
+        );
+    }
+
+    #[test]
+    fn exporter_omits_fan_speed_for_a_fractional_detail_value() {
+        // A snapshot recorded before the typed field existed, or a
+        // hand-edited one, can carry a fractional `Fan Speed` string. Every
+        // all-smi parser rejects a fractional
+        // `all_smi_gpu_fan_speed_rpm` reading, so the exporter must not
+        // publish one from the fallback either. Otherwise the two paths
+        // would disagree, with this side happily emitting a value the
+        // other side always drops.
+        let mut gpu = make_nvidia_gpu();
+        gpu.fan_speed_rpm = None;
+        gpu.detail
+            .insert("Fan Speed".to_string(), "1450.5 RPM".to_string());
+        let output = GpuMetricExporter::new(&[gpu]).export_metrics();
+        assert!(
+            !output.contains("all_smi_gpu_fan_speed_rpm"),
+            "a fractional detail value must not reach the exposition:\n{output}"
+        );
+    }
+
+    #[test]
+    fn exporter_omits_fan_speed_for_an_out_of_range_detail_value() {
+        // Mirrors the reader-side clamp's failure mode: a corrupted sensor
+        // read that still parses as a huge integer must not be published,
+        // the same way `network::metrics_parser` rejects it on the way
+        // back in.
+        let mut gpu = make_nvidia_gpu();
+        gpu.fan_speed_rpm = None;
+        gpu.detail
+            .insert("Fan Speed".to_string(), "4294967295 RPM".to_string());
+        let output = GpuMetricExporter::new(&[gpu]).export_metrics();
+        assert!(
+            !output.contains("all_smi_gpu_fan_speed_rpm"),
+            "an out-of-range detail value must not reach the exposition:\n{output}"
         );
     }
 

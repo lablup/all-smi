@@ -301,6 +301,31 @@ fn get_gpu_info_leaves_fan_speed_unset_without_a_tachometer() {
 }
 
 #[test]
+fn get_gpu_info_clamps_a_garbled_fan_reading_before_either_write() {
+    // A corrupted `fan1_input` file parses as a valid, but implausible,
+    // u32. That must never reach `GpuInfo::fan_speed_rpm` or the `Fan
+    // Speed` detail string unclamped, and the two must keep agreeing with
+    // each other after the clamp the same way they do for a normal
+    // reading (see `get_gpu_info_publishes_fan_speed_as_field_and_detail`).
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let card = make_card(root, 0, "0x8086", "i915", "0x56A0");
+    let hwmon = card.join("device").join("hwmon").join("hwmon0");
+    fs::create_dir_all(&hwmon).unwrap();
+    fs::write(hwmon.join("fan1_input"), format!("{}\n", u32::MAX)).unwrap();
+
+    let reader = IntelGpuReader::new_from_root(root);
+    let info = reader.get_gpu_info();
+
+    assert_eq!(info.len(), 1);
+    assert_eq!(info[0].fan_speed_rpm, Some(MAX_GPU_FAN_RPM));
+    assert_eq!(
+        info[0].detail.get("Fan Speed").map(String::as_str),
+        Some(format!("{MAX_GPU_FAN_RPM} RPM").as_str())
+    );
+}
+
+#[test]
 fn get_gpu_info_integrated_reports_zero_memory() {
     let dir = tempdir().unwrap();
     let root = dir.path();

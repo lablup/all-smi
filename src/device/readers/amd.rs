@@ -14,7 +14,7 @@
 
 use crate::device::GpuReader;
 use crate::device::readers::common_cache::{DetailBuilder, DeviceStaticInfo};
-use crate::device::types::{GpuInfo, ProcessInfo};
+use crate::device::types::{GpuInfo, MAX_GPU_FAN_RPM, ProcessInfo};
 use crate::utils::get_hostname;
 use chrono::Local;
 use libamdgpu_top::AMDGPU::{DeviceHandle, GPU_INFO, GpuMetrics, MetricsInfo};
@@ -33,6 +33,16 @@ const MAX_GPU_MEMORY_BYTES: u64 = 512 * 1024 * 1024 * 1024; // 512GB max memory
 // Driver version validation constant
 // Linux kernel versions typically don't exceed 999 for any component
 const MAX_VERSION_COMPONENT: i32 = 999;
+
+/// Cap a raw `sensors.fan_rpm` reading so a garbled `libamdgpu_top` sample
+/// can never propagate `u32::MAX` into `GpuInfo::fan_speed_rpm` or the `Fan
+/// Speed` detail string. Mirrors the same defence applied to temperature,
+/// frequency, power, and memory a few lines below, and shares its bound
+/// with the Windows ADL, Intel sysfs, and Intel Level Zero fan readings via
+/// [`crate::device::types::MAX_GPU_FAN_RPM`].
+fn clamp_fan_rpm(rpm: Option<u32>) -> Option<u32> {
+    rpm.map(|value| value.min(MAX_GPU_FAN_RPM))
+}
 
 /// Per-device state that needs to be cached
 ///
@@ -422,7 +432,7 @@ impl GpuReader for AmdGpuReader {
                         format!("Gen{} x{}", link.r#gen, link.width),
                     );
                 }
-                if let Some(fan) = sensors.fan_rpm {
+                if let Some(fan) = clamp_fan_rpm(sensors.fan_rpm) {
                     fan_speed_rpm = Some(fan);
                     detail.insert("Fan Speed".to_string(), format!("{fan} RPM"));
                 }
@@ -779,5 +789,17 @@ mod tests {
             typical_boost_freq < MAX_GPU_FREQ_MHZ,
             "Should support typical boost frequencies"
         );
+    }
+
+    #[test]
+    fn clamp_fan_rpm_bounds_a_garbled_sensor_reading() {
+        // A corrupted or overflowed `libamdgpu_top` sample must never reach
+        // `GpuInfo::fan_speed_rpm` (and, from there, the exporter and the
+        // TUI) unclamped.
+        assert_eq!(clamp_fan_rpm(Some(u32::MAX)), Some(MAX_GPU_FAN_RPM));
+        // A real-world reading passes through unchanged.
+        assert_eq!(clamp_fan_rpm(Some(1450)), Some(1450));
+        // No tachometer stays `None`, not a clamped zero.
+        assert_eq!(clamp_fan_rpm(None), None);
     }
 }
