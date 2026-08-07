@@ -345,13 +345,17 @@ pub fn apply_to_gpu_info(gpu: &mut GpuInfo, metrics: &AdapterMetrics) {
     // must stay system-wide; reading either as a device-level number
     // would understate a busy GPU by whatever other processes hold.
     if let Some(budget) = metrics.process_budget {
-        gpu.detail
-            .insert("VRAM Budget (this process)".to_string(), budget.to_string());
+        gpu.detail.insert(
+            "VRAM Budget (this process)".to_string(),
+            format!("{budget} bytes"),
+        );
         touched_dxgi = true;
     }
     if let Some(usage) = metrics.process_current_usage {
-        gpu.detail
-            .insert("VRAM Usage (this process)".to_string(), usage.to_string());
+        gpu.detail.insert(
+            "VRAM Usage (this process)".to_string(),
+            format!("{usage} bytes"),
+        );
         touched_dxgi = true;
     }
 
@@ -787,8 +791,8 @@ mod tests {
 
         // Neither DXGI figure may leak into the device-level number.
         assert_eq!(gpu.used_memory, 0);
-        assert_eq!(gpu.detail["VRAM Budget (this process)"], "7000000000");
-        assert_eq!(gpu.detail["VRAM Usage (this process)"], "123456");
+        assert_eq!(gpu.detail["VRAM Budget (this process)"], "7000000000 bytes");
+        assert_eq!(gpu.detail["VRAM Usage (this process)"], "123456 bytes");
         assert!(!gpu.detail.contains_key("Source: Memory Used"));
     }
 
