@@ -341,12 +341,45 @@ if [ -n "$CPUSET" ]; then
   esac
 fi
 
+# Collapse a space-separated CPU list into ranges: "3 5 4 6" becomes "3-6".
+#
+# Held as awk source in a shell variable because awk has no include and both
+# groupers below need it, one bucketing by tolerance and one by exact equality.
+# Maintaining two copies of an insertion sort and a run-collapse loop invites
+# the failure where a fix lands in one grouper and not the other, and the two
+# disagree only on the hosts that reach the second path.
+AWK_RANGES='
+    function ranges(s,   a, n, i, j, t, out) {
+      n = split(s, a, " ")
+      # One group can merge several input rows, whose CPU runs interleave, so
+      # sort numerically before collapsing rather than trusting input order.
+      for (i = 2; i <= n; i++) {
+        t = a[i] + 0
+        for (j = i - 1; j >= 1 && a[j] + 0 > t; j--) a[j + 1] = a[j]
+        a[j + 1] = t
+      }
+      out = ""
+      i = 1
+      while (i <= n) {
+        j = i
+        while (j + 1 <= n && a[j + 1] + 0 == a[j] + 0 + 1) j++
+        out = out (out == "" ? "" : ",") (i == j ? a[i] : a[i] "-" a[j])
+        i = j + 1
+      }
+      return out
+    }
+'
+
 # Report core types, so a reader can tell a heterogeneous host from a uniform
 # one. Grouping by maximum frequency separates ARM big.LITTLE clusters and
 # Intel P/E cores alike; cpu_capacity is the device-tree fallback for ARM
-# systems without cpufreq. When neither is readable the topology is reported
-# as unknown rather than assumed uniform, because assuming uniform is exactly
-# the error this block exists to prevent.
+# systems without cpufreq. Cloud VMs commonly have neither, since frequency
+# scaling is the hypervisor's business there and they are not device-tree
+# systems either, so two more signals are tried before giving up: the Intel
+# hybrid sysfs CPU lists (cpu_core/cpu_atom), then the ARM `CPU part` field in
+# /proc/cpuinfo. When none of the four is readable the topology is reported as
+# unknown rather than assumed uniform, because assuming uniform is exactly the
+# error this block exists to prevent.
 #
 # With a CPU list in $1, only those CPUs are enumerated, so the caller can ask
 # what the mask covers rather than what the machine has. The sysfs walk is
@@ -362,7 +395,9 @@ linux_topology() {
   elif [ -r /sys/devices/system/cpu/cpu0/cpu_capacity ]; then
     src=capacity
   else
-    echo "unknown (no cpufreq or cpu_capacity)"
+    intel_hybrid_topology "$keep" && return
+    arm_part_topology "$keep" && return
+    echo "unknown (no cpufreq, cpu_capacity, hybrid sysfs, or CPU part)"
     return
   fi
 
@@ -396,26 +431,7 @@ linux_topology() {
   # TOLERANCE of the group's fastest member instead, comparing against that
   # fixed representative rather than the previous row so a long run of small
   # steps cannot drift one bucket across a real cluster boundary.
-  printf '%s' "$lines" | sort -k1,1nr -k2,2n | awk -v src="$src" -v tol=0.05 '
-    function ranges(s,   a, n, i, j, t, out) {
-      n = split(s, a, " ")
-      # A bucket can merge several keys, whose CPU runs interleave, so sort
-      # numerically before collapsing rather than trusting the input order.
-      for (i = 2; i <= n; i++) {
-        t = a[i] + 0
-        for (j = i - 1; j >= 1 && a[j] + 0 > t; j--) a[j + 1] = a[j]
-        a[j + 1] = t
-      }
-      out = ""
-      i = 1
-      while (i <= n) {
-        j = i
-        while (j + 1 <= n && a[j + 1] + 0 == a[j] + 0 + 1) j++
-        out = out (out == "" ? "" : ",") (i == j ? a[i] : a[i] "-" a[j])
-        i = j + 1
-      }
-      return out
-    }
+  printf '%s' "$lines" | sort -k1,1nr -k2,2n | awk -v src="$src" -v tol=0.05 "$AWK_RANGES"'
     {
       if (g == 0 || $1 + 0 < rep * (1 - tol)) { g++; rep = $1 + 0; gkey[g] = $1 + 0 }
       gcnt[g]++
@@ -430,6 +446,139 @@ linux_topology() {
       }
       printf "%s: %s\n", (g > 1 ? "heterogeneous" : "uniform"), out
     }'
+}
+
+# Group "sortkey cpu label" triples by exact equality on sortkey, ascending,
+# and print them in the same "heterogeneous: NxLABEL (cpus ...), ..." /
+# "uniform: NxLABEL" grammar as the tolerance-bucketed path above. Shared by
+# the two signals below. Neither a hybrid sysfs CPU list nor an ARM part ID is
+# a measurement with noise to smooth over, unlike a frequency or capacity
+# reading, so bucketing by proximity would solve a problem that does not
+# exist here and could wrongly merge two genuinely different groups that
+# happen to sort near each other.
+group_exact() {
+  sort -k1,1n -k2,2n | awk "$AWK_RANGES"'
+    {
+      key = $1 + 0
+      label = $0
+      sub(/^[^ ]+ [^ ]+ /, "", label)
+      if (g == 0 || key != prevkey) { g++; lbl[g] = label; prevkey = key }
+      gcnt[g]++
+      glist[g] = glist[g] " " $2
+    }
+    END {
+      out = ""
+      for (i = 1; i <= g; i++) {
+        out = out (i > 1 ? ", " : "") gcnt[i] "x " lbl[i]
+        if (g > 1) out = out " (cpus " ranges(glist[i]) ")"
+      }
+      printf "%s: %s\n", (g > 1 ? "heterogeneous" : "uniform"), out
+    }'
+}
+
+# Intel hybrid: the kernel publishes which CPUs are P-cores and which are
+# E-cores directly, so this is definitive and needs no tolerance bucketing,
+# unlike cpuinfo_max_freq, which carries a per-core turbo-binning spread that
+# gives a favoured P-core a higher advertised frequency than its siblings.
+# Returns 1 (printing nothing) when neither list is readable, or when a mask
+# in $1 excludes every CPU named in both, so the caller falls through to the
+# next signal instead of reporting an empty group as uniform.
+intel_hybrid_topology() {
+  local keep="$1" lines="" cpu plist elist
+  if [ -r /sys/devices/cpu_core/cpus ]; then
+    plist="$(cpu_list_expand "$(cat /sys/devices/cpu_core/cpus)")"
+    for cpu in $plist; do
+      if [ -n "$keep" ]; then
+        case "$keep" in *" $cpu "*) ;; *) continue ;; esac
+      fi
+      lines="${lines}1 ${cpu} P-core
+"
+    done
+  fi
+  if [ -r /sys/devices/cpu_atom/cpus ]; then
+    elist="$(cpu_list_expand "$(cat /sys/devices/cpu_atom/cpus)")"
+    for cpu in $elist; do
+      if [ -n "$keep" ]; then
+        case "$keep" in *" $cpu "*) ;; *) continue ;; esac
+      fi
+      lines="${lines}2 ${cpu} E-core
+"
+    done
+  fi
+  [ -n "$lines" ] || return 1
+  printf '%s' "$lines" | group_exact
+}
+
+# ARM `CPU part` grouping from /proc/cpuinfo. Independent of both cpufreq and
+# cpu_capacity, so it resolves topology on hosts that have neither, which is
+# exactly the cloud-VM gap this signal exists to close. Grouping is
+# exact-equality: a part ID is a fixed registry value, not a measurement, and
+# there is no reading noise here for the tolerance bucket above to survive.
+#
+# Grouping comes entirely from /proc/cpuinfo; lscpu supplies only the label.
+# On a host with no lscpu, or one older than util-linux 2.38 (no MODELNAME
+# column), the label falls back to the raw part ID (e.g. "part 0xd85"), but
+# the groups and their CPU ranges are unaffected. The fallback is per-part-ID
+# text rather than one shared placeholder precisely so a missing label can
+# never collapse two real groups into one.
+#
+# Groups come out ordered by part ID, which is a registry value carrying no
+# performance ranking, so unlike the cpufreq path above the first group here is
+# not the fastest one. On this GB10 the two orderings agree, 0xd85 (X925)
+# sorting below 0xd87 (A725), but that is a coincidence of the registry rather
+# than something to read meaning into. The label and CPU list carry the
+# information; their order does not. Nothing better is available on this path,
+# since it is reached only when both signals that could rank the clusters,
+# cpufreq and cpu_capacity, are unreadable.
+arm_part_topology() {
+  local keep="$1" pairs names lines
+  pairs="$(awk '
+    /^processor/ { cpu = $NF }
+    /^CPU part/  { print cpu, $NF }
+  ' /proc/cpuinfo 2>/dev/null)"
+  [ -n "$pairs" ] || return 1
+
+  names=""
+  command -v lscpu >/dev/null 2>&1 &&
+    names="$(LC_ALL=C lscpu -e=CPU,MODELNAME 2>/dev/null | tail -n +2)"
+
+  # part is decoded to a decimal sort key by hand, in portable awk without the
+  # gawk-only strtonum. Both `sort -n` and awk's numeric coercion stop at the
+  # first non-digit, so every "0x.." part ID would otherwise read as the same
+  # value 0 and collapse all part IDs into a single group instead of the
+  # several real ones.
+  lines="$(printf '%s\n' "$pairs" | awk -v keep="$keep" -v names="$names" '
+    function hex2dec(s,   i, c, v, n, digit) {
+      sub(/^0[xX]/, "", s)
+      v = 0
+      n = length(s)
+      for (i = 1; i <= n; i++) {
+        c = tolower(substr(s, i, 1))
+        digit = index("0123456789abcdef", c) - 1
+        v = v * 16 + digit
+      }
+      return v
+    }
+    BEGIN {
+      nn = split(names, nlines, "\n")
+      for (k = 1; k <= nn; k++) {
+        m = split(nlines[k], f, " ")
+        if (m < 2) continue
+        label = f[2]
+        for (j = 3; j <= m; j++) label = label " " f[j]
+        namebycpu[f[1]] = label
+      }
+    }
+    {
+      cpu = $1; part = $2
+      if (keep != "" && index(keep, " " cpu " ") == 0) next
+      label = (cpu in namebycpu) ? namebycpu[cpu] : ("part " part)
+      print hex2dec(part), cpu, label
+    }
+  ')"
+  [ -n "$lines" ] || return 1
+
+  printf '%s\n' "$lines" | group_exact
 }
 
 # macOS exposes perflevels rather than per-CPU frequencies, and gives no way
