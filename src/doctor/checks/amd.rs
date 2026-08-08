@@ -35,6 +35,27 @@ pub fn checks() -> &'static [&'static Check] {
     CHECKS
 }
 
+/// The exact `libamdgpu_top` version pinned in `Cargo.toml`.
+///
+/// Cargo hands the compiler no dependency versions, so `env!` cannot reach
+/// this and the value has to be transcribed. `check_libamdgpu_top` used to
+/// format `env!("CARGO_PKG_VERSION")` into the ABI string, which reported
+/// all-smi's own version as the dependency's (issue #362). The transcription
+/// is kept honest by `pinned_version_matches_cargo_toml`, which parses the `=`
+/// pin out of `Cargo.toml` and fails when the two disagree, so a pin bump that
+/// forgets this constant breaks a test instead of shipping a wrong ABI
+/// identifier.
+///
+/// The `test` arm of the `cfg` keeps the constant alive in configurations
+/// where the reporting arm below is compiled out (musl, non-Linux, or the
+/// `amd` feature off) so the guard test runs everywhere. Without it the
+/// constant would be dead code in exactly those builds.
+#[cfg(any(
+    all(target_os = "linux", not(target_env = "musl"), feature = "amd"),
+    test
+))]
+const LIBAMDGPU_TOP_PINNED_VERSION: &str = "0.11.5";
+
 static ROCM_VERSION: Check = Check {
     id: "amd.rocm.version",
     title: "ROCm version",
@@ -236,10 +257,10 @@ fn check_libamdgpu_top(_ctx: &CheckCtx) -> CheckResult {
     {
         // The `libamdgpu_top` crate is linked at compile time; if this
         // binary was built with AMD support the dep is present. Surface
-        // the crate version as the ABI identifier.
+        // the dependency's pinned version as the ABI identifier, not
+        // all-smi's own version (issue #362).
         CheckResult::Pass(format!(
-            "linked libamdgpu_top {}",
-            env!("CARGO_PKG_VERSION")
+            "linked libamdgpu_top {LIBAMDGPU_TOP_PINNED_VERSION}"
         ))
     }
     #[cfg(all(target_os = "linux", not(target_env = "musl"), not(feature = "amd")))]
@@ -326,5 +347,68 @@ fn check_build_gate(_ctx: &CheckCtx) -> CheckResult {
     ))]
     {
         CheckResult::Pass("glibc or non-Linux target — AMD support available".to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::LIBAMDGPU_TOP_PINNED_VERSION;
+
+    /// `Cargo.toml` is embedded at compile time rather than read from a
+    /// runtime path so the test does not depend on the working directory,
+    /// and so editing the manifest forces a rebuild of this test.
+    const MANIFEST: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"));
+
+    /// Extract the exact version from the `libamdgpu_top` dependency line.
+    ///
+    /// Returns `None` when no dependency line is found or the version cannot
+    /// be read, which the caller turns into a failure: a manifest the parser
+    /// no longer understands must not quietly pass the guard. Comment lines
+    /// mentioning the crate are skipped because they start with `#`.
+    fn pinned_libamdgpu_top_version(manifest: &str) -> Option<&str> {
+        let line = manifest
+            .lines()
+            .map(str::trim)
+            .find(|l| l.starts_with("libamdgpu_top") && l.contains("version"))?;
+        let after_key = line.split_once("version")?.1;
+        let after_quote = after_key.split_once('"')?.1;
+        let value = after_quote.split_once('"')?.0;
+        Some(value.trim().trim_start_matches('=').trim())
+    }
+
+    /// The reported ABI identifier must be the pinned dependency version.
+    ///
+    /// This is the forcing function the `Cargo.toml` comment asks for by
+    /// hand: bumping the `=` pin without updating
+    /// [`LIBAMDGPU_TOP_PINNED_VERSION`] fails here rather than shipping a
+    /// wrong version to whoever is debugging an AMD ABI problem.
+    #[test]
+    fn pinned_version_matches_cargo_toml() {
+        let pinned = pinned_libamdgpu_top_version(MANIFEST).expect(
+            "could not parse the libamdgpu_top version out of Cargo.toml; if the dependency \
+             declaration moved or changed shape, update pinned_libamdgpu_top_version",
+        );
+        assert_eq!(
+            pinned, LIBAMDGPU_TOP_PINNED_VERSION,
+            "libamdgpu_top is pinned to {pinned} in Cargo.toml but amd.libamdgpu_top.abi reports \
+             {LIBAMDGPU_TOP_PINNED_VERSION}; update LIBAMDGPU_TOP_PINNED_VERSION to match the pin"
+        );
+    }
+
+    /// The pin must stay an exact `=` requirement. A caret or range would
+    /// let Cargo resolve a different version than the one reported, which
+    /// this guard could not detect.
+    #[test]
+    fn libamdgpu_top_is_pinned_exactly() {
+        let line = MANIFEST
+            .lines()
+            .map(str::trim)
+            .find(|l| l.starts_with("libamdgpu_top") && l.contains("version"))
+            .expect("libamdgpu_top dependency line not found in Cargo.toml");
+        assert!(
+            line.contains("\"="),
+            "libamdgpu_top must stay pinned with an exact `=` requirement so the reported ABI \
+             version is the resolved one, got: {line}"
+        );
     }
 }

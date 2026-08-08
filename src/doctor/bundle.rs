@@ -333,6 +333,15 @@ fn enabled_features() -> Vec<&'static str> {
     v.push("mock");
     #[cfg(feature = "furiosa")]
     v.push("furiosa");
+    // Recorded because this feature decides what the Intel GPU readers can
+    // collect at all: with it the readers dlopen the Level Zero loader and
+    // surface per-engine activity plus Sysman power, without it they fall
+    // back to the sysfs/WMI baseline. Omitting it hid the one fact that
+    // explains why two builds report different Intel GPU metrics (issue
+    // #362). Every feature declared in Cargo.toml except `default` must have
+    // an arm here; `bundle_covers_every_declared_feature` enforces that.
+    #[cfg(feature = "level_zero")]
+    v.push("level_zero");
     if v.is_empty() {
         v.push("none");
     }
@@ -459,6 +468,129 @@ fn macos_system_profiler_bytes(redact: &RedactOptions) -> Option<Vec<u8>> {
 mod tests {
     use super::*;
     use crate::doctor::Summary;
+
+    /// Both sources are embedded at compile time. `Cargo.toml` is reached
+    /// through `CARGO_MANIFEST_DIR` and this module's own file through a
+    /// relative include, so neither depends on the working directory.
+    const MANIFEST: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"));
+    const BUNDLE_SOURCE: &str = include_str!("bundle.rs");
+
+    /// Feature names declared in the `[features]` table of `Cargo.toml`.
+    ///
+    /// Continuation lines of multi-line arrays carry no `=` and are skipped,
+    /// as are comments and blank lines. Keys that are not bare identifiers
+    /// are ignored so a stray quoted entry cannot be mistaken for a feature.
+    fn declared_features(manifest: &str) -> Vec<&str> {
+        let mut out = Vec::new();
+        let mut in_features = false;
+        for line in manifest.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with('[') {
+                in_features = trimmed == "[features]";
+                continue;
+            }
+            if !in_features || trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            let Some((name, _)) = trimmed.split_once('=') else {
+                continue;
+            };
+            let name = name.trim();
+            if !name.is_empty()
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+            {
+                out.push(name);
+            }
+        }
+        out
+    }
+
+    /// Source text of `enabled_features`, from its signature to the next
+    /// top-level `fn`. Restricting the scan to this span keeps unrelated
+    /// feature gates elsewhere in the file, and the literals in this test
+    /// module, from satisfying the coverage assertion.
+    fn enabled_features_body(source: &str) -> &str {
+        let start = source.find("fn enabled_features()").expect(
+            "fn enabled_features() not found in bundle.rs; if it was renamed or moved, update \
+             this test to point at the new location",
+        );
+        let rest = &source[start..];
+        let end = rest.find("\nfn ").unwrap_or(rest.len());
+        &rest[..end]
+    }
+
+    /// Feature names appearing in `#[cfg(feature = "...")]` attributes.
+    fn cfg_gated_features(body: &str) -> Vec<&str> {
+        const MARKER: &str = "#[cfg(feature = \"";
+        let mut out = Vec::new();
+        let mut rest = body;
+        while let Some(i) = rest.find(MARKER) {
+            rest = &rest[i + MARKER.len()..];
+            let Some((name, tail)) = rest.split_once('"') else {
+                break;
+            };
+            out.push(name);
+            rest = tail;
+        }
+        out
+    }
+
+    /// Every declared cargo feature must be representable in the bundle's
+    /// feature list.
+    ///
+    /// The arms are `#[cfg]`-gated, so a running test only observes the
+    /// features it was itself built with and cannot notice a missing arm for
+    /// a disabled one. Comparing the manifest against the source text is what
+    /// makes the check independent of the build configuration. This function
+    /// has already drifted twice (`amd` arrived late in #358, `level_zero` was
+    /// missing from the start, #362), which is what the assertion is for.
+    ///
+    /// `default` is excluded: it is an alias for other features rather than a
+    /// runtime capability of its own.
+    #[test]
+    fn bundle_covers_every_declared_feature() {
+        let declared = declared_features(MANIFEST);
+        assert!(
+            declared.contains(&"default") && declared.contains(&"cli"),
+            "parsing the [features] table of Cargo.toml looks broken, got {declared:?}"
+        );
+
+        let covered = cfg_gated_features(enabled_features_body(BUNDLE_SOURCE));
+        for feature in declared {
+            if feature == "default" {
+                continue;
+            }
+            assert!(
+                covered.contains(&feature),
+                "cargo feature `{feature}` is declared in Cargo.toml but enabled_features() has \
+                 no arm for it, so a build with it would understate itself in support bundles; \
+                 arms found: {covered:?}"
+            );
+        }
+    }
+
+    /// The reported list must match what the binary was actually built with,
+    /// in both directions: a compiled-in feature appears and a compiled-out
+    /// one does not.
+    #[test]
+    fn enabled_features_matches_build_configuration() {
+        let features = enabled_features();
+        for (name, compiled_in) in [
+            ("cli", cfg!(feature = "cli")),
+            ("amd", cfg!(feature = "amd")),
+            ("mock", cfg!(feature = "mock")),
+            ("furiosa", cfg!(feature = "furiosa")),
+            ("level_zero", cfg!(feature = "level_zero")),
+        ] {
+            assert_eq!(
+                features.contains(&name),
+                compiled_in,
+                "feature `{name}` compiled in: {compiled_in}, but reported list is {features:?}"
+            );
+        }
+    }
 
     #[test]
     fn bundle_writes_expected_entries() {
