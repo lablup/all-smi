@@ -47,14 +47,18 @@
 //! strings at known offsets; a correct layout reads them as legible
 //! device paths, a wrong one reads them as garbage.
 //! [`AdapterInfoArray::validated`] performs that check at runtime, per
-//! entry, so a wrong stride is caught on the second entry even when the
-//! first happens to parse, and a row ADL never wrote is a failure
-//! rather than an empty adapter. Whenever verification fails the reader
-//! declines multi-GPU attribution, leaving the DXGI and PDH baseline
-//! (the pre-#353 behavior, which a single-GPU machine keeps
+//! row, so a wrong stride is caught on the second row even when the
+//! first happens to parse. The buffer is pre-filled with a poison
+//! pattern rather than zeros, so a row ADL never wrote
+//! ([`RowState::Untouched`]) is distinguishable from a row the driver
+//! memset but did not populate ([`RowState::Blank`]), which AMD's own
+//! SDK sample treats as normal (it zero-fills and then filters by
+//! `iPresent`). Whenever verification fails the reader declines
+//! multi-GPU attribution, leaving the DXGI and PDH baseline (the
+//! pre-#353 behavior, which a single-GPU machine keeps
 //! unconditionally), and the `amd.adl.adapters` doctor check dumps the
-//! same fields so the transcribed layout can be confirmed or refuted
-//! from real hardware.
+//! same fields with a per-row state tag so the transcribed layout can
+//! be confirmed or refuted from real hardware.
 //!
 //! The declared layout is the **Windows** variant: `adl_structures.h`
 //! appends `iExist`, the two driver-path strings, `strPNPString`, and
@@ -335,58 +339,114 @@ pub fn adl_string_lossy(bytes: &[u8]) -> String {
     String::from_utf8_lossy(&bytes[..end]).into_owned()
 }
 
+/// The byte every field of [`AdapterInfo::poisoned`] is filled with.
+///
+/// `0xAA` is deliberately neither NUL nor printable ASCII, so a poison
+/// row can never pass the string checks by accident, and a poisoned
+/// `c_int` (`0xAAAAAAAA`, a large negative value) can never pass the
+/// index or size checks either.
+pub const ADAPTER_POISON_BYTE: u8 = 0xAA;
+
+/// What the driver did to one row of an [`AdapterInfoArray`].
+///
+/// Distinguishing these four states is the entire reason the buffer is
+/// poison-filled rather than zero-filled: with a zero fill, "the driver
+/// never wrote this row" and "the driver memset the array and did not
+/// populate this row" are the same bytes, and the second is the healthy
+/// behavior AMD's own SDK sample expects (it zero-fills, calls, then
+/// filters by `iPresent`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowState {
+    /// The poison fill is intact: ADL never wrote this row. A trailing
+    /// run of these is what a declared struct *smaller* than the
+    /// driver's produces (the driver derives its row count as
+    /// `iInputSize / sizeof` and stops early); row 0 untouched means
+    /// the call wrote nothing at all.
+    Untouched,
+    /// All zero: the driver memset the row but did not populate it,
+    /// the normal shape for an adapter slot filtered out by
+    /// `iPresent`-style logic.
+    Blank,
+    /// Written and consistent with the transcribed layout
+    /// ([`AdapterInfo::looks_sane`]).
+    Populated,
+    /// Written but inconsistent with the transcribed layout: the
+    /// unambiguous signature of a wrong field offset or stride.
+    Garbled,
+}
+
 impl AdapterInfo {
-    /// Whether ADL left this row exactly as [`AdapterInfoArray::for_count`]
-    /// pre-filled it: every byte still zero.
+    /// The poison pre-fill [`AdapterInfoArray::for_count`] uses: every
+    /// `int` is `0xAAAAAAAA` and every string byte is `0xAA`.
     ///
-    /// A row ADL actually wrote always carries something, a UDID, a
-    /// marketing name, a vendor id, so an untouched row means ADL
-    /// filled fewer rows than `iInputSize` asked for. That is what
-    /// happens when the real `sizeof(AdapterInfo)` is larger than the
-    /// one transcribed here: ADL derives its row count as
-    /// `iInputSize / sizeof` and stops early, leaving the tail blank.
-    /// Since that is precisely the transcription error the runtime
-    /// verification exists to catch, [`Self::looks_sane`] treats a
-    /// blank row as a failure rather than as an empty adapter. Without
-    /// it a short write reads as a table of valid rows whose strings
-    /// are all legitimately empty, and the `amd.adl.adapters` doctor
-    /// check would report PASS over a buffer the driver never touched.
+    /// `AdapterInfo` is all plain old data (nine `c_int`s and six byte
+    /// arrays, no padding, pinned by the layout assertions above), so
+    /// every bit pattern is a valid value and a poison-filled buffer is
+    /// fully initialized memory; the pattern only has to be one no
+    /// driver write could plausibly reproduce.
+    pub fn poisoned() -> Self {
+        let poison_int = u32::from_ne_bytes([ADAPTER_POISON_BYTE; 4]) as c_int;
+        Self {
+            i_size: poison_int,
+            i_adapter_index: poison_int,
+            str_udid: [ADAPTER_POISON_BYTE; ADL_MAX_PATH],
+            i_bus_number: poison_int,
+            i_device_number: poison_int,
+            i_function_number: poison_int,
+            i_vendor_id: poison_int,
+            str_adapter_name: [ADAPTER_POISON_BYTE; ADL_MAX_PATH],
+            str_display_name: [ADAPTER_POISON_BYTE; ADL_MAX_PATH],
+            i_present: poison_int,
+            i_exist: poison_int,
+            str_driver_path: [ADAPTER_POISON_BYTE; ADL_MAX_PATH],
+            str_driver_path_ext: [ADAPTER_POISON_BYTE; ADL_MAX_PATH],
+            str_pnp_string: [ADAPTER_POISON_BYTE; ADL_MAX_PATH],
+            i_os_display_index: poison_int,
+        }
+    }
+
+    /// Whether the driver memset this row without populating it: every
+    /// byte zero. One of the two inputs to [`Self::classify`], which is
+    /// the single source of truth on how a row is treated.
     ///
-    /// ## Open risk: this may be too strict for a real driver
+    /// A blank row is **not** a failure. AMD's own ADL SDK sample
+    /// zero-fills its `AdapterInfo` array, calls
+    /// `ADL2_Adapter_AdapterInfo_Get`, and then filters the result by
+    /// `iPresent` / `ADL2_Adapter_Active_Get` rather than assuming
+    /// every requested row comes back populated, so a real driver
+    /// plausibly leaves some rows at their memset zeros on perfectly
+    /// healthy hardware. An earlier revision rejected any blank row as
+    /// short-write evidence; that conflated two different facts, which
+    /// the poison pre-fill now separates: a row the driver *never
+    /// wrote* still carries the poison ([`RowState::Untouched`]), while
+    /// a zeroed row proves the driver wrote zeros over it
+    /// ([`RowState::Blank`]).
     ///
-    /// AMD's own ADL SDK sample zero-fills its `AdapterInfo` array
-    /// before calling `ADL2_Adapter_AdapterInfo_Get` and then filters
-    /// the result by `iPresent` / `ADL2_Adapter_Active_Get` rather than
-    /// assuming every requested row comes back populated. That implies
-    /// a real driver may legitimately leave some rows untouched even on
-    /// correctly enumerated, healthy hardware, in which case this check
-    /// would disable multi-GPU attribution on a host whose layout is
-    /// actually right.
-    ///
-    /// This must **not** be relaxed on that suspicion alone: tolerating
-    /// blank rows again reopens exactly the short-write detection hole
-    /// `is_blank` exists to close (see the module docs and the history
-    /// of this check). The evidence that would justify revisiting it is
-    /// specific: an `amd.adl.adapters` dump from real hardware showing
-    /// blank rows *interleaved with* otherwise legible, `looks_sane`-passing
-    /// rows in the same call. That pattern is the signature of a driver
-    /// that legitimately leaves some rows unused; a `sizeof` mismatch
-    /// instead produces a run of blank rows from some index onward with
-    /// nothing legible past it. Until that evidence exists, a blank row
-    /// is treated as a layout failure, not as a normal driver response,
-    /// and the fix belongs in the caller's requested count, not here.
+    /// Accepting blank rows is safe because the worst case is
+    /// under-attribution, never mis-attribution. A populated row 0
+    /// proves every field offset through 1568 is right (a mid-struct
+    /// size error such as a different `ADL_MAX_PATH` would garble its
+    /// strings), so the residual unknown is only the stride, and a
+    /// wrong stride shows up either as a garbled later row (rejected by
+    /// [`AdapterInfoArray::validated`]) or as the driver writing fewer
+    /// rows, which costs attribution of the missing cards but can never
+    /// report one card's telemetry against another. Interleaved blanks
+    /// are the signature of healthy `iPresent` filtering and are
+    /// deliberately not rejected; a stride mismatch produces garbled
+    /// rows or a trailing untouched run, not interleaving.
     pub fn is_blank(&self) -> bool {
         *self == Self::default()
     }
 
-    /// Whether this entry is consistent with the layout declared above.
+    /// Whether a *written* row is consistent with the layout declared
+    /// above. One of the inputs to [`Self::classify`]; callers should
+    /// use `classify`, which first separates the untouched and blank
+    /// rows this predicate is not meant to judge (an all-zero row
+    /// passes every check below vacuously).
     ///
-    /// Four independent signals, all of which a correct layout passes
+    /// Three independent signals, all of which a correct layout passes
     /// trivially and a wrong one fails almost surely:
     ///
-    /// - the row must not be blank, i.e. ADL must have written it at
-    ///   all (see [`Self::is_blank`] for why a short write is a layout
-    ///   signal and not an empty adapter);
     /// - the four string fields must be NUL-terminated printable ASCII
     ///   (a shifted or misdeclared layout puts binary data there);
     /// - `iSize`, when the driver fills it in, must equal our
@@ -416,9 +476,6 @@ impl AdapterInfo {
     /// time, per entry, so one odd row cannot disable attribution for
     /// the whole machine.
     pub fn looks_sane(&self) -> bool {
-        if self.is_blank() {
-            return false;
-        }
         let size_ok = self.i_size == 0 || self.i_size as usize == std::mem::size_of::<Self>();
         let index_ok = (0..256).contains(&self.i_adapter_index);
         size_ok
@@ -427,6 +484,28 @@ impl AdapterInfo {
             && adl_string(&self.str_adapter_name).is_some()
             && adl_string(&self.str_display_name).is_some()
             && adl_string(&self.str_pnp_string).is_some()
+    }
+
+    /// Classify what the driver did to this row. The single source of
+    /// truth for row handling: [`AdapterInfoArray::validated`] builds
+    /// its accept/reject decision on it and the `amd.adl.adapters`
+    /// doctor check prints it per row.
+    ///
+    /// The order matters. The poison bytes are neither NUL nor
+    /// printable ASCII, so an untouched row would otherwise fall
+    /// through to [`RowState::Garbled`]; and an all-zero row passes
+    /// [`Self::looks_sane`] vacuously, so blankness must be decided
+    /// before saneness.
+    pub fn classify(&self) -> RowState {
+        if *self == Self::poisoned() {
+            RowState::Untouched
+        } else if self.is_blank() {
+            RowState::Blank
+        } else if self.looks_sane() {
+            RowState::Populated
+        } else {
+            RowState::Garbled
+        }
     }
 }
 
@@ -450,12 +529,18 @@ pub struct AdapterInfoArray {
 }
 
 impl AdapterInfoArray {
-    /// Allocate a zeroed buffer for `requested` adapter rows plus
-    /// headroom.
+    /// Allocate a poison-filled buffer for `requested` adapter rows
+    /// plus headroom.
+    ///
+    /// Poison rather than zeros so that after the call, a row ADL never
+    /// wrote is distinguishable from a row the driver memset without
+    /// populating; see [`RowState`]. `AdapterInfo` is all plain old
+    /// data, so the poison-filled buffer is fully initialized valid
+    /// memory before the driver ever sees it.
     pub fn for_count(requested: usize) -> Self {
         let allocated = requested * 2 + 4;
         Self {
-            entries: vec![AdapterInfo::default(); allocated],
+            entries: vec![AdapterInfo::poisoned(); allocated],
             requested,
         }
     }
@@ -475,9 +560,9 @@ impl AdapterInfoArray {
     /// would be a buffer overflow inside a closed-source driver, so a
     /// silent wrap must not be able to produce it. A request too large
     /// to express in a `c_int` reports 0, which makes the driver write
-    /// nothing and leaves every row blank, which
-    /// [`AdapterInfo::looks_sane`] then rejects. The loader bounds the
-    /// adapter count long before this matters.
+    /// nothing and leaves every row with its poison fill intact, which
+    /// [`Self::validated`] rejects because row 0 is not populated. The
+    /// loader bounds the adapter count long before this matters.
     pub fn input_size(&self) -> c_int {
         self.requested
             .checked_mul(std::mem::size_of::<AdapterInfo>())
@@ -492,24 +577,86 @@ impl AdapterInfoArray {
         &self.entries[..self.requested]
     }
 
-    /// The filled-in rows, or `None` when any row fails
-    /// [`AdapterInfo::looks_sane`].
-    ///
-    /// Every row is checked, not just the first: with a wrong struct
-    /// *size* the first row still parses (offsets within it are right)
-    /// and it is the second row onward that garbles, so on the
-    /// multi-adapter machines this struct exists for, the later rows
-    /// are the stride check. A size wrong in the other direction (ours
-    /// larger than the driver's) makes ADL write fewer rows than we
-    /// requested rather than garbled ones, so the later rows stay
-    /// blank; [`AdapterInfo::is_blank`] is what turns that into a
-    /// failure instead of a table of empty adapters.
-    pub fn validated(&self) -> Option<&[AdapterInfo]> {
-        let entries = self.requested_entries();
-        entries
+    /// Per-row [`RowState`] for the requested rows, in order. This is
+    /// what the `amd.adl.adapters` doctor check prints next to each
+    /// dump line, so a real-hardware report says decisively whether the
+    /// driver populated, memset, or never touched each row.
+    pub fn row_states(&self) -> Vec<RowState> {
+        self.requested_entries()
             .iter()
-            .all(AdapterInfo::looks_sane)
-            .then_some(entries)
+            .map(AdapterInfo::classify)
+            .collect()
+    }
+
+    /// The populated rows, or `None` when the table as a whole cannot
+    /// be trusted.
+    ///
+    /// Rejected when any of the following holds; otherwise the
+    /// [`RowState::Populated`] rows are returned and blank or untouched
+    /// rows are dropped silently (they were already harmless
+    /// downstream: they group to an empty PNP string, which
+    /// `plan_attribution` matches against nothing):
+    ///
+    /// 1. **Any row is [`RowState::Garbled`].** Written bytes that
+    ///    contradict the layout are the unambiguous transcription
+    ///    error, whichever field or stride produced them.
+    /// 2. **Row 0 is not [`RowState::Populated`].** ADL always has at
+    ///    least one adapter to describe when the call succeeds, so an
+    ///    untouched or blank row 0 means the call wrote nothing usable;
+    ///    this also keeps the `input_size() == 0` refusal and the
+    ///    "declared size so much smaller than the driver's that zero
+    ///    rows fit" case rejected.
+    /// 3. **No row is [`RowState::Populated`].** Implied by rule 2 but
+    ///    kept explicit: an accepted table always carries at least one
+    ///    adapter.
+    /// 4. **The `iAdapterIndex` values of the populated rows are not
+    ///    all distinct.** A stride mismatch tends to repeat or scramble
+    ///    them, so distinctness is cheap extra stride evidence.
+    ///
+    /// Every row participates, not just the first, because the stride
+    /// errors point in opposite directions. A declared size *larger*
+    /// than the driver's fits more rows than the driver's own stride,
+    /// so the driver writes at a smaller stride and our row 1 reads
+    /// misaligned bytes: garbled, caught by rule 1 (row 0 alone would
+    /// pass, since offsets within one row are self-consistent). A
+    /// declared size *smaller* than the driver's makes the driver
+    /// derive a lower row count from `iInputSize` and stop early,
+    /// leaving a trailing untouched run; when at least one row was
+    /// still written that shape is accepted, because it is
+    /// indistinguishable from healthy `iPresent` filtering and its
+    /// worst case is under-attribution of the missing cards, never
+    /// mis-attribution.
+    ///
+    /// The real gate downstream is the PNP join in `plan_attribution`,
+    /// which is far stronger evidence than anything here: a garbled
+    /// read cannot produce a `strPNPString` that exactly equals a WMI
+    /// `PNPDeviceID`, so a successful match confirms the layout
+    /// empirically on every poll.
+    pub fn validated(&self) -> Option<Vec<AdapterInfo>> {
+        let entries = self.requested_entries();
+        let states = self.row_states();
+        if states.contains(&RowState::Garbled) {
+            return None;
+        }
+        if states.first() != Some(&RowState::Populated) {
+            return None;
+        }
+        let populated: Vec<AdapterInfo> = entries
+            .iter()
+            .zip(&states)
+            .filter(|(_, state)| **state == RowState::Populated)
+            .map(|(entry, _)| *entry)
+            .collect();
+        if populated.is_empty() {
+            return None;
+        }
+        let mut indices: Vec<c_int> = populated.iter().map(|row| row.i_adapter_index).collect();
+        indices.sort_unstable();
+        indices.dedup();
+        if indices.len() != populated.len() {
+            return None;
+        }
+        Some(populated)
     }
 }
 
@@ -787,42 +934,108 @@ mod tests {
     }
 
     #[test]
-    fn a_row_the_driver_never_wrote_is_not_a_valid_empty_adapter() {
-        // Every arm of `looks_sane` is individually satisfied by the
-        // zero row `for_count` pre-fills the buffer with: `iSize` is 0
-        // (accepted), `iAdapterIndex` is 0 (in range), and each string
-        // field is a NUL at offset 0, which `adl_string` documents as
-        // the empty string rather than garbage. The blank check is the
-        // only thing standing between that and a table of "valid"
-        // adapters ADL never touched.
+    fn rows_classify_by_what_the_driver_did_to_them() {
+        // Poison intact: never written. The poison bytes are neither
+        // NUL nor printable, so order matters: an untouched row must
+        // not fall through to Garbled.
+        assert_eq!(AdapterInfo::poisoned().classify(), RowState::Untouched);
+
+        // All zero: memset but not populated. An all-zero row passes
+        // every `looks_sane` arm vacuously, so blankness must be
+        // decided before saneness.
         let blank = AdapterInfo::default();
         assert!(blank.is_blank());
-        assert!(!blank.looks_sane());
-        assert_eq!(adl_string(&blank.str_udid), Some(""));
+        assert!(blank.looks_sane());
+        assert_eq!(blank.classify(), RowState::Blank);
 
-        // And one written byte anywhere is enough to stop being blank.
+        // Written and consistent with the layout.
         let written = sane_entry(0, r"PCI\VEN_1002&DEV_744C\6&ABCD&0&19");
-        assert!(!written.is_blank());
-        assert!(written.looks_sane());
+        assert_eq!(written.classify(), RowState::Populated);
+
+        // Written bytes that contradict the layout.
+        let mut garbage = written;
+        garbage.str_pnp_string = [0xFF; ADL_MAX_PATH];
+        assert_eq!(garbage.classify(), RowState::Garbled);
     }
 
     #[test]
-    fn a_short_write_leaving_trailing_rows_blank_fails_verification() {
-        // The failure mode of transcribing a struct *larger* than the
-        // driver's: ADL derives its row count as `iInputSize / sizeof`,
-        // stops early, and leaves our tail untouched. Nothing garbles,
-        // so the per-row string checks alone would pass the table; the
-        // short write itself is the layout evidence.
+    fn a_trailing_untouched_run_is_accepted_and_dropped() {
+        // A declared size *smaller* than the driver's makes ADL derive
+        // a lower row count from iInputSize and stop early, leaving the
+        // tail poison. With row 0 populated that shape is accepted:
+        // the worst case is under-attribution of the missing cards,
+        // never mis-attribution, and it is indistinguishable from a
+        // driver that simply had less to say.
         let mut array = AdapterInfoArray::for_count(3);
         array.entries[0] = sane_entry(0, r"PCI\VEN_1002&DEV_744C\6&ABCD&0&19");
         array.entries[1] = sane_entry(1, r"PCI\VEN_1002&DEV_164E\4&FEDC&0&41");
-        // entries[2] is still the zero we handed the driver.
+        // entries[2] still carries the poison fill.
+        let accepted = array.validated().expect("trailing untouched run must pass");
+        assert_eq!(accepted.len(), 2);
+        assert_eq!(
+            array.row_states(),
+            vec![
+                RowState::Populated,
+                RowState::Populated,
+                RowState::Untouched
+            ]
+        );
+        // The doctor still gets every raw row to report.
+        assert_eq!(array.requested_entries().len(), 3);
+    }
+
+    #[test]
+    fn blank_rows_are_dropped_whether_trailing_or_interleaved() {
+        // Interleaved blanks are the signature of healthy iPresent
+        // filtering (AMD's own SDK sample zero-fills and then filters),
+        // so they must not reject the table; only the populated rows
+        // come back.
+        let mut array = AdapterInfoArray::for_count(3);
+        array.entries[0] = sane_entry(0, r"PCI\VEN_1002&DEV_744C\6&ABCD&0&19");
+        array.entries[1] = AdapterInfo::default();
+        array.entries[2] = sane_entry(2, r"PCI\VEN_1002&DEV_164E\4&FEDC&0&41");
+        let accepted = array.validated().expect("interleaved blanks must pass");
+        assert_eq!(accepted.len(), 2);
+        assert_eq!(accepted[0].i_adapter_index, 0);
+        assert_eq!(accepted[1].i_adapter_index, 2);
+
+        // Trailing blanks behave the same.
+        let mut array = AdapterInfoArray::for_count(2);
+        array.entries[0] = sane_entry(0, r"PCI\VEN_1002&DEV_744C\6&ABCD&0&19");
+        array.entries[1] = AdapterInfo::default();
+        assert_eq!(array.validated().map(|rows| rows.len()), Some(1));
+    }
+
+    #[test]
+    fn a_table_without_a_populated_first_row_is_rejected() {
+        // Row 0 blank: the driver memset the buffer but described no
+        // adapter, which a successful call never legitimately does.
+        let mut array = AdapterInfoArray::for_count(2);
+        array.entries[0] = AdapterInfo::default();
+        array.entries[1] = sane_entry(1, r"PCI\VEN_1002&DEV_164E\4&FEDC&0&41");
         assert!(array.validated().is_none());
 
-        // The doctor still gets the raw rows to report, blank ones
-        // included, since "ADL wrote two of the three rows we asked
-        // for" is exactly the evidence that names the error.
-        assert_eq!(array.requested_entries().len(), 3);
+        // Row 0 untouched: the call wrote nothing at all. This is also
+        // the shape the input_size() == 0 refusal produces, and the
+        // shape of a declared size so much smaller than the driver's
+        // that zero rows fit the byte budget.
+        let untouched = AdapterInfoArray::for_count(2);
+        assert_eq!(
+            untouched.row_states(),
+            vec![RowState::Untouched, RowState::Untouched]
+        );
+        assert!(untouched.validated().is_none());
+    }
+
+    #[test]
+    fn duplicate_adapter_indices_among_populated_rows_are_rejected() {
+        // A stride mismatch tends to repeat or scramble iAdapterIndex;
+        // two populated rows claiming the same index is cheap extra
+        // stride evidence, and no healthy enumeration produces it.
+        let mut array = AdapterInfoArray::for_count(2);
+        array.entries[0] = sane_entry(0, r"PCI\VEN_1002&DEV_744C\6&ABCD&0&19");
+        array.entries[1] = sane_entry(0, r"PCI\VEN_1002&DEV_164E\4&FEDC&0&41");
+        assert!(array.validated().is_none());
     }
 
     #[test]
@@ -831,11 +1044,11 @@ mod tests {
         array.entries[0] = sane_entry(0, r"PCI\VEN_1002&DEV_744C\6&ABCD&0&19");
         array.entries[1] = sane_entry(1, r"PCI\VEN_1002&DEV_164E\4&FEDC&0&41");
         assert!(array.validated().is_some());
-        assert_eq!(array.validated().unwrap().len(), 2);
+        assert_eq!(array.validated().map(|rows| rows.len()), Some(2));
 
         // A wrong stride leaves the first row parseable and garbles the
-        // second; that must reject everything, because a layout that is
-        // wrong for one row is wrong for all of them.
+        // second; that must reject everything, blanks or not, because a
+        // layout that is wrong for one row is wrong for all of them.
         array.entries[1].str_udid = [0xFF; ADL_MAX_PATH];
         assert!(array.validated().is_none());
     }

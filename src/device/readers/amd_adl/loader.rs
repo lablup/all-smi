@@ -356,27 +356,32 @@ impl AdlRuntime {
         // Read before the pointer is taken so no borrow of `buffer` is
         // created while the pointer ADL writes through is live.
         let input_size = buffer.input_size();
-        // SAFETY: `buffer` starts with at least `count` zeroed
-        // `AdapterInfo` entries plus headroom (see `AdapterInfoArray`),
-        // `input_size` reports the requested size, and the compile-time
-        // assertions in `ffi` pin the layout the driver will write.
+        // SAFETY: `buffer` starts with at least `count` poison-filled
+        // `AdapterInfo` entries plus headroom (see `AdapterInfoArray`).
+        // `AdapterInfo` is all plain-old-data (ints and byte arrays, no
+        // padding, pinned by the `ffi` assertions), so the poison
+        // pattern is a valid value of the type and the buffer is fully
+        // initialized before the driver sees it. `input_size` reports
+        // the requested size, and the compile-time assertions in `ffi`
+        // pin the layout the driver will write.
         let status = unsafe { adapter_info_get(self.context, buffer.as_mut_ptr(), input_size) };
         if status != ADL_OK {
             return AdapterProbe::CallFailed;
         }
-        let layout_ok = buffer.validated().is_some();
+        let accepted = buffer.validated();
         AdapterProbe::Rows {
             rows: buffer.requested_entries().to_vec(),
-            layout_ok,
+            accepted,
         }
     }
 
     /// The validated adapter inventory, refreshed on the slow interval.
     ///
     /// `None` covers every way of not having one: the entry point is
-    /// missing, the call failed, or layout verification rejected the
-    /// rows. All of them mean multi-GPU attribution declines, which is
-    /// the designed failure mode.
+    /// missing, the call failed, or verification rejected the table.
+    /// All of them mean multi-GPU attribution declines, which is the
+    /// designed failure mode. On acceptance only the populated rows
+    /// are parsed; blank or untouched rows never enter the inventory.
     fn adapter_inventory(&mut self) -> Option<&[AdlAdapter]> {
         let due = match self.inventory_scanned_at {
             None => true,
@@ -386,9 +391,9 @@ impl AdlRuntime {
             self.inventory_scanned_at = Some(Instant::now());
             self.adapter_inventory = match self.probe_adapter_info() {
                 AdapterProbe::Rows {
-                    rows,
-                    layout_ok: true,
-                } => Some(adapters::parse_adapters(&rows)),
+                    accepted: Some(populated),
+                    ..
+                } => Some(adapters::parse_adapters(&populated)),
                 _ => None,
             };
         }
@@ -405,13 +410,15 @@ pub enum AdapterProbe {
     /// The count or info call returned an error, or the count was
     /// implausible.
     CallFailed,
-    /// The call succeeded. `layout_ok` reports whether every row passed
-    /// `AdapterInfo::looks_sane`; the rows are returned either way,
-    /// because when verification fails the raw bytes are exactly the
-    /// evidence the doctor exists to collect.
+    /// The call succeeded. `rows` is every requested row exactly as the
+    /// driver (or the poison pre-fill) left it, returned even on
+    /// verification failure because the raw bytes are exactly the
+    /// evidence the doctor exists to collect. `accepted` is the
+    /// populated subset when `AdapterInfoArray::validated` accepted the
+    /// table, `None` when it rejected it.
     Rows {
         rows: Vec<AdapterInfo>,
-        layout_ok: bool,
+        accepted: Option<Vec<AdapterInfo>>,
     },
 }
 

@@ -98,9 +98,12 @@ static ADL_ADAPTERS: Check = Check {
 /// so an operator on real hardware is the verifier. Legible device
 /// paths in the dump confirm the layout; garbage refutes it, which is
 /// why the rows are printed even, and especially, when runtime
-/// verification fails. The dump also shows the grouping and the PNP
-/// strings that multi-GPU attribution matches against the GPU uuids,
-/// so a wrong match can be diagnosed from the same output.
+/// verification fails, and why each row carries its `RowState` tag:
+/// BLANK (driver memset, healthy filtering) versus UNTOUCHED (poison
+/// intact, short write) is exactly the distinction a real-hardware
+/// report needs to settle. The dump also shows the grouping and the
+/// PNP strings that multi-GPU attribution matches against the GPU
+/// uuids, so a wrong match can be diagnosed from the same output.
 fn check_adl_adapters(_ctx: &CheckCtx) -> CheckResult {
     #[cfg(target_os = "windows")]
     {
@@ -121,16 +124,22 @@ fn check_adl_adapters(_ctx: &CheckCtx) -> CheckResult {
                     .to_string(),
                 Some("single-GPU sensor augmentation is unaffected".to_string()),
             ),
-            AdapterProbe::Rows { rows, layout_ok } => {
+            AdapterProbe::Rows { rows, accepted } => {
+                // Every row renders with its RowState tag (POPULATED
+                // rows untagged, BLANK / UNTOUCHED / GARBLED named), so
+                // a real-hardware dump says decisively whether a
+                // non-populated row was memset by the driver or never
+                // written; that distinction is what the poison pre-fill
+                // exists for.
                 let dump = rows
                     .iter()
                     .enumerate()
                     .map(|(slot, row)| adapters::describe_raw_entry(slot, row))
                     .collect::<Vec<_>>()
                     .join("; ");
-                if !layout_ok {
-                    // The two failures point at opposite corrections, so
-                    // name which one was seen. See
+                let Some(populated) = accepted else {
+                    // The failure shapes point at different
+                    // corrections, so name the one seen. See
                     // `adapters::describe_layout_failure`, which is
                     // where this is tested: this whole function is
                     // Windows-gated and cannot run on the Linux runner.
@@ -146,12 +155,13 @@ fn check_adl_adapters(_ctx: &CheckCtx) -> CheckResult {
                                 .to_string(),
                         ),
                     );
-                }
-                let parsed = adapters::parse_adapters(&rows);
+                };
+                let parsed = adapters::parse_adapters(&populated);
                 let groups = adapters::group_by_card(&parsed);
                 CheckResult::Pass(format!(
-                    "{} adapter row(s) across {} physical card(s); {}",
+                    "{} adapter row(s), {} populated, across {} physical card(s); {}",
                     rows.len(),
+                    populated.len(),
                     groups.len(),
                     dump
                 ))

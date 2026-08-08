@@ -89,27 +89,62 @@ pub fn clamp_scan_count(count: i32) -> i32 {
     count.min(MAX_ADAPTER_ROWS)
 }
 
-/// Describe which direction a failed `AdapterInfo` layout verification
-/// points in, for the `amd.adl.adapters` doctor check.
+/// Describe which failure shape a rejected `AdapterInfo` table shows,
+/// for the `amd.adl.adapters` doctor check.
 ///
-/// The two failure modes call for opposite corrections. A blank row
-/// means ADL wrote fewer rows than `iInputSize` asked for, which is what
-/// a declared `AdapterInfo` larger than the driver's produces; legible
-/// bytes with an illegible string mean the opposite, a wrong field
-/// offset or stride.
+/// The failure shapes call for different corrections, so name the one
+/// that was seen, most specific first:
+///
+/// - **Garbled rows**: written bytes that contradict the layout, the
+///   unambiguous wrong-field-offset-or-stride error. A declared struct
+///   *larger* than the driver's lands here too: more rows fit
+///   `iInputSize` than the driver's own stride assumes, so the driver
+///   writes at a smaller stride and row 1 onward reads misaligned.
+/// - **Row 0 untouched**: the poison pre-fill is intact, the call
+///   wrote nothing at all.
+/// - **No populated rows**: the driver memset the buffer (or parts of
+///   it) but described no adapter.
+/// - **Duplicate adapter indices**: two populated rows claim the same
+///   `iAdapterIndex`, which no healthy enumeration produces and a
+///   stride mismatch does.
+///
+/// A trailing untouched run *with* a populated row 0, and blank rows in
+/// any position, are no longer failures (see
+/// `ffi::AdapterInfoArray::validated`); they do not reach this
+/// function through the verification path.
 pub fn describe_layout_failure(rows: &[ffi::AdapterInfo]) -> String {
-    let blank = rows.iter().filter(|row| row.is_blank()).count();
-    if blank > 0 {
-        format!(
-            "the driver left {blank} of {} row(s) untouched, which is what a declared \
-             AdapterInfo larger than the driver's produces",
-            rows.len()
-        )
-    } else {
-        "the rows were written but their string fields are not legible, which is what a \
-         wrong field offset or stride produces"
-            .to_string()
+    let states: Vec<ffi::RowState> = rows.iter().map(ffi::AdapterInfo::classify).collect();
+    let count = |wanted: ffi::RowState| states.iter().filter(|state| **state == wanted).count();
+    let garbled = count(ffi::RowState::Garbled);
+    let untouched = count(ffi::RowState::Untouched);
+    let populated = count(ffi::RowState::Populated);
+    let total = rows.len();
+
+    if garbled > 0 {
+        return format!(
+            "{garbled} of {total} row(s) hold written bytes that contradict the layout, \
+             which is what a wrong field offset or stride produces (a declared AdapterInfo \
+             larger than the driver's also lands here: the driver strides shorter and later \
+             rows read misaligned)"
+        );
     }
+    if states.first() == Some(&ffi::RowState::Untouched) {
+        return format!(
+            "row 0 still carries the poison pre-fill ({untouched} of {total} row(s) \
+             untouched): the call wrote nothing at all"
+        );
+    }
+    if populated == 0 {
+        return format!(
+            "the driver memset the buffer but populated none of the {total} row(s): no \
+             adapter was described"
+        );
+    }
+    // The remaining rejection: duplicate iAdapterIndex among the
+    // populated rows.
+    "the populated rows repeat an iAdapterIndex value, which no healthy enumeration \
+     produces and a stride mismatch does"
+        .to_string()
 }
 
 /// One ADL adapter row in owned, parsed form.
@@ -403,20 +438,39 @@ fn has_duplicate_assignment(assigned: &[Option<usize>]) -> bool {
 /// One diagnostic line for a raw adapter row, valid or not.
 ///
 /// Used by the `amd.adl.adapters` doctor check, whose whole purpose is
-/// field verification of the transcribed layout: the strings are
-/// rendered lossily and quoted so that garbage bytes, the signature of
-/// a wrong layout, survive into the report instead of being hidden.
+/// field verification of the transcribed layout. Each line names the
+/// row's [`ffi::RowState`], which is the distinction the poison
+/// pre-fill exists to make visible: a real-hardware dump then says
+/// decisively whether a non-populated row was memset by the driver
+/// (normal `iPresent`-style filtering) or never written at all (a
+/// short write). Populated and garbled rows render their fields, the
+/// strings lossily and quoted so that garbage bytes, the signature of
+/// a wrong layout, survive into the report instead of being hidden;
+/// blank and untouched rows have no field content worth printing, so
+/// they render as their state alone.
 pub fn describe_raw_entry(slot: usize, entry: &ffi::AdapterInfo) -> String {
-    format!(
-        "[{slot}] index={} bus={} device={} function={} vendor={} name={:?} pnp={:?}",
-        entry.i_adapter_index,
-        entry.i_bus_number,
-        entry.i_device_number,
-        entry.i_function_number,
-        entry.i_vendor_id,
-        ffi::adl_string_lossy(&entry.str_adapter_name),
-        ffi::adl_string_lossy(&entry.str_pnp_string),
-    )
+    match entry.classify() {
+        ffi::RowState::Untouched => {
+            format!("[{slot}] UNTOUCHED (poison intact, driver never wrote)")
+        }
+        ffi::RowState::Blank => format!("[{slot}] BLANK (driver memset, not populated)"),
+        state => {
+            let tag = match state {
+                ffi::RowState::Garbled => "GARBLED ",
+                _ => "",
+            };
+            format!(
+                "[{slot}] {tag}index={} bus={} device={} function={} vendor={} name={:?} pnp={:?}",
+                entry.i_adapter_index,
+                entry.i_bus_number,
+                entry.i_device_number,
+                entry.i_function_number,
+                entry.i_vendor_id,
+                ffi::adl_string_lossy(&entry.str_adapter_name),
+                ffi::adl_string_lossy(&entry.str_pnp_string),
+            )
+        }
+    }
 }
 
 #[cfg(test)]
@@ -758,9 +812,8 @@ mod tests {
         assert_eq!(clamp_scan_count(10_000), MAX_ADAPTER_ROWS);
     }
 
-    /// A non-blank `AdapterInfo` row: enough for `describe_layout_failure`
-    /// to see it as written, regardless of whether it would also pass
-    /// `looks_sane`.
+    /// A populated `AdapterInfo` row: written and passing `looks_sane`,
+    /// which is what `classify` requires for `RowState::Populated`.
     fn written_row(index: i32) -> ffi::AdapterInfo {
         let mut entry = ffi::AdapterInfo {
             i_adapter_index: index,
@@ -771,24 +824,49 @@ mod tests {
         entry
     }
 
-    #[test]
-    fn layout_failure_names_a_short_write_when_rows_are_blank() {
-        let rows = vec![
-            written_row(0),
-            ffi::AdapterInfo::default(),
-            ffi::AdapterInfo::default(),
-        ];
-        let shape = describe_layout_failure(&rows);
-        assert!(shape.contains("2 of 3"), "{shape}");
-        assert!(shape.contains("untouched"), "{shape}");
+    /// A garbled row: written bytes whose strings cannot be parsed.
+    fn garbled_row(index: i32) -> ffi::AdapterInfo {
+        let mut entry = written_row(index);
+        entry.str_pnp_string = [0xFF; ffi::ADL_MAX_PATH];
+        entry
     }
 
     #[test]
-    fn layout_failure_names_garbled_strings_when_no_row_is_blank() {
-        let rows = vec![written_row(0), written_row(1)];
+    fn layout_failure_names_garbled_rows_first() {
+        // Garbled bytes are the unambiguous layout error, so they win
+        // over any other shape present in the same table.
+        let rows = vec![written_row(0), garbled_row(1), ffi::AdapterInfo::poisoned()];
         let shape = describe_layout_failure(&rows);
-        assert!(!shape.contains("untouched"), "{shape}");
-        assert!(shape.contains("not legible"), "{shape}");
+        assert!(shape.contains("1 of 3"), "{shape}");
+        assert!(shape.contains("contradict the layout"), "{shape}");
+        assert!(shape.contains("stride"), "{shape}");
+    }
+
+    #[test]
+    fn layout_failure_names_a_dead_call_when_row_zero_is_untouched() {
+        let rows = vec![ffi::AdapterInfo::poisoned(), ffi::AdapterInfo::poisoned()];
+        let shape = describe_layout_failure(&rows);
+        assert!(shape.contains("poison"), "{shape}");
+        assert!(shape.contains("2 of 2"), "{shape}");
+        assert!(shape.contains("wrote nothing at all"), "{shape}");
+    }
+
+    #[test]
+    fn layout_failure_names_an_empty_memset_when_nothing_was_populated() {
+        let rows = vec![ffi::AdapterInfo::default(), ffi::AdapterInfo::default()];
+        let shape = describe_layout_failure(&rows);
+        assert!(shape.contains("memset"), "{shape}");
+        assert!(shape.contains("no adapter was described"), "{shape}");
+    }
+
+    #[test]
+    fn layout_failure_names_duplicate_indices_as_the_remaining_shape() {
+        // Two populated rows with the same iAdapterIndex: the only
+        // rejection left once nothing is garbled, row 0 is populated,
+        // and something was populated.
+        let rows = vec![written_row(0), written_row(0)];
+        let shape = describe_layout_failure(&rows);
+        assert!(shape.contains("repeat an iAdapterIndex"), "{shape}");
     }
 
     #[test]
@@ -804,9 +882,30 @@ mod tests {
         entry.str_adapter_name[..4].copy_from_slice(b"card");
         entry.str_pnp_string[..3].copy_from_slice(b"PCI");
         let line = describe_raw_entry(0, &entry);
+        // A populated row keeps the plain field format, untagged.
         assert_eq!(
             line,
             "[0] index=2 bus=8 device=0 function=0 vendor=1002 name=\"card\" pnp=\"PCI\""
         );
+    }
+
+    #[test]
+    fn raw_rows_carry_their_state_so_the_dump_is_decisive() {
+        // The poison fill exists so the eventual real-hardware dump can
+        // settle whether a non-populated row was memset by the driver
+        // or never written; the per-row tag is where that distinction
+        // becomes visible to the operator.
+        assert_eq!(
+            describe_raw_entry(1, &ffi::AdapterInfo::default()),
+            "[1] BLANK (driver memset, not populated)"
+        );
+        assert_eq!(
+            describe_raw_entry(2, &ffi::AdapterInfo::poisoned()),
+            "[2] UNTOUCHED (poison intact, driver never wrote)"
+        );
+        let line = describe_raw_entry(3, &garbled_row(7));
+        assert!(line.starts_with("[3] GARBLED index=7"), "{line}");
+        // The garbage bytes survive, lossily, as evidence.
+        assert!(line.contains("pnp="), "{line}");
     }
 }
