@@ -159,11 +159,10 @@ fn check_adl_adapters(_ctx: &CheckCtx) -> CheckResult {
                 let parsed = adapters::parse_adapters(&populated);
                 let groups = adapters::group_by_card(&parsed);
                 CheckResult::Pass(format!(
-                    "{} adapter row(s), {} populated, across {} physical card(s); {}",
+                    "{} adapter row(s), {} populated, across {} physical card(s); {dump}",
                     rows.len(),
                     populated.len(),
                     groups.len(),
-                    dump
                 ))
             }
         }

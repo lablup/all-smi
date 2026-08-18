@@ -236,32 +236,62 @@ fn plausible_bdf(adapter: &AdlAdapter) -> bool {
         && (0..=7).contains(&adapter.function)
 }
 
+/// Whether two ADL `strPNPString` values name the same physical device.
+///
+/// ADL does not repeat one instance path across a card's rows. Observed
+/// on an AMD Radeon(TM) 8060S (driver 32.0.31035.1003): the primary row
+/// carries the base device instance path, the path WMI reports as
+/// `PNPDeviceID`, and each additional display-output row carries that
+/// same path with a `&02`, `&03`, ... suffix appended. So sameness is
+/// "one extends the other at a separator", not equality.
+///
+/// The `&` boundary is load-bearing. Without it two genuinely distinct
+/// paths that merely share a prefix, `...&0&0041` and `...&0&00410`,
+/// would read as one card. Comparison is ASCII-case-insensitive because
+/// WMI and ADL do not agree on case.
+fn shares_device_instance(a: &str, b: &str) -> bool {
+    let (short, long) = if a.len() <= b.len() { (a, b) } else { (b, a) };
+    let (short, long) = (short.as_bytes(), long.as_bytes());
+    if !long[..short.len()].eq_ignore_ascii_case(short) {
+        return false;
+    }
+    long.len() == short.len() || long[short.len()] == b'&'
+}
+
 /// Group adapter rows into one [`CardGroup`] per physical card.
 ///
 /// Groups are sorted by bus/device/function and their indices sorted
 /// ascending, so the output is deterministic regardless of the order
 /// the driver enumerated in.
 ///
-/// A group whose rows carry two different non-empty PNP instance paths
+/// A group whose rows carry two unrelated non-empty PNP instance paths
 /// is dropped rather than returned. Grouping trusts the PCI
 /// bus/device/function to identify a physical card, so a driver that
 /// leaves those fields unfilled collapses every card into one group.
 /// The caller then samples telemetry from the first index of the group
 /// that answers PMLog, which can be a different physical card's index,
 /// and one card's temperature, power, and fan would be reported for
-/// another GPU with nothing in the output saying so. Two different
+/// another GPU with nothing in the output saying so. Two unrelated
 /// instance paths under one PCI address is the observable signature of
 /// that state, and dropping the group is the same answer the rest of
-/// this module gives everywhere else: decline rather than guess. Rows
-/// of one real card share their instance path; a secondary
-/// display-output row may leave it blank, which is backfilled and is
-/// not a conflict, and case differences are not a conflict either,
-/// since WMI and ADL do not agree on case.
+/// this module gives everywhere else: decline rather than guess.
+///
+/// "Unrelated" is judged by [`shares_device_instance`], not by string
+/// equality: a card's display-output rows extend its base path rather
+/// than repeating it (see that function). A row may also leave the path
+/// blank, which is no evidence either way and is skipped. The group's
+/// own `pnp_string` is the shortest path its rows carried, which is the
+/// base path, and therefore the only form the exact join in
+/// [`plan_attribution`] can match against a WMI `PNPDeviceID`.
+///
+/// Agreement is judged once per group against that base rather than
+/// pairwise as rows arrive, so the verdict does not depend on which row
+/// the driver enumerated first.
 pub fn group_by_card(adapters: &[AdlAdapter]) -> Vec<CardGroup> {
     let mut groups: Vec<CardGroup> = Vec::new();
-    // Parallel to `groups`: whether the group saw contradictory PNP
-    // strings and therefore cannot be trusted to be one card.
-    let mut conflicting: Vec<bool> = Vec::new();
+    // Parallel to `groups`: every non-empty instance path the group's
+    // rows carried, checked for agreement once the group is complete.
+    let mut paths: Vec<Vec<String>> = Vec::new();
     for adapter in adapters {
         if !plausible_bdf(adapter) {
             continue;
@@ -271,22 +301,14 @@ pub fn group_by_card(adapters: &[AdlAdapter]) -> Vec<CardGroup> {
                 && group.device == adapter.device
                 && group.function == adapter.function
         });
-        match existing {
+        let position = match existing {
             Some(position) => {
                 let group = &mut groups[position];
                 group.indices.push(adapter.index);
-                // Prefer any row that actually carries the string; a
-                // secondary display-output row can leave one blank.
-                if !adapter.pnp_string.is_empty() {
-                    if group.pnp_string.is_empty() {
-                        group.pnp_string = adapter.pnp_string.clone();
-                    } else if !group.pnp_string.eq_ignore_ascii_case(&adapter.pnp_string) {
-                        conflicting[position] = true;
-                    }
-                }
                 if group.adapter_name.is_empty() && !adapter.adapter_name.is_empty() {
                     group.adapter_name = adapter.adapter_name.clone();
                 }
+                position
             }
             None => {
                 groups.push(CardGroup {
@@ -294,17 +316,35 @@ pub fn group_by_card(adapters: &[AdlAdapter]) -> Vec<CardGroup> {
                     device: adapter.device,
                     function: adapter.function,
                     adapter_name: adapter.adapter_name.clone(),
-                    pnp_string: adapter.pnp_string.clone(),
+                    // Resolved below, once every row of this group has
+                    // been seen and the shortest path is known.
+                    pnp_string: String::new(),
                     indices: vec![adapter.index],
                 });
-                conflicting.push(false);
+                paths.push(Vec::new());
+                groups.len() - 1
             }
+        };
+        if !adapter.pnp_string.is_empty() {
+            paths[position].push(adapter.pnp_string.clone());
         }
     }
     let mut groups: Vec<CardGroup> = groups
         .into_iter()
-        .zip(conflicting)
-        .filter_map(|(group, conflicted)| (!conflicted).then_some(group))
+        .zip(paths)
+        .filter_map(|(mut group, paths)| {
+            // No row carried a path: nothing contradicts anything, so
+            // the group survives with an empty `pnp_string` that simply
+            // matches no GPU downstream, exactly as before.
+            let Some(base) = paths.iter().min_by_key(|path| path.len()) else {
+                return Some(group);
+            };
+            if !paths.iter().all(|path| shares_device_instance(base, path)) {
+                return None;
+            }
+            group.pnp_string = base.clone();
+            Some(group)
+        })
         .collect();
     for group in &mut groups {
         group.indices.sort_unstable();
@@ -503,6 +543,96 @@ mod tests {
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].indices, vec![0, 1, 2]);
         assert_eq!(groups[0].pnp_string, DGPU_PNP);
+    }
+
+    // Observed on a real host, 2026-08-18: AMD Radeon(TM) 8060S
+    // Graphics (Strix Halo APU), driver 32.0.31035.1003, Windows 11.
+    // ADL enumerated five rows for the single physical card, all
+    // sharing bus 189 / device 0 / function 0, but each secondary
+    // display-output row carried a *distinct* instance path: the base
+    // path with an `&02`..`&05` suffix appended. Not blank, not merely
+    // case-differing, genuinely different -- which is the one shape
+    // `group_by_card` treats as a conflict and drops.
+    const REAL_8060S_BASE: &str = r"PCI\VEN_1002&DEV_1586&SUBSYS_B0261F4C&REV_C1\4&2368981F&0&0041";
+
+    #[test]
+    fn real_display_output_rows_do_not_dissolve_their_card() {
+        let mut adapters = vec![adapter(0, (189, 0, 0), REAL_8060S_BASE)];
+        let suffixed: Vec<String> = (2..=5).map(|n| format!("{REAL_8060S_BASE}&0{n}")).collect();
+        for (offset, pnp) in suffixed.iter().enumerate() {
+            adapters.push(adapter(offset as i32 + 1, (189, 0, 0), pnp));
+        }
+        let groups = group_by_card(&adapters);
+        assert_eq!(
+            groups.len(),
+            1,
+            "five ADL rows of one physical card must yield one group"
+        );
+        assert_eq!(groups[0].indices, vec![0, 1, 2, 3, 4]);
+        // The base path is the one WMI reports as PNPDeviceID, so it is
+        // the only value the exact join in `plan_attribution` can match.
+        assert_eq!(groups[0].pnp_string, REAL_8060S_BASE);
+    }
+
+    #[test]
+    fn the_base_path_wins_however_the_driver_enumerated_the_rows() {
+        // Display-output rows first, base path last. Grouping decides
+        // against the shortest path once the group is complete, so the
+        // verdict does not depend on enumeration order.
+        let second = format!("{REAL_8060S_BASE}&02");
+        let third = format!("{REAL_8060S_BASE}&03");
+        let adapters = vec![
+            adapter(1, (189, 0, 0), &second),
+            adapter(2, (189, 0, 0), &third),
+            adapter(0, (189, 0, 0), REAL_8060S_BASE),
+        ];
+        let groups = group_by_card(&adapters);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].indices, vec![0, 1, 2]);
+        assert_eq!(groups[0].pnp_string, REAL_8060S_BASE);
+    }
+
+    #[test]
+    fn a_shared_prefix_that_is_not_a_path_boundary_is_still_a_conflict() {
+        // `...&0&0041` and `...&0&00410` are different devices that
+        // happen to share a prefix. Only an extension at a `&` boundary
+        // is a display-output sibling, so these must not merge.
+        let lookalike = format!("{REAL_8060S_BASE}0");
+        let adapters = vec![
+            adapter(0, (189, 0, 0), REAL_8060S_BASE),
+            adapter(1, (189, 0, 0), &lookalike),
+        ];
+        assert!(group_by_card(&adapters).is_empty());
+    }
+
+    #[test]
+    fn display_output_rows_no_longer_block_multi_gpu_attribution() {
+        // The configuration this feature exists for, in the row shape
+        // real hardware produces: an APU and a dGPU, each enumerating a
+        // base row plus a display-output row. Before grouping keyed on
+        // the base path, both groups were dropped as conflicting and
+        // this returned `Decline`, which made the whole feature inert.
+        let apu_second = format!("{APU_PNP}&02");
+        let dgpu_second = format!("{DGPU_PNP}&02");
+        let adapters = vec![
+            adapter(0, (4, 0, 0), APU_PNP),
+            adapter(1, (4, 0, 0), &apu_second),
+            adapter(2, (8, 0, 0), DGPU_PNP),
+            adapter(3, (8, 0, 0), &dgpu_second),
+        ];
+        assert_eq!(
+            plan_attribution(&[DGPU_PNP, APU_PNP], Some(&adapters)),
+            AttributionPlan::PerCard(vec![
+                CardMatch {
+                    gpu_index: 0,
+                    adl_indices: vec![2, 3],
+                },
+                CardMatch {
+                    gpu_index: 1,
+                    adl_indices: vec![0, 1],
+                },
+            ])
+        );
     }
 
     #[test]
