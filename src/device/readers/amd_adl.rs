@@ -32,21 +32,28 @@
 //! right blind, for hardware that predates the datacentre and workstation
 //! cards all-smi targets. A pre-Vega card keeps the WMI and PDH baseline.
 //!
-//! ## Scope: one AMD GPU
+//! ## Scope: attribution across cards
 //!
-//! ADL identifies adapters by an index that does not map to a card
-//! without `AdapterInfo`, a 1568-byte struct whose layout this module
-//! deliberately refuses to declare blind (see [`ffi`]). Worse, one card
-//! exposes several adapter indices, one per display output, all
-//! reporting identical telemetry, so an index cannot even be
-//! deduplicated without it.
+//! ADL identifies adapters by an index, and one card exposes several
+//! indices, one per display output, all reporting identical telemetry.
+//! `AdapterInfo` (see [`ffi`]) ties each index to a physical card by
+//! PCI bus/device/function and carries the Windows PNP string, which
+//! is the same `PNPDeviceID` the reader stores as the GPU uuid, so on
+//! a multi-GPU host the join is exact. See [`adapters`] for the
+//! grouping and matching rules.
 //!
-//! Rather than guess, augmentation only runs when the reader found
-//! exactly one AMD GPU. That covers the overwhelming majority of real
-//! machines, and on a multi-AMD-GPU host the result is the honest DXGI
-//! and PDH baseline instead of one card's temperature reported against
-//! another. This mirrors the conclusion the #346 review reached about
-//! adapter matching: declining to attribute beats attributing wrongly.
+//! The whole scheme is conditioned on the runtime layout verification
+//! in [`ffi::AdapterInfoArray::validated`]: the `AdapterInfo` layout is
+//! transcribed blind (nothing in CI compiles for Windows), so rows are
+//! only trusted after their string fields prove the layout at runtime.
+//! If verification, the ADL call, or the matching fails, multi-GPU
+//! hosts keep the honest DXGI and PDH baseline; and a machine with
+//! exactly one AMD GPU never consults `AdapterInfo` at all, keeping
+//! the behavior it had before #353. Either way the failure mode stays
+//! the one the #346 review settled on: declining to attribute beats
+//! attributing wrongly. The `amd.adl.adapters` doctor check dumps the
+//! raw rows so both the layout and the matching can be confirmed from
+//! a real machine.
 //!
 //! ## Cost
 //!
@@ -58,6 +65,7 @@
 //! out of its deepest idle power state; all-smi's intervals start at one
 //! second, which is well clear of that.
 
+pub mod adapters;
 pub mod ffi;
 pub mod sensors;
 
@@ -67,15 +75,6 @@ pub mod loader;
 use crate::device::readers::windows_gpu_perf::note_metrics_source;
 use crate::device::types::{GpuInfo, MAX_GPU_FAN_RPM};
 use sensors::AdlReadout;
-
-/// Whether an ADL readout can be attributed to a specific card.
-///
-/// See the module docs: without `AdapterInfo` an ADL adapter index
-/// cannot be tied to a GPU, so attribution is only safe when there is
-/// nothing to confuse it with.
-pub fn can_attribute(amd_gpu_count: usize) -> bool {
-    amd_gpu_count == 1
-}
 
 /// Layer an ADL readout onto a GPU that already carries the WMI, DXGI,
 /// and PDH baseline.
@@ -194,18 +193,52 @@ pub fn apply_to_gpu_info(gpu: &mut GpuInfo, readout: &AdlReadout) {
 /// Sample ADL and layer the result onto the reader's GPUs.
 ///
 /// Called after the vendor-neutral layer so ADL's readings win. A no-op
-/// when ADL is unavailable, when no adapter exposes PMLog, or when the
-/// machine has more than one AMD GPU.
+/// when ADL is unavailable or when no adapter exposes PMLog. On a
+/// single-GPU machine the process-wide sample is attributed directly,
+/// exactly as before #353; on a multi-GPU machine each GPU is
+/// augmented only when [`adapters::plan_attribution`] matched it to a
+/// card exactly, and a failed match or failed `AdapterInfo` layout
+/// verification leaves the DXGI and PDH baseline untouched.
 #[cfg(target_os = "windows")]
 pub fn augment(gpus: &mut [GpuInfo]) {
-    if !can_attribute(gpus.len()) {
-        return;
-    }
-    let Some(output) = loader::sample() else {
-        return;
+    use adapters::AttributionPlan;
+
+    // Only a multi-GPU host needs the adapter inventory; the sole-GPU
+    // path must not depend on `AdapterInfo` in any way, including not
+    // paying for the call.
+    let inventory = if gpus.len() > 1 {
+        loader::adapter_inventory()
+    } else {
+        None
     };
-    let readout = sensors::extract(&output);
-    apply_to_gpu_info(&mut gpus[0], &readout);
+    let uuids: Vec<&str> = gpus.iter().map(|gpu| gpu.uuid.as_str()).collect();
+    match adapters::plan_attribution(&uuids, inventory.as_deref()) {
+        AttributionPlan::SoleGpu => {
+            let Some(output) = loader::sample() else {
+                return;
+            };
+            let readout = sensors::extract(&output);
+            apply_to_gpu_info(&mut gpus[0], &readout);
+        }
+        AttributionPlan::PerCard(matches) => {
+            for card in matches {
+                // Every index of a card reports the same telemetry, so
+                // take the first one that answers; a card where none
+                // answers (a pre-Vega APU next to a modern dGPU) keeps
+                // its baseline.
+                let Some(output) = card
+                    .adl_indices
+                    .iter()
+                    .find_map(|&index| loader::sample_adapter(index))
+                else {
+                    continue;
+                };
+                let readout = sensors::extract(&output);
+                apply_to_gpu_info(&mut gpus[card.gpu_index], &readout);
+            }
+        }
+        AttributionPlan::Decline => {}
+    }
 }
 
 /// Non-Windows builds have no ADL. The stub keeps the surrounding logic
@@ -473,17 +506,42 @@ mod tests {
     }
 
     #[test]
-    fn attribution_is_refused_for_anything_but_a_single_amd_gpu() {
-        assert!(can_attribute(1));
-        // Zero cards is nothing to attribute to; two or more cannot be
-        // told apart without AdapterInfo.
-        assert!(!can_attribute(0));
-        assert!(!can_attribute(2));
-        assert!(!can_attribute(4));
+    fn a_single_gpu_never_depends_on_adapterinfo() {
+        // The regression pin for pre-#353 behavior: with exactly one
+        // AMD GPU the plan is SoleGpu whether the adapter inventory is
+        // present, absent, or failed layout verification, so the
+        // single-GPU machine that worked before AdapterInfo existed
+        // keeps working when it lies. The matching-level counterpart
+        // tests live in `adapters`.
+        use adapters::{AttributionPlan, plan_attribution};
+
+        let gpu = baseline_gpu();
+        let uuids = [gpu.uuid.as_str()];
+        assert_eq!(plan_attribution(&uuids, None), AttributionPlan::SoleGpu);
+        assert_eq!(
+            plan_attribution(&uuids, Some(&[])),
+            AttributionPlan::SoleGpu
+        );
+    }
+
+    #[test]
+    fn multi_gpu_attribution_declines_without_a_validated_inventory() {
+        // Two AMD GPUs and no validated AdapterInfo rows (unavailable
+        // entry point, failed call, or failed layout verification all
+        // arrive here as `None`): the reader must decline rather than
+        // guess, exactly as it did before #353.
+        use adapters::{AttributionPlan, plan_attribution};
+
+        let uuids = ["PCI\\VEN_1002&DEV_744C", "PCI\\VEN_1002&DEV_164E"];
+        assert_eq!(plan_attribution(&uuids, None), AttributionPlan::Decline);
     }
 
     #[test]
     fn augment_is_inert_when_attribution_is_refused() {
+        // On a Linux test runner the stub is inert; on a Windows dev
+        // machine without a validated adapter inventory the multi-GPU
+        // path declines. Either way two baseline GPUs must come back
+        // untouched.
         let mut gpus = vec![baseline_gpu(), baseline_gpu()];
         augment(&mut gpus);
         for gpu in &gpus {
