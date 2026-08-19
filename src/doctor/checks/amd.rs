@@ -30,6 +30,7 @@ static CHECKS: &[&Check] = &[
     &ADL_LIBRARY,
     &ADL_SENSORS,
     &ADL_ADAPTERS,
+    &ADL_PER_ADAPTER,
 ];
 
 pub fn checks() -> &'static [&'static Check] {
@@ -106,6 +107,13 @@ static ADL_ADAPTERS: Check = Check {
     title: "AMD ADL adapter inventory",
     severity_on_fail: Severity::Info,
     run: check_adl_adapters,
+};
+
+static ADL_PER_ADAPTER: Check = Check {
+    id: "amd.adl.per_adapter",
+    title: "AMD ADL per-adapter PMLog sampling",
+    severity_on_fail: Severity::Info,
+    run: check_adl_per_adapter,
 };
 
 /// Dump the raw `AdapterInfo` rows: index, PCI bus/device/function,
@@ -194,6 +202,191 @@ fn check_adl_adapters(_ctx: &CheckCtx) -> CheckResult {
     }
 }
 
+/// Render an `AdlReadout` the one way both ADL sensor checks print it.
+///
+/// `amd.adl.sensors` reports the scanned adapter and `amd.adl.per_adapter`
+/// reports every adapter index. A field-verification dump is only
+/// comparable across the two if they render the same struct identically,
+/// so the formatting lives here rather than at each call site.
+#[cfg(target_os = "windows")]
+fn describe_readout(readout: &crate::device::readers::amd_adl::sensors::AdlReadout) -> String {
+    format!(
+        "edge={:?}C hotspot={:?}C mem={:?}C power={:?}W fan={:?}rpm gfx={:?}MHz \
+         mclk={:?}MHz activity={:?}%",
+        readout.temperature_edge_c,
+        readout.temperature_hotspot_c,
+        readout.temperature_mem_c,
+        readout.power_w,
+        readout.fan_rpm,
+        readout.clock_gfx_mhz,
+        readout.clock_mem_mhz,
+        readout.activity_gfx_pct,
+    )
+}
+
+/// Sample PMLog against every ADL adapter index, grouped by physical card.
+///
+/// This is the field-verification path for the multi-GPU attribution
+/// machinery, the same role `amd.adl.sensors` plays for the sensor index
+/// mapping and `amd.adl.adapters` plays for the `AdapterInfo` layout.
+/// Three pieces of that machinery are both `cfg(target_os = "windows")`
+/// and unreachable on a single-GPU host, because `plan_attribution` takes
+/// its `SoleGpu` arm before any of them execute: `loader::adapter_inventory`,
+/// `loader::sample_adapter`, and the `PerCard` arm of `augment`. Nothing in
+/// CI reaches them either, since no job compiles all-smi for Windows. This
+/// check puts the first two on a reachable code path and prints what the
+/// third would consume.
+///
+/// The question it exists to answer is whether two physically distinct
+/// cards report distinct telemetry, the outstanding acceptance criterion
+/// tracked in issue #370. With two or more cards the summary states the
+/// verdict outright. With one card it says so instead of implying a
+/// result, because several indices of a single card agreeing is not
+/// evidence either way about two cards.
+fn check_adl_per_adapter(_ctx: &CheckCtx) -> CheckResult {
+    #[cfg(target_os = "windows")]
+    {
+        use crate::device::readers::amd_adl::{adapters, loader, sensors};
+
+        let Some(inventory) = loader::adapter_inventory() else {
+            // `adapter_inventory` collapses no-library, no-entry-point,
+            // failed-call, and failed-layout-verification into one
+            // `None`. `amd.adl.adapters` is the check that separates
+            // them, so point there rather than guessing here.
+            return CheckResult::Skip(
+                "no validated adapter inventory; see amd.adl.adapters for which stage declined"
+                    .to_string(),
+            );
+        };
+
+        let groups = adapters::group_by_card(&inventory);
+        if groups.is_empty() {
+            return CheckResult::Warn(
+                format!(
+                    "{} adapter row(s) grouped into 0 physical card(s), so multi-GPU attribution \
+                     would decline",
+                    inventory.len()
+                ),
+                Some(
+                    "please report the amd.adl.adapters dump; the grouping rules in \
+                     device/readers/amd_adl/adapters.rs disagree with this driver"
+                        .to_string(),
+                ),
+            );
+        }
+
+        // One readout per card, in card order, for the distinctness
+        // verdict below. `None` for a card no index answered for.
+        let mut per_card_first: Vec<Option<String>> = Vec::new();
+        let mut answered = 0usize;
+        let mut attempted = 0usize;
+        let mut blocks = Vec::new();
+
+        for (slot, group) in groups.iter().enumerate() {
+            let mut first_seen: Option<String> = None;
+            let mut rows = Vec::new();
+            for &index in &group.indices {
+                attempted += 1;
+                let Some(output) = loader::sample_adapter(index) else {
+                    // `augment` takes the first index of a card that
+                    // answers, so a silent index is survivable but is
+                    // exactly what makes that choice order-dependent.
+                    // Name it rather than omitting the row.
+                    rows.push(format!("[{index}] no PMLog answer"));
+                    continue;
+                };
+                answered += 1;
+                let raw = sensors::supported_raw(&output);
+                let readout = sensors::extract(&output);
+                let interpreted = describe_readout(&readout);
+                if first_seen.is_none() {
+                    first_seen = Some(interpreted.clone());
+                }
+                let dump = raw
+                    .iter()
+                    .map(|(sensor, value)| format!("{sensor}={value}"))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                rows.push(format!(
+                    "[{index}] {} sensor(s); {interpreted}; raw: {dump}",
+                    raw.len()
+                ));
+            }
+            per_card_first.push(first_seen);
+            blocks.push(format!(
+                "card {slot} bus={} device={} function={} name={:?} pnp={:?} -> {}",
+                group.bus,
+                group.device,
+                group.function,
+                group.adapter_name,
+                group.pnp_string,
+                rows.join(", ")
+            ));
+        }
+
+        let dump = blocks.join(" | ");
+        if answered == 0 {
+            return CheckResult::Warn(
+                format!(
+                    "no PMLog answer from any of {attempted} adapter index(es) across {} card(s), \
+                     so multi-GPU attribution would find no card to sample. {dump}",
+                    groups.len()
+                ),
+                Some(
+                    "expected on pre-Vega cards, whose sensors live behind the legacy Overdrive \
+                     5/6/7 entry points that all-smi does not implement; otherwise please report \
+                     this dump"
+                        .to_string(),
+                ),
+            );
+        }
+
+        let verdict = per_card_verdict(&per_card_first, groups.len());
+
+        CheckResult::Pass(format!(
+            "{answered}/{attempted} adapter index(es) answered across {} card(s); {verdict}. \
+             {dump}",
+            groups.len()
+        ))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        CheckResult::Skip("ADL is Windows-only".to_string())
+    }
+}
+
+/// The one sentence `amd.adl.per_adapter` exists to produce: do distinct
+/// physical cards report distinct telemetry?
+///
+/// `per_card_first` holds the first answering readout per card, in card
+/// order, with `None` for a card that stayed silent. Comparison is on the
+/// rendered string rather than field by field, so "identical" means
+/// exactly what an operator reads off the dump.
+///
+/// Split out from the check body so it is testable on every platform: the
+/// check itself is Windows-gated and cannot run on the Linux runner, which
+/// is the same reason `adapters::describe_layout_failure` is a free
+/// function.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn per_card_verdict(per_card_first: &[Option<String>], card_count: usize) -> String {
+    if card_count < 2 {
+        return "1 physical card, so per-card differentiation is unobservable on this host \
+                (issue #370 tracks confirming it on a two-card host)"
+            .to_string();
+    }
+    let seen: Vec<&String> = per_card_first.iter().flatten().collect();
+    if seen.len() < 2 {
+        return "fewer than 2 cards answered, so per-card differentiation is undetermined"
+            .to_string();
+    }
+    if seen.windows(2).all(|pair| pair[0] == pair[1]) {
+        return "every card reported an IDENTICAL readout, which on distinct cards would mean the \
+                driver is not separating per-card telemetry; please report this"
+            .to_string();
+    }
+    "cards reported DISTINCT readouts, which is what per-card attribution needs".to_string()
+}
+
 /// Report whether `atiadlxx.dll` loaded and an ADL2 context was created.
 fn check_adl_library(_ctx: &CheckCtx) -> CheckResult {
     #[cfg(target_os = "windows")]
@@ -274,18 +467,7 @@ fn check_adl_sensors(_ctx: &CheckCtx) -> CheckResult {
             .collect::<Vec<_>>()
             .join(" ");
 
-        let interpreted = format!(
-            "edge={:?}C hotspot={:?}C mem={:?}C power={:?}W fan={:?}rpm gfx={:?}MHz \
-             mclk={:?}MHz activity={:?}%",
-            readout.temperature_edge_c,
-            readout.temperature_hotspot_c,
-            readout.temperature_mem_c,
-            readout.power_w,
-            readout.fan_rpm,
-            readout.clock_gfx_mhz,
-            readout.clock_mem_mhz,
-            readout.activity_gfx_pct,
-        );
+        let interpreted = describe_readout(&readout);
 
         let count = raw.len();
         if readout.is_empty() {
@@ -446,7 +628,7 @@ fn check_build_gate(_ctx: &CheckCtx) -> CheckResult {
 
 #[cfg(test)]
 mod tests {
-    use super::LIBAMDGPU_TOP_PINNED_VERSION;
+    use super::{LIBAMDGPU_TOP_PINNED_VERSION, per_card_verdict};
 
     /// `Cargo.toml` is embedded at compile time rather than read from a
     /// runtime path so the test does not depend on the working directory,
@@ -503,6 +685,76 @@ mod tests {
             line.contains("\"="),
             "libamdgpu_top must stay pinned with an exact `=` requirement so the reported ABI \
              version is the resolved one, got: {line}"
+        );
+    }
+
+    fn readout(power_w: f64) -> Option<String> {
+        Some(format!("power=Some({power_w})W"))
+    }
+
+    /// A single card cannot answer the question this check exists for, so
+    /// the verdict must say that rather than reporting agreement as if it
+    /// were evidence. This is the arm every single-GPU host takes, which
+    /// makes it the arm most likely to be read and misread.
+    #[test]
+    fn one_card_reports_the_question_as_unobservable() {
+        let verdict = per_card_verdict(&[readout(32.0)], 1);
+        assert!(
+            verdict.contains("unobservable"),
+            "single-card verdict must not imply a result, got: {verdict}"
+        );
+        assert!(
+            !verdict.contains("IDENTICAL") && !verdict.contains("DISTINCT"),
+            "single-card verdict must claim neither outcome, got: {verdict}"
+        );
+    }
+
+    /// Two cards reporting the same telemetry is the failure this check
+    /// looks for, so it must be named loudly rather than passing quietly.
+    #[test]
+    fn identical_readouts_across_cards_are_called_out() {
+        let verdict = per_card_verdict(&[readout(32.0), readout(32.0)], 2);
+        assert!(
+            verdict.contains("IDENTICAL"),
+            "matching readouts on two cards must be flagged, got: {verdict}"
+        );
+    }
+
+    /// The healthy case: distinct cards, distinct telemetry.
+    #[test]
+    fn distinct_readouts_across_cards_are_the_expected_result() {
+        let verdict = per_card_verdict(&[readout(32.0), readout(11.5)], 2);
+        assert!(
+            verdict.contains("DISTINCT"),
+            "differing readouts on two cards are what attribution needs, got: {verdict}"
+        );
+    }
+
+    /// One differing card is enough to prove the driver separates
+    /// telemetry, even when two other cards happen to agree. A pairwise
+    /// `all` over neighbours would report IDENTICAL here if the differing
+    /// card sat at either end, so the ordering is deliberate.
+    #[test]
+    fn one_differing_card_among_three_still_reads_as_distinct() {
+        let verdict = per_card_verdict(&[readout(32.0), readout(32.0), readout(11.5)], 3);
+        assert!(
+            verdict.contains("DISTINCT"),
+            "any disagreement proves separation, got: {verdict}"
+        );
+    }
+
+    /// Silent cards make the comparison meaningless, so the verdict must
+    /// be undetermined rather than borrowing the one card that answered.
+    #[test]
+    fn a_single_answering_card_leaves_the_verdict_undetermined() {
+        let verdict = per_card_verdict(&[readout(32.0), None], 2);
+        assert!(
+            verdict.contains("undetermined"),
+            "one silent card cannot be compared against, got: {verdict}"
+        );
+        assert!(
+            !verdict.contains("IDENTICAL") && !verdict.contains("DISTINCT"),
+            "an undetermined verdict must claim neither outcome, got: {verdict}"
         );
     }
 }

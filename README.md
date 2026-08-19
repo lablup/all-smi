@@ -606,7 +606,7 @@ Stable check IDs (greppable across versions):
 | `privileges.*` | `privileges.user`, `privileges.root`, `privileges.video_render_group`, `privileges.dev_dri`, `privileges.dev_tenstorrent` |
 | `container.*` | `container.runtime`, `container.cgroup`, `container.k8s_serviceaccount` |
 | `nvidia.*` | `nvidia.nvml.loadable`, `nvidia.smi.binary`, `nvidia.driver.version`, `nvidia.env.visible_devices`, `nvidia.mig.mode` |
-| `amd.*` | `amd.rocm.version`, `amd.libamdgpu_top.abi`, `amd.dri.perms`, `amd.build.target_env`, `amd.adl.library`, `amd.adl.sensors`, `amd.adl.adapters` |
+| `amd.*` | `amd.rocm.version`, `amd.libamdgpu_top.abi`, `amd.dri.perms`, `amd.build.target_env`, `amd.adl.library`, `amd.adl.sensors`, `amd.adl.adapters`, `amd.adl.per_adapter` |
 | `apple.*` | `apple.macos.version`, `apple.silicon`, `apple.smc` |
 | `gaudi.*` | `gaudi.hlsmi`, `gaudi.devices`, `gaudi.driver` |
 | `tpu.*` | `tpu.libtpu`, `tpu.env.name`, `tpu.accel.vendor` |
