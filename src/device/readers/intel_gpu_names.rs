@@ -305,6 +305,7 @@ pub fn classify_intel_architecture(name: &str) -> IntelArchitecture {
 ///
 /// The entries are the SKUs this project already claimed as discrete before
 /// issue #364, kept exactly as they were so nothing regresses.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 const DISCRETE_ARC_MODELS: &[&str] = &[
     // Alchemist (Xe-HPG) desktop
     "a310", "a380", "a580", "a750", "a770", // Battlemage (Xe2) desktop
@@ -317,6 +318,7 @@ const DISCRETE_ARC_MODELS: &[&str] = &[
 /// iGPUs. Lunar Lake's `V` suffix used to escape the old heuristic by
 /// accident (`140v` is digits-then-letter, which failed its digits-only
 /// test); it is named explicitly here so the escape is deliberate.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 const INTEGRATED_ARC_MODELS: &[&str] = &["130v", "140v", "b390"];
 
 /// Panther Lake iGPU model numbers.
@@ -360,6 +362,7 @@ fn is_arc_model_token(token: &str) -> bool {
 /// leaves the field to the authoritative source (the DXGI memory layout)
 /// instead of asserting a variant it cannot support. Guessing here is
 /// exactly what reported the integrated B390 as `Discrete`.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub fn classify_intel_variant(name: &str) -> Option<&'static str> {
     let lower = name.to_lowercase();
     if !lower.contains("arc") {

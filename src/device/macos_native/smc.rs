@@ -261,8 +261,13 @@ pub struct TempKeyScan {
     /// Discovered GPU sensor keys, in key-table order.
     pub gpu_keys: Vec<String>,
     /// Key-table indices actually read, including binary-search probes.
+    ///
+    /// Diagnostic only, like the other two counters here: the binary
+    /// target never reads it, so it needs the same `dead_code` waiver.
+    #[allow(dead_code)]
     pub scanned_keys: u32,
     /// Total number of keys the SMC reports.
+    #[allow(dead_code)]
     pub total_keys: u32,
     /// Whether the sorted-table fast path produced this result. False means
     /// the exhaustive fallback ran. Diagnostic only; no metric depends on it.
