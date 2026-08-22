@@ -99,9 +99,23 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 use std::time::Duration;
 
+/// The process-global manager together with the number of live handles that
+/// asked for it to be kept alive.
+#[derive(Default)]
+struct ManagerSlot {
+    manager: Option<Arc<NativeMetricsManager>>,
+    /// Outstanding [`acquire_native_metrics_manager`] calls not yet matched by
+    /// a [`release_native_metrics_manager`].
+    ///
+    /// Only owning handles participate. [`initialize_native_metrics_manager`]
+    /// deliberately does not, because the readers that call it have no
+    /// teardown point of their own and would pin the manager forever.
+    handles: usize,
+}
+
 /// Global singleton for NativeMetricsManager
-static NATIVE_METRICS_MANAGER: Lazy<Mutex<Option<Arc<NativeMetricsManager>>>> =
-    Lazy::new(|| Mutex::new(None));
+static NATIVE_METRICS_MANAGER: Lazy<Mutex<ManagerSlot>> =
+    Lazy::new(|| Mutex::new(ManagerSlot::default()));
 
 /// Track if first data has been received
 static FIRST_DATA_RECEIVED: AtomicBool = AtomicBool::new(false);
@@ -477,32 +491,97 @@ unsafe impl Sync for NativeMetricsManager {}
 pub fn initialize_native_metrics_manager(
     interval_ms: u64,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut manager_guard = NATIVE_METRICS_MANAGER.lock().map_err(|_| "Lock poisoned")?;
+    let mut slot = NATIVE_METRICS_MANAGER.lock().map_err(|_| "Lock poisoned")?;
+    ensure_manager(&mut slot, interval_ms)
+}
 
-    if manager_guard.is_none() {
-        let manager = NativeMetricsManager::new(interval_ms)?;
+/// Initialize the manager if needed and register an owning handle.
+///
+/// Pairs with [`release_native_metrics_manager`]. Use this instead of
+/// [`initialize_native_metrics_manager`] wherever the caller has a defined
+/// lifetime and tears the manager down when it ends, so that one owner ending
+/// does not pull the manager out from under another that is still running
+/// (issue #374).
+///
+/// The handle is registered only when initialization succeeds, so a caller
+/// that treats an error as "no manager to release" stays balanced.
+///
+/// Unused by the binary, which owns the manager for the whole process and
+/// tears it down with [`shutdown_native_metrics_manager`] instead.
+#[allow(dead_code)]
+pub fn acquire_native_metrics_manager(interval_ms: u64) -> Result<(), Box<dyn std::error::Error>> {
+    let mut slot = NATIVE_METRICS_MANAGER.lock().map_err(|_| "Lock poisoned")?;
+    ensure_manager(&mut slot, interval_ms)?;
+    slot.handles += 1;
+    Ok(())
+}
 
-        // Pre-collect first data sample to warm up the cache
-        // This ensures all subsequent calls from readers use cached data
-        let _ = manager.collect_once();
+/// Release an owning handle taken by [`acquire_native_metrics_manager`],
+/// tearing the manager down once the last one is gone.
+#[allow(dead_code)]
+pub fn release_native_metrics_manager() {
+    let Ok(mut slot) = NATIVE_METRICS_MANAGER.lock() else {
+        return;
+    };
 
-        *manager_guard = Some(Arc::new(manager));
+    slot.handles = slot.handles.saturating_sub(1);
+    if slot.handles > 0 {
+        return;
     }
 
+    let manager = slot.manager.take();
+    drop(slot);
+    finish_shutdown(manager);
+}
+
+/// Create the manager into `slot` if it is not there yet.
+fn ensure_manager(
+    slot: &mut ManagerSlot,
+    interval_ms: u64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if slot.manager.is_some() {
+        return Ok(());
+    }
+
+    let manager = NativeMetricsManager::new(interval_ms)?;
+
+    // Pre-collect first data sample to warm up the cache
+    // This ensures all subsequent calls from readers use cached data
+    let _ = manager.collect_once();
+
+    slot.manager = Some(Arc::new(manager));
     Ok(())
 }
 
 /// Get the global native metrics manager instance
 pub fn get_native_metrics_manager() -> Option<Arc<NativeMetricsManager>> {
-    NATIVE_METRICS_MANAGER.lock().ok()?.clone()
+    NATIVE_METRICS_MANAGER.lock().ok()?.manager.clone()
 }
 
 /// Shutdown and cleanup the native metrics manager
+///
+/// Unconditional: it tears the manager down and forgets every outstanding
+/// handle, so it belongs at process exit rather than at the end of one owner's
+/// life. Owners with a defined lifetime should use
+/// [`acquire_native_metrics_manager`] / [`release_native_metrics_manager`].
 #[allow(dead_code)]
 pub fn shutdown_native_metrics_manager() {
-    if let Ok(mut guard) = NATIVE_METRICS_MANAGER.lock()
-        && let Some(manager) = guard.take()
-    {
+    let manager = match NATIVE_METRICS_MANAGER.lock() {
+        Ok(mut slot) => {
+            slot.handles = 0;
+            slot.manager.take()
+        }
+        Err(_) => None,
+    };
+    finish_shutdown(manager);
+}
+
+/// Stop `manager`, if there is one, with the singleton lock already released.
+///
+/// [`NativeMetricsManager::shutdown`] joins the collector thread, so it must
+/// not run under the lock that thread's collaborators may need.
+fn finish_shutdown(manager: Option<Arc<NativeMetricsManager>>) {
+    if let Some(manager) = manager {
         manager.shutdown();
     }
     FIRST_DATA_RECEIVED.store(false, Ordering::Relaxed);

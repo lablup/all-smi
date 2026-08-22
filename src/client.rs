@@ -59,9 +59,7 @@ use crate::error::Result;
 use crate::storage::{StorageInfo, StorageReader, create_storage_reader};
 
 #[cfg(target_os = "macos")]
-use crate::device::macos_native::{
-    initialize_native_metrics_manager, shutdown_native_metrics_manager,
-};
+use crate::device::macos_native::{acquire_native_metrics_manager, release_native_metrics_manager};
 
 #[cfg(target_os = "linux")]
 use crate::device::hlsmi::{initialize_hlsmi_manager, shutdown_hlsmi_manager};
@@ -211,7 +209,7 @@ impl AllSmi {
         #[cfg(target_os = "macos")]
         let macos_initialized = {
             if crate::device::is_apple_silicon() {
-                match initialize_native_metrics_manager(config.sample_interval_ms) {
+                match acquire_native_metrics_manager(config.sample_interval_ms) {
                     Ok(()) => true,
                     Err(e) => {
                         // Log but don't fail - some metrics may still work
@@ -710,7 +708,7 @@ impl Drop for AllSmi {
         // Cleanup platform-specific managers
         #[cfg(target_os = "macos")]
         if self._macos_initialized {
-            shutdown_native_metrics_manager();
+            release_native_metrics_manager();
         }
 
         #[cfg(target_os = "linux")]
