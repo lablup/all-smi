@@ -179,18 +179,10 @@ pub fn snapshot() -> Snapshot {
         .into_iter()
         .map(|adapter| {
             let luid = adapter.identity.luid;
-            // Integrated graphics report no dedicated pool at all and
-            // address system RAM instead, so falling back to
-            // `SharedSystemMemory` is the difference between a correct
-            // capacity and leaving the wrong 32-bit WMI value in place
-            // for every Intel iGPU.
-            let (total_memory, memory_is_shared) = if adapter.dedicated_video_memory > 0 {
-                (Some(adapter.dedicated_video_memory), false)
-            } else if adapter.shared_system_memory > 0 {
-                (Some(adapter.shared_system_memory), true)
-            } else {
-                (None, false)
-            };
+            let (total_memory, memory_is_shared) = resolve_adapter_memory(
+                adapter.dedicated_video_memory,
+                adapter.shared_system_memory,
+            );
             AdapterMetrics {
                 identity: adapter.identity,
                 total_memory,
@@ -322,6 +314,52 @@ pub fn note_metrics_source(detail: &mut HashMap<String, String>, source: &str) {
 /// shape of a GitHub-hosted Windows runner) upgrades VRAM and leaves
 /// utilization at the baseline rather than zeroing anything that was
 /// already known.
+/// Smallest dedicated pool that can plausibly be a discrete card's own
+/// VRAM.
+///
+/// The previous rule was "a non-zero dedicated pool means a discrete
+/// card", written from the premise that integrated graphics report no
+/// dedicated pool at all. That premise is false on current hardware:
+/// modern Intel and AMD integrated parts publish a small stolen-memory
+/// carve-out through DXGI, and 128 MiB is the classic value. The old rule
+/// therefore took the carve-out as the whole capacity, which is what
+/// reported an Arc B390 as a 128 MiB card (issue #364).
+///
+/// 1 GiB separates the two populations with room on both sides. No
+/// discrete card has ever shipped with less, and the stock carve-outs are
+/// 64/128/256/512 MiB. A machine whose firmware is configured for a large
+/// carve-out (some AMD APUs allow 2 GiB or more) lands above the floor and
+/// is reported at that size, which is the amount the operator actually
+/// set aside.
+const MIN_DISCRETE_DEDICATED_BYTES: u64 = 1024 * 1024 * 1024;
+
+/// Choose an adapter's total memory and say whether it is a shared
+/// aperture rather than a dedicated pool.
+///
+/// Split out of [`build_adapter_metrics`] so the decision is reachable by
+/// a test runner. It drives every Windows GPU this project reports:
+/// `intel_gpu_windows` and `amd_windows` both reach it through
+/// [`augment_gpus`], so a change here moves Radeon APUs as well as Intel
+/// iGPUs.
+fn resolve_adapter_memory(dedicated: u64, shared: u64) -> (Option<u64>, bool) {
+    if dedicated >= MIN_DISCRETE_DEDICATED_BYTES {
+        return (Some(dedicated), false);
+    }
+    if shared > 0 {
+        // Either a carve-out below the floor or no dedicated pool at all.
+        // The shared aperture is the memory the device can actually
+        // address, so it is the honest capacity.
+        return (Some(shared), true);
+    }
+    if dedicated > 0 {
+        // Below the floor with nothing shared to fall back to. Report
+        // what the adapter claims rather than nothing; a small pool is
+        // still better than an unknown one.
+        return (Some(dedicated), false);
+    }
+    (None, false)
+}
+
 pub fn apply_to_gpu_info(gpu: &mut GpuInfo, metrics: &AdapterMetrics) {
     let mut touched_dxgi = false;
     let mut touched_pdh = false;
@@ -337,6 +375,20 @@ pub fn apply_to_gpu_info(gpu: &mut GpuInfo, metrics: &AdapterMetrics) {
             }
             .to_string(),
         );
+        // Fill the discrete/integrated variant when the caller could not
+        // decide from the device name. Whether the adapter owns a
+        // dedicated pool or addresses a shared aperture is the definition
+        // of the distinction, so DXGI answers it directly rather than by
+        // inference from a marketing string. `or_insert_with` keeps a
+        // name-derived answer that the reader already trusted; only the
+        // "unknown numbered part" case reaches this (issue #364).
+        gpu.detail.entry("Variant".to_string()).or_insert_with(|| {
+            if metrics.memory_is_shared {
+                "Integrated".to_string()
+            } else {
+                "Discrete".to_string()
+            }
+        });
         touched_dxgi = true;
     }
 
@@ -559,6 +611,88 @@ pub fn gpu_process_row(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const MIB: u64 = 1024 * 1024;
+    const GIB: u64 = 1024 * MIB;
+
+    // ---------- issue #364: the dedicated-pool premise ----------
+
+    /// The reported defect. An Arc B390 publishes a 128 MiB DXGI
+    /// carve-out, the old rule took any non-zero dedicated pool as the
+    /// card's VRAM, and the device reported as a 128 MiB card.
+    #[test]
+    fn small_carve_out_reports_the_shared_aperture() {
+        let (total, shared) = resolve_adapter_memory(128 * MIB, 16 * GIB);
+        assert_eq!(total, Some(16 * GIB));
+        assert!(shared, "a carve-out below the floor is a shared aperture");
+    }
+
+    /// The same premise breaks on AMD: `amd_windows` reaches this through
+    /// `augment_gpus`, so every Radeon APU on Windows moves with it. The
+    /// issue calls this out as test-plan scope rather than a review
+    /// surprise.
+    #[test]
+    fn amd_apu_carve_out_reports_the_shared_aperture() {
+        for carve_out in [64 * MIB, 128 * MIB, 256 * MIB, 512 * MIB] {
+            let (total, shared) = resolve_adapter_memory(carve_out, 32 * GIB);
+            assert_eq!(total, Some(32 * GIB), "carve-out {carve_out} bytes");
+            assert!(shared, "carve-out {carve_out} bytes");
+        }
+    }
+
+    /// A discrete card keeps its dedicated pool. This is the behaviour the
+    /// old rule got right and the fix must not trade away.
+    #[test]
+    fn discrete_card_keeps_its_dedicated_pool() {
+        for vram in [2 * GIB, 8 * GIB, 12 * GIB, 24 * GIB] {
+            let (total, shared) = resolve_adapter_memory(vram, 16 * GIB);
+            assert_eq!(total, Some(vram), "vram {vram} bytes");
+            assert!(!shared, "vram {vram} bytes");
+        }
+    }
+
+    /// An integrated part that reports no dedicated pool at all: the case
+    /// the original rule was written for, unchanged.
+    #[test]
+    fn zero_dedicated_still_reports_the_shared_aperture() {
+        let (total, shared) = resolve_adapter_memory(0, 8 * GIB);
+        assert_eq!(total, Some(8 * GIB));
+        assert!(shared);
+    }
+
+    /// A firmware-configured carve-out at or above the floor is what the
+    /// operator set aside, so it is reported as dedicated rather than
+    /// silently replaced by the aperture.
+    #[test]
+    fn large_configured_carve_out_is_taken_at_face_value() {
+        let (total, shared) = resolve_adapter_memory(2 * GIB, 32 * GIB);
+        assert_eq!(total, Some(2 * GIB));
+        assert!(!shared);
+    }
+
+    /// Nothing shared to fall back to: report the small pool rather than
+    /// nothing at all.
+    #[test]
+    fn small_pool_with_no_aperture_is_reported_as_is() {
+        let (total, shared) = resolve_adapter_memory(128 * MIB, 0);
+        assert_eq!(total, Some(128 * MIB));
+        assert!(!shared);
+    }
+
+    #[test]
+    fn no_memory_information_reports_nothing() {
+        assert_eq!(resolve_adapter_memory(0, 0), (None, false));
+    }
+
+    /// The floor itself is inclusive, so the boundary is pinned rather
+    /// than left to drift with a future edit.
+    #[test]
+    fn the_discrete_floor_is_inclusive() {
+        let (_, shared_at) = resolve_adapter_memory(MIN_DISCRETE_DEDICATED_BYTES, 32 * GIB);
+        assert!(!shared_at, "exactly at the floor counts as dedicated");
+        let (_, shared_below) = resolve_adapter_memory(MIN_DISCRETE_DEDICATED_BYTES - 1, 32 * GIB);
+        assert!(shared_below, "one byte below the floor is a carve-out");
+    }
     use crate::device::types::GpuInfo;
 
     fn blank_gpu() -> GpuInfo {
@@ -614,6 +748,36 @@ mod tests {
             process_budget: None,
             process_current_usage: None,
         }
+    }
+
+    /// DXGI settles the discrete/integrated question when the device
+    /// name could not. Owning a dedicated pool versus addressing a shared
+    /// aperture is the distinction itself, so this is a direct answer
+    /// rather than an inference from a marketing string (issue #364).
+    #[test]
+    fn dxgi_fills_the_variant_the_name_could_not_decide() {
+        let mut shared = blank_gpu();
+        let mut shared_metrics = metrics(Some(16 * GIB), None, None);
+        shared_metrics.memory_is_shared = true;
+        apply_to_gpu_info(&mut shared, &shared_metrics);
+        assert_eq!(shared.detail["Variant"], "Integrated");
+
+        let mut dedicated = blank_gpu();
+        apply_to_gpu_info(&mut dedicated, &metrics(Some(8 * GIB), None, None));
+        assert_eq!(dedicated.detail["Variant"], "Discrete");
+    }
+
+    /// A variant the reader already decided from a known SKU wins. DXGI
+    /// only fills the gap; it does not overrule a curated answer.
+    #[test]
+    fn an_existing_variant_is_not_overwritten() {
+        let mut gpu = blank_gpu();
+        gpu.detail
+            .insert("Variant".to_string(), "Discrete".to_string());
+        let mut shared_metrics = metrics(Some(16 * GIB), None, None);
+        shared_metrics.memory_is_shared = true;
+        apply_to_gpu_info(&mut gpu, &shared_metrics);
+        assert_eq!(gpu.detail["Variant"], "Discrete");
     }
 
     #[test]

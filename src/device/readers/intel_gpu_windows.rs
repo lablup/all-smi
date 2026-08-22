@@ -36,7 +36,9 @@
 //! before — there is no regression for hosts that lack either.
 
 use crate::device::GpuReader;
-use crate::device::readers::intel_gpu_names::classify_intel_architecture;
+use crate::device::readers::intel_gpu_names::{
+    classify_intel_architecture, classify_intel_variant,
+};
 use crate::device::types::{GpuInfo, ProcessInfo};
 use crate::utils::get_hostname;
 use chrono::Local;
@@ -173,10 +175,14 @@ impl IntelWindowsGpuReader {
                     if let Some(ref dac_type) = controller.adapter_d_a_c_type {
                         detail.insert("DAC Type".to_string(), dac_type.clone());
                     }
-                    detail.insert(
-                        "Variant".to_string(),
-                        classify_intel_variant(&name).to_string(),
-                    );
+                    // `None` means the name carries a model number this
+                    // table does not know. Leave the field unset rather
+                    // than guessing: the DXGI memory layout fills it in
+                    // `windows_gpu_perf::apply_to_gpu_info`, and it knows
+                    // the answer for real (issue #364).
+                    if let Some(variant) = classify_intel_variant(&name) {
+                        detail.insert("Variant".to_string(), variant.to_string());
+                    }
                     // Architecture / SYCL classification — shared with
                     // the Linux reader via `intel_gpu_names::classify_*`
                     // so a single source of truth drives downstream
@@ -409,48 +415,6 @@ pub fn is_intel_gpu_name(name: &str) -> bool {
         "lunar lake",
     ];
     FAMILY_TOKENS.iter().any(|t| lower.contains(t))
-}
-
-/// Heuristic discrete-vs-integrated discriminator for Intel client
-/// GPUs on Windows. We can't introspect VRAM reliably via WMI (the 32-bit
-/// `AdapterRAM` field is unreliable, see above) so we fall back to a
-/// name-pattern check that the test suite locks in.
-///
-/// The discriminator looks for an Arc model number — discrete Arc cards
-/// always carry one (e.g. `A770`, `A750`, `B580`, `B570`), while the
-/// Meteor Lake / Core Ultra iGPU is sold as "Intel(R) Arc(TM) Graphics"
-/// with no number. Iris / UHD / HD Graphics / Xe Graphics are always
-/// integrated.
-fn classify_intel_variant(name: &str) -> &'static str {
-    let lower = name.to_lowercase();
-    if !lower.contains("arc") {
-        return "Integrated";
-    }
-    // Heuristic: discrete Arc names contain a token like "a770", "b580"
-    // etc. — a letter A/B/C followed by 3+ digits. Scan word boundaries.
-    let has_model_number = lower
-        .split(|c: char| !c.is_ascii_alphanumeric())
-        .any(is_arc_model_token);
-    if has_model_number {
-        "Discrete"
-    } else {
-        "Integrated"
-    }
-}
-
-/// `true` for tokens like `a770`, `a750`, `b580`, `c770` — a single
-/// letter (current Arc generations are A/B; reserve C/D for forward
-/// compatibility) followed by 3+ digits.
-fn is_arc_model_token(token: &str) -> bool {
-    let bytes = token.as_bytes();
-    if bytes.len() < 4 {
-        return false;
-    }
-    let first = bytes[0] as char;
-    if !matches!(first, 'a' | 'b' | 'c' | 'd') {
-        return false;
-    }
-    bytes[1..].iter().all(|b| b.is_ascii_digit())
 }
 
 #[cfg(test)]

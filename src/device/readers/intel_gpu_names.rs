@@ -123,6 +123,12 @@ pub enum IntelArchitecture {
     XeLpg,
     /// Xe-LPG+ integrated (Lunar Lake / Core Ultra Series 2 / Arc 140V/130V).
     XeLpgPlus,
+    /// Xe3 integrated (Panther Lake / Core Ultra Series 3 / Arc B390).
+    ///
+    /// The first Intel iGPU generation sold under a discrete-looking model
+    /// number, which is what broke the naming assumptions this module used
+    /// to rely on (issue #364).
+    Xe3,
     /// Xe (Iris Xe on Tiger / Alder / Raptor Lake integrated graphics).
     IrisXe,
     /// Older integrated graphics — HD Graphics / UHD Graphics on pre-Xe
@@ -139,7 +145,12 @@ impl IntelArchitecture {
     pub fn is_sycl_capable(self) -> bool {
         matches!(
             self,
-            Self::Alchemist | Self::Battlemage | Self::XeLpg | Self::XeLpgPlus | Self::IrisXe,
+            Self::Alchemist
+                | Self::Battlemage
+                | Self::XeLpg
+                | Self::XeLpgPlus
+                | Self::Xe3
+                | Self::IrisXe,
         )
     }
 
@@ -150,6 +161,7 @@ impl IntelArchitecture {
             Self::Battlemage => "Battlemage (Xe2, B-series)",
             Self::XeLpg => "Xe-LPG (Meteor Lake)",
             Self::XeLpgPlus => "Xe-LPG+ (Lunar Lake)",
+            Self::Xe3 => "Xe3 (Panther Lake)",
             Self::IrisXe => "Iris Xe (Tiger/Alder/Raptor Lake)",
             Self::OlderIntegrated => "Pre-Xe (HD/UHD Graphics)",
             Self::Unknown => "Unknown",
@@ -237,15 +249,36 @@ pub fn classify_intel_architecture(name: &str) -> IntelArchitecture {
         return IntelArchitecture::XeLpgPlus;
     }
 
-    // 5. Xe-LPG (Meteor Lake). Either the explicit `xe-lpg`/`xe lpg`
-    //    family name, or any other Arc iGPU — by this point Alchemist and
-    //    Lunar Lake have been ruled out, so a residual `arc` + `graphics`
-    //    name (notably `Intel Arc Graphics`) is the Meteor Lake iGPU.
-    if (n.contains("xe") && n.contains("lpg")) || (n.contains("arc") && n.contains("graphics")) {
+    // 5. Xe3 (Panther Lake). Either an explicit family token, or Arc plus
+    //    a known Xe3 iGPU model number. Panther Lake is the first Intel
+    //    iGPU generation sold under a model number, so it has to be named
+    //    here: it is neither ruled in by the Battlemage SKU list above nor
+    //    ruled out by the residual-iGPU rule below, and without this arm
+    //    it silently reported as Meteor Lake (issue #364).
+    if n.contains("panther lake")
+        || n.contains("pantherlake")
+        || n.contains("xe3")
+        || (n.contains("arc") && XE3_INTEGRATED_MODELS.iter().any(|m| n.contains(m)))
+    {
+        return IntelArchitecture::Xe3;
+    }
+
+    // 6. Xe-LPG (Meteor Lake). Either the explicit `xe-lpg`/`xe lpg`
+    //    family name, or a residual unnumbered Arc iGPU. The unnumbered
+    //    part is load-bearing: `Intel Arc Graphics` with no model number
+    //    is the Meteor Lake iGPU, while every numbered Arc name has been
+    //    resolved by one of the arms above or is a part this table does
+    //    not know yet. Claiming Meteor Lake for an unknown numbered SKU is
+    //    what produced the B390 misreport, so numbered names fall through
+    //    to `Unknown` instead.
+    if n.contains("xe") && n.contains("lpg") {
+        return IntelArchitecture::XeLpg;
+    }
+    if n.contains("arc") && n.contains("graphics") && !contains_arc_model_number(&n) {
         return IntelArchitecture::XeLpg;
     }
 
-    // 6. Iris Xe (Tiger / Alder / Raptor Lake integrated).
+    // 7. Iris Xe (Tiger / Alder / Raptor Lake integrated).
     if n.contains("iris") && n.contains("xe") {
         return IntelArchitecture::IrisXe;
     }
@@ -253,9 +286,240 @@ pub fn classify_intel_architecture(name: &str) -> IntelArchitecture {
     IntelArchitecture::Unknown
 }
 
+// ---------------------------------------------------------------------
+// Discrete / integrated classification.
+//
+// Lives here rather than in `intel_gpu_windows` for two reasons. It is
+// pure string matching, like everything else in this module. And
+// `intel_gpu_windows` is `cfg(target_os = "windows")`, which means no
+// runner this project has ever compiles it, so the rule that produced the
+// B390 misreport was unreachable by every test job (issue #364, #368).
+// ---------------------------------------------------------------------
+
+/// Arc model numbers that belong to discrete cards.
+///
+/// An explicit table, not a pattern. Until Panther Lake, "an Arc name with
+/// a model number" was a sound proxy for "discrete", and the code relied on
+/// it. That proxy is dead: the integrated B390 and the discrete B380 differ
+/// by one digit, so no general rule over the name can separate them.
+///
+/// The entries are the SKUs this project already claimed as discrete before
+/// issue #364, kept exactly as they were so nothing regresses.
+const DISCRETE_ARC_MODELS: &[&str] = &[
+    // Alchemist (Xe-HPG) desktop
+    "a310", "a380", "a580", "a750", "a770", // Battlemage (Xe2) desktop
+    "b380", "b570", "b580",
+];
+
+/// Arc model numbers that belong to integrated parts.
+///
+/// The counterpart to [`DISCRETE_ARC_MODELS`]: numbered names that are
+/// iGPUs. Lunar Lake's `V` suffix used to escape the old heuristic by
+/// accident (`140v` is digits-then-letter, which failed its digits-only
+/// test); it is named explicitly here so the escape is deliberate.
+const INTEGRATED_ARC_MODELS: &[&str] = &["130v", "140v", "b390"];
+
+/// Panther Lake iGPU model numbers.
+///
+/// A subset of [`INTEGRATED_ARC_MODELS`]; kept separate because it also
+/// drives the architecture arm, where Lunar Lake's parts must not land.
+const XE3_INTEGRATED_MODELS: &[&str] = &["b390"];
+
+/// `true` when the lowercased name carries an Arc-style model number,
+/// whether or not this module knows which part it is.
+///
+/// A model number is a single letter in `a`..=`d` followed by three or more
+/// digits (`a770`, `b580`, `b390`), or three digits followed by `v`
+/// (`140v`). Used to tell "unnumbered, therefore the Meteor Lake iGPU" from
+/// "numbered, therefore a part that must be named explicitly".
+fn contains_arc_model_number(lower: &str) -> bool {
+    lower
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .any(is_arc_model_token)
+}
+
+/// `true` for one token that looks like an Arc model number.
+fn is_arc_model_token(token: &str) -> bool {
+    let bytes = token.as_bytes();
+    if bytes.len() < 4 {
+        return false;
+    }
+    // `a770`, `b580`, `b390`: letter then digits.
+    let letter_first =
+        matches!(bytes[0], b'a' | b'b' | b'c' | b'd') && bytes[1..].iter().all(u8::is_ascii_digit);
+    // `140v`, `130v`: digits then the Lunar Lake suffix.
+    let suffix_last =
+        bytes[bytes.len() - 1] == b'v' && bytes[..bytes.len() - 1].iter().all(u8::is_ascii_digit);
+    letter_first || suffix_last
+}
+
+/// Whether an Intel GPU marketing name denotes a discrete card.
+///
+/// `None` means "this name carries a model number this table does not
+/// know". That is a deliberate third answer rather than a guess: the caller
+/// leaves the field to the authoritative source (the DXGI memory layout)
+/// instead of asserting a variant it cannot support. Guessing here is
+/// exactly what reported the integrated B390 as `Discrete`.
+pub fn classify_intel_variant(name: &str) -> Option<&'static str> {
+    let lower = name.to_lowercase();
+    if !lower.contains("arc") {
+        // Iris / UHD / HD / Xe Graphics are always integrated.
+        return Some("Integrated");
+    }
+    if DISCRETE_ARC_MODELS.iter().any(|m| lower.contains(m)) {
+        return Some("Discrete");
+    }
+    if INTEGRATED_ARC_MODELS.iter().any(|m| lower.contains(m)) {
+        return Some("Integrated");
+    }
+    if contains_arc_model_number(&lower) {
+        // A numbered Arc part that predates this table's knowledge. Since
+        // Panther Lake, a number no longer implies discrete.
+        return None;
+    }
+    // Unnumbered Arc, e.g. `Intel(R) Arc(TM) Graphics` on Meteor Lake.
+    Some("Integrated")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---------- issue #364: Intel Arc B390 (Xe3 / Panther Lake) ----------
+
+    /// The reported defect: an integrated Xe3 part with a model number was
+    /// called `Discrete` because "Arc name with a model number" was taken
+    /// as a proxy for discrete.
+    #[test]
+    fn b390_is_integrated_not_discrete() {
+        assert_eq!(
+            classify_intel_variant("Intel(R) Arc(TM) B390 Graphics"),
+            Some("Integrated")
+        );
+    }
+
+    /// The second half of the same defect: with no Xe3 variant the B390
+    /// fell through to the residual-iGPU rule and reported as Meteor Lake.
+    #[test]
+    fn b390_classifies_as_xe3_not_meteor_lake() {
+        let arch = classify_intel_architecture("Intel(R) Arc(TM) B390 Graphics");
+        assert_eq!(arch, IntelArchitecture::Xe3);
+        assert_eq!(arch.label(), "Xe3 (Panther Lake)");
+        assert!(arch.is_sycl_capable());
+    }
+
+    /// B390 (integrated Xe3) and B380 (discrete Battlemage) differ by one
+    /// digit. This is the case that makes an explicit table necessary and
+    /// any general name pattern wrong.
+    #[test]
+    fn b380_and_b390_do_not_collide() {
+        assert_eq!(
+            classify_intel_variant("Intel(R) Arc(TM) B380 Graphics"),
+            Some("Discrete")
+        );
+        assert_eq!(
+            classify_intel_architecture("Intel(R) Arc(TM) B380 Graphics"),
+            IntelArchitecture::Battlemage
+        );
+        assert_eq!(
+            classify_intel_variant("Intel(R) Arc(TM) B390 Graphics"),
+            Some("Integrated")
+        );
+        assert_eq!(
+            classify_intel_architecture("Intel(R) Arc(TM) B390 Graphics"),
+            IntelArchitecture::Xe3
+        );
+    }
+
+    /// An Arc name carrying a model number this table does not know gets
+    /// no variant at all, so the caller can defer to DXGI. Guessing
+    /// `Discrete` here is the original bug.
+    #[test]
+    fn unknown_numbered_arc_defers_instead_of_guessing() {
+        assert_eq!(
+            classify_intel_variant("Intel(R) Arc(TM) C990 Graphics"),
+            None
+        );
+        assert_eq!(
+            classify_intel_architecture("Intel(R) Arc(TM) C990 Graphics"),
+            IntelArchitecture::Unknown
+        );
+    }
+
+    // ---------- regression guards for the pre-#364 behaviour ----------
+
+    #[test]
+    fn known_discrete_arc_skus_stay_discrete() {
+        for name in [
+            "Intel(R) Arc(TM) A770 Graphics",
+            "Intel(R) Arc(TM) A750 Graphics",
+            "Intel(R) Arc(TM) A580 Graphics",
+            "Intel(R) Arc(TM) A380 Graphics",
+            "Intel(R) Arc(TM) A310 Graphics",
+            "Intel(R) Arc(TM) B580 Graphics",
+            "Intel(R) Arc(TM) B570 Graphics",
+        ] {
+            assert_eq!(
+                classify_intel_variant(name),
+                Some("Discrete"),
+                "{name} must stay discrete"
+            );
+        }
+    }
+
+    #[test]
+    fn integrated_families_stay_integrated() {
+        for name in [
+            "Intel(R) Iris(R) Xe Graphics",
+            "Intel(R) UHD Graphics 770",
+            "Intel(R) HD Graphics 620",
+            // Unnumbered Arc on Meteor Lake.
+            "Intel(R) Arc(TM) Graphics",
+            // Lunar Lake's numbered iGPUs.
+            "Intel(R) Arc(TM) 140V GPU",
+            "Intel(R) Arc(TM) 130V GPU",
+        ] {
+            assert_eq!(
+                classify_intel_variant(name),
+                Some("Integrated"),
+                "{name} must stay integrated"
+            );
+        }
+    }
+
+    /// The Meteor Lake residual rule still has to fire for the unnumbered
+    /// name it was written for, and Lunar Lake must not be swallowed by
+    /// the new Xe3 arm.
+    #[test]
+    fn neighbouring_architectures_do_not_regress() {
+        assert_eq!(
+            classify_intel_architecture("Intel(R) Arc(TM) Graphics"),
+            IntelArchitecture::XeLpg
+        );
+        assert_eq!(
+            classify_intel_architecture("Intel(R) Arc(TM) 140V GPU"),
+            IntelArchitecture::XeLpgPlus
+        );
+        assert_eq!(
+            classify_intel_architecture("Intel(R) Arc(TM) A770 Graphics"),
+            IntelArchitecture::Alchemist
+        );
+        assert_eq!(
+            classify_intel_architecture("Intel(R) Arc(TM) B580 Graphics"),
+            IntelArchitecture::Battlemage
+        );
+    }
+
+    #[test]
+    fn arc_model_number_detection() {
+        assert!(contains_arc_model_number("intel(r) arc(tm) a770 graphics"));
+        assert!(contains_arc_model_number("intel(r) arc(tm) b390 graphics"));
+        assert!(contains_arc_model_number("intel(r) arc(tm) 140v gpu"));
+        assert!(!contains_arc_model_number("intel(r) arc(tm) graphics"));
+        assert!(!contains_arc_model_number("intel(r) iris(r) xe graphics"));
+        // A single letter followed by fewer than three digits is not a model.
+        assert!(!contains_arc_model_number("a77"));
+    }
 
     #[test]
     fn known_families_resolve() {
