@@ -217,21 +217,42 @@ struct OwnedDict(CFDictionaryRef);
 
 unsafe impl Send for OwnedDict {}
 
-/// A joinable handle over one in-flight channel-group query.
-struct ChannelQueryHandle(std::thread::JoinHandle<OwnedDict>);
+/// One channel-group query, either already running on its own thread or
+/// waiting to run on the calling thread.
+enum ChannelQuery {
+    Spawned(std::thread::JoinHandle<OwnedDict>),
+    /// No thread was available, so the query runs inline when joined. That
+    /// makes the enumeration sequential again, which is exactly the behavior
+    /// this replaced, rather than a failure.
+    Inline(ChannelGroupQuery),
+}
 
-impl ChannelQueryHandle {
+impl ChannelQuery {
     /// Wait for the query. `Err` means the worker panicked; `Ok(null)` means
     /// the group does not exist on this host.
     fn join(self) -> Result<CFDictionaryRef, ()> {
-        self.0.join().map(|OwnedDict(dict)| dict).map_err(|_| ())
+        match self {
+            Self::Spawned(handle) => handle.join().map(|OwnedDict(dict)| dict).map_err(|_| ()),
+            Self::Inline(query) => Ok(query.copy_channels()),
+        }
     }
 }
 
 /// Start one `IOReportCopyChannelsInGroup` query on its own thread.
-fn spawn_channel_query(group: CFStringRef, subgroup: CFStringRef) -> ChannelQueryHandle {
+///
+/// Thread creation can fail under resource pressure, and `thread::spawn`
+/// panics when it does. This is reached from `AllSmi::with_config`, a library
+/// entry point that reports failure through `Result`, so a refused thread
+/// degrades to running the query inline instead of unwinding through it.
+fn spawn_channel_query(group: CFStringRef, subgroup: CFStringRef) -> ChannelQuery {
     let query = ChannelGroupQuery { group, subgroup };
-    ChannelQueryHandle(std::thread::spawn(move || OwnedDict(query.copy_channels())))
+    match std::thread::Builder::new()
+        .name("all-smi-ioreport".to_string())
+        .spawn(move || OwnedDict(query.copy_channels()))
+    {
+        Ok(handle) => ChannelQuery::Spawned(handle),
+        Err(_) => ChannelQuery::Inline(query),
+    }
 }
 
 /// Borrow the process-wide merged channel description, building it on first
