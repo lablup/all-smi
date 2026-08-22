@@ -356,27 +356,53 @@ fn test_refresh_memory_in_place() {
 /// every live GPU field as unavailable, even though it was still in use
 /// (issue #374).
 ///
-/// The second client is deliberately left untouched until after the first is
+/// The survivor is deliberately left untouched until after the other client is
 /// dropped: a client whose readers already cached the manager kept working by
 /// accident, so warming it first would hide the regression this guards.
+///
+/// Both drop orders are checked, because the two clients are not symmetric in
+/// the code under test. One of them constructed the shared manager and the
+/// other merely found it already there, and it should not matter which of the
+/// two goes away first.
 #[test]
 #[cfg(target_os = "macos")]
 fn dropping_one_client_leaves_another_working() {
+    assert_survivor_still_reads(DropOrder::FirstBuilt);
+    assert_survivor_still_reads(DropOrder::SecondBuilt);
+}
+
+#[cfg(target_os = "macos")]
+enum DropOrder {
+    /// Drop the client that constructed the shared manager.
+    FirstBuilt,
+    /// Drop the client that found the manager already constructed.
+    SecondBuilt,
+}
+
+/// Build two clients, drop the one `order` names, and assert the other still
+/// reads the GPU.
+#[cfg(target_os = "macos")]
+fn assert_survivor_still_reads(order: DropOrder) {
     let first = AllSmi::new().expect("Failed to create first AllSmi");
     let second = AllSmi::new().expect("Failed to create second AllSmi");
+
+    let (dropped, survivor) = match order {
+        DropOrder::FirstBuilt => (first, second),
+        DropOrder::SecondBuilt => (second, first),
+    };
 
     // Establish what a working client reports on this host. Where the native
     // metrics manager is unavailable to begin with (Intel Mac, VM, sandboxed
     // CI runner) there is nothing to regress, so the test only asserts that
-    // the second client is no worse off than the first.
-    let baseline_has_readings = first
+    // the survivor is no worse off than the client that was dropped.
+    let baseline_has_readings = dropped
         .get_gpu_info()
         .first()
         .is_some_and(|gpu| gpu.utilization_reading().is_some());
 
-    drop(first);
+    drop(dropped);
 
-    let gpus = second.get_gpu_info();
+    let gpus = survivor.get_gpu_info();
     if !baseline_has_readings {
         return;
     }
