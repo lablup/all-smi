@@ -1172,6 +1172,10 @@ fn bad_example() -> Result<()> {
 }
 ```
 
+Construction is not free, and on macOS it is the most expensive of the supported platforms: it opens an IOReport subscription, discovers the machine's SMC temperature sensors, and takes a first sample so the initial query returns real data instead of nothing. On an Apple M5 Max that is roughly 280 ms for the first instance in a process and roughly 135 ms for later ones, which reuse the sensor and channel discovery the first one paid for. Keep one instance for the life of the monitoring loop rather than building one per query.
+
+Several instances may be alive at once, and dropping one does not disturb the others. The platform state they share is reference counted, so it is released when the last instance holding it goes away.
+
 ### 4. Handle Platform Differences
 
 ```rust
