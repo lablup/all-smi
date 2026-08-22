@@ -347,3 +347,104 @@ fn test_refresh_memory_in_place() {
         assert_eq!(first.index, original_index);
     }
 }
+
+/// Dropping one `AllSmi` must not disable another that is still alive.
+///
+/// On macOS the native metrics manager is a process-global singleton, and
+/// `AllSmi::drop` used to tear it down unconditionally. A second client that
+/// had not yet touched its readers therefore found no manager and reported
+/// every live GPU field as unavailable, even though it was still in use
+/// (issue #374).
+///
+/// The survivor is deliberately left untouched until after the other client is
+/// dropped: a client whose readers already cached the manager kept working by
+/// accident, so warming it first would hide the regression this guards.
+///
+/// Both drop orders are checked, because the two clients are not symmetric in
+/// the code under test. One of them constructed the shared manager and the
+/// other merely found it already there, and it should not matter which of the
+/// two goes away first.
+#[test]
+#[cfg(target_os = "macos")]
+fn dropping_one_client_leaves_another_working() {
+    assert_survivor_still_reads(DropOrder::FirstBuilt);
+    assert_survivor_still_reads(DropOrder::SecondBuilt);
+}
+
+#[cfg(target_os = "macos")]
+enum DropOrder {
+    /// Drop the client that constructed the shared manager.
+    FirstBuilt,
+    /// Drop the client that found the manager already constructed.
+    SecondBuilt,
+}
+
+/// Build two clients, drop the one `order` names, and assert the other still
+/// reads the GPU.
+#[cfg(target_os = "macos")]
+fn assert_survivor_still_reads(order: DropOrder) {
+    let first = AllSmi::new().expect("Failed to create first AllSmi");
+    let second = AllSmi::new().expect("Failed to create second AllSmi");
+
+    let (dropped, survivor) = match order {
+        DropOrder::FirstBuilt => (first, second),
+        DropOrder::SecondBuilt => (second, first),
+    };
+
+    // Establish what a working client reports on this host. Where the native
+    // metrics manager is unavailable to begin with (Intel Mac, VM, sandboxed
+    // CI runner) there is nothing to regress, so the test only asserts that
+    // the survivor is no worse off than the client that was dropped.
+    let baseline_has_readings = dropped
+        .get_gpu_info()
+        .first()
+        .is_some_and(|gpu| gpu.utilization_reading().is_some());
+
+    drop(dropped);
+
+    let gpus = survivor.get_gpu_info();
+    if !baseline_has_readings {
+        return;
+    }
+
+    let gpu = gpus
+        .first()
+        .expect("the surviving client must still enumerate the GPU");
+    assert!(
+        gpu.utilization_reading().is_some(),
+        "utilization must still be readable after the other client was dropped"
+    );
+    assert!(
+        gpu.power_consumption_reading().is_some(),
+        "power must still be readable after the other client was dropped"
+    );
+}
+
+/// A client built after every earlier one was dropped must still work.
+///
+/// This is the same singleton lifetime as
+/// `dropping_one_client_leaves_another_working`, taken from the other side:
+/// the last drop does tear the manager down, so the next construction has to
+/// rebuild it rather than inherit a torn-down one.
+#[test]
+#[cfg(target_os = "macos")]
+fn a_client_built_after_the_last_drop_still_works() {
+    let first = AllSmi::new().expect("Failed to create first AllSmi");
+    let baseline_has_readings = first
+        .get_gpu_info()
+        .first()
+        .is_some_and(|gpu| gpu.utilization_reading().is_some());
+    drop(first);
+
+    let second = AllSmi::new().expect("Failed to create AllSmi after the first was dropped");
+    let gpus = second.get_gpu_info();
+    if !baseline_has_readings {
+        return;
+    }
+
+    assert!(
+        gpus.first()
+            .is_some_and(|gpu| gpu.utilization_reading().is_some()),
+        "a client built after the previous one was dropped must still read the GPU"
+    );
+}

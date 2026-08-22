@@ -112,6 +112,175 @@ fn get_cfstring_refs() -> &'static CFStringRefs {
     CFSTRING_REFS.get_or_init(CFStringRefs::new)
 }
 
+/// One `IOReportCopyChannelsInGroup` query, in a form that can cross a thread
+/// boundary.
+///
+/// SAFETY: both fields are `CFStringRef`s owned by [`CFStringRefs`], which
+/// retains them for the life of the process and never mutates them. The same
+/// reasoning that makes `CFStringRefs` `Sync` makes this `Send`.
+#[derive(Clone, Copy)]
+struct ChannelGroupQuery {
+    group: CFStringRef,
+    subgroup: CFStringRef,
+}
+
+unsafe impl Send for ChannelGroupQuery {}
+
+impl ChannelGroupQuery {
+    /// Run the query. Returns null when the group does not exist on this host.
+    fn copy_channels(self) -> CFDictionaryRef {
+        unsafe { IOReportCopyChannelsInGroup(self.group, self.subgroup, 0, 0, 0) }
+    }
+}
+
+/// Process-wide cache of the merged channel description used to open every
+/// IOReport subscription.
+///
+/// SAFETY: holds an owned (+1 retained) reference to an immutable
+/// CFDictionary that is never released and never mutated after publication.
+/// Immutable CF objects are safe to read concurrently, and the only consumer,
+/// [`IOReport::new`], reads it solely as the source of a
+/// `CFDictionaryCreateMutableCopy`.
+struct MergedChannels(CFDictionaryRef);
+
+unsafe impl Send for MergedChannels {}
+unsafe impl Sync for MergedChannels {}
+
+/// Cached result of enumerating and merging the three channel groups.
+///
+/// The set of channels a machine exposes is fixed by its hardware, so this is
+/// computed once per process. That matters because
+/// `IOReportCopyChannelsInGroup` is by far the most expensive part of opening
+/// a subscription, and a library consumer can construct and drop several
+/// clients over a process's life (issue #374).
+static MERGED_CHANNELS: OnceLock<MergedChannels> = OnceLock::new();
+
+/// Enumerate the three channel groups and merge them into one dictionary.
+///
+/// The three queries are independent reads that are only combined afterwards,
+/// so they run concurrently. Only the Energy Model group is required: the CPU
+/// and GPU stats groups are tolerated as absent, which is the same asymmetry
+/// the sequential version had.
+///
+/// Returns an owned (+1 retained) dictionary.
+fn build_merged_channels() -> Result<CFDictionaryRef, &'static str> {
+    let refs = get_cfstring_refs();
+
+    // Spawn all three before joining any, so they overlap.
+    let energy = spawn_channel_query(refs.energy_model, ptr::null());
+    let cpu = spawn_channel_query(refs.cpu_stats, refs.cpu_perf_states);
+    let gpu = spawn_channel_query(refs.gpu_stats, refs.gpu_perf_states);
+
+    // `Err` means that worker panicked, which is distinct from a group that
+    // simply does not exist on this host: the latter returns a null dictionary.
+    let energy_channels = energy.join();
+    let cpu_channels = cpu.join().unwrap_or(ptr::null());
+    let gpu_channels = gpu.join().unwrap_or(ptr::null());
+
+    let energy_channels = match energy_channels {
+        Ok(dict) if !dict.is_null() => dict,
+        outcome => {
+            // The optional groups may still have succeeded; do not leak them.
+            for dict in [cpu_channels, gpu_channels] {
+                if !dict.is_null() {
+                    unsafe { CFRelease(dict as *const c_void) };
+                }
+            }
+            return Err(match outcome {
+                Err(_) => "IOReport Energy Model channel enumeration panicked",
+                Ok(_) => "Failed to get Energy Model channels",
+            });
+        }
+    };
+
+    unsafe {
+        // Merge all channels into one dictionary
+        if !cpu_channels.is_null() {
+            IOReportMergeChannels(energy_channels, cpu_channels, ptr::null());
+            CFRelease(cpu_channels as *const c_void);
+        }
+        if !gpu_channels.is_null() {
+            IOReportMergeChannels(energy_channels, gpu_channels, ptr::null());
+            CFRelease(gpu_channels as *const c_void);
+        }
+    }
+
+    Ok(energy_channels)
+}
+
+/// A `CFDictionaryRef` that may cross a thread boundary.
+///
+/// SAFETY: used only to hand an owned dictionary back from the worker thread
+/// that created it to the thread that joins it. Ownership moves with the
+/// value, so no two threads ever hold it at once.
+struct OwnedDict(CFDictionaryRef);
+
+unsafe impl Send for OwnedDict {}
+
+/// One channel-group query, either already running on its own thread or
+/// waiting to run on the calling thread.
+enum ChannelQuery {
+    Spawned(std::thread::JoinHandle<OwnedDict>),
+    /// No thread was available, so the query runs inline when joined. That
+    /// makes the enumeration sequential again, which is exactly the behavior
+    /// this replaced, rather than a failure.
+    Inline(ChannelGroupQuery),
+}
+
+impl ChannelQuery {
+    /// Wait for the query. `Err` means the worker panicked; `Ok(null)` means
+    /// the group does not exist on this host.
+    fn join(self) -> Result<CFDictionaryRef, ()> {
+        match self {
+            Self::Spawned(handle) => handle.join().map(|OwnedDict(dict)| dict).map_err(|_| ()),
+            Self::Inline(query) => Ok(query.copy_channels()),
+        }
+    }
+}
+
+/// Start one `IOReportCopyChannelsInGroup` query on its own thread.
+///
+/// Thread creation can fail under resource pressure, and `thread::spawn`
+/// panics when it does. This is reached from `AllSmi::with_config`, a library
+/// entry point that reports failure through `Result`, so a refused thread
+/// degrades to running the query inline instead of unwinding through it.
+fn spawn_channel_query(group: CFStringRef, subgroup: CFStringRef) -> ChannelQuery {
+    let query = ChannelGroupQuery { group, subgroup };
+    match std::thread::Builder::new()
+        .name("all-smi-ioreport".to_string())
+        .spawn(move || OwnedDict(query.copy_channels()))
+    {
+        Ok(handle) => ChannelQuery::Spawned(handle),
+        Err(_) => ChannelQuery::Inline(query),
+    }
+}
+
+/// Borrow the process-wide merged channel description, building it on first
+/// use.
+///
+/// The returned reference stays valid for the life of the process and must not
+/// be released by the caller.
+fn merged_channels() -> Result<CFDictionaryRef, &'static str> {
+    if let Some(cached) = MERGED_CHANNELS.get() {
+        return Ok(cached.0);
+    }
+
+    let built = build_merged_channels()?;
+
+    // Another thread may have published first; release the loser's copy rather
+    // than leaking it. Either way the cache now holds the reference to use.
+    if let Err(MergedChannels(duplicate)) = MERGED_CHANNELS.set(MergedChannels(built)) {
+        unsafe { CFRelease(duplicate as *const c_void) };
+    }
+
+    // Set above either published `built` or found a winner already there, so
+    // the cache is populated by now either way.
+    MERGED_CHANNELS
+        .get()
+        .map(|cached| cached.0)
+        .ok_or("IOReport channel cache was not published")
+}
+
 /// Opaque IOReport subscription reference
 #[repr(C)]
 struct IOReportSubscription {
@@ -717,41 +886,25 @@ pub struct IOReport {
 
 impl IOReport {
     /// Create a new IOReport subscription for the specified channel groups
+    ///
+    /// The channel description this subscribes to is enumerated once per
+    /// process and cached, so repeated construction (a library consumer
+    /// building more than one client over the process's life) pays only for
+    /// the subscription itself.
     pub fn new() -> Result<Self, &'static str> {
+        // Borrowed from the process-wide cache, which retains it. Not ours to
+        // release.
+        let merged = merged_channels()?;
+
         unsafe {
-            // Get static CFString refs to avoid use-after-free
-            let refs = get_cfstring_refs();
-
-            // Get channels for each group using static CFStrings
-            let energy_channels =
-                IOReportCopyChannelsInGroup(refs.energy_model, ptr::null(), 0, 0, 0);
-            let cpu_channels =
-                IOReportCopyChannelsInGroup(refs.cpu_stats, refs.cpu_perf_states, 0, 0, 0);
-            let gpu_channels =
-                IOReportCopyChannelsInGroup(refs.gpu_stats, refs.gpu_perf_states, 0, 0, 0);
-
-            if energy_channels.is_null() {
-                return Err("Failed to get Energy Model channels");
-            }
-
-            // Merge all channels into one dictionary
-            if !cpu_channels.is_null() {
-                IOReportMergeChannels(energy_channels, cpu_channels, ptr::null());
-                CFRelease(cpu_channels as *const c_void);
-            }
-            if !gpu_channels.is_null() {
-                IOReportMergeChannels(energy_channels, gpu_channels, ptr::null());
-                CFRelease(gpu_channels as *const c_void);
-            }
-
-            // Create mutable copy for subscription
-            let count = core_foundation::dictionary::CFDictionaryGetCount(energy_channels) as isize;
+            // Create mutable copy for subscription. The cached dictionary must
+            // stay pristine, so the subscription always gets its own copy.
+            let count = core_foundation::dictionary::CFDictionaryGetCount(merged) as isize;
             let channels = core_foundation::dictionary::CFDictionaryCreateMutableCopy(
                 core_foundation::base::kCFAllocatorDefault,
                 count,
-                energy_channels,
+                merged,
             );
-            CFRelease(energy_channels as *const c_void);
 
             if channels.is_null() {
                 return Err("Failed to create mutable channel dictionary");
@@ -1204,6 +1357,65 @@ impl IOReportMetrics {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Opening a second subscription must not re-enumerate the channel groups.
+    ///
+    /// Enumerating them is the expensive half of `IOReport::new`, and a library
+    /// consumer that constructs and drops several clients over a process's life
+    /// used to pay it every time (issue #374). Pointer identity is the direct
+    /// evidence that the second call reused the first call's work; a timing
+    /// assertion would prove the same thing less reliably.
+    ///
+    /// Skipped where IOReport is unavailable (an Intel Mac, a VM, a sandboxed
+    /// runner), which is not a failure.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn channel_enumeration_happens_once_per_process() {
+        let Ok(first) = merged_channels() else {
+            return;
+        };
+        let second = merged_channels().expect("a cached lookup cannot start failing");
+        assert_eq!(
+            first, second,
+            "the merged channel dictionary must be enumerated once and reused"
+        );
+    }
+
+    /// Every subscription gets its own mutable copy, so nothing a subscription
+    /// does can reach the cached description the next one is built from.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn each_subscription_copies_the_cached_channels() {
+        let Ok(cached) = merged_channels() else {
+            return;
+        };
+        let Ok(report) = IOReport::new() else {
+            return;
+        };
+        assert_ne!(
+            report.channels as CFDictionaryRef, cached,
+            "a subscription must not hold the cached dictionary itself"
+        );
+    }
+
+    /// Two subscriptions can be open at once, which is what a second client
+    /// constructed before the first is dropped amounts to.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn two_subscriptions_can_coexist() {
+        let Ok(first) = IOReport::new() else {
+            return;
+        };
+        let Ok(second) = IOReport::new() else {
+            return;
+        };
+        assert!(!first.channels.is_null());
+        assert!(!second.channels.is_null());
+        assert_ne!(
+            first.channels, second.channels,
+            "each subscription needs its own channel dictionary"
+        );
+    }
 
     #[test]
     fn test_calc_freq_from_residencies() {

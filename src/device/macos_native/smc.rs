@@ -35,8 +35,25 @@
 use std::ffi::c_void;
 use std::sync::OnceLock;
 
-/// Maximum number of temperature keys to discover per category (similar to mactop's limit)
-const MAX_TEMP_KEYS: usize = 64;
+/// Upper bound on discovered CPU temperature keys (`Tp*`/`Te*` on Apple
+/// Silicon, `TC*` on Intel).
+///
+/// This is a runaway guard, not a sampling budget: it is sized so no shipping
+/// Mac reaches it, which keeps the reported average over the complete sensor
+/// set rather than over an arbitrary prefix of the key table. Measured counts:
+/// 23 on an M5 Max, single digits on Intel.
+const MAX_CPU_TEMP_KEYS: usize = 256;
+
+/// Upper bound on discovered GPU temperature keys (`Tg*` on Apple Silicon,
+/// `TG*` on Intel).
+///
+/// Separate from [`MAX_CPU_TEMP_KEYS`] because the two families have very
+/// different real counts: an M5 Max exposes 84 `Tg*` sensors against 23
+/// `Tp*`/`Te*` ones. The previous shared cap of 64 truncated that set, so the
+/// reported GPU temperature averaged whichever 64 sensors the key table
+/// happened to list first. Sized to leave headroom above the largest known
+/// part (an Ultra is roughly two Max dies) so truncation stays theoretical.
+const MAX_GPU_TEMP_KEYS: usize = 512;
 
 /// Maximum number of fans to probe. No Mac ships with more than a handful.
 const MAX_FANS: u32 = 8;
@@ -189,10 +206,10 @@ enum TempKeyCategory {
 /// Every discovered reading is still range-filtered by the callers, so a
 /// misclassified sensor cannot pull an average outside plausible temperatures.
 fn classify_temperature_key(key: &str, data_type: u32) -> Option<TempKeyCategory> {
-    let bytes = key.as_bytes();
-    if bytes.len() < 2 || bytes[0] != b'T' {
+    if !is_temperature_key_candidate(key) {
         return None;
     }
+    let bytes = key.as_bytes();
 
     match data_type {
         SMC_TYPE_FLT => match bytes[1] {
@@ -207,6 +224,55 @@ fn classify_temperature_key(key: &str, data_type: u32) -> Option<TempKeyCategory
         },
         _ => None,
     }
+}
+
+/// True when `key`'s *name alone* leaves any chance that
+/// [`classify_temperature_key`] accepts it.
+///
+/// Discovery learns a key's name and its data type through two separate IOKit
+/// round trips, and the name is the cheaper of the two. Every key whose name
+/// already rules out both sensor families can therefore skip the second round
+/// trip entirely. On an M5 Max that is 3,623 of 3,739 keys.
+///
+/// [`classify_temperature_key`] delegates its name test here so the two can
+/// never disagree: a name this rejects is a name the classifier rejects.
+fn is_temperature_key_candidate(key: &str) -> bool {
+    let bytes = key.as_bytes();
+    bytes.len() >= 2 && bytes[0] == b'T' && matches!(bytes[1], b'p' | b'e' | b'g' | b'C' | b'G')
+}
+
+/// FourCC of the lowest key name any temperature sensor can have (`T\0\0\0`).
+const TEMP_KEY_RANGE_START: u32 = u32::from_be_bytes([b'T', 0, 0, 0]);
+
+/// FourCC one past the highest key name any temperature sensor can have
+/// (`U\0\0\0`). Every candidate name starts with `T`, so the sorted key table
+/// confines them to `TEMP_KEY_RANGE_START..TEMP_KEY_RANGE_END`.
+const TEMP_KEY_RANGE_END: u32 = u32::from_be_bytes([b'U', 0, 0, 0]);
+
+/// Result of one pass over the SMC key table, including how much of the table
+/// the pass had to touch.
+///
+/// The counts exist so callers (and tests) can assert that discovery stops
+/// short of the whole table; they are not used to compute any metric.
+#[derive(Debug, Clone, Default)]
+pub struct TempKeyScan {
+    /// Discovered CPU sensor keys, in key-table order.
+    pub cpu_keys: Vec<String>,
+    /// Discovered GPU sensor keys, in key-table order.
+    pub gpu_keys: Vec<String>,
+    /// Key-table indices actually read, including binary-search probes.
+    pub scanned_keys: u32,
+    /// Total number of keys the SMC reports.
+    pub total_keys: u32,
+    /// Whether the sorted-table fast path produced this result. False means
+    /// the exhaustive fallback ran. Diagnostic only; no metric depends on it.
+    #[allow(dead_code)]
+    pub used_sorted_range: bool,
+}
+
+/// Convert a FourCC code back to its 4-character name.
+fn fourcc_to_string(key: u32) -> String {
+    String::from_utf8_lossy(&key.to_be_bytes()).to_string()
 }
 
 /// Convert FourCC string to u32
@@ -333,68 +399,214 @@ impl SMC {
         Ok(count)
     }
 
-    /// Get key name by index
+    /// Get the raw FourCC code of the key at `index`.
     ///
-    /// Based on mactop's SMCGetKeyFromIndex implementation
-    pub fn get_key_from_index(&self, index: u32) -> Result<String, &'static str> {
+    /// The undecoded `u32` is what the key table is ordered by, so range
+    /// queries compare these rather than the lossily-decoded names returned by
+    /// [`get_key_from_index`].
+    fn get_key_code_from_index(&self, index: u32) -> Result<u32, &'static str> {
         let input = KeyData {
             data8: SMC_CMD_READ_INDEX,
             data32: index,
             ..Default::default()
         };
 
-        let output = self.read(&input)?;
+        Ok(self.read(&input)?.key)
+    }
 
-        // Key is stored as u32 in big-endian format
-        let key = output.key;
-        let key_bytes = key.to_be_bytes();
-
-        // Convert to string (4-character FourCC code)
-        let key_str = String::from_utf8_lossy(&key_bytes).to_string();
-
-        Ok(key_str)
+    /// Get key name by index
+    ///
+    /// Based on mactop's SMCGetKeyFromIndex implementation
+    ///
+    /// Part of this module's public surface; discovery itself compares the
+    /// undecoded codes from [`get_key_code_from_index`](Self::get_key_code_from_index).
+    #[allow(dead_code)]
+    pub fn get_key_from_index(&self, index: u32) -> Result<String, &'static str> {
+        Ok(fourcc_to_string(self.get_key_code_from_index(index)?))
     }
 
     /// Discover all temperature keys dynamically
     ///
-    /// Iterates the whole SMC key space once and keeps the keys that
-    /// [`classify_temperature_key`] recognizes as CPU or GPU sensors.
+    /// Keeps the keys that [`classify_temperature_key`] recognizes as CPU or
+    /// GPU sensors, capped per category by [`MAX_CPU_TEMP_KEYS`] and
+    /// [`MAX_GPU_TEMP_KEYS`].
     ///
-    /// Returns at most MAX_TEMP_KEYS per category to prevent unbounded growth.
+    /// See [`scan_temperature_keys`](Self::scan_temperature_keys) for how much
+    /// of the key table this has to read.
     pub fn discover_temperature_keys(&self) -> (Vec<String>, Vec<String>) {
-        let mut cpu_keys = Vec::with_capacity(MAX_TEMP_KEYS);
-        let mut gpu_keys = Vec::with_capacity(MAX_TEMP_KEYS);
+        let scan = self.scan_temperature_keys();
+        (scan.cpu_keys, scan.gpu_keys)
+    }
 
-        let key_count = match self.get_key_count() {
+    /// Discover temperature keys and report how much of the key table was read.
+    ///
+    /// The SMC key table is ordered by FourCC, so every candidate name (all of
+    /// which start with `T`) lives in one contiguous span. This binary-searches
+    /// for the start of that span and walks only to its end, which on an M5 Max
+    /// touches 359 of 3,739 indices instead of all of them. Within the span,
+    /// [`is_temperature_key_candidate`] rejects most names outright so the
+    /// second round trip (`read_key_info`) is spent only on plausible keys.
+    ///
+    /// Ordering is checked, not assumed. Nothing short of reading the whole
+    /// table can prove it, so this takes the two cheap checks available and
+    /// backstops them: the indices the binary search already read must be
+    /// non-decreasing, the key below the span must sort below it, and a span
+    /// that yields no sensors at all is treated as a failed assumption rather
+    /// than as a machine with no sensors. Any of those falling through runs the
+    /// exhaustive scan that predates this, which is the authority on what the
+    /// table contains. The fallback also skips the second round trip for
+    /// non-candidate names, so it is cheaper than the original was.
+    pub fn scan_temperature_keys(&self) -> TempKeyScan {
+        let total_keys = match self.get_key_count() {
             Ok(count) => count,
-            Err(_) => return (cpu_keys, gpu_keys),
+            Err(_) => return TempKeyScan::default(),
         };
 
-        for i in 0..key_count {
-            // Stop early if we've found enough keys in both categories
-            if cpu_keys.len() >= MAX_TEMP_KEYS && gpu_keys.len() >= MAX_TEMP_KEYS {
-                break;
-            }
+        if let Some(scan) = self.scan_sorted_temperature_range(total_keys)
+            && !(scan.cpu_keys.is_empty() && scan.gpu_keys.is_empty())
+        {
+            return scan;
+        }
 
-            let key = match self.get_key_from_index(i) {
-                Ok(k) => k,
-                Err(_) => continue,
-            };
+        self.scan_all_keys(total_keys)
+    }
 
-            // Get key info to check data type
-            let key_info = match self.read_key_info(&key) {
-                Ok(info) => info,
-                Err(_) => continue,
-            };
+    /// Fast path: locate the `T*` span in a FourCC-ordered key table and read
+    /// only that span.
+    ///
+    /// Returns `None` when the table does not behave like a sorted one, which
+    /// hands the caller back to [`scan_all_keys`](Self::scan_all_keys).
+    fn scan_sorted_temperature_range(&self, total_keys: u32) -> Option<TempKeyScan> {
+        if total_keys == 0 {
+            return None;
+        }
 
-            match classify_temperature_key(&key, key_info.data_type) {
-                Some(TempKeyCategory::Cpu) if cpu_keys.len() < MAX_TEMP_KEYS => cpu_keys.push(key),
-                Some(TempKeyCategory::Gpu) if gpu_keys.len() < MAX_TEMP_KEYS => gpu_keys.push(key),
-                _ => {}
+        let mut scanned_keys = 0u32;
+        // Probes recorded as (index, code); used to verify the table really is
+        // ordered before its ordering is relied on.
+        let mut probes: Vec<(u32, u32)> = Vec::new();
+
+        // Lower bound: first index whose key is >= "T\0\0\0".
+        let (mut lo, mut hi) = (0u32, total_keys);
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            let code = self.get_key_code_from_index(mid).ok()?;
+            scanned_keys += 1;
+            probes.push((mid, code));
+
+            if code < TEMP_KEY_RANGE_START {
+                lo = mid + 1;
+            } else {
+                hi = mid;
             }
         }
 
-        (cpu_keys, gpu_keys)
+        // Confirm the lower edge: the key before the span must sort below it.
+        if lo > 0 {
+            let code = self.get_key_code_from_index(lo - 1).ok()?;
+            scanned_keys += 1;
+            probes.push((lo - 1, code));
+            if code >= TEMP_KEY_RANGE_START {
+                return None;
+            }
+        }
+
+        // The probes must be consistent with an ordered table. Sorting by index
+        // and requiring non-decreasing codes catches a table that is not
+        // ordered the way the search assumed.
+        probes.sort_unstable_by_key(|(index, _)| *index);
+        if probes.windows(2).any(|w| w[0].1 > w[1].1) {
+            return None;
+        }
+
+        let mut cpu_keys = Vec::new();
+        let mut gpu_keys = Vec::new();
+
+        for index in lo..total_keys {
+            let code = match self.get_key_code_from_index(index) {
+                Ok(code) => code,
+                // Tolerated the same way the exhaustive scan tolerates it.
+                // The span's end is decided by the next key that reads back,
+                // so a gap costs extra indices but cannot end the walk early.
+                Err(_) => {
+                    scanned_keys += 1;
+                    continue;
+                }
+            };
+            scanned_keys += 1;
+
+            if code >= TEMP_KEY_RANGE_END {
+                break;
+            }
+
+            self.classify_key_at(code, &mut cpu_keys, &mut gpu_keys);
+
+            if cpu_keys.len() >= MAX_CPU_TEMP_KEYS && gpu_keys.len() >= MAX_GPU_TEMP_KEYS {
+                break;
+            }
+        }
+
+        Some(TempKeyScan {
+            cpu_keys,
+            gpu_keys,
+            scanned_keys,
+            total_keys,
+            used_sorted_range: true,
+        })
+    }
+
+    /// Fallback: walk the whole key table, as this did before the span search.
+    fn scan_all_keys(&self, total_keys: u32) -> TempKeyScan {
+        let mut cpu_keys = Vec::new();
+        let mut gpu_keys = Vec::new();
+        let mut scanned_keys = 0u32;
+
+        for index in 0..total_keys {
+            // Nothing left that either category can accept.
+            if cpu_keys.len() >= MAX_CPU_TEMP_KEYS && gpu_keys.len() >= MAX_GPU_TEMP_KEYS {
+                break;
+            }
+
+            let code = match self.get_key_code_from_index(index) {
+                Ok(code) => code,
+                Err(_) => {
+                    scanned_keys += 1;
+                    continue;
+                }
+            };
+            scanned_keys += 1;
+
+            self.classify_key_at(code, &mut cpu_keys, &mut gpu_keys);
+        }
+
+        TempKeyScan {
+            cpu_keys,
+            gpu_keys,
+            scanned_keys,
+            total_keys,
+            used_sorted_range: false,
+        }
+    }
+
+    /// Read `code`'s data type and file it under the category it belongs to.
+    ///
+    /// Skips the `read_key_info` round trip for any name that cannot classify,
+    /// and honours the per-category caps.
+    fn classify_key_at(&self, code: u32, cpu_keys: &mut Vec<String>, gpu_keys: &mut Vec<String>) {
+        let key = fourcc_to_string(code);
+        if !is_temperature_key_candidate(&key) {
+            return;
+        }
+
+        let Ok(key_info) = self.read_key_info(&key) else {
+            return;
+        };
+
+        match classify_temperature_key(&key, key_info.data_type) {
+            Some(TempKeyCategory::Cpu) if cpu_keys.len() < MAX_CPU_TEMP_KEYS => cpu_keys.push(key),
+            Some(TempKeyCategory::Gpu) if gpu_keys.len() < MAX_GPU_TEMP_KEYS => gpu_keys.push(key),
+            _ => {}
+        }
     }
 
     /// Read a value from the SMC
@@ -777,6 +989,163 @@ impl SMCMetrics {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The name pre-filter is the classifier's own first gate, so anything the
+    /// classifier can accept must survive it. If these ever disagree,
+    /// discovery silently stops finding sensors it used to find.
+    #[test]
+    fn name_prefilter_accepts_everything_the_classifier_can() {
+        let names = [
+            "Tp01", "Tp0X", "Te05", "Tg0f", "Tg7L", "TC0P", "TC0D", "TG0P", "TG0D", "TB0T", "TW0P",
+            "Ts0P", "PSTR", "F0Ac", "#KEY", "Tp", "T", "",
+        ];
+        for name in names {
+            for data_type in [SMC_TYPE_FLT, SMC_TYPE_SP78, SMC_TYPE_UI8, SMC_TYPE_UI32] {
+                if classify_temperature_key(name, data_type).is_some() {
+                    assert!(
+                        is_temperature_key_candidate(name),
+                        "{name} classifies but the pre-filter would have skipped it"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Keys the pre-filter rejects are exactly the keys whose second IOKit
+    /// round trip discovery is allowed to skip.
+    #[test]
+    fn name_prefilter_rejects_non_temperature_names() {
+        for name in [
+            "PSTR", "F0Ac", "#KEY", "TB0T", "TW0P", "Ts0P", "VP0R", "T", "",
+        ] {
+            assert!(
+                !is_temperature_key_candidate(name),
+                "{name} should not cost a key-info round trip"
+            );
+        }
+        for name in ["Tp01", "Te05", "Tg0f", "TC0P", "TG0D"] {
+            assert!(is_temperature_key_candidate(name), "{name} must be probed");
+        }
+    }
+
+    /// The span search assumes every candidate name sorts inside
+    /// `TEMP_KEY_RANGE_START..TEMP_KEY_RANGE_END`. A candidate outside it would
+    /// be skipped without the fallback ever noticing.
+    #[test]
+    fn every_candidate_name_sorts_inside_the_scanned_span() {
+        for second in *b"pegCG" {
+            for low in [0x00u8, b'0', b'z', 0xFF] {
+                let code = u32::from_be_bytes([b'T', second, low, low]);
+                assert!(
+                    (TEMP_KEY_RANGE_START..TEMP_KEY_RANGE_END).contains(&code),
+                    "{code:#010x} falls outside the scanned span"
+                );
+            }
+        }
+        assert!(str_to_fourcc("Sxxx") < TEMP_KEY_RANGE_START);
+        assert!(str_to_fourcc("U000") >= TEMP_KEY_RANGE_END);
+    }
+
+    /// GPU and CPU sensors are capped independently. A shared cap of 64
+    /// truncated the 84 `Tg*` sensors an M5 Max exposes, which made the
+    /// reported GPU temperature an average over whichever ones the key table
+    /// listed first.
+    #[test]
+    fn gpu_key_cap_clears_real_sensor_counts() {
+        const {
+            assert!(
+                MAX_GPU_TEMP_KEYS > 84,
+                "an M5 Max exposes 84 Tg* sensors; the cap must not truncate them"
+            );
+            assert!(
+                MAX_CPU_TEMP_KEYS > 23,
+                "an M5 Max exposes 23 Tp*/Te* sensors"
+            );
+        }
+    }
+
+    #[test]
+    fn fourcc_round_trips_through_its_name() {
+        for name in ["Tp01", "Tg0f", "TC0P", "#KEY", "PSTR"] {
+            assert_eq!(fourcc_to_string(str_to_fourcc(name)), name);
+        }
+    }
+
+    /// Discovery must stop short of the whole key table.
+    ///
+    /// The early exit it used to rely on required both categories to saturate a
+    /// shared 64-key cap, which no real Mac does, so every discovery walked all
+    /// 3,739 keys of an M5 Max table twice over. Skipped where the SMC is not
+    /// reachable (a VM or a sandboxed runner), which is not a failure.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn discovery_stops_before_the_end_of_the_key_table() {
+        let Ok(smc) = SMC::new() else {
+            return;
+        };
+        let scan = smc.scan_temperature_keys();
+        if scan.total_keys == 0 {
+            return;
+        }
+
+        assert!(
+            scan.scanned_keys < scan.total_keys,
+            "scanned {} of {} keys; discovery walked the whole table",
+            scan.scanned_keys,
+            scan.total_keys
+        );
+    }
+
+    /// Whichever path discovery took, the keys it returns must be ones the
+    /// classifier actually accepts, and it must respect the per-category caps.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn discovered_keys_are_classifiable_and_capped() {
+        let Ok(smc) = SMC::new() else {
+            return;
+        };
+        let scan = smc.scan_temperature_keys();
+
+        assert!(scan.cpu_keys.len() <= MAX_CPU_TEMP_KEYS);
+        assert!(scan.gpu_keys.len() <= MAX_GPU_TEMP_KEYS);
+        for key in scan.cpu_keys.iter().chain(scan.gpu_keys.iter()) {
+            assert!(
+                is_temperature_key_candidate(key),
+                "{key} is not a temperature sensor name"
+            );
+        }
+    }
+
+    /// The span search and the exhaustive fallback must agree. They are two
+    /// implementations of one question, and only the slow one is obviously
+    /// correct, so the fast one is checked against it on real hardware.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn the_span_search_finds_what_the_full_scan_finds() {
+        let Ok(smc) = SMC::new() else {
+            return;
+        };
+        let total_keys = match smc.get_key_count() {
+            Ok(count) if count > 0 => count,
+            _ => return,
+        };
+
+        let Some(fast) = smc.scan_sorted_temperature_range(total_keys) else {
+            return;
+        };
+        let full = smc.scan_all_keys(total_keys);
+
+        assert!(fast.used_sorted_range, "the fast path must report itself");
+        assert!(!full.used_sorted_range, "the fallback must report itself");
+        assert_eq!(fast.cpu_keys, full.cpu_keys, "CPU keys disagree");
+        assert_eq!(fast.gpu_keys, full.gpu_keys, "GPU keys disagree");
+        assert!(
+            fast.scanned_keys < full.scanned_keys,
+            "the span search read {} keys against the full scan's {}",
+            fast.scanned_keys,
+            full.scanned_keys
+        );
+    }
 
     #[test]
     fn test_fourcc_conversion() {
