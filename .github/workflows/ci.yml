@@ -86,6 +86,43 @@ jobs:
             exit 1
           fi
 
+      # The doctor checks are the operator-facing half of the same
+      # question, and they are reachable here for the same reason: the
+      # loader is installed above, and `level_zero.loader` is deliberately
+      # not gated on Intel GPU presence, so it reports a real result on a
+      # runner that has no Intel hardware.
+      #
+      # Expected shape on this runner: build PASS, loader PASS naming the
+      # library, init SKIP and devices SKIP (no GPU to initialise for), and
+      # exit 0, because a machine without an Intel GPU is not broken. A SKIP
+      # on either of the first two means the checks stopped being reachable
+      # in CI, which is the failure this step exists to catch.
+      - name: Level Zero doctor checks report runtime state
+        run: |
+          set -euo pipefail
+          out="${RUNNER_TEMP:-/tmp}/level-zero-doctor.json"
+          status=0
+          cargo run --quiet --bin all-smi -- doctor --only level_zero --json > "$out" || status=$?
+          cat "$out"
+          if [ "$status" -ne 0 ]; then
+            echo "::error::doctor exited $status on a host with no Intel GPU; nothing here should fail such a host"
+            exit 1
+          fi
+          build=$(jq -r '.checks[] | select(.id=="level_zero.build") | .status' "$out")
+          loader=$(jq -r '.checks[] | select(.id=="level_zero.loader") | .status' "$out")
+          message=$(jq -r '.checks[] | select(.id=="level_zero.loader") | .message' "$out")
+          if [ "$build" != "pass" ] || [ "$loader" != "pass" ]; then
+            echo "::error::expected level_zero.build and level_zero.loader to pass here, got build=$build loader=$loader"
+            exit 1
+          fi
+          case "$message" in
+            *libze_loader*) ;;
+            *)
+              echo "::error::level_zero.loader passed without naming the library it loaded: $message"
+              exit 1
+              ;;
+          esac
+
       # `cargo test` with no flags now covers the Level Zero backend:
       # build.rs turns `all_smi_level_zero` on for every Linux target, so
       # there is no configuration in which the module goes uncompiled and

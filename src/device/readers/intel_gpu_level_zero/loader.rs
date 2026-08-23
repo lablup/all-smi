@@ -136,6 +136,95 @@ pub unsafe fn prepare_sysman_env_for_legacy_runtime() {
 /// loaded — the typical case on a host without the Intel L0 loader.
 static LZ_RUNTIME: OnceCell<Mutex<Option<LzRuntime>>> = OnceCell::new();
 
+/// Which stage of [`initialize_runtime`] the process actually reached.
+///
+/// Every one of these is a `None` from `with_runtime`'s point of view, and
+/// they have four different remedies. Collapsing them was fine while the
+/// only consumer was a metric that silently fell back to sysfs or WMI;
+/// `all-smi doctor` has to tell an operator which one happened.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LevelZeroInit {
+    /// No entry in [`LIBZE_PATHS`] loaded with every mandatory symbol.
+    LoaderMissing,
+    /// The loader exports no `zesInit` and `ZES_ENABLE_SYSMAN=1` was not
+    /// set before `zeInit`, so Sysman cannot be reached at all.
+    SysmanUnavailable,
+    /// `zeInit` returned the carried non-success `ze_result_t`.
+    ZeInitFailed(i32),
+    /// `zesInit` returned the carried non-success `ze_result_t`.
+    ZesInitFailed(i32),
+    /// Initialisation completed. Says nothing about how many devices were
+    /// found; see [`LevelZeroProbe::device_count`].
+    Ok,
+}
+
+/// How Sysman was enabled, recorded only when initialisation succeeded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SysmanRoute {
+    /// Modern loader: `zesInit` resolved and returned success.
+    ZesInit,
+    /// Legacy loader: no `zesInit` symbol, `ZES_ENABLE_SYSMAN=1` was
+    /// already in the environment when `zeInit` ran.
+    LegacyEnvVar,
+}
+
+/// What one process learned about the Level Zero runtime, recorded as
+/// [`initialize_runtime`] ran rather than re-derived afterwards.
+#[derive(Debug, Clone)]
+pub struct LevelZeroProbe {
+    /// `cfg!(all_smi_level_zero)`. Always true where this type exists; the
+    /// field carries the answer to callers that are compiled either way.
+    pub compiled_in: bool,
+    /// Every candidate this target would try, in order.
+    pub searched_paths: &'static [&'static str],
+    /// The entry that loaded with all mandatory symbols resolved.
+    pub loaded_path: Option<&'static str>,
+    pub init: LevelZeroInit,
+    pub sysman_route: Option<SysmanRoute>,
+    pub device_count: usize,
+    /// Canonical BDFs, sorted. Same source as `enumerated_pci_bdfs`.
+    pub device_bdfs: Vec<String>,
+}
+
+/// Stages recorded during the one initialisation this process performs.
+///
+/// Written exactly once, from inside [`initialize_runtime`], because
+/// `LZ_RUNTIME` is a `OnceCell`: a diagnostic that ran its own `dlopen`
+/// and `zeInit` would be a second code path, free to drift from the one
+/// that actually decides whether metrics appear.
+static LZ_INIT_RECORD: OnceCell<(Option<&'static str>, LevelZeroInit, Option<SysmanRoute>)> =
+    OnceCell::new();
+
+fn record_init(loaded_path: Option<&'static str>, init: LevelZeroInit, route: Option<SysmanRoute>) {
+    // `set` fails only if something already recorded, which cannot happen
+    // twice for one `OnceCell`-guarded initialisation. Ignoring the error
+    // keeps this a pure side-channel that cannot alter the caller.
+    let _ = LZ_INIT_RECORD.set((loaded_path, init, route));
+}
+
+/// Initialise if it has not happened yet, then report what each stage did.
+///
+/// Triggering initialisation is deliberate: on a host that has not touched
+/// an Intel GPU this is the call that answers whether the runtime would
+/// work at all, which is the entire question a diagnostic is asked.
+pub fn probe() -> LevelZeroProbe {
+    let device_bdfs = super::enumerated_pci_bdfs();
+    let (loaded_path, init, sysman_route) =
+        LZ_INIT_RECORD
+            .get()
+            .copied()
+            .unwrap_or((None, LevelZeroInit::LoaderMissing, None));
+    LevelZeroProbe {
+        compiled_in: true,
+        searched_paths: LIBZE_PATHS,
+        loaded_path,
+        init,
+        sysman_route,
+        device_count: device_bdfs.len(),
+        device_bdfs,
+    }
+}
+
 /// Result of the first successful library load + `zeInit`.
 pub(crate) struct LzRuntime {
     /// Keep the `libloading::Library` alive for the lifetime of the
@@ -193,16 +282,21 @@ fn initialize_runtime() -> Option<LzRuntime> {
     // symbols. A failure here is the normal case on a host without the
     // L0 runtime — we log at debug, never warn or error.
     let mut loaded: Option<LoadedLibrary> = None;
+    let mut loaded_path: Option<&'static str> = None;
     for path in LIBZE_PATHS {
         // SAFETY: see `try_load_library`'s safety contract — we only
         // load canonical Level Zero loader paths.
         if let Some(lib) = unsafe { try_load_library(path) } {
             debug!("Level Zero: loaded {path}");
             loaded = Some(lib);
+            loaded_path = Some(path);
             break;
         }
     }
-    let loaded = loaded?;
+    let Some(loaded) = loaded else {
+        record_init(None, LevelZeroInit::LoaderMissing, None);
+        return None;
+    };
 
     let api = loaded.api;
     let sysman_env_enabled = std::env::var(SYSMAN_ENV_KEY)
@@ -212,6 +306,7 @@ fn initialize_runtime() -> Option<LzRuntime> {
         debug!(
             "Level Zero: loader does not expose zesInit and {SYSMAN_ENV_KEY}=1 was not set before zeInit; degrading"
         );
+        record_init(loaded_path, LevelZeroInit::SysmanUnavailable, None);
         return None;
     }
 
@@ -221,6 +316,7 @@ fn initialize_runtime() -> Option<LzRuntime> {
     let init_res = unsafe { (api.ze_init)(ffi::ZE_INIT_FLAG_DEFAULT) };
     if init_res != ffi::ZE_RESULT_SUCCESS {
         debug!("Level Zero: zeInit returned {init_res}; degrading");
+        record_init(loaded_path, LevelZeroInit::ZeInitFailed(init_res), None);
         return None;
     }
 
@@ -232,9 +328,19 @@ fn initialize_runtime() -> Option<LzRuntime> {
         let sysman_res = unsafe { (zes_init)(ffi::ZE_INIT_FLAG_DEFAULT) };
         if sysman_res != ffi::ZE_RESULT_SUCCESS {
             debug!("Level Zero: zesInit returned {sysman_res}; degrading");
+            record_init(loaded_path, LevelZeroInit::ZesInitFailed(sysman_res), None);
             return None;
         }
     }
+
+    // Which route got us here decides the remediation when a later
+    // upgrade removes the environment variable from the operator's setup.
+    let route = if api.zes_init.is_some() {
+        SysmanRoute::ZesInit
+    } else {
+        SysmanRoute::LegacyEnvVar
+    };
+    record_init(loaded_path, LevelZeroInit::Ok, Some(route));
 
     let devices_by_pci = enumerate_devices(&api);
     if devices_by_pci.is_empty() {

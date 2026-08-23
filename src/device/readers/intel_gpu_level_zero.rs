@@ -62,6 +62,7 @@ pub use apply::{ApplyPlatform, apply_to_gpu_info};
 pub use loader::normalise_pci_bdf;
 pub use loader::prepare_sysman_env_for_legacy_runtime;
 pub(crate) use loader::with_runtime;
+pub use loader::{LevelZeroInit, LevelZeroProbe, SysmanRoute, probe};
 pub(crate) use point::{
     FanSample, FrequencySample, MemorySample, TemperatureSample, populate_point_samples,
     refresh_fan, refresh_frequency, refresh_memory, refresh_temperature,
