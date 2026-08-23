@@ -76,9 +76,9 @@ fn main() {
     // mutation safety contract is upheld.
     //
     // `all_smi_level_zero` rather than `feature = "level_zero"`: the
-    // backend is compiled into every Windows build regardless of the
-    // feature, and on Windows this is the only chance to set the variable
-    // before a background thread exists. See `build.rs`.
+    // backend is compiled into every Linux and Windows build regardless of
+    // the feature, and this is the only point at which the process is
+    // still single-threaded. See `build.rs`.
     #[cfg(all_smi_level_zero)]
     unsafe {
         // SAFETY: `main` has not created the Tokio runtime or spawned

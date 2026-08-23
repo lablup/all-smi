@@ -122,8 +122,8 @@ struct IntelGpuCard {
     energy_state: Mutex<EnergyState>,
     /// Per-card Level Zero handle state (issue #248). Mirrors
     /// `engine_state` — delta-tracked behind a `Mutex` for power
-    /// readings, only present when the Level Zero backend is compiled in
-    /// (`--features level_zero` on Linux; always on Windows).
+    /// readings, only present when the Level Zero backend is compiled in,
+    /// which is every Linux and Windows target.
     #[cfg(all_smi_level_zero)]
     level_zero_state: Mutex<crate::device::readers::intel_gpu_level_zero::LevelZeroState>,
 }

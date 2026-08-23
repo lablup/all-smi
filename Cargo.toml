@@ -156,28 +156,25 @@ mock = ["cli", "dep:rand", "dep:hyper", "dep:hyper-util"]
 # Note: the bare dep name form (without `dep:` prefix) preserves the
 # implicit `furiosa-smi-rs` feature that existing reader code keys on.
 furiosa = ["furiosa-smi-rs"]
-# Intel Level Zero (oneAPI) Sysman backend for the Intel client GPU
-# readers: temperature, power, frequency, fan, and per-engine activity.
+# Accepted no-op, kept for compatibility.
 #
-# Adds no dependency. The loader (`libze_loader.so.1` / `ze_loader.dll`)
-# is `dlopen`d at runtime through `libloading`, so enabling this links
-# nothing extra and a host without the runtime degrades to the sysfs /
-# WMI baseline.
+# The Intel Level Zero (oneAPI) Sysman backend it used to gate is now
+# compiled into every Linux and Windows build. `build.rs` emits an
+# `all_smi_level_zero` cfg for those targets and the code gates on that,
+# because cargo cannot express a per-target feature default and we ship a
+# single artifact per platform. The backend adds no dependency (the loader
+# is `dlopen`d through `libloading`, already an unconditional dependency on
+# both targets) and opens nothing on a machine with no Intel GPU, so there
+# is no build to opt out of any more.
 #
-# **This feature does not describe Windows.** `build.rs` emits an
-# `all_smi_level_zero` cfg alias that is on for every Windows target
-# regardless of this flag, and the code gates on the alias. Cargo cannot
-# express a per-target default, and we ship a single
-# `x86_64-pc-windows-msvc` artifact that has no other source for GPU
-# temperature, power, or frequency. The practical consequence: the
-# `features:` line of a support bundle says nothing about whether the
-# backend is present on Windows. Read the `level_zero:` line instead,
-# which `all-smi doctor` derives from the alias.
+# The consequence worth knowing: the `features:` line of a support bundle
+# no longer says anything about this backend. `all-smi doctor` writes a
+# separate `level_zero:` line into version.txt, derived from the cfg.
 #
-# On Linux the flag means what it says: default OFF, and a build without
-# it contains zero references to the Level Zero loader. See
-# `src/device/readers/intel_gpu_level_zero.rs` for the module and issue
-# #248 for the rationale.
+# The feature is retained rather than deleted so that
+# `--features level_zero`, and any downstream manifest that lists it, keeps
+# building. See `src/device/readers/intel_gpu_level_zero.rs` for the module
+# and issue #248 for the original rationale.
 level_zero = []
 
 [lib]

@@ -77,11 +77,11 @@ pub mod intel_gpu_gtidle;
 // Sysman metrics per field when available, while keeping sysfs/WMI as the
 // baseline and fallback.
 //
-// `all_smi_level_zero` is emitted by `build.rs`: opt-in on Linux via
-// `--features level_zero`, unconditional on Windows because nothing else
-// there can report GPU temperature, power, or frequency and we ship one
-// Windows artifact. A Linux build without the feature pulls in neither
-// this module nor any Level Zero symbol.
+// `all_smi_level_zero` is emitted by `build.rs` for every Linux and
+// Windows target, and for nothing else. The backend adds no dependency
+// (the loader is `dlopen`d) and opens nothing on a machine with no Intel
+// GPU, so there is no build worth opting out of; the `level_zero` cargo
+// feature survives only as an accepted no-op.
 #[cfg(all_smi_level_zero)]
 pub mod intel_gpu_level_zero;
 #[cfg(target_os = "linux")]

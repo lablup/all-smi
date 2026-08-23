@@ -796,12 +796,14 @@ mod tests {
     }
 
     /// The effective Level Zero state is reported separately from the
-    /// cargo-feature list, and tracks the `all_smi_level_zero` cfg alias
-    /// rather than `--features level_zero`.
+    /// cargo-feature list, and tracks the `all_smi_level_zero` cfg rather
+    /// than `--features level_zero`.
     ///
-    /// The two diverge on Windows by design: `build.rs` turns the backend
-    /// on for every Windows target, so a default Windows build reports
-    /// `level_zero: compiled-in` while `features:` correctly omits it.
+    /// The two no longer agree anywhere: `build.rs` turns the backend on
+    /// for every Linux and Windows target regardless of the feature, so a
+    /// default build on either reports `level_zero: compiled-in` while
+    /// `features:` correctly omits it. That divergence is the whole reason
+    /// this line exists.
     #[test]
     fn level_zero_effective_tracks_the_cfg_alias() {
         assert_eq!(
@@ -809,12 +811,13 @@ mod tests {
             cfg!(all_smi_level_zero)
         );
 
-        // The feature always implies the alias; the reverse holds only off
-        // Windows.
-        if cfg!(feature = "level_zero") && !cfg!(target_os = "macos") {
-            assert_eq!(level_zero_effective(), "compiled-in");
-        }
-        if cfg!(target_os = "windows") {
+        // The rule build.rs implements. Only the positive direction is
+        // asserted: the compiler enforces the other half, because a target
+        // without the backend's `libloading` dependency does not build with
+        // the cfg forced on, which is a louder failure than this test. A
+        // scratch probe that widens the gate by hand is also allowed to
+        // turn it on anywhere, and should not have to fail here to do it.
+        if cfg!(target_os = "linux") || cfg!(target_os = "windows") {
             assert_eq!(level_zero_effective(), "compiled-in");
         }
     }

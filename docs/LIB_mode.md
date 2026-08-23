@@ -65,7 +65,7 @@ cargo add all-smi
 | `amd` | on | AMD GPU backend on glibc Linux via `libamdgpu_top`. Adds `libdrm.so.2` and `libdrm_amdgpu.so.1` as link-time requirements. |
 | `mock` | off | Builds the mock server binary. |
 | `furiosa` | off | Furiosa NPU backend. |
-| `level_zero` | off on Linux, forced on for Windows targets | Intel Level Zero (Sysman) backend, loaded at runtime via `dlopen`. Adds no dependency either way. A Windows consumer gets the backend without asking for it, because nothing else on that platform reports GPU temperature, power, or frequency; `build.rs` emits the `all_smi_level_zero` cfg for the target and the readers gate on that. |
+| `level_zero` | accepted no-op | The Intel Level Zero (Sysman) backend it used to gate is compiled into every Linux and Windows build. It adds no dependency (the loader is `dlopen`ed) and opens nothing on a machine with no Intel GPU, so there is nothing to opt out of; `build.rs` emits the `all_smi_level_zero` cfg for those targets and the readers gate on that. |
 
 `amd` is on by default so that adding this crate keeps AMD GPU monitoring without extra configuration. The cost is that `libamdgpu_top` links `libdrm.so.2` and `libdrm_amdgpu.so.1` unconditionally, and those become hard `NEEDED` entries on your binary too. A host that does not have AMD's userspace DRM libraries then fails to start your program with a loader error before `main` runs, which no amount of runtime handling can catch. Turn the feature off if your binary must run on hosts without those libraries:
 

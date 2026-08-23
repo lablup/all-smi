@@ -33,11 +33,12 @@
 //! 3. **Level Zero Sysman** — temperature, power, frequency, fan.
 //!
 //! Layer 3 is compiled into every Windows build (the `all_smi_level_zero`
-//! alias from `build.rs`, not the `level_zero` cargo feature): nothing
-//! else on Windows supplies those four fields, and `ze_loader.dll` ships
-//! with the Intel graphics driver. It is `dlopen`ed rather than linked, so
-//! a host without the driver keeps the layer-2 readings and pays one
-//! failed load for the lifetime of the process.
+//! cfg from `build.rs`, not the `level_zero` cargo feature). It matters
+//! more here than on Linux: nothing else on Windows supplies those four
+//! fields at all, and `ze_loader.dll` ships with the Intel graphics
+//! driver. It is `dlopen`ed rather than linked, so a host without the
+//! driver keeps the layer-2 readings and pays one failed load for the
+//! lifetime of the process.
 //!
 //! Each field records where it came from in a `Source: <field>` detail
 //! key, `detail["Metrics Source"]` accumulates the layers that

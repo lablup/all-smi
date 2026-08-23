@@ -472,9 +472,9 @@ Support for Radeon and Instinct GPUs via ROCm/libamdgpu_top, including VRAM/GTT 
 .TP
 .B Intel Arc / Iris Xe / Xe client GPUs
 Support for Arc A/B-series discrete GPUs and Iris Xe/Xe-LPG integrated GPUs via i915/xe sysfs (Linux) and WMI (Windows), including architecture classification, SYCL/oneAPI capability detection, engine-busy utilization computed from sysfs per-engine monotonic counters (Linux; max of render and compute engines reported as primary utilization), and per-process GPU memory tracking via /proc fdinfo (Linux; dedupes shared DRM file descriptors by drm-client-id).
-Intel Level Zero (oneAPI) augmentation is opt-in on Linux, built with
+Intel Level Zero (oneAPI) augmentation is compiled into every Linux and Windows build; the
 .B \-\-features level_zero
-(default: off), and is compiled into every Windows build regardless of that flag, since nothing else on Windows reports GPU temperature, power, or frequency. When the backend is present and
+flag it used to require is now an accepted no-op. When
 .I libze_loader.so.1
 (Linux) or
 .I ze_loader.dll
