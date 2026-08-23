@@ -101,10 +101,11 @@ pub enum Commands {
     /// Install and control `all-smi api` as a supervised background
     /// service (issue #309).
     ///
-    /// The system scope requires root and registers the service
-    /// machine-wide; `--user` installs a per-user service with no
-    /// elevation. Runtime settings stay in the environment file and the
-    /// TOML config, so changing a port never requires reinstalling.
+    /// On Linux and macOS, the system scope requires root and registers
+    /// the service machine-wide; `--user` installs a per-user service
+    /// with no elevation. Runtime settings stay in the environment file
+    /// and the TOML config, so changing a port never requires
+    /// reinstalling.
     /// Linux (systemd), macOS (launchd), and Windows (Service Control
     /// Manager) are supported. `--user` applies to Linux and macOS but
     /// has no meaning on Windows, where the Service Control Manager has
@@ -905,6 +906,10 @@ mod tests {
         assert!(
             help.contains("Linux (systemd), macOS (launchd), and Windows (Service Control"),
             "service help must list Linux, macOS, and Windows support, got:\n{help}"
+        );
+        assert!(
+            help.contains("On Linux and macOS, the system scope requires root"),
+            "service help must keep root wording scoped to Linux and macOS, got:\n{help}"
         );
         assert!(
             help.contains("`--user` applies to Linux and macOS"),
