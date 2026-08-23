@@ -301,4 +301,28 @@ mod tests {
         let got = scrub("kernel 5.15.0-89-generic", &opts);
         assert!(!got.contains(REDACT_KPTR));
     }
+
+    /// A PCI BDF must survive redaction intact.
+    ///
+    /// `0000:03:00.0` is colon-separated hex, which is the shape both the
+    /// IPv6 and the MAC matcher hunt for. A mangled BDF would make the
+    /// `level_zero.devices` check useless in the exact situation it exists
+    /// for, since the operator would be told a device is visible but not
+    /// which one.
+    #[test]
+    fn a_pci_bdf_survives_redaction() {
+        let opts = RedactOptions {
+            hostname: None,
+            username: None,
+            ..Default::default()
+        };
+        for bdf in [
+            "0000:03:00.0",
+            "0000:00:02.0",
+            "10de:01:00.1",
+            "2 device(s) visible to Sysman (0000:03:00.0, 0000:04:00.0)",
+        ] {
+            assert_eq!(scrub(bdf, &opts), bdf, "redaction mangled {bdf:?}");
+        }
+    }
 }

@@ -26,6 +26,7 @@ pub mod container;
 pub mod env;
 pub mod furiosa;
 pub mod gaudi;
+pub mod level_zero;
 pub mod network;
 pub mod nvidia;
 pub mod platform;
@@ -50,6 +51,7 @@ pub fn all() -> Vec<&'static Check> {
     v.extend(tenstorrent::checks());
     v.extend(rebellions::checks());
     v.extend(furiosa::checks());
+    v.extend(level_zero::checks());
     v.extend(windows::checks());
     v.extend(env::checks());
     v.extend(network::checks());

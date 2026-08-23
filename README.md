@@ -542,9 +542,18 @@ netsh advfirewall firewall delete rule name="all-smi"
 The `all-smi doctor` subcommand runs a read-only suite of environment checks and
 prints a PASS/WARN/FAIL report covering platform, privileges, container
 runtime, every supported hardware backend (NVIDIA, AMD, Apple, Gaudi, TPU,
-Tenstorrent, Rebellions, Furiosa, Windows), the relevant environment
-variables, and optional remote endpoint connectivity. Each check has a hard
-3-second timeout.
+Tenstorrent, Rebellions, Furiosa, Intel Level Zero, Windows), the relevant
+environment variables, and optional remote endpoint connectivity. Each check
+has a hard 3-second timeout.
+
+The `level_zero.*` checks report the four stages that decide whether Intel GPU
+temperature, power, and frequency are collectable at all, separately rather
+than as one verdict: whether the backend is compiled in, which loader library
+was found, whether the runtime initialised and by which Sysman route, and how
+many devices Sysman enumerated. None of them can FAIL, because an absent Level
+Zero runtime degrades to the sysfs or WMI baseline rather than breaking a run,
+and a host with no Intel GPU reports SKIP rather than complaining about
+hardware it does not have.
 
 ```bash
 # Human-readable report (default)
