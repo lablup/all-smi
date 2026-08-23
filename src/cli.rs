@@ -105,10 +105,10 @@ pub enum Commands {
     /// machine-wide; `--user` installs a per-user service with no
     /// elevation. Runtime settings stay in the environment file and the
     /// TOML config, so changing a port never requires reinstalling.
-    /// Linux (systemd) and Windows (Service Control Manager) are
-    /// supported today; the macOS launchd backend is tracked
-    /// separately. `--user` has no meaning on Windows, where the
-    /// Service Control Manager has no per-user scope.
+    /// Linux (systemd), macOS (launchd), and Windows (Service Control
+    /// Manager) are supported. `--user` applies to Linux and macOS but
+    /// has no meaning on Windows, where the Service Control Manager has
+    /// no per-user scope.
     /// See `all-smi service --help` for subcommands.
     Service(ServiceArgs),
 }
@@ -892,6 +892,28 @@ mod tests {
                 "`service status` must accept --{expected}"
             );
         }
+    }
+
+    #[test]
+    fn service_help_mentions_all_supported_backends_and_user_scope() {
+        let mut cmd = build_command_with_runtime_help();
+        let service = cmd
+            .find_subcommand_mut("service")
+            .expect("service subcommand");
+        let help = service.render_long_help().to_string();
+
+        assert!(
+            help.contains("Linux (systemd), macOS (launchd), and Windows (Service Control"),
+            "service help must list Linux, macOS, and Windows support, got:\n{help}"
+        );
+        assert!(
+            help.contains("`--user` applies to Linux and macOS"),
+            "service help must describe where --user applies, got:\n{help}"
+        );
+        assert!(
+            !help.contains("tracked separately"),
+            "service help must not claim launchd is still pending, got:\n{help}"
+        );
     }
 
     /// `config_help_block()` must annotate the resolved path with an
