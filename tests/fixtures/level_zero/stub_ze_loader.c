@@ -476,11 +476,8 @@ zesFrequencyGetState(zes_freq_handle_t hFrequency, zes_freq_state_t *pState) {
     pState->currentVoltage = 1.05;
     pState->request = 2200.0;
     pState->tdp = 2300.0;
-    /* REACHABILITY PROOF, reverted in the next commit: `actual` and
-     * `efficient` swapped. This is exactly the defect class the size
-     * assertions cannot see, so the test must go red. */
-    pState->efficient = STUB_FREQ_ACTUAL_MHZ;
-    pState->actual = 1200.0;
+    pState->efficient = 1200.0;
+    pState->actual = STUB_FREQ_ACTUAL_MHZ;
     pState->throttleReasons = 0;
     return ZE_RESULT_SUCCESS;
 }
