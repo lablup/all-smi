@@ -97,9 +97,12 @@ fn linux_fresh_sysman_overwrites_fields() {
         gpu.detail.get("Power (L0)").map(String::as_str),
         Some("120.50 W")
     );
+    // The sysfs qualifier survives. Level Zero used to assign this string
+    // rather than append to it, so "(engine counters)" was lost the moment
+    // Sysman produced a reading.
     assert_eq!(
         gpu.detail.get("Metrics Source").map(String::as_str),
-        Some("sysfs + Level Zero Sysman")
+        Some("sysfs (engine counters) + Level Zero Sysman")
     );
     assert_eq!(
         gpu.detail.get("Source: Utilization").map(String::as_str),
@@ -310,4 +313,159 @@ fn no_data_keeps_baseline() {
         Some("WMI")
     );
     assert!(!gpu.detail.contains_key("Power (L0)"));
+}
+
+// ---------------------------------------------------------------------
+// Integrated Windows parts: the DXGI handoff (issue #364)
+// ---------------------------------------------------------------------
+
+/// Shape of an Intel iGPU after the vendor-neutral Windows layer has run:
+/// DXGI resolved the capacity to the shared aperture and said so, and PDH
+/// contributed a utilization figure.
+fn integrated_after_dxgi() -> GpuInfo {
+    let mut gpu = make_baseline_gpu_info();
+    gpu.name = "Intel(R) Arc(TM) B390 GPU".to_string();
+    gpu.total_memory = 19_202_415_943;
+    gpu.detail
+        .insert("Metrics Source".to_string(), "WMI".to_string());
+    gpu.detail
+        .insert("Source: Memory".to_string(), "DXGI (shared)".to_string());
+    crate::device::readers::detail_keys::note_metrics_source(&mut gpu.detail, "DXGI");
+    crate::device::readers::detail_keys::note_metrics_source(&mut gpu.detail, "PDH");
+    gpu
+}
+
+/// A 128 MiB Sysman readout on an integrated part is the stolen-memory
+/// carve-out, not the capacity. Letting it through is how the B390 was
+/// reported with 128 MiB of VRAM against a real 17.88 GiB aperture.
+#[test]
+fn a_dedicated_carve_out_never_replaces_a_shared_aperture() {
+    let mut gpu = integrated_after_dxgi();
+    let readout = LevelZeroReadout {
+        memory: Some(LevelZeroMemoryReadout {
+            used_bytes: 64 * 1024 * 1024,
+            total_bytes: 128 * 1024 * 1024,
+            kind: LevelZeroMemoryKind::DedicatedLocal,
+            source: "Level Zero Sysman",
+        }),
+        temperature_celsius: Some(FreshValue::level_zero(48)),
+        ..Default::default()
+    };
+    apply_to_gpu_info(&mut gpu, &readout, ApplyPlatform::Windows);
+
+    assert_eq!(gpu.total_memory, 19_202_415_943);
+    assert_eq!(
+        gpu.detail.get("Source: Memory").map(String::as_str),
+        Some("DXGI (shared)")
+    );
+    // Not discarded: the carve-out is real, it is just not the capacity.
+    assert_eq!(
+        gpu.detail.get("VRAM Dedicated (L0)").map(String::as_str),
+        Some("134217728 bytes")
+    );
+    assert!(!gpu.detail.contains_key("VRAM Total"));
+    // The rest of the readout still lands.
+    assert_eq!(gpu.temperature, 48);
+}
+
+/// The guard must not cost discrete cards their Sysman VRAM figure, which
+/// is the only 64-bit-correct source when DXGI is unavailable.
+#[test]
+fn a_discrete_card_still_takes_its_sysman_total() {
+    let mut gpu = make_baseline_gpu_info();
+    gpu.detail
+        .insert("Source: Memory".to_string(), "WMI".to_string());
+    let readout = LevelZeroReadout {
+        memory: Some(LevelZeroMemoryReadout {
+            used_bytes: 2 * 1024 * 1024 * 1024,
+            total_bytes: 12 * 1024 * 1024 * 1024,
+            kind: LevelZeroMemoryKind::DedicatedLocal,
+            source: "Level Zero Sysman",
+        }),
+        ..Default::default()
+    };
+    apply_to_gpu_info(&mut gpu, &readout, ApplyPlatform::Windows);
+
+    assert_eq!(gpu.total_memory, 12 * 1024 * 1024 * 1024);
+    assert_eq!(gpu.used_memory, 2 * 1024 * 1024 * 1024);
+    assert_eq!(
+        gpu.detail.get("Source: Memory").map(String::as_str),
+        Some("Level Zero Sysman")
+    );
+}
+
+/// Linux has no DXGI layer, so the marker cannot appear there and the
+/// sysfs-derived total must keep yielding to Sysman as it always has.
+#[test]
+fn the_shared_aperture_guard_is_windows_only() {
+    let mut gpu = make_baseline_gpu_info();
+    gpu.detail
+        .insert("Source: Memory".to_string(), "DXGI (shared)".to_string());
+    let readout = LevelZeroReadout {
+        memory: Some(LevelZeroMemoryReadout {
+            used_bytes: 1024,
+            total_bytes: 8 * 1024 * 1024 * 1024,
+            kind: LevelZeroMemoryKind::DedicatedLocal,
+            source: "Level Zero Sysman",
+        }),
+        ..Default::default()
+    };
+    apply_to_gpu_info(&mut gpu, &readout, ApplyPlatform::Linux);
+
+    assert_eq!(gpu.total_memory, 8 * 1024 * 1024 * 1024);
+}
+
+/// A driver that reports a dedicated pool of zero must not zero a capacity
+/// another layer already established.
+#[test]
+fn an_empty_dedicated_readout_leaves_the_total_alone() {
+    let mut gpu = make_baseline_gpu_info();
+    let readout = LevelZeroReadout {
+        memory: Some(LevelZeroMemoryReadout {
+            used_bytes: 0,
+            total_bytes: 0,
+            kind: LevelZeroMemoryKind::DedicatedLocal,
+            source: "Level Zero Sysman",
+        }),
+        temperature_celsius: Some(FreshValue::level_zero(40)),
+        ..Default::default()
+    };
+    apply_to_gpu_info(&mut gpu, &readout, ApplyPlatform::Windows);
+
+    assert_eq!(gpu.total_memory, 12 * 1024 * 1024 * 1024);
+    assert!(!gpu.detail.contains_key("VRAM Dedicated (L0)"));
+}
+
+/// Every layer that ran must still be named. Assigning here is what made a
+/// fully-instrumented host report only "WMI + Level Zero Sysman".
+#[test]
+fn the_full_windows_stack_is_recorded_in_order() {
+    let mut gpu = integrated_after_dxgi();
+    let readout = LevelZeroReadout {
+        temperature_celsius: Some(FreshValue::level_zero(48)),
+        ..Default::default()
+    };
+    apply_to_gpu_info(&mut gpu, &readout, ApplyPlatform::Windows);
+
+    assert_eq!(
+        gpu.detail.get("Metrics Source").map(String::as_str),
+        Some("WMI + DXGI + PDH + Level Zero Sysman")
+    );
+}
+
+/// Polling repeatedly must not grow the string.
+#[test]
+fn repeated_polls_do_not_grow_the_metrics_source() {
+    let mut gpu = integrated_after_dxgi();
+    let readout = LevelZeroReadout {
+        temperature_celsius: Some(FreshValue::level_zero(48)),
+        ..Default::default()
+    };
+    for _ in 0..5 {
+        apply_to_gpu_info(&mut gpu, &readout, ApplyPlatform::Windows);
+    }
+    assert_eq!(
+        gpu.detail.get("Metrics Source").map(String::as_str),
+        Some("WMI + DXGI + PDH + Level Zero Sysman")
+    );
 }

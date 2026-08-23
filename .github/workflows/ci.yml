@@ -51,14 +51,17 @@ jobs:
       - name: Run clippy
         run: cargo clippy -- -D warnings
 
-      # The `level_zero` feature is default-off and no job enabled it, so
-      # everything under src/device/readers/intel_gpu_level_zero/ was
-      # never compiled, never linted, and its 49 tests were filtered out
-      # of every `cargo test` run. Two defects in that module reached
-      # issue #364 through this hole. The steps below close it. They are
-      # additional rather than replacements: the default-feature build is
-      # what `cargo install` and downstream crates get, so it has to stay
-      # covered on its own.
+      # On Linux the `level_zero` feature is default-off, so everything
+      # under src/device/readers/intel_gpu_level_zero/ is invisible to a
+      # default build: never compiled, never linted, tests filtered out.
+      # Two defects in that module reached issue #364 through that hole.
+      # The steps below close it. They are additional rather than
+      # replacements: the default-feature build is what `cargo install`
+      # and downstream crates get, so it has to stay covered on its own.
+      #
+      # This is a Linux runner, so the feature is the only way to reach the
+      # module here. Windows builds compile it unconditionally through the
+      # `all_smi_level_zero` cfg alias and need no flag.
       - name: Run tests (level_zero)
         run: cargo test --verbose --features level_zero
 
@@ -904,15 +907,16 @@ jobs:
       # protoc is deliberately absent: build.rs compiles the TPU protos
       # on Linux only, so a Windows build needs no protoc at all.
       #
-      # `--features level_zero` because this is the only job on a Windows
-      # runner, and src/device/readers/intel_gpu_windows.rs gates its
-      # Level Zero augmentation on both `cfg(target_os = "windows")` and
-      # that feature. Without the flag here, that code compiles nowhere
-      # in CI at all. The job itself is opt-in via
+      # No `--features level_zero` here, on purpose. build.rs emits the
+      # `all_smi_level_zero` cfg for every Windows target regardless of the
+      # feature, so a plain build already includes the backend. Passing the
+      # flag would compile the same thing while testing a configuration we
+      # do not ship; leaving it off means this job builds exactly what the
+      # release artifact is. The job is opt-in via
       # ENABLE_WINDOWS_SERVICE_SMOKE, so this is coverage when the runner
       # is available rather than a guarantee.
       - name: Build all-smi
-        run: cargo build --bin all-smi --features level_zero
+        run: cargo build --bin all-smi
 
       - name: Require an elevated runner
         run: |
@@ -1147,11 +1151,12 @@ jobs:
             exit 1
           fi
 
-      # Release-profile compile with `level_zero` on, matching what the
-      # release workflow would produce once Part B of #372 lands. The
-      # debug-profile test and clippy steps in the `test` job would not
-      # catch a release-only failure such as an optimization-dependent
-      # const evaluation.
+      # Release-profile compile with the backend on. Two things this
+      # catches that the debug-profile steps in the `test` job cannot: a
+      # release-only failure such as an optimization-dependent const
+      # evaluation, and the shape every Windows artifact now ships, since
+      # `all_smi_level_zero` is unconditional there. This runner is Linux,
+      # so the feature flag is how the same code gets compiled.
       #
       # `--locked` is deliberate. `level_zero = []` activates no
       # dependency, so the feature must not move Cargo.lock; if it ever

@@ -89,8 +89,11 @@ pub struct AdapterMetrics {
     /// more than the number delivers: "DXGI" and "DXGI (shared)" mean
     /// materially different things to someone reading a memory gauge.
     pub memory_is_shared: bool,
-    /// System-wide dedicated VRAM in use, in bytes, from the PDH
-    /// `GPU Adapter Memory` counter.
+    /// System-wide GPU memory in use, in bytes, from the PDH
+    /// `GPU Adapter Memory` counter. Read from `Shared Usage` when
+    /// [`Self::memory_is_shared`] is set and `Dedicated Usage` otherwise,
+    /// so the figure is always drawn from the same pool
+    /// [`Self::total_memory`] measures.
     pub used_memory: Option<u64>,
     /// Device utilization, 0..=100, from the PDH `GPU Engine` counters.
     pub utilization: Option<f64>,
@@ -100,12 +103,18 @@ pub struct AdapterMetrics {
     pub process_current_usage: Option<u64>,
 }
 
-/// Per-process dedicated GPU memory, keyed by adapter.
+/// Per-process GPU memory, keyed by adapter.
 #[derive(Clone, Debug)]
 pub struct ProcessGpuMemory {
     pub pid: u32,
     pub luid: AdapterLuid,
-    pub dedicated_bytes: u64,
+    /// Bytes this process holds on that adapter. Dedicated VRAM for a
+    /// card with its own pool, shared-aperture memory for an integrated
+    /// part, matching whichever pool [`AdapterMetrics::total_memory`]
+    /// reports for the same adapter. Named for what it means rather than
+    /// for one of the two counters, because reading the dedicated counter
+    /// on an iGPU returns a flat zero.
+    pub used_bytes: u64,
 }
 
 /// One poll's worth of vendor-neutral GPU data.
@@ -172,22 +181,41 @@ pub fn snapshot() -> Snapshot {
     if let Some(cached) = cached_snapshot(SNAPSHOT_COALESCE_WINDOW) {
         return cached;
     }
+    // DXGI runs first, and its answer decides whether the shared-aperture
+    // PDH counters are worth sampling at all. A machine with only discrete
+    // cards never adds them to the query.
     let dxgi_adapters = dxgi::enumerate();
-    let sample = pdh::sample();
-
-    let adapters = dxgi_adapters
+    let resolved: Vec<_> = dxgi_adapters
         .into_iter()
         .map(|adapter| {
-            let luid = adapter.identity.luid;
             let (total_memory, memory_is_shared) = resolve_adapter_memory(
                 adapter.dedicated_video_memory,
                 adapter.shared_system_memory,
+            );
+            (adapter, total_memory, memory_is_shared)
+        })
+        .collect();
+    let shared_luids: std::collections::HashSet<AdapterLuid> = resolved
+        .iter()
+        .filter(|(_, _, is_shared)| *is_shared)
+        .map(|(adapter, _, _)| adapter.identity.luid)
+        .collect();
+    let sample = pdh::sample(!shared_luids.is_empty());
+
+    let adapters = resolved
+        .into_iter()
+        .map(|(adapter, total_memory, memory_is_shared)| {
+            let luid = adapter.identity.luid;
+            let used_memory = select_adapter_usage(
+                memory_is_shared,
+                sample.adapter_memory.get(&luid).copied(),
+                sample.adapter_shared_memory.get(&luid).copied(),
             );
             AdapterMetrics {
                 identity: adapter.identity,
                 total_memory,
                 memory_is_shared,
-                used_memory: sample.adapter_memory.get(&luid).copied(),
+                used_memory,
                 utilization: sample.utilization.get(&luid).copied(),
                 process_budget: adapter.process_budget,
                 process_current_usage: adapter.process_current_usage,
@@ -195,16 +223,11 @@ pub fn snapshot() -> Snapshot {
         })
         .collect();
 
-    let processes = sample
-        .process_memory
-        .into_iter()
-        .filter(|(_, bytes)| *bytes > 0)
-        .map(|(instance, bytes)| ProcessGpuMemory {
-            pid: instance.pid,
-            luid: instance.luid,
-            dedicated_bytes: bytes,
-        })
-        .collect();
+    let processes = merge_process_rows(
+        sample.process_memory,
+        sample.process_shared_memory,
+        &shared_luids,
+    );
 
     let snapshot = Snapshot {
         adapters,
@@ -288,24 +311,11 @@ pub fn pdh_query_available() -> bool {
     false
 }
 
-/// Record that `source` contributed to this GPU's metrics.
-///
-/// The Intel reader established `Metrics Source` as a human-readable
-/// composition ("WMI", then "WMI + Level Zero" once Level Zero produced
-/// a readout). This keeps that shape while letting several backends
-/// append, and is idempotent so repeated polls do not grow the string.
-pub fn note_metrics_source(detail: &mut HashMap<String, String>, source: &str) {
-    let entry = detail.entry("Metrics Source".to_string()).or_default();
-    if entry.is_empty() {
-        *entry = source.to_string();
-        return;
-    }
-    if entry.split(" + ").any(|part| part == source) {
-        return;
-    }
-    entry.push_str(" + ");
-    entry.push_str(source);
-}
+// `Metrics Source` composition moved to `detail_keys` so the Level Zero
+// backend can append to it too; that module is compiled on every target,
+// this one is not. Re-exported here because `amd_adl` and downstream
+// consumers already reach it through this path.
+pub use crate::device::readers::detail_keys::note_metrics_source;
 
 /// Layer this adapter's metrics onto a WMI-derived [`GpuInfo`].
 ///
@@ -358,6 +368,55 @@ fn resolve_adapter_memory(dedicated: u64, shared: u64) -> (Option<u64>, bool) {
         return (Some(dedicated), false);
     }
     (None, false)
+}
+
+/// Pick the usage figure drawn from the same pool the capacity describes.
+///
+/// An integrated adapter's `Dedicated Usage` instances read a flat zero,
+/// because nothing is allocated out of its small stolen carve-out. Pairing
+/// that with a shared-aperture total reported every Intel and AMD iGPU on
+/// Windows as using no memory at all.
+///
+/// There is deliberately no cross-pool fallback. `Source: Memory Used` is
+/// labelled from the same `memory_is_shared` flag, so substituting the
+/// other pool would publish a number under a label that does not describe
+/// it. An absent counter yields `None`, and the caller leaves whatever the
+/// WMI baseline held, which is what already happens on a host publishing no
+/// GPU memory counters at all.
+fn select_adapter_usage(
+    memory_is_shared: bool,
+    dedicated: Option<u64>,
+    shared: Option<u64>,
+) -> Option<u64> {
+    if memory_is_shared { shared } else { dedicated }
+}
+
+/// Combine the two per-process counter families into one row set, taking
+/// each pid's figure from the pool its adapter is measured against.
+///
+/// Zero-byte rows are dropped: a process that has touched the GPU at some
+/// point keeps an instance alive at zero, and listing it would fill the
+/// process view with entries that hold nothing.
+fn merge_process_rows(
+    dedicated: Vec<(ids::GpuProcessMemoryInstance, u64)>,
+    shared: Vec<(ids::GpuProcessMemoryInstance, u64)>,
+    shared_luids: &std::collections::HashSet<AdapterLuid>,
+) -> Vec<ProcessGpuMemory> {
+    dedicated
+        .into_iter()
+        .filter(|(instance, _)| !shared_luids.contains(&instance.luid))
+        .chain(
+            shared
+                .into_iter()
+                .filter(|(instance, _)| shared_luids.contains(&instance.luid)),
+        )
+        .filter(|(_, bytes)| *bytes > 0)
+        .map(|(instance, bytes)| ProcessGpuMemory {
+            pid: instance.pid,
+            luid: instance.luid,
+            used_bytes: bytes,
+        })
+        .collect()
 }
 
 pub fn apply_to_gpu_info(gpu: &mut GpuInfo, metrics: &AdapterMetrics) {
@@ -413,15 +472,14 @@ pub fn apply_to_gpu_info(gpu: &mut GpuInfo, metrics: &AdapterMetrics) {
 
     if let Some(used) = metrics.used_memory {
         gpu.used_memory = used;
-        // On an integrated GPU the `GPU Adapter Memory\Dedicated Usage`
-        // counter tracks only the small stolen-memory carve-out, not the
-        // shared aperture the total now reports. Say so rather than
-        // labelling it plain "PDH", which would imply the two numbers
-        // are the same kind of quantity.
+        // Integrated adapters are measured against the shared aperture,
+        // discrete ones against their dedicated pool. Both are honest
+        // usage figures for the capacity reported next to them, but they
+        // count different memory, so the label says which.
         gpu.detail.insert(
             "Source: Memory Used".to_string(),
             if metrics.memory_is_shared {
-                "PDH (dedicated carve-out only)"
+                "PDH (shared)"
             } else {
                 "PDH"
             }
@@ -560,7 +618,7 @@ pub fn process_rows_from(snapshot: &Snapshot, adapter_index: &AdapterIndex) -> V
                 *device_id,
                 uuid,
                 process.pid,
-                process.dedicated_bytes,
+                process.used_bytes,
             ))
         })
         .collect()
@@ -924,7 +982,7 @@ mod tests {
                 ProcessGpuMemory {
                     pid: 4242,
                     luid: known,
-                    dedicated_bytes: 536_870_912,
+                    used_bytes: 536_870_912,
                 },
                 // A card this reader never paired, for example an NVIDIA
                 // GPU sitting alongside the AMD one. Its processes must
@@ -932,7 +990,7 @@ mod tests {
                 ProcessGpuMemory {
                     pid: 99,
                     luid: AdapterLuid::new(0, 0xFFFF),
-                    dedicated_bytes: 1,
+                    used_bytes: 1,
                 },
             ],
         );
@@ -1022,5 +1080,104 @@ mod tests {
         assert!(snapshot.is_empty());
         assert!(snapshot.identities().is_empty());
         assert!(snapshot.adapter(AdapterLuid::new(0, 1)).is_none());
+    }
+
+    // -----------------------------------------------------------------
+    // Which memory pool a figure is drawn from (issue #364)
+    // -----------------------------------------------------------------
+
+    /// The defect: an integrated adapter reports its capacity as the shared
+    /// aperture, but usage was read from `Dedicated Usage`, whose instances
+    /// are a flat zero on such a part. Every Intel and AMD iGPU on Windows
+    /// showed 0 bytes in use against a multi-gigabyte total.
+    #[test]
+    fn an_integrated_adapter_is_measured_against_its_aperture() {
+        assert_eq!(
+            select_adapter_usage(true, Some(0), Some(3_221_225_472)),
+            Some(3_221_225_472)
+        );
+    }
+
+    #[test]
+    fn a_discrete_adapter_is_measured_against_its_dedicated_pool() {
+        assert_eq!(
+            select_adapter_usage(false, Some(8_589_934_592), Some(1_048_576)),
+            Some(8_589_934_592)
+        );
+    }
+
+    /// A counter can fail to add, and the shared pair is only added once
+    /// some adapter needs it. Reporting the other pool's figure under this
+    /// one's label would be worse than reporting nothing, so the field goes
+    /// unwritten and the baseline stands.
+    #[test]
+    fn a_missing_pool_reports_nothing_rather_than_the_other_one() {
+        assert_eq!(select_adapter_usage(true, Some(134_217_728), None), None);
+        assert_eq!(select_adapter_usage(false, None, Some(512)), None);
+        assert_eq!(select_adapter_usage(true, None, None), None);
+    }
+
+    fn process_instance(pid: u32, luid: AdapterLuid) -> ids::GpuProcessMemoryInstance {
+        ids::GpuProcessMemoryInstance { pid, luid, phys: 0 }
+    }
+
+    /// Each pid's figure comes from the pool its own adapter is measured
+    /// against, so a host with both an iGPU and a discrete card reports both
+    /// correctly in the same poll.
+    #[test]
+    fn process_rows_follow_their_adapter() {
+        let igpu = AdapterLuid::new(0, 1);
+        let discrete = AdapterLuid::new(0, 2);
+        let shared_luids = std::collections::HashSet::from([igpu]);
+
+        let rows = merge_process_rows(
+            vec![
+                (process_instance(100, igpu), 0),
+                (process_instance(200, discrete), 4_294_967_296),
+            ],
+            vec![
+                (process_instance(100, igpu), 1_073_741_824),
+                // A shared row for a discrete adapter is noise here: that
+                // card is already counted from its dedicated pool, and
+                // taking both would double-count the pid.
+                (process_instance(200, discrete), 65_536),
+            ],
+            &shared_luids,
+        );
+
+        let mut seen: Vec<(u32, u64)> = rows.iter().map(|r| (r.pid, r.used_bytes)).collect();
+        seen.sort_unstable();
+        assert_eq!(seen, vec![(100, 1_073_741_824), (200, 4_294_967_296)]);
+    }
+
+    /// A process that once touched the GPU keeps a zero-valued instance
+    /// alive; listing it would fill the process view with empty rows.
+    #[test]
+    fn zero_byte_process_rows_are_dropped() {
+        let luid = AdapterLuid::new(0, 1);
+        let rows = merge_process_rows(
+            vec![
+                (process_instance(1, luid), 0),
+                (process_instance(2, luid), 8),
+            ],
+            Vec::new(),
+            &std::collections::HashSet::new(),
+        );
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].pid, 2);
+    }
+
+    /// With no shared adapter on the machine the shared families are never
+    /// sampled, so the second vector is empty and must change nothing.
+    #[test]
+    fn a_discrete_only_host_is_unaffected() {
+        let luid = AdapterLuid::new(0, 7);
+        let rows = merge_process_rows(
+            vec![(process_instance(42, luid), 1024)],
+            Vec::new(),
+            &std::collections::HashSet::new(),
+        );
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].used_bytes, 1024);
     }
 }

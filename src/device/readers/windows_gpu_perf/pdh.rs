@@ -15,13 +15,31 @@
 //! Performance Data Helper (PDH) sampling of the Windows GPU counter
 //! families.
 //!
-//! Three counter families are read:
+//! Up to five counter families are read:
 //!
 //! | Counter | Shape | Gives us |
 //! |---|---|---|
 //! | `\GPU Engine(*)\Utilization Percentage` | rate | device utilization |
 //! | `\GPU Adapter Memory(*)\Dedicated Usage` | gauge | system-wide used VRAM |
 //! | `\GPU Process Memory(*)\Dedicated Usage` | gauge | per-process VRAM |
+//! | `\GPU Adapter Memory(*)\Shared Usage` | gauge | system-wide used aperture |
+//! | `\GPU Process Memory(*)\Shared Usage` | gauge | per-process aperture |
+//!
+//! ## Why the shared families are conditional
+//!
+//! An integrated GPU allocates almost nothing out of its small stolen
+//! carve-out, so every `Dedicated Usage` instance reads a flat zero and
+//! the real consumption sits in the shared aperture. Sampling only the
+//! dedicated counters reported `used_memory: 0` for every Intel and AMD
+//! iGPU on Windows.
+//!
+//! They are added to the query only once an adapter on this machine has
+//! actually resolved its capacity to a shared aperture, which
+//! [`super::snapshot`] knows from the DXGI enumeration it runs first. A
+//! machine with only discrete cards therefore never adds the counters and
+//! never pays for them: `PdhCollectQueryData` costs what the query holds,
+//! so an unconditional add would tax every Windows host for a case that
+//! only integrated parts have.
 //!
 //! This is the same data Task Manager's GPU pane shows, and it is
 //! vendor-neutral: AMD, Intel, and NVIDIA adapters all publish it
@@ -89,6 +107,12 @@ pub struct PdhSample {
     pub adapter_memory: HashMap<AdapterLuid, u64>,
     /// Dedicated VRAM in use per (pid, adapter), in bytes.
     pub process_memory: Vec<(GpuProcessMemoryInstance, u64)>,
+    /// System-wide shared-aperture memory in use, per adapter, in bytes.
+    /// Empty unless the caller asked for the shared families.
+    pub adapter_shared_memory: HashMap<AdapterLuid, u64>,
+    /// Shared-aperture memory in use per (pid, adapter), in bytes. Empty
+    /// unless the caller asked for the shared families.
+    pub process_shared_memory: Vec<(GpuProcessMemoryInstance, u64)>,
 }
 
 struct GpuCounterQuery {
@@ -96,6 +120,12 @@ struct GpuCounterQuery {
     engine: PDH_HCOUNTER,
     adapter_memory: PDH_HCOUNTER,
     process_memory: PDH_HCOUNTER,
+    /// The shared-aperture pair, added on first demand rather than at
+    /// open. Invalid until then, which `read_*` treats as "no instances".
+    adapter_shared_memory: PDH_HCOUNTER,
+    process_shared_memory: PDH_HCOUNTER,
+    /// Latch so the add is attempted once even if it fails.
+    shared_added: bool,
     /// Set once a collection has happened, which is when the rate
     /// counter starts producing values.
     primed: bool,
@@ -145,11 +175,35 @@ impl GpuCounterQuery {
             engine,
             adapter_memory,
             process_memory,
+            adapter_shared_memory: PDH_HCOUNTER::default(),
+            process_shared_memory: PDH_HCOUNTER::default(),
+            shared_added: false,
             primed: false,
         })
     }
 
-    fn collect(&mut self) -> PdhSample {
+    /// Add the shared-aperture counters if they are not in the query yet.
+    ///
+    /// Must run before the collect that will read them: PDH populates a
+    /// counter's value during `PdhCollectQueryData`, and both of these are
+    /// gauges, so one collect after the add is enough.
+    fn ensure_shared_counters(&mut self) {
+        if self.shared_added {
+            return;
+        }
+        self.shared_added = true;
+        self.adapter_shared_memory =
+            add_counter(self.query, w!("\\GPU Adapter Memory(*)\\Shared Usage"))
+                .unwrap_or_default();
+        self.process_shared_memory =
+            add_counter(self.query, w!("\\GPU Process Memory(*)\\Shared Usage"))
+                .unwrap_or_default();
+    }
+
+    fn collect(&mut self, include_shared: bool) -> PdhSample {
+        if include_shared {
+            self.ensure_shared_counters();
+        }
         if unsafe { PdhCollectQueryData(self.query) } != 0 {
             return PdhSample::default();
         }
@@ -170,31 +224,47 @@ impl GpuCounterQuery {
             sample.utilization = aggregate_engine_utilization(engine_samples);
         }
 
-        if !self.adapter_memory.is_invalid() {
-            let adapter_samples = read_counter_array(self.adapter_memory)
-                .into_iter()
-                .filter_map(|(name, value)| {
-                    parse_gpu_adapter_memory_instance(&name).map(|instance| (instance, value))
-                })
-                .collect::<Vec<(GpuAdapterMemoryInstance, f64)>>();
-            sample.adapter_memory = aggregate_adapter_memory(adapter_samples);
-        }
-
-        if !self.process_memory.is_invalid() {
-            sample.process_memory = read_counter_array(self.process_memory)
-                .into_iter()
-                .filter_map(|(name, value)| {
-                    if !value.is_finite() || value < 0.0 {
-                        return None;
-                    }
-                    parse_gpu_process_memory_instance(&name)
-                        .map(|instance| (instance, value as u64))
-                })
-                .collect();
+        sample.adapter_memory = read_adapter_memory(self.adapter_memory);
+        sample.process_memory = read_process_memory(self.process_memory);
+        if include_shared {
+            sample.adapter_shared_memory = read_adapter_memory(self.adapter_shared_memory);
+            sample.process_shared_memory = read_process_memory(self.process_shared_memory);
         }
 
         sample
     }
+}
+
+/// Read and aggregate one `GPU Adapter Memory` counter into per-adapter
+/// totals. Empty when the counter was never added or failed to add.
+fn read_adapter_memory(counter: PDH_HCOUNTER) -> HashMap<AdapterLuid, u64> {
+    if counter.is_invalid() {
+        return HashMap::new();
+    }
+    let samples = read_counter_array(counter)
+        .into_iter()
+        .filter_map(|(name, value)| {
+            parse_gpu_adapter_memory_instance(&name).map(|instance| (instance, value))
+        })
+        .collect::<Vec<(GpuAdapterMemoryInstance, f64)>>();
+    aggregate_adapter_memory(samples)
+}
+
+/// Read one `GPU Process Memory` counter into `(instance, bytes)` rows.
+/// Empty when the counter was never added or failed to add.
+fn read_process_memory(counter: PDH_HCOUNTER) -> Vec<(GpuProcessMemoryInstance, u64)> {
+    if counter.is_invalid() {
+        return Vec::new();
+    }
+    read_counter_array(counter)
+        .into_iter()
+        .filter_map(|(name, value)| {
+            if !value.is_finite() || value < 0.0 {
+                return None;
+            }
+            parse_gpu_process_memory_instance(&name).map(|instance| (instance, value as u64))
+        })
+        .collect()
 }
 
 fn add_counter(query: PDH_HQUERY, path: PCWSTR) -> Option<PDH_HCOUNTER> {
@@ -312,7 +382,11 @@ static SAMPLER: OnceCell<Mutex<Option<GpuCounterQuery>>> = OnceCell::new();
 /// publishes no GPU counter instances, or on the very first call (for
 /// the utilization field only). Callers treat an empty field as "no
 /// data" and keep whatever the WMI baseline provided.
-pub fn sample() -> PdhSample {
+///
+/// `include_shared` asks for the shared-aperture families, which only
+/// integrated adapters need. Passing `false` leaves them out of the query
+/// entirely rather than reading and discarding them.
+pub fn sample(include_shared: bool) -> PdhSample {
     let cell = SAMPLER.get_or_init(|| Mutex::new(GpuCounterQuery::open()));
     let mut guard = match cell.lock() {
         Ok(guard) => guard,
@@ -322,7 +396,7 @@ pub fn sample() -> PdhSample {
         Err(poisoned) => poisoned.into_inner(),
     };
     match guard.as_mut() {
-        Some(query) => query.collect(),
+        Some(query) => query.collect(include_shared),
         None => PdhSample::default(),
     }
 }

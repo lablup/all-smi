@@ -74,10 +74,12 @@ fn main() {
     // ZES_ENABLE_SYSMAN=1 before the first `zeInit`. Do that while the
     // process is still single-threaded so Rust 2024's environment
     // mutation safety contract is upheld.
-    #[cfg(all(
-        any(target_os = "linux", target_os = "windows"),
-        feature = "level_zero"
-    ))]
+    //
+    // `all_smi_level_zero` rather than `feature = "level_zero"`: the
+    // backend is compiled into every Windows build regardless of the
+    // feature, and on Windows this is the only chance to set the variable
+    // before a background thread exists. See `build.rs`.
+    #[cfg(all_smi_level_zero)]
     unsafe {
         // SAFETY: `main` has not created the Tokio runtime or spawned
         // signal-handler/background threads yet, and this runs before

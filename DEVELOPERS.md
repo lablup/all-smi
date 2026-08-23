@@ -95,12 +95,29 @@ The default build (`default = ["cli", "amd"]`) includes the full CLI, TUI, API s
 | `amd` | on | AMD GPU backend on glibc Linux via the `libamdgpu_top` crate. Disable to drop the `libdrm.so.2` / `libdrm_amdgpu.so.1` runtime dependency. |
 | `mock` | off | Builds the `all-smi-mock-server` binary that simulates GPU/NPU clusters. |
 | `furiosa` | off | Furiosa NPU backend via the `furiosa-smi-rs` crate (Linux targets). |
-| `level_zero` | off | Intel oneAPI Level Zero (Sysman) backend for Intel client GPUs. Dynamically loads `libze_loader.so.1` (Linux) / `ze_loader.dll` (Windows) at runtime; a missing runtime degrades silently to the sysfs/WMI baseline. |
+| `level_zero` | off on Linux, **always on for Windows targets** | Intel oneAPI Level Zero (Sysman) backend for Intel client GPUs. Dynamically loads `libze_loader.so.1` (Linux) / `ze_loader.dll` (Windows) at runtime; a missing runtime degrades silently to the sysfs/WMI baseline. On Windows the backend is compiled in regardless of this flag (see below), so `features:` in a support bundle cannot tell you whether it is present; read `level_zero:` in `version.txt` instead. |
 
 ```bash
-# Example: build with the Intel Level Zero backend enabled
+# Example: build with the Intel Level Zero backend enabled (Linux)
 cargo build --release --features level_zero
 ```
+
+##### Why Windows ignores the flag
+
+`build.rs` emits an `all_smi_level_zero` cfg alias, and every consumer gates
+on that rather than on the cargo feature. The alias is on for any Windows
+target whether or not `--features level_zero` was passed.
+
+Three reasons. The backend adds no dependency: it `dlopen`s `ze_loader.dll`
+through `libloading`, already an unconditional Windows dependency, so
+compiling it in adds no import and no startup cost on a machine without the
+DLL. Nothing else on Windows can supply GPU temperature, power, or
+frequency, so leaving it out makes those columns permanently empty on Intel
+hardware. And we publish a single `x86_64-pc-windows-msvc` artifact; an
+opt-in backend would mean shipping an Intel and a non-Intel Windows package.
+
+Cargo cannot express a per-target feature default, which is why this is a
+cfg alias rather than a `[target.'cfg(windows)'.features]` entry.
 
 #### Dropping the AMD backend (`amd`)
 

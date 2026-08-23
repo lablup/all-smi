@@ -472,13 +472,13 @@ Support for Radeon and Instinct GPUs via ROCm/libamdgpu_top, including VRAM/GTT 
 .TP
 .B Intel Arc / Iris Xe / Xe client GPUs
 Support for Arc A/B-series discrete GPUs and Iris Xe/Xe-LPG integrated GPUs via i915/xe sysfs (Linux) and WMI (Windows), including architecture classification, SYCL/oneAPI capability detection, engine-busy utilization computed from sysfs per-engine monotonic counters (Linux; max of render and compute engines reported as primary utilization), and per-process GPU memory tracking via /proc fdinfo (Linux; dedupes shared DRM file descriptors by drm-client-id).
-Optional Intel Level Zero (oneAPI) augmentation is available when the binary is built with
+Intel Level Zero (oneAPI) augmentation is opt-in on Linux, built with
 .B \-\-features level_zero
-(default: off). When enabled and
+(default: off), and is compiled into every Windows build regardless of that flag, since nothing else on Windows reports GPU temperature, power, or frequency. When the backend is present and
 .I libze_loader.so.1
 (Linux) or
 .I ze_loader.dll
-(Windows) is present at runtime, additional per-engine activity metrics (including the XMX
+(Windows, installed with the Intel graphics driver) is present at runtime, additional per-engine activity metrics (including the XMX
 .B COMPUTE_SINGLE
 class not reachable via sysfs), energy-counter-derived power, temperature, dedicated/local memory state, frequency, and fan readings are surfaced when the corresponding Sysman domains are available and fresh. Seeded power and engine samples do not overwrite sysfs/WMI fallbacks. Missing loaders, missing optional symbols, unsupported domains, and permission failures degrade silently to the sysfs/WMI baseline, and per-field detail entries identify mixed metric sources.
 .TP

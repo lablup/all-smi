@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use super::{LevelZeroFanReadout, LevelZeroMemoryKind, LevelZeroReadout};
+use crate::device::readers::detail_keys::note_metrics_source;
 use crate::device::types::{GpuInfo, MAX_GPU_FAN_RPM};
 
 #[derive(Debug, Clone, Copy)]
@@ -51,7 +52,10 @@ pub fn apply_to_gpu_info(
     }
     if let Some(memory) = readout.memory {
         match memory.kind {
-            LevelZeroMemoryKind::DedicatedLocal => {
+            LevelZeroMemoryKind::DedicatedLocal
+                if memory.total_bytes > 0
+                    && !dxgi_resolved_a_shared_aperture(gpu_info, platform) =>
+            {
                 gpu_info.total_memory = memory.total_bytes;
                 gpu_info.used_memory = memory.used_bytes.min(memory.total_bytes);
                 set_source(gpu_info, "Memory", memory.source);
@@ -59,6 +63,21 @@ pub fn apply_to_gpu_info(
                     "VRAM Total".to_string(),
                     format!("{} bytes", memory.total_bytes),
                 );
+            }
+            LevelZeroMemoryKind::DedicatedLocal => {
+                // Either an empty readout, or an integrated part whose
+                // dedicated pool is the small stolen carve-out that DXGI
+                // already looked past. Overwriting here is how a 17.88 GiB
+                // Arc B390 became a 128 MiB one (issue #364): Sysman
+                // reports the carve-out perfectly correctly, it is just not
+                // the capacity the device can address. Keep the number
+                // visible without letting it replace the total.
+                if memory.total_bytes > 0 {
+                    gpu_info.detail.insert(
+                        "VRAM Dedicated (L0)".to_string(),
+                        format!("{} bytes", memory.total_bytes),
+                    );
+                }
             }
             LevelZeroMemoryKind::SharedSystem => {
                 gpu_info.detail.insert(
@@ -86,10 +105,17 @@ pub fn apply_to_gpu_info(
                 gpu_info.detail.remove("Utilization");
             }
             apply_fan(gpu_info, readout.fan, false);
-            gpu_info.detail.insert(
-                "Metrics Source".to_string(),
-                "sysfs + Level Zero Sysman".to_string(),
-            );
+            // Append rather than assign. Assigning erased whatever the
+            // sysfs layer had recorded: a card whose kernel exposes engine
+            // counters reports `"sysfs (engine counters)"`, and that
+            // qualifier disappeared the moment Level Zero produced a
+            // reading. Name the generic baseline only when no layer
+            // claimed one, so the string still reads "sysfs + Level Zero
+            // Sysman" on a card without engine counters.
+            if !gpu_info.detail.contains_key("Metrics Source") {
+                note_metrics_source(&mut gpu_info.detail, "sysfs");
+            }
+            note_metrics_source(&mut gpu_info.detail, "Level Zero Sysman");
         }
         ApplyPlatform::Windows => {
             if let Some(primary) = readout.primary_engine_utilization {
@@ -97,12 +123,31 @@ pub fn apply_to_gpu_info(
                 set_source(gpu_info, "Utilization", primary.source);
             }
             apply_fan(gpu_info, readout.fan, true);
-            gpu_info.detail.insert(
-                "Metrics Source".to_string(),
-                "WMI + Level Zero Sysman".to_string(),
-            );
+            // Appending is the whole point: assigning here erased the DXGI
+            // and PDH contributions that ran before this layer, so a host
+            // with the full stack reported "WMI + Level Zero Sysman" and
+            // hid where its memory and utilization figures came from.
+            note_metrics_source(&mut gpu_info.detail, "Level Zero Sysman");
         }
     }
+}
+
+/// Whether the vendor-neutral DXGI layer already resolved this adapter's
+/// capacity to a shared aperture rather than a dedicated pool.
+///
+/// `windows_gpu_perf::apply_to_gpu_info` writes `"DXGI (shared)"` exactly
+/// when it took that branch, which makes the detail map the handoff between
+/// two layers that cannot see each other: this one is compiled on Linux too
+/// and must not reach into a Windows-only module.
+///
+/// Linux never reaches this. There is no DXGI, and the sysfs reader
+/// publishes a real dedicated pool for the parts that have one.
+fn dxgi_resolved_a_shared_aperture(gpu_info: &GpuInfo, platform: ApplyPlatform) -> bool {
+    matches!(platform, ApplyPlatform::Windows)
+        && gpu_info
+            .detail
+            .get("Source: Memory")
+            .is_some_and(|source| source.contains("shared"))
 }
 
 fn set_source(gpu_info: &mut GpuInfo, field: &str, source: &str) {
