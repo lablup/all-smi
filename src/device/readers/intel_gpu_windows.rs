@@ -19,21 +19,32 @@
 //! template. The only differences are the vendor / family filter and a
 //! discrete-vs-integrated heuristic surfaced in `detail["Variant"]`.
 //!
-//! ## WMI-only baseline limitations
+//! ## Layering
 //!
-//! Detailed metrics (utilization, temperature, fine-grained power) are
-//! **not** available through WMI for Intel client GPUs. The WMI-only
-//! baseline therefore returns `0` for those fields and writes a
-//! `detail["Note"]` entry that points operators at Level Zero.
+//! `Win32_VideoController` publishes no utilization, no temperature, and
+//! no power, so the WMI query is only a baseline that names the card.
+//! Two layers stack on top of it, each outranking the last:
 //!
-//! Issue #248 added an opt-in Level Zero augmentation behind the
-//! `level_zero` Cargo feature. When the build includes the feature
-//! AND the L0 loader (`ze_loader.dll`) is present at runtime, the
-//! augmentation overwrites the WMI zeros for `GpuInfo.utilization`
-//! and `GpuInfo.power_consumption` and flips
-//! `detail["Metrics Source"]` from `"WMI"` to `"WMI + Level Zero"`.
-//! Without the feature or the runtime the reader behaves exactly as
-//! before — there is no regression for hosts that lack either.
+//! 1. **WMI** — name, driver version, PNP id, and the name-derived
+//!    architecture / variant classification.
+//! 2. **DXGI + PDH** ([`super::windows_gpu_perf`]) — the 64-bit memory
+//!    capacity WMI's 32-bit `AdapterRAM` cannot express, memory in use,
+//!    and utilization. Vendor-neutral.
+//! 3. **Level Zero Sysman** — temperature, power, frequency, fan.
+//!
+//! Layer 3 is compiled into every Windows build (the `all_smi_level_zero`
+//! cfg from `build.rs`, not the `level_zero` cargo feature). It matters
+//! more here than on Linux: nothing else on Windows supplies those four
+//! fields at all, and `ze_loader.dll` ships with the Intel graphics
+//! driver. It is `dlopen`ed rather than linked, so a host without the
+//! driver keeps the layer-2 readings and pays one failed load for the
+//! lifetime of the process.
+//!
+//! Each field records where it came from in a `Source: <field>` detail
+//! key, `detail["Metrics Source"]` accumulates the layers that
+//! contributed (`"WMI + DXGI + PDH + Level Zero Sysman"` on a fully
+//! instrumented host), and `detail["Note"]` names whatever is still
+//! missing once every layer has run.
 
 use crate::device::GpuReader;
 use crate::device::readers::intel_gpu_names::{
@@ -98,7 +109,7 @@ pub struct IntelWindowsGpuReader {
     /// power reading is meaningful from the second refresh onward).
     /// Behind a `Mutex` because the public `&self` methods are called
     /// concurrently by the collector thread and the API server.
-    #[cfg(feature = "level_zero")]
+    #[cfg(all_smi_level_zero)]
     level_zero_state:
         Mutex<HashMap<String, crate::device::readers::intel_gpu_level_zero::LevelZeroState>>,
     /// Adapter LUID to `(device index, GPU uuid)`, recorded by
@@ -116,7 +127,7 @@ impl Default for IntelWindowsGpuReader {
 impl IntelWindowsGpuReader {
     pub fn new() -> Self {
         Self {
-            #[cfg(feature = "level_zero")]
+            #[cfg(all_smi_level_zero)]
             level_zero_state: Mutex::new(HashMap::new()),
             adapter_index: Mutex::new(Default::default()),
         }
@@ -195,21 +206,13 @@ impl IntelWindowsGpuReader {
                         "SYCL Capable".to_string(),
                         arch.sycl_capable_label().to_string(),
                     );
-                    // `Metrics Source` advertises which backend
-                    // produced the metrics. WMI on its own surfaces no
-                    // utilization / temperature / power; the level_zero
-                    // augmentation below upgrades this string when L0
-                    // produces a readout. The legacy `Note` key is
-                    // retained for compatibility with downstream
-                    // consumers but conveys the same meaning.
-                    detail.insert(
-                        "Metrics Source".to_string(),
-                        "WMI".to_string(),
-                    );
-                    detail.insert(
-                        "Note".to_string(),
-                        "Detailed metrics require Level Zero / xpu-smi".to_string(),
-                    );
+                    // `Metrics Source` advertises which backends
+                    // produced the metrics; the DXGI/PDH and Level Zero
+                    // layers append themselves as they run. The `Note`
+                    // key is written afterwards by
+                    // `annotate_missing_metrics`, once we know what those
+                    // layers actually managed to supply.
+                    detail.insert("Metrics Source".to_string(), "WMI".to_string());
                     detail.insert("Source: Utilization".to_string(), "unavailable".to_string());
                     detail.insert("Source: Temperature".to_string(), "unavailable".to_string());
                     detail.insert("Source: Power".to_string(), "unavailable".to_string());
@@ -276,8 +279,11 @@ impl GpuReader for IntelWindowsGpuReader {
         if let Ok(mut guard) = self.adapter_index.lock() {
             *guard = adapter_index;
         }
-        #[cfg(feature = "level_zero")]
+        #[cfg(all_smi_level_zero)]
         self.augment_with_level_zero(&mut gpus);
+        for gpu in &mut gpus {
+            annotate_missing_metrics(gpu);
+        }
         gpus
     }
 
@@ -296,7 +302,7 @@ impl GpuReader for IntelWindowsGpuReader {
     }
 }
 
-#[cfg(feature = "level_zero")]
+#[cfg(all_smi_level_zero)]
 impl IntelWindowsGpuReader {
     /// Layer Level Zero metrics on top of the WMI baseline. Each
     /// Intel WMI controller is paired with an L0 device by ordinal
@@ -335,6 +341,43 @@ impl IntelWindowsGpuReader {
             }
         }
     }
+}
+
+/// Name the metrics that are still missing once every layer has run.
+///
+/// The reader used to publish a blanket "Detailed metrics require Level
+/// Zero / xpu-smi" on every poll, which is now wrong in both directions.
+/// Level Zero is compiled into every Windows build, so it cannot be the
+/// thing to go install; and on a host where the driver is present the note
+/// fired anyway, next to the very fields it claimed were unavailable.
+///
+/// An integrated part legitimately exposes no Sysman thermal sensor, so
+/// "nothing is missing" and "temperature is missing" are both normal
+/// outcomes. Saying which one this machine is in is the useful part.
+fn annotate_missing_metrics(gpu: &mut GpuInfo) {
+    use crate::device::readers::detail_keys::missing_metric_sources;
+    // Utilization is included because PDH can be absent (Server Core
+    // without the counter set, a locked-down host) and then no layer
+    // supplies it either.
+    const REPORTED: &[&str] = &["Temperature", "Power", "Frequency", "Utilization"];
+    let missing = missing_metric_sources(&gpu.detail, REPORTED);
+    if missing.is_empty() {
+        // Removing rather than leaving a stale note: `detail` is rebuilt
+        // per poll today, but a reader that starts caching it would
+        // otherwise keep publishing a note the machine has outgrown.
+        gpu.detail.remove("Note");
+        return;
+    }
+    // The build is never the answer on Windows, so the note points at the
+    // two things an operator can actually check.
+    gpu.detail.insert(
+        "Note".to_string(),
+        format!(
+            "{} unavailable: install the Intel graphics driver (ze_loader.dll), \
+             or this GPU exposes no such sensor",
+            missing.join(", ")
+        ),
+    );
 }
 
 /// Detect Intel client GPU presence on Windows via WMI.
@@ -413,6 +456,15 @@ pub fn is_intel_gpu_name(name: &str) -> bool {
         "battlemage",
         "lunarlake",
         "lunar lake",
+        // Forward-looking. Panther Lake already passes on "arc" (it ships
+        // as "Intel(R) Arc(TM) B390 GPU"), but a future part sold as plain
+        // "Intel(R) Xe3 Graphics" would not. A bare "gpu" token is
+        // deliberately absent: it would admit the non-graphics Intel
+        // devices this filter exists to exclude.
+        "xe2",
+        "xe3",
+        "panther lake",
+        "pantherlake",
     ];
     FAMILY_TOKENS.iter().any(|t| lower.contains(t))
 }

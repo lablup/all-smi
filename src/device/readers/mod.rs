@@ -20,6 +20,11 @@ pub mod chassis;
 // Common caching utilities shared across all readers
 pub mod common_cache;
 
+// `GpuInfo::detail` key conventions (`Metrics Source`, `Source: <field>`).
+// Unconditional on purpose: the layers that write these keys sit behind
+// disjoint `cfg` gates and cannot call helpers held inside one another.
+pub mod detail_keys;
+
 // Native Apple Silicon reader using IOReport/SMC (no sudo required)
 #[cfg(target_os = "macos")]
 pub mod apple_silicon_native;
@@ -68,14 +73,16 @@ pub mod intel_gpu_engine;
 pub mod intel_gpu_fdinfo;
 #[cfg(target_os = "linux")]
 pub mod intel_gpu_gtidle;
-// Opt-in Intel Level Zero (oneAPI) backend. Cross-platform FFI shim that
-// prefers Sysman metrics per field when available, while keeping sysfs/WMI
-// as the baseline and fallback. Enabled with `--features level_zero`;
-// default builds do not pull this module in or link Level Zero symbols.
-#[cfg(all(
-    any(target_os = "linux", target_os = "windows"),
-    feature = "level_zero"
-))]
+// Intel Level Zero (oneAPI) backend. Cross-platform FFI shim that prefers
+// Sysman metrics per field when available, while keeping sysfs/WMI as the
+// baseline and fallback.
+//
+// `all_smi_level_zero` is emitted by `build.rs` for every Linux and
+// Windows target, and for nothing else. The backend adds no dependency
+// (the loader is `dlopen`d) and opens nothing on a machine with no Intel
+// GPU, so there is no build worth opting out of; the `level_zero` cargo
+// feature survives only as an accepted no-op.
+#[cfg(all_smi_level_zero)]
 pub mod intel_gpu_level_zero;
 #[cfg(target_os = "linux")]
 pub mod intel_gpu_linux;

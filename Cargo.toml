@@ -156,16 +156,25 @@ mock = ["cli", "dep:rand", "dep:hyper", "dep:hyper-util"]
 # Note: the bare dep name form (without `dep:` prefix) preserves the
 # implicit `furiosa-smi-rs` feature that existing reader code keys on.
 furiosa = ["furiosa-smi-rs"]
-# Opt-in Intel Level Zero (oneAPI) backend for Intel client GPU readers.
-# Default OFF — when disabled the binary contains zero references to the
-# Level Zero loader, and the Linux/Windows Intel readers behave exactly
-# as they did before #248. When enabled the readers dynamically load
-# `libze_loader.so.1` (Linux) or `ze_loader.dll` (Windows) at runtime via
-# `libloading`; absence of the runtime degrades gracefully back to the
-# sysfs / WMI baseline. v1 surface: per-engine activity (including the
-# XMX `COMPUTE_SINGLE` class) and power via the Sysman energy counter.
-# See `src/device/readers/intel_gpu_level_zero.rs` for the full module
-# and issue #248 for the rationale and deferred surface.
+# Accepted no-op, kept for compatibility.
+#
+# The Intel Level Zero (oneAPI) Sysman backend it used to gate is now
+# compiled into every Linux and Windows build. `build.rs` emits an
+# `all_smi_level_zero` cfg for those targets and the code gates on that,
+# because cargo cannot express a per-target feature default and we ship a
+# single artifact per platform. The backend adds no dependency (the loader
+# is `dlopen`d through `libloading`, already an unconditional dependency on
+# both targets) and opens nothing on a machine with no Intel GPU, so there
+# is no build to opt out of any more.
+#
+# The consequence worth knowing: the `features:` line of a support bundle
+# no longer says anything about this backend. `all-smi doctor` writes a
+# separate `level_zero:` line into version.txt, derived from the cfg.
+#
+# The feature is retained rather than deleted so that
+# `--features level_zero`, and any downstream manifest that lists it, keeps
+# building. See `src/device/readers/intel_gpu_level_zero.rs` for the module
+# and issue #248 for the original rationale.
 level_zero = []
 
 [lib]

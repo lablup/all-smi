@@ -21,7 +21,8 @@
 
 use super::ffi;
 use super::loader::{
-    MAX_L0_HANDLES, cap_handle_count, format_pci_bdf, normalise_pci_bdf, try_load_library,
+    LIBZE_PATHS, MAX_L0_HANDLES, cap_handle_count, format_pci_bdf, normalise_pci_bdf,
+    try_load_library,
 };
 use super::refresh::{
     compute_engine_busy_pct, compute_power_watts, make_engine_sample, make_power_sample,
@@ -379,6 +380,59 @@ fn try_load_library_returns_none_for_nonexistent_path() {
         result.is_none(),
         "expected None for nonexistent loader path"
     );
+}
+
+/// Environment key CI sets once it has installed a real Level Zero loader.
+///
+/// Opt-in rather than always-on because the assertion below is only
+/// meaningful when the loader is actually present, and a developer host
+/// usually has no reason to install it.
+const EXPECT_LOADER_ENV: &str = "ALL_SMI_EXPECT_LEVEL_ZERO_LOADER";
+
+/// Printed only after the assertion below has actually run. The CI step
+/// that sets [`EXPECT_LOADER_ENV`] greps for it.
+///
+/// Without this the test is indistinguishable from a skip: rename the
+/// environment key, drop the `env:` block from the workflow, or move the
+/// test, and it silently stops asserting while the job stays green. That
+/// is the failure mode this whole check exists to prevent, so it should
+/// not have one of its own.
+const LOADER_ASSERTED_MARKER: &str = "all-smi: level-zero-loader-assertion-ran";
+
+/// Load a real `libze_loader.so.1` and resolve every symbol we require.
+///
+/// This is the one part of the FFI surface a runner without a GPU can
+/// still check, and until now nothing checked it. The loader is packaged
+/// separately from the GPU driver on Linux, so CI can install it on a
+/// plain cloud instance. What that proves is not small: that every path in
+/// `LIBZE_PATHS` is a name the dynamic linker actually resolves, and that
+/// every mandatory symbol in `LzApi` is spelled the way the real library
+/// exports it. A typo in either is invisible to the compiler and turns the
+/// whole backend into a silent no-op on real hardware.
+///
+/// It deliberately stops short of `zeInit`. A machine with no Intel GPU
+/// has no driver for the loader to hand back, so initialisation failing
+/// there is correct behaviour rather than a defect, and asserting on it
+/// would make this test fail for the wrong reason.
+#[test]
+fn the_installed_loader_exports_every_symbol_we_resolve() {
+    if std::env::var_os(EXPECT_LOADER_ENV).is_none() {
+        // No loader installed on this host; nothing to assert.
+        return;
+    }
+    // SAFETY: same contract as production. Only canonical Level Zero
+    // loader paths are passed, and no resolved pointer is called here.
+    let loaded = LIBZE_PATHS
+        .iter()
+        .find_map(|path| unsafe { try_load_library(path) });
+    assert!(
+        loaded.is_some(),
+        "{EXPECT_LOADER_ENV} is set, so a Level Zero loader is installed, but none of \
+         {LIBZE_PATHS:?} loaded with every required symbol resolved. Either a path in \
+         LIBZE_PATHS no longer matches what the loader package installs, or a symbol \
+         name in LzApi is wrong."
+    );
+    println!("{LOADER_ASSERTED_MARKER}");
 }
 
 #[test]

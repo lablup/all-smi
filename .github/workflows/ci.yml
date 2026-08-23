@@ -42,31 +42,73 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
 
+      # The Level Zero loader ships as its own package on Ubuntu, separate
+      # from the Intel GPU driver, so a runner with no GPU can still load
+      # it. That is worth doing: it is the only part of the FFI surface
+      # reachable without hardware, and until now nothing checked it. The
+      # test it enables asserts that every path in `LIBZE_PATHS` resolves
+      # and every mandatory symbol in `LzApi` is spelled the way the real
+      # library exports it. Both are invisible to the compiler and would
+      # otherwise turn the whole backend into a silent no-op on real
+      # hardware.
+      #
+      # No device is involved, so nothing here attempts `zeInit`.
+      - name: Install the Level Zero loader
+        run: |
+          set -eu
+          sudo apt-get install -y libze1 || sudo apt-get install -y level-zero
+          if ! ldconfig -p | grep -q 'libze_loader\.so\.1'; then
+            echo "::error::the loader package installed but libze_loader.so.1 is not on the linker path; the package name in this step is probably wrong"
+            exit 1
+          fi
+          ldconfig -p | grep libze_loader
+
+      # ALL_SMI_EXPECT_LEVEL_ZERO_LOADER turns the loader test from a skip
+      # into an assertion, and is opt-in so the same test is a no-op on a
+      # developer host with no loader installed.
+      #
+      # It runs as its own step so the result can be checked rather than
+      # assumed. A green test proves nothing on its own here: if the key is
+      # renamed, the `env:` block is dropped, or the test moves, it goes
+      # back to returning early and the job stays green while checking
+      # nothing. Grepping for a marker the test prints only after asserting
+      # turns each of those into a red build.
+      - name: The Level Zero loader resolves every symbol we require
+        env:
+          ALL_SMI_EXPECT_LEVEL_ZERO_LOADER: "1"
+        run: |
+          set -euo pipefail
+          log="${RUNNER_TEMP:-/tmp}/level-zero-loader.log"
+          cargo test --lib the_installed_loader_exports_every_symbol_we_resolve \
+            -- --nocapture | tee "$log"
+          if ! grep -q 'all-smi: level-zero-loader-assertion-ran' "$log"; then
+            echo "::error::the loader test did not assert. Either it no longer runs under this name, or ALL_SMI_EXPECT_LEVEL_ZERO_LOADER no longer reaches it."
+            exit 1
+          fi
+
+      # `cargo test` with no flags now covers the Level Zero backend:
+      # build.rs turns `all_smi_level_zero` on for every Linux target, so
+      # there is no configuration in which the module goes uncompiled and
+      # its tests filtered out. That hole is what let two defects reach
+      # issue #364.
       - name: Run tests
         run: cargo test --verbose
 
       - name: Check formatting
         run: cargo fmt --check
 
+      # `--all-targets` is deliberate. Without it clippy lints only lib and
+      # bin, leaving every test target unchecked, which is where a good
+      # deal of this crate's logic lives.
       - name: Run clippy
-        run: cargo clippy -- -D warnings
+        run: cargo clippy --all-targets -- -D warnings
 
-      # The `level_zero` feature is default-off and no job enabled it, so
-      # everything under src/device/readers/intel_gpu_level_zero/ was
-      # never compiled, never linted, and its 49 tests were filtered out
-      # of every `cargo test` run. Two defects in that module reached
-      # issue #364 through this hole. The steps below close it. They are
-      # additional rather than replacements: the default-feature build is
-      # what `cargo install` and downstream crates get, so it has to stay
-      # covered on its own.
-      - name: Run tests (level_zero)
-        run: cargo test --verbose --features level_zero
-
-      # `--all-targets` where the default clippy step above has no such
-      # flag: the module's tests live behind the same feature gate, so
-      # linting only lib and bin would leave them unchecked again.
-      - name: Run clippy (level_zero)
-        run: cargo clippy --features level_zero --all-targets -- -D warnings
+      # `level_zero` is an accepted no-op now that the backend is
+      # unconditional. Nothing else would notice if passing it started
+      # failing, and a downstream manifest that lists it would break
+      # without warning.
+      - name: The level_zero feature is still accepted
+        run: cargo build --features level_zero --bin all-smi
 
   # ═══════════════════════════════════════════════════════════════
   # Job: Packaging Sync (issue #309)
@@ -904,15 +946,16 @@ jobs:
       # protoc is deliberately absent: build.rs compiles the TPU protos
       # on Linux only, so a Windows build needs no protoc at all.
       #
-      # `--features level_zero` because this is the only job on a Windows
-      # runner, and src/device/readers/intel_gpu_windows.rs gates its
-      # Level Zero augmentation on both `cfg(target_os = "windows")` and
-      # that feature. Without the flag here, that code compiles nowhere
-      # in CI at all. The job itself is opt-in via
+      # No `--features level_zero` here, on purpose. build.rs emits the
+      # `all_smi_level_zero` cfg for every Windows target regardless of the
+      # feature, so a plain build already includes the backend. Passing the
+      # flag would compile the same thing while testing a configuration we
+      # do not ship; leaving it off means this job builds exactly what the
+      # release artifact is. The job is opt-in via
       # ENABLE_WINDOWS_SERVICE_SMOKE, so this is coverage when the runner
       # is available rather than a guarantee.
       - name: Build all-smi
-        run: cargo build --bin all-smi --features level_zero
+        run: cargo build --bin all-smi
 
       - name: Require an elevated runner
         run: |
@@ -1147,18 +1190,14 @@ jobs:
             exit 1
           fi
 
-      # Release-profile compile with `level_zero` on, matching what the
-      # release workflow would produce once Part B of #372 lands. The
-      # debug-profile test and clippy steps in the `test` job would not
-      # catch a release-only failure such as an optimization-dependent
-      # const evaluation.
-      #
-      # `--locked` is deliberate. `level_zero = []` activates no
-      # dependency, so the feature must not move Cargo.lock; if it ever
-      # does, this fails here rather than in the vendored Debian build,
-      # which uses the stricter `--frozen`.
+      # The `Build binary` step above already compiles the Level Zero
+      # backend, since `all_smi_level_zero` is unconditional on Linux. What
+      # this adds is the `--locked` guarantee for the no-op feature:
+      # `level_zero = []` activates no dependency, so passing it must not
+      # move Cargo.lock. If it ever does, this fails here rather than in
+      # the vendored Debian build, which uses the stricter `--frozen`.
       #
       # Like the step above, this overwrites target/release/all-smi.
       # Nothing in this job consumes that artifact.
-      - name: Build with the level_zero feature
+      - name: The level_zero feature does not move Cargo.lock
         run: cargo build --release --locked --features level_zero --bin all-smi

@@ -95,10 +95,39 @@ The default build (`default = ["cli", "amd"]`) includes the full CLI, TUI, API s
 | `amd` | on | AMD GPU backend on glibc Linux via the `libamdgpu_top` crate. Disable to drop the `libdrm.so.2` / `libdrm_amdgpu.so.1` runtime dependency. |
 | `mock` | off | Builds the `all-smi-mock-server` binary that simulates GPU/NPU clusters. |
 | `furiosa` | off | Furiosa NPU backend via the `furiosa-smi-rs` crate (Linux targets). |
-| `level_zero` | off | Intel oneAPI Level Zero (Sysman) backend for Intel client GPUs. Dynamically loads `libze_loader.so.1` (Linux) / `ze_loader.dll` (Windows) at runtime; a missing runtime degrades silently to the sysfs/WMI baseline. |
+| `level_zero` | accepted no-op | The Intel oneAPI Level Zero (Sysman) backend it used to gate is now compiled into **every Linux and Windows build**. It dynamically loads `libze_loader.so.1` / `ze_loader.dll` at runtime and degrades silently to the sysfs/WMI baseline when the runtime is absent. Because the flag no longer decides anything, `features:` in a support bundle cannot tell you whether the backend is present; read `level_zero:` in `version.txt` instead. |
+
+##### Why the Level Zero flag no longer decides anything
+
+`build.rs` emits an `all_smi_level_zero` cfg, and every consumer gates on
+that rather than on the cargo feature. It is on for every Linux and Windows
+target and off for everything else, macOS included.
+
+Four reasons the backend is unconditional:
+
+1. **It adds no dependency.** The loader is `dlopen`ed through
+   `libloading`, already an unconditional dependency on both targets, so
+   compiling the backend in adds no `NEEDED` entry and no import.
+2. **It costs nothing without the hardware.** `reader_factory` builds the
+   Intel reader only when an Intel GPU is present, so on any other machine
+   the loader is never opened. With a GPU but no runtime, the failed load
+   is cached process-wide and the sysfs/WMI baseline stands.
+3. **We ship one artifact per target.** An opt-in backend would mean
+   publishing an Intel and a non-Intel package for the same platform, and
+   an Intel Arc owner would have to build from source to get anything the
+   vendor backend adds.
+4. **On Windows nothing else can supply the fields.** GPU temperature,
+   power, and frequency have no WMI, DXGI, or PDH source. Linux has a
+   sysfs baseline, so there the backend is an upgrade rather than the
+   difference between data and empty columns.
+
+Cargo cannot express a per-target feature default, which is why this is a
+cfg rather than a manifest entry. The feature itself is kept so that
+`--features level_zero`, and any downstream manifest listing it, keeps
+building:
 
 ```bash
-# Example: build with the Intel Level Zero backend enabled
+# Still accepted, still builds, changes nothing
 cargo build --release --features level_zero
 ```
 

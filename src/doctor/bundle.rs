@@ -306,6 +306,7 @@ fn env_dump(redact: &RedactOptions) -> String {
 
 fn version_dump(report: &Report) -> String {
     let features = enabled_features().join(",");
+    let level_zero = level_zero_effective();
     let triple = crate::doctor::checks::platform::checks()
         .iter()
         .find(|c| c.id == "platform.runtime")
@@ -316,8 +317,25 @@ fn version_dump(report: &Report) -> String {
     let schema = report.schema;
     let timestamp = &report.timestamp;
     format!(
-        "all-smi {version}\nschema: {schema}\ntimestamp: {timestamp}\nfeatures: {features}\nruntime: {triple}\n"
+        "all-smi {version}\nschema: {schema}\ntimestamp: {timestamp}\nfeatures: {features}\nlevel_zero: {level_zero}\nruntime: {triple}\n"
     )
+}
+
+/// Whether the Intel Level Zero backend was compiled into this binary.
+///
+/// Deliberately separate from [`enabled_features`], which is contractually
+/// a list of enabled *cargo features*. Level Zero is not purely a feature:
+/// `build.rs` turns it on for every Windows target regardless of
+/// `--features level_zero`, so on Windows the feature list says nothing
+/// about whether the backend is there. That is exactly what someone
+/// reading a support bundle needs to know, because it decides whether GPU
+/// temperature, power, and frequency can be collected at all.
+fn level_zero_effective() -> &'static str {
+    if cfg!(all_smi_level_zero) {
+        "compiled-in"
+    } else {
+        "absent"
+    }
 }
 
 fn enabled_features() -> Vec<&'static str> {
@@ -340,6 +358,11 @@ fn enabled_features() -> Vec<&'static str> {
     // explains why two builds report different Intel GPU metrics (issue
     // #362). Every feature declared in Cargo.toml except `default` must have
     // an arm here; `bundle_covers_every_declared_feature` enforces that.
+    //
+    // This arm tracks the cargo feature and nothing else. On Windows the
+    // backend is compiled in whether or not the feature is set, so read the
+    // `level_zero:` line of version.txt for the effective state; see
+    // `level_zero_effective`.
     #[cfg(feature = "level_zero")]
     v.push("level_zero");
     if v.is_empty() {
@@ -770,5 +793,55 @@ mod tests {
                 "symlink target was overwritten despite O_NOFOLLOW"
             );
         }
+    }
+
+    /// The effective Level Zero state is reported separately from the
+    /// cargo-feature list, and tracks the `all_smi_level_zero` cfg rather
+    /// than `--features level_zero`.
+    ///
+    /// The two no longer agree anywhere: `build.rs` turns the backend on
+    /// for every Linux and Windows target regardless of the feature, so a
+    /// default build on either reports `level_zero: compiled-in` while
+    /// `features:` correctly omits it. That divergence is the whole reason
+    /// this line exists.
+    #[test]
+    fn level_zero_effective_tracks_the_cfg_alias() {
+        assert_eq!(
+            level_zero_effective() == "compiled-in",
+            cfg!(all_smi_level_zero)
+        );
+
+        // The rule build.rs implements. Only the positive direction is
+        // asserted: the compiler enforces the other half, because a target
+        // without the backend's `libloading` dependency does not build with
+        // the cfg forced on, which is a louder failure than this test. A
+        // scratch probe that widens the gate by hand is also allowed to
+        // turn it on anywhere, and should not have to fail here to do it.
+        if cfg!(target_os = "linux") || cfg!(target_os = "windows") {
+            assert_eq!(level_zero_effective(), "compiled-in");
+        }
+    }
+
+    /// The line has to be in version.txt itself, not merely computable: a
+    /// support bundle is read by someone who does not have the build.
+    #[test]
+    fn version_dump_reports_the_level_zero_state() {
+        let report = Report {
+            schema: 1,
+            version: "0.99.9".to_string(),
+            timestamp: "2026-04-20T00:00:00Z".to_string(),
+            summary: Summary {
+                pass: 0,
+                warn: 0,
+                fail: 0,
+                skip: 0,
+            },
+            checks: vec![],
+        };
+        let dump = version_dump(&report);
+        assert!(
+            dump.contains(&format!("level_zero: {}", level_zero_effective())),
+            "version.txt must record the effective Level Zero state, got:\n{dump}"
+        );
     }
 }

@@ -79,6 +79,17 @@ pub fn intel_gpu_marketing_name(device_id: u32) -> String {
         0x8A50 | 0x8A51 | 0x8A52 | 0x8A53 | 0x8A56 | 0x8A57 | 0x8A58 | 0x8A59 | 0x8A5A | 0x8A5B
         | 0x8A5C | 0x8A5D | 0x8A71 => "Intel Iris Plus / UHD Graphics (Ice Lake)".to_string(),
 
+        // ---- Xe3 / Panther Lake (Core Ultra Series 3). 0xB08x range.
+        // The reporting host for issue #364 is `8086:b080`. The range is
+        // deliberate rather than a single ID: Intel ships an iGPU family
+        // across a contiguous block of device IDs per generation, and the
+        // alternative to a range is reporting `Intel Graphics (device
+        // 0xb081)` for the next SKU off the same silicon. The name is
+        // generic for the same reason, since one ID does not distinguish
+        // the B390 from its siblings; `classify_intel_architecture` reads
+        // the marketing string for that.
+        0xB080..=0xB08F => "Intel Arc Graphics (Core Ultra / Panther Lake)".to_string(),
+
         // ---- Xe2 / Lunar Lake / Arrow Lake (Gen13/14 IDs in 0xA7* range).
         0xA780 | 0xA781 | 0xA782 | 0xA783 | 0xA788 | 0xA789 | 0xA78A | 0xA78B | 0xA7A0 | 0xA7A1
         | 0xA7A8 | 0xA7A9 | 0xA7AA | 0xA7AB | 0xA7AC | 0xA7AD => {
@@ -752,5 +763,54 @@ mod tests {
             "No"
         );
         assert_eq!(IntelArchitecture::Unknown.sycl_capable_label(), "Unknown");
+    }
+
+    // ---------- device-ID resolution for Panther Lake ----------
+
+    /// The Linux reader has no marketing string to read: it resolves the
+    /// name from the PCI device ID in sysfs. Without a table entry, the
+    /// reporting host's `8086:b080` produced `Intel Graphics (device
+    /// 0xb080)`, which then classified as `Unknown` because every
+    /// architecture rule keys off the name.
+    #[test]
+    fn panther_lake_device_ids_resolve_to_a_named_part() {
+        for id in [0xB080u32, 0xB084, 0xB08F] {
+            assert_eq!(
+                intel_gpu_marketing_name(id),
+                "Intel Arc Graphics (Core Ultra / Panther Lake)",
+                "device {id:#06x}"
+            );
+        }
+    }
+
+    /// The vendor half of a full PCI ID must not disturb the lookup.
+    #[test]
+    fn the_vendor_half_of_a_pci_id_is_ignored() {
+        assert_eq!(
+            resolve_intel_gpu_name(0x8086_B080),
+            "Intel Arc Graphics (Core Ultra / Panther Lake)"
+        );
+    }
+
+    /// The range must stay inside its block. `0xB07F` and `0xB090` belong
+    /// to whatever Intel ships next, and claiming them would repeat the
+    /// mistake that put the B390 on Meteor Lake.
+    #[test]
+    fn the_panther_lake_range_does_not_bleed() {
+        assert!(intel_gpu_marketing_name(0xB07F).is_empty());
+        assert!(intel_gpu_marketing_name(0xB090).is_empty());
+        assert_eq!(
+            resolve_intel_gpu_name(0xB090),
+            "Intel Graphics (device 0xb090)"
+        );
+    }
+
+    /// A resolved Panther Lake name must survive the round trip into the
+    /// architecture classifier, which is what the readers actually publish.
+    #[test]
+    fn a_resolved_panther_lake_name_classifies_as_xe3() {
+        let name = resolve_intel_gpu_name(0xB080);
+        assert_eq!(classify_intel_architecture(&name), IntelArchitecture::Xe3);
+        assert_eq!(classify_intel_variant(&name), Some("Integrated"));
     }
 }
