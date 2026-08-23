@@ -63,6 +63,7 @@
 #include <level_zero/ze_api.h>
 #include <level_zero/zes_api.h>
 
+#include <stdatomic.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -89,9 +90,10 @@ static int stub_mem;
 static int stub_freq;
 static int stub_fan;
 
-/* Device B owns nothing but its PCI address. It exists to prove that a
- * second device is enumerated and sorted, and to exercise the two count
- * edge cases below without disturbing device A's exact values. */
+/* Device B owns one render engine and deliberately rejects power-domain
+ * enumeration. It exists to prove that a second device is enumerated and
+ * sorted, to exercise the count edge cases below, and to verify that one
+ * failing Sysman family does not suppress the others. */
 
 /* ------------------------------------------------------------------ *
  * Fixed per-call steps
@@ -108,9 +110,18 @@ static int stub_fan;
 #define STUB_RENDER_ACTIVE_US    100000ULL   /* 10.00% of a tick */
 #define STUB_ENERGY_UJ         45000000ULL   /* 45.00 W over a tick */
 
-static uint64_t compute_calls;
-static uint64_t render_calls;
-static uint64_t power_calls;
+/* Rust's test harness runs independent tests concurrently. These counters
+ * are shared by every test through the one process-wide stub library, so
+ * plain increments would be a C data race. Relaxed atomics are sufficient:
+ * callers need a unique monotonically increasing sample number, not an
+ * ordering relationship with any other state. */
+static _Atomic uint64_t compute_calls;
+static _Atomic uint64_t render_calls;
+static _Atomic uint64_t power_calls;
+
+static uint64_t next_call(_Atomic uint64_t *counter) {
+    return atomic_fetch_add_explicit(counter, 1, memory_order_relaxed) + 1;
+}
 
 /* Point-in-time values. Each is unique within its struct so a field read
  * at the wrong offset yields an obviously wrong number. */
@@ -268,13 +279,13 @@ zesEngineGetActivity(zes_engine_handle_t hEngine, zes_engine_stats_t *pStats) {
     }
     memset(pStats, 0, sizeof(*pStats));
     if (hEngine == (zes_engine_handle_t)&stub_engine_compute) {
-        compute_calls++;
-        pStats->activeTime = compute_calls * STUB_COMPUTE_ACTIVE_US;
-        pStats->timestamp = compute_calls * STUB_TICK_US;
+        uint64_t call = next_call(&compute_calls);
+        pStats->activeTime = call * STUB_COMPUTE_ACTIVE_US;
+        pStats->timestamp = call * STUB_TICK_US;
     } else if (hEngine == (zes_engine_handle_t)&stub_engine_render) {
-        render_calls++;
-        pStats->activeTime = render_calls * STUB_RENDER_ACTIVE_US;
-        pStats->timestamp = render_calls * STUB_TICK_US;
+        uint64_t call = next_call(&render_calls);
+        pStats->activeTime = call * STUB_RENDER_ACTIVE_US;
+        pStats->timestamp = call * STUB_TICK_US;
     } else {
         return ZE_RESULT_ERROR_INVALID_ARGUMENT;
     }
@@ -288,11 +299,11 @@ zesEngineGetActivity(zes_engine_handle_t hEngine, zes_engine_stats_t *pStats) {
 ZE_APIEXPORT ze_result_t ZE_APICALL
 zesDeviceEnumPowerDomains(zes_device_handle_t hDevice, uint32_t *pCount,
                           zes_pwr_handle_t *phPower) {
+    if (hDevice == (zes_device_handle_t)&stub_device_b) {
+        return ZE_RESULT_ERROR_UNSUPPORTED_FEATURE;
+    }
     if (hDevice != (zes_device_handle_t)&stub_device_a) {
-        if (pCount != NULL && phPower == NULL) {
-            *pCount = 0;
-        }
-        return ZE_RESULT_SUCCESS;
+        return ZE_RESULT_ERROR_INVALID_ARGUMENT;
     }
     void *items[] = {&stub_power};
     return stub_enumerate(pCount, (void **)phPower, items, 1);
@@ -308,9 +319,9 @@ zesPowerGetEnergyCounter(zes_pwr_handle_t hPower,
         return ZE_RESULT_ERROR_INVALID_ARGUMENT;
     }
     memset(pEnergy, 0, sizeof(*pEnergy));
-    power_calls++;
-    pEnergy->energy = power_calls * STUB_ENERGY_UJ;
-    pEnergy->timestamp = power_calls * STUB_TICK_US;
+    uint64_t call = next_call(&power_calls);
+    pEnergy->energy = call * STUB_ENERGY_UJ;
+    pEnergy->timestamp = call * STUB_TICK_US;
     return ZE_RESULT_SUCCESS;
 }
 

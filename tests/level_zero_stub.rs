@@ -210,25 +210,32 @@ fn the_point_in_time_families_land_in_gpu_info() {
 }
 
 /// Device B advertises 4096 engines, above the `MAX_L0_HANDLES` cap of 256,
-/// then fills fewer than requested. Both the clamp and the post-fill
-/// truncate have to hold or this panics or reads past the buffer.
+/// then fills fewer than requested. It also returns a non-success result for
+/// power enumeration. The engine family must remain fresh while power alone
+/// degrades, in addition to surviving both the clamp and post-fill truncate.
 #[test]
-fn an_over_cap_count_and_a_short_fill_are_survived() {
+fn count_edges_and_a_failing_family_are_isolated() {
     if !armed() {
         return;
     }
     let mut state = l0::LevelZeroState::empty();
-    let readout = l0::refresh(&mut state, BDF_B).expect("device B must still bind");
+    let first = l0::refresh(&mut state, BDF_B).expect("device B must still bind");
     assert!(
         l0::is_bound(&state),
         "device B must bind even though its enumerator misbehaves"
     );
     // One engine survived the clamp and the truncate.
     assert_eq!(l0::engine_count(&state), 1);
-    // Device B has no power domain, and a family the driver does not offer
-    // must degrade only itself.
+    // The failing power family must degrade only itself.
     assert_eq!(l0::power_domain_count(&state), 0);
-    assert!(readout.power_watts.is_none());
+    assert!(first.power_watts.is_none());
+
+    let second = l0::refresh(&mut state, BDF_B).expect("the engine family must stay fresh");
+    let engine = second
+        .primary_engine_utilization
+        .expect("a power enumeration failure must not suppress engine data");
+    assert!((engine.value - 10.0).abs() < 1e-9);
+    assert!(second.power_watts.is_none());
     println!("{MARKER}");
 }
 
