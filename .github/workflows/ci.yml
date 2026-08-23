@@ -122,6 +122,69 @@ jobs:
               exit 1
               ;;
           esac
+      # Everything past `try_load_library` needs a driver to answer, and no
+      # runner has an Intel GPU. A synthetic loader supplies the answers so
+      # the rest of the backend runs here: device enumeration, the
+      # count-then-buffer idiom and its clamp, the BDF mapping, the delta
+      # arithmetic, and above all the struct layouts.
+      #
+      # The headers are the point. The stub is compiled against the vendor's
+      # own `ze_api.h` and `zes_api.h`, so a value that survives into an
+      # all-smi `#[repr(C)]` field proves the two layouts agree field by
+      # field. The size assertions we already have compare our struct to our
+      # own transcription of the spec, which cannot catch a field-order swap
+      # or an offset error that preserves the total.
+      - name: Install the Level Zero headers
+        run: sudo apt-get install -y libze-dev || sudo apt-get install -y level-zero-dev
+
+      # Built into its own directory so LD_LIBRARY_PATH ordering is
+      # unambiguous against the real libze1 installed above, which the
+      # previous step still needs.
+      - name: Build the stub Level Zero loader
+        run: |
+          set -euo pipefail
+          mkdir -p target/lz-stub
+          cc -shared -fPIC -Wall -Wextra -Werror \
+             -Wl,-soname,libze_loader.so.1 \
+             -o target/lz-stub/libze_loader.so.1 \
+             tests/fixtures/level_zero/stub_ze_loader.c
+          # Every symbol the backend resolves must be exported, or the test
+          # below fails later and less clearly.
+          for sym in zeInit zesInit zeDriverGet zeDeviceGet \
+                     zesDevicePciGetProperties zesDeviceEnumEngineGroups \
+                     zesEngineGetProperties zesEngineGetActivity \
+                     zesDeviceEnumPowerDomains zesPowerGetEnergyCounter \
+                     zesDeviceEnumTemperatureSensors zesTemperatureGetProperties \
+                     zesTemperatureGetState zesDeviceEnumMemoryModules \
+                     zesMemoryGetProperties zesMemoryGetState \
+                     zesDeviceEnumFrequencyDomains zesFrequencyGetProperties \
+                     zesFrequencyGetState zesDeviceEnumFans \
+                     zesFanGetProperties zesFanGetState; do
+            if ! nm -D --defined-only target/lz-stub/libze_loader.so.1 | grep -q " $sym\$"; then
+              echo "::error::the stub does not export $sym"
+              exit 1
+            fi
+          done
+
+      # `LIBZE_PATHS[0]` is the bare SONAME, and dlopen searches
+      # LD_LIBRARY_PATH before the default paths, so the stub wins here
+      # without any production code knowing it exists. The variable is set
+      # on this step alone, so every other step still sees the real loader.
+      #
+      # Its own test binary, therefore its own process: `LZ_RUNTIME` is a
+      # process-wide OnceCell and the library's unit tests already latch it.
+      - name: Drive the backend against the stub loader
+        env:
+          ALL_SMI_LEVEL_ZERO_STUB: "1"
+        run: |
+          set -euo pipefail
+          log="${RUNNER_TEMP:-/tmp}/level-zero-stub.log"
+          LD_LIBRARY_PATH="$PWD/target/lz-stub:${LD_LIBRARY_PATH:-}" \
+            cargo test --test level_zero_stub -- --nocapture | tee "$log"
+          if ! grep -q 'all-smi: level-zero-stub-assertions-ran' "$log"; then
+            echo "::error::the stub tests did not assert. Either ALL_SMI_LEVEL_ZERO_STUB no longer reaches them, or the LD_LIBRARY_PATH binding stopped working and every test returned early."
+            exit 1
+          fi
 
       # `cargo test` with no flags now covers the Level Zero backend:
       # build.rs turns `all_smi_level_zero` on for every Linux target, so
