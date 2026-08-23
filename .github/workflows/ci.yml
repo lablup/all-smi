@@ -51,6 +51,23 @@ jobs:
       - name: Run clippy
         run: cargo clippy -- -D warnings
 
+      # The `level_zero` feature is default-off and no job enabled it, so
+      # everything under src/device/readers/intel_gpu_level_zero/ was
+      # never compiled, never linted, and its 49 tests were filtered out
+      # of every `cargo test` run. Two defects in that module reached
+      # issue #364 through this hole. The steps below close it. They are
+      # additional rather than replacements: the default-feature build is
+      # what `cargo install` and downstream crates get, so it has to stay
+      # covered on its own.
+      - name: Run tests (level_zero)
+        run: cargo test --verbose --features level_zero
+
+      # `--all-targets` where the default clippy step above has no such
+      # flag: the module's tests live behind the same feature gate, so
+      # linting only lib and bin would leave them unchecked again.
+      - name: Run clippy (level_zero)
+        run: cargo clippy --features level_zero --all-targets -- -D warnings
+
   # ═══════════════════════════════════════════════════════════════
   # Job: Packaging Sync (issue #309)
   # ═══════════════════════════════════════════════════════════════
@@ -886,8 +903,16 @@ jobs:
 
       # protoc is deliberately absent: build.rs compiles the TPU protos
       # on Linux only, so a Windows build needs no protoc at all.
+      #
+      # `--features level_zero` because this is the only job on a Windows
+      # runner, and src/device/readers/intel_gpu_windows.rs gates its
+      # Level Zero augmentation on both `cfg(target_os = "windows")` and
+      # that feature. Without the flag here, that code compiles nowhere
+      # in CI at all. The job itself is opt-in via
+      # ENABLE_WINDOWS_SERVICE_SMOKE, so this is coverage when the runner
+      # is available rather than a guarantee.
       - name: Build all-smi
-        run: cargo build --bin all-smi
+        run: cargo build --bin all-smi --features level_zero
 
       - name: Require an elevated runner
         run: |
@@ -1121,3 +1146,19 @@ jobs:
             echo "::error::libdrm is still linked with --no-default-features --features cli"
             exit 1
           fi
+
+      # Release-profile compile with `level_zero` on, matching what the
+      # release workflow would produce once Part B of #372 lands. The
+      # debug-profile test and clippy steps in the `test` job would not
+      # catch a release-only failure such as an optimization-dependent
+      # const evaluation.
+      #
+      # `--locked` is deliberate. `level_zero = []` activates no
+      # dependency, so the feature must not move Cargo.lock; if it ever
+      # does, this fails here rather than in the vendored Debian build,
+      # which uses the stricter `--frozen`.
+      #
+      # Like the step above, this overwrites target/release/all-smi.
+      # Nothing in this job consumes that artifact.
+      - name: Build with the level_zero feature
+        run: cargo build --release --locked --features level_zero --bin all-smi
