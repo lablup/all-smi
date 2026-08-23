@@ -389,6 +389,16 @@ fn try_load_library_returns_none_for_nonexistent_path() {
 /// usually has no reason to install it.
 const EXPECT_LOADER_ENV: &str = "ALL_SMI_EXPECT_LEVEL_ZERO_LOADER";
 
+/// Printed only after the assertion below has actually run. The CI step
+/// that sets [`EXPECT_LOADER_ENV`] greps for it.
+///
+/// Without this the test is indistinguishable from a skip: rename the
+/// environment key, drop the `env:` block from the workflow, or move the
+/// test, and it silently stops asserting while the job stays green. That
+/// is the failure mode this whole check exists to prevent, so it should
+/// not have one of its own.
+const LOADER_ASSERTED_MARKER: &str = "all-smi: level-zero-loader-assertion-ran";
+
 /// Load a real `libze_loader.so.1` and resolve every symbol we require.
 ///
 /// This is the one part of the FFI surface a runner without a GPU can
@@ -422,6 +432,7 @@ fn the_installed_loader_exports_every_symbol_we_resolve() {
          LIBZE_PATHS no longer matches what the loader package installs, or a symbol \
          name in LzApi is wrong."
     );
+    println!("{LOADER_ASSERTED_MARKER}");
 }
 
 #[test]

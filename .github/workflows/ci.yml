@@ -63,19 +63,36 @@ jobs:
           fi
           ldconfig -p | grep libze_loader
 
+      # ALL_SMI_EXPECT_LEVEL_ZERO_LOADER turns the loader test from a skip
+      # into an assertion, and is opt-in so the same test is a no-op on a
+      # developer host with no loader installed.
+      #
+      # It runs as its own step so the result can be checked rather than
+      # assumed. A green test proves nothing on its own here: if the key is
+      # renamed, the `env:` block is dropped, or the test moves, it goes
+      # back to returning early and the job stays green while checking
+      # nothing. Grepping for a marker the test prints only after asserting
+      # turns each of those into a red build.
+      - name: The Level Zero loader resolves every symbol we require
+        env:
+          ALL_SMI_EXPECT_LEVEL_ZERO_LOADER: "1"
+        run: |
+          set -euo pipefail
+          log="${RUNNER_TEMP:-/tmp}/level-zero-loader.log"
+          cargo test --lib the_installed_loader_exports_every_symbol_we_resolve \
+            -- --nocapture | tee "$log"
+          if ! grep -q 'all-smi: level-zero-loader-assertion-ran' "$log"; then
+            echo "::error::the loader test did not assert. Either it no longer runs under this name, or ALL_SMI_EXPECT_LEVEL_ZERO_LOADER no longer reaches it."
+            exit 1
+          fi
+
       # `cargo test` with no flags now covers the Level Zero backend:
       # build.rs turns `all_smi_level_zero` on for every Linux target, so
       # there is no configuration in which the module goes uncompiled and
       # its tests filtered out. That hole is what let two defects reach
       # issue #364.
-      #
-      # ALL_SMI_EXPECT_LEVEL_ZERO_LOADER turns the loader test above from
-      # a skip into an assertion. It is opt-in so the same test is a no-op
-      # on a developer host with no loader installed.
       - name: Run tests
         run: cargo test --verbose
-        env:
-          ALL_SMI_EXPECT_LEVEL_ZERO_LOADER: "1"
 
       - name: Check formatting
         run: cargo fmt --check
