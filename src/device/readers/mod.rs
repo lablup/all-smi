@@ -79,7 +79,14 @@ pub mod intel_gpu_gtidle;
 pub mod intel_gpu_level_zero;
 #[cfg(target_os = "linux")]
 pub mod intel_gpu_linux;
-#[cfg(any(target_os = "linux", target_os = "windows"))]
+// The `test` arm is load-bearing for the same reason it is on
+// `windows_gpu_perf` below. The discrete/integrated and architecture rules
+// live here, the Windows reader that consumes them is never compiled by any
+// runner this project has, and a wrong rule there is invisible until it
+// reaches a user's machine. That is how the B390 shipped misclassified
+// (issue #364). Compiling under `cfg(test)` everywhere puts the rules in
+// front of every test runner, including a macOS development host.
+#[cfg(any(target_os = "linux", target_os = "windows", test))]
 pub mod intel_gpu_names;
 // The helpers themselves only use portable filesystem APIs, so keep their unit
 // tests available on non-Linux development hosts as well.

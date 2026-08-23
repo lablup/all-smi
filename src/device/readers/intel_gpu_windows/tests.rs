@@ -76,64 +76,6 @@ fn non_intel_excluded() {
     assert!(!is_intel_gpu_name("AMD Radeon RX 7900 XTX"));
 }
 
-#[test]
-fn classify_arc_discrete() {
-    assert_eq!(
-        classify_intel_variant("Intel(R) Arc(TM) A770 Graphics"),
-        "Discrete"
-    );
-    assert_eq!(
-        classify_intel_variant("Intel(R) Arc(TM) B580 Graphics"),
-        "Discrete"
-    );
-}
-
-#[test]
-fn classify_iris_integrated() {
-    assert_eq!(
-        classify_intel_variant("Intel(R) Iris(R) Xe Graphics"),
-        "Integrated"
-    );
-}
-
-#[test]
-fn classify_uhd_integrated() {
-    assert_eq!(
-        classify_intel_variant("Intel(R) UHD Graphics 770"),
-        "Integrated"
-    );
-}
-
-#[test]
-fn classify_meteor_lake_arc_igpu_as_integrated() {
-    // "Intel Arc Graphics" without a model number on Core Ultra is
-    // the iGPU and must NOT be classified as Discrete.
-    assert_eq!(
-        classify_intel_variant("Intel(R) Arc(TM) Graphics"),
-        "Integrated"
-    );
-}
-
-#[test]
-fn arc_model_token_recognises_known_skus() {
-    assert!(is_arc_model_token("a770"));
-    assert!(is_arc_model_token("a750"));
-    assert!(is_arc_model_token("a580"));
-    assert!(is_arc_model_token("a380"));
-    assert!(is_arc_model_token("b580"));
-    assert!(is_arc_model_token("b570"));
-}
-
-#[test]
-fn arc_model_token_rejects_non_models() {
-    assert!(!is_arc_model_token("arc"));
-    assert!(!is_arc_model_token("tm"));
-    assert!(!is_arc_model_token("graphics"));
-    assert!(!is_arc_model_token("a"));
-    // Single letter followed by <3 digits doesn't count as a model.
-    assert!(!is_arc_model_token("a77"));
-}
-
 // ---------- Marketing-name fixture parity with backend.ai-go ----------
 //
 // Every name the architecture classifier handles must also pass the
