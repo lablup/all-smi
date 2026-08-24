@@ -46,11 +46,12 @@ thread_local! {
 fn with_cimv2_connection<T, F: FnOnce(&WMIConnection) -> T>(f: F) -> Option<T> {
     WMI_CIMV2_CONNECTION.with(|cell| {
         let mut conn_ref = cell.borrow_mut();
-        if conn_ref.is_none() {
-            if let Ok(wmi_con) = WMIConnection::new() {
-                *conn_ref = Some(wmi_con);
-            }
-            // Silently fail if connection cannot be created
+        // A failed connection is left as `None` on purpose: the caller
+        // gets `None` back and degrades, and the next call retries.
+        if conn_ref.is_none()
+            && let Ok(wmi_con) = WMIConnection::new()
+        {
+            *conn_ref = Some(wmi_con);
         }
         conn_ref.as_ref().map(f)
     })
@@ -60,11 +61,11 @@ fn with_cimv2_connection<T, F: FnOnce(&WMIConnection) -> T>(f: F) -> Option<T> {
 fn with_root_wmi_connection<T, F: FnOnce(&WMIConnection) -> T>(f: F) -> Option<T> {
     WMI_ROOT_WMI_CONNECTION.with(|cell| {
         let mut conn_ref = cell.borrow_mut();
-        if conn_ref.is_none() {
-            if let Ok(wmi_con) = WMIConnection::with_namespace_path("root\\WMI") {
-                *conn_ref = Some(wmi_con);
-            }
-            // Silently fail if connection cannot be created
+        // Same as above: a failed connection stays `None` and is retried.
+        if conn_ref.is_none()
+            && let Ok(wmi_con) = WMIConnection::with_namespace_path("root\\WMI")
+        {
+            *conn_ref = Some(wmi_con);
         }
         conn_ref.as_ref().map(f)
     })
