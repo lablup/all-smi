@@ -57,12 +57,22 @@ jobs:
   # #367 records four `clippy -D warnings` sites, both reported from a
   # developer machine rather than from a run anyone else can read.
   #
-  # `continue-on-error` on the three check steps is deliberate and
-  # temporary. The point of the first run is to produce the list, and a
-  # job that stops at `fmt` would hide whatever `clippy` and `test` have
-  # to say. The summary step at the end fails the job, so a red run is
-  # still red; it just reports all three first. Remove the flags once
-  # #366 and #367 are closed, and this becomes an ordinary gate.
+  # This is an ordinary gate: the first failing check fails the job.
+  #
+  # It did not start that way. The three checks carried
+  # `continue-on-error` and a summary step failed the job at the end, so
+  # that one run could report all three rather than stopping at `fmt` and
+  # hiding what the other two had to say. That mattered while #366 and
+  # #367 were open, and it earned its keep twice: both issues turned out
+  # to undercount, because nothing could see past the first thing that
+  # stopped the build. #366 reported four failing tests and had seven,
+  # and #367 reported four clippy sites and had nine.
+  #
+  # Both are closed and run 32726116136 on `main` reported all three
+  # green, so the scaffolding is gone. If a future run needs the same
+  # report-everything behaviour for a debugging session, it is a few
+  # lines of `continue-on-error` plus a summary step, and this comment is
+  # the record of what it looked like.
   # ───────────────────────────────────────────────────────────────
   windows-checks:
     name: Windows Checks
@@ -114,47 +124,30 @@ jobs:
             [Security.Principal.WindowsBuiltInRole]::Administrator)
 
       - name: cargo fmt --check
-        id: fmt
-        continue-on-error: true
         run: cargo fmt --all -- --check
 
       - name: cargo clippy
-        id: clippy
-        continue-on-error: true
         run: cargo clippy --all-targets -- -D warnings
 
       - name: cargo test --lib
-        id: test
-        continue-on-error: true
         run: cargo test --lib
 
       # Diagnostics, not a gate. It runs the binary this job just built
       # against the actual hardware, which is the only way #377 and #378
       # get evidence rather than inference.
+      #
+      # `if: always()` so it still runs after a failed check, which is
+      # when knowing what the host is matters most. It keeps
+      # `continue-on-error` for the same reason it always had it: a probe
+      # that cannot build is not a reason to fail a run whose checks
+      # passed.
       - name: all-smi doctor
+        if: always()
         continue-on-error: true
         run: |
           cargo run --bin all-smi -- doctor --verbose
           Write-Output "--- level_zero only, as json"
           cargo run --bin all-smi -- doctor --only level_zero --json
-
-      - name: Report
-        run: |
-          $results = [ordered]@{
-            'cargo fmt --check' = "${{ steps.fmt.outcome }}"
-            'cargo clippy'      = "${{ steps.clippy.outcome }}"
-            'cargo test --lib'  = "${{ steps.test.outcome }}"
-          }
-          $failed = @()
-          foreach ($k in $results.Keys) {
-            Write-Output ("{0,-18} {1}" -f $k, $results[$k])
-            if ($results[$k] -ne 'success') { $failed += $k }
-          }
-          if ($failed.Count -gt 0) {
-            Write-Output "::error::native Windows checks failed: $($failed -join ', '). See #366 and #367."
-            exit 1
-          }
-          Write-Output "All native Windows checks passed."
 
   # ═══════════════════════════════════════════════════════════════
   # Job: Windows Service Control Manager smoke test (issue #311)
