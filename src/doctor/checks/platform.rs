@@ -114,24 +114,13 @@ fn check_runtime(_ctx: &CheckCtx) -> CheckResult {
         msg.push_str(&format!(" (env={env})"));
     }
 
-    // The AMD backend is gated on `not(target_env = "musl")` and on the
-    // default-on `amd` cargo feature; surface a warning naming whichever gate
-    // actually removed it so the reason is never misattributed (issue #345).
+    // The runtime AMD plugin cannot participate in a statically linked musl
+    // build. Cargo feature state is deliberately irrelevant now.
     #[cfg(target_env = "musl")]
     {
         return CheckResult::Warn(
             format!("{msg} — musl builds do not include AMD GPU support"),
             Some("rebuild with a glibc target (e.g. x86_64-unknown-linux-gnu) for AMD".to_string()),
-        );
-    }
-
-    #[cfg(all(target_os = "linux", not(target_env = "musl"), not(feature = "amd")))]
-    {
-        return CheckResult::Warn(
-            format!(
-                "{msg}, built without the `amd` cargo feature so AMD GPU support is compiled out"
-            ),
-            Some("rebuild with the default features, or add `--features amd`, for AMD".to_string()),
         );
     }
 

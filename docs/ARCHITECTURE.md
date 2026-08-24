@@ -207,6 +207,14 @@ pub trait MetricsExporter: Send + Sync {
 - DLA (Deep Learning Accelerator) support
 - Integrated memory architecture handling
 
+#### AMD Linux runtime plugin (`src/device/readers/amd.rs`, `crates/all-smi-amd-plugin/`)
+- The main crate contains hardware detection and a `libloading` adapter only; it never links `libamdgpu_top`, `libdrm.so.2`, or `libdrm_amdgpu.so.1`
+- The companion `liball_smi_amd.so` retains the existing `libamdgpu_top` reader and exposes an opaque reader handle plus JSON buffers through the versioned `AmdPluginApiV1` C function table
+- The host validates the ABI version, function-table size, and wire-format identifier before creating a reader; mismatches fail closed and appear in `amd.libamdgpu_top.abi`
+- Search order is an explicit absolute `ALL_SMI_AMD_PLUGIN` override, the executable directory, executable-relative `../lib/all-smi`, `/usr/local/lib/all-smi`, and `/usr/lib/all-smi`; no current-directory or bare-name lookup is allowed, and world-writable candidates are rejected
+- Missing plugins, missing native dependencies, and sampling/serialization failures degrade to an absent AMD reader without affecting startup or other backends
+- Release tarballs keep the companion beside the binary, Homebrew installs it to the formula's `lib/all-smi`, and Debian/PPA packages install it to `/usr/lib/all-smi`
+
 #### Intel Arc / Iris Xe client GPU (Linux: `src/device/readers/intel_gpu_linux.rs`, Windows: `src/device/readers/intel_gpu_windows.rs`)
 - Linux: sysfs discovery under `/sys/class/drm/card*`, vendor `0x8086`, driver `i915` or `xe`
 - Windows: WMI `Win32_VideoController` query filtered to Intel graphics adapter names
@@ -539,8 +547,8 @@ pub const MAX_HISTORY_SIZE: usize = 60;
 default = ["cli", "amd"]
 # CLI parsing, TUI, and the axum API server
 cli = ["dep:clap", "dep:crossterm", "dep:axum", "dep:tower-http", "dep:anyhow", "dep:toml", "dep:dirs"]
-# AMD GPU backend via libamdgpu_top (glibc Linux)
-amd = ["dep:libamdgpu_top"]
+# Accepted no-op; glibc Linux always contains the runtime loader
+amd = []
 # Enables the mock server binary
 mock = ["cli", "dep:rand", "dep:hyper", "dep:hyper-util"]
 # Furiosa NPU backend
@@ -551,7 +559,7 @@ furiosa = ["furiosa-smi-rs"]
 level_zero = []
 ```
 
-`amd` is the only backend feature that defaults to on. It exists because `libamdgpu_top` links `libdrm.so.2` and `libdrm_amdgpu.so.1` unconditionally, which every dependent binary inherits as `NEEDED` entries; a consumer that must run on hosts without those libraries builds with `default-features = false` (see `docs/LIB_mode.md`). Disabling it compiles out `src/device/readers/amd.rs`, `platform_detection::has_amd`, and the AMD arm of `reader_factory`, which is the same shape the musl artifacts already ship. Windows AMD support goes through `amd_adl`/WMI and is independent of this feature.
+`amd` remains in the default feature list only for downstream manifest compatibility and has no effect. Every glibc Linux build contains AMD PCI/sysfs detection and the runtime loader, while `libamdgpu_top` and libdrm live exclusively in the `all-smi-amd-plugin` workspace package. A `default-features = false` consumer therefore regains AMD monitoring whenever the matching companion is deployed, without inheriting native `NEEDED` entries. Musl omits the loader, and Windows AMD support remains independent through `amd_adl`/WMI.
 
 ### Binary Targets
 

@@ -1,0 +1,27 @@
+[package]
+name = "all-smi-amd-plugin"
+version = "0.26.1"
+description = "Runtime-loaded Linux AMD GPU backend for all-smi"
+authors = ["Jeongkyu Shin <inureyes@gmail.com>"]
+license = "Apache-2.0"
+repository = "https://github.com/lablup/all-smi"
+edition = "2024"
+rust-version = "1.96"
+publish = false
+
+[lib]
+name = "all_smi_amd"
+crate-type = ["cdylib"]
+
+[dependencies]
+all-smi = { path = "../..", default-features = false }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sysinfo = "0.39"
+
+[target.'cfg(all(target_os = "linux", not(target_env = "musl")))'.dependencies]
+chrono = "0.4.44"
+libc = "0.2"
+# Keep this exact pin synchronized with the plugin metadata and the guard test
+# in src/lib.rs. Upstream has shipped patch-level API breaks in the past.
+libamdgpu_top = "=0.11.5"

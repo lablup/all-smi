@@ -51,11 +51,12 @@ pub mod tpu_sysfs;
 #[cfg(target_os = "linux")]
 pub mod tenstorrent;
 
-// Gated on glibc Linux plus the default-on `amd` cargo feature (issue #345).
-// Disabling the feature drops the `libamdgpu_top` dependency and with it the
-// `libdrm.so.2` / `libdrm_amdgpu.so.1` link-time requirements.
-#[cfg(all(target_os = "linux", not(target_env = "musl"), feature = "amd"))]
+// The main crate owns only a runtime loader. The companion cdylib keeps
+// `libamdgpu_top` and its libdrm linkage out of every consumer binary.
+#[cfg(all(target_os = "linux", not(target_env = "musl")))]
 pub mod amd;
+#[cfg(all(target_os = "linux", not(target_env = "musl")))]
+pub mod amd_plugin_api;
 
 #[cfg(target_os = "windows")]
 pub mod amd_windows;

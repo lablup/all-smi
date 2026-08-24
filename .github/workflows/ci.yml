@@ -1036,22 +1036,44 @@ jobs:
       - name: Build binary
         run: cargo build --release --bin all-smi
 
+      - name: Build AMD runtime plugin
+        run: cargo build --release --locked -p all-smi-amd-plugin
+
       - name: Build library-only (no default features)
         run: cargo build --no-default-features --lib
 
-      # Guards issue #345: with the `amd` feature off, `libamdgpu_top` must
-      # not be linked, so the binary must not carry libdrm as a NEEDED entry.
-      # `--no-default-features` also drops `cli` and therefore the binary, so
-      # the comparable artifact is built with `cli` re-enabled. This step
-      # overwrites target/release/all-smi from the step above; nothing later
-      # in this job consumes that artifact.
-      - name: Verify the AMD backend is droppable (no libdrm linkage)
+      # Guards issues #345 and #359: both feature configurations keep libdrm
+      # out of the main binary, while the companion owns that linkage and can
+      # be loaded through the versioned ABI. `--no-default-features` drops the
+      # CLI, so the downstream-like binary build explicitly re-enables it.
+      - name: Verify AMD runtime linkage and plugin contract
         run: |
+          set -euo pipefail
+          if objdump -p target/release/all-smi | grep -q 'NEEDED.*libdrm'; then
+            echo "::error::the default-feature binary inherits libdrm"
+            exit 1
+          fi
+          if ! objdump -p target/release/liball_smi_amd.so | grep -q 'NEEDED.*libdrm_amdgpu'; then
+            echo "::error::the AMD companion does not own libdrm_amdgpu linkage"
+            exit 1
+          fi
+
           cargo build --release --no-default-features --features cli --bin all-smi
-          echo "NEEDED entries without the amd feature:"
+          echo "NEEDED entries for a downstream-like feature configuration:"
           objdump -p target/release/all-smi | grep NEEDED || true
           if objdump -p target/release/all-smi | grep -q 'NEEDED.*libdrm'; then
-            echo "::error::libdrm is still linked with --no-default-features --features cli"
+            echo "::error::the downstream-like binary inherits libdrm"
+            exit 1
+          fi
+
+          report="${RUNNER_TEMP}/amd-plugin-doctor.json"
+          ALL_SMI_AMD_PLUGIN="$PWD/target/release/liball_smi_amd.so" \
+            target/release/all-smi doctor --only amd --json > "$report"
+          cat "$report"
+          status=$(jq -r '.checks[] | select(.id=="amd.libamdgpu_top.abi") | .status' "$report")
+          message=$(jq -r '.checks[] | select(.id=="amd.libamdgpu_top.abi") | .message' "$report")
+          if [ "$status" != pass ] || [[ "$message" != *"ABI v1"* ]]; then
+            echo "::error::doctor did not verify the AMD plugin ABI: status=$status message=$message"
             exit 1
           fi
 

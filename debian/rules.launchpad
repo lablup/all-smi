@@ -37,6 +37,7 @@ override_dh_auto_build:
 
 override_dh_auto_install:
 	install -D -m 0755 target/release/all-smi debian/all-smi/usr/bin/all-smi
+	install -D -m 0755 target/release/liball_smi_amd.so debian/all-smi/usr/lib/all-smi/liball_smi_amd.so
 
 override_dh_auto_test:
 	@echo "Skipping tests for PPA build"
