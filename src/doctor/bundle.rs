@@ -618,7 +618,14 @@ mod tests {
 
     #[test]
     fn bundle_writes_expected_entries() {
-        let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+        // A `NamedTempFile` stays open at the path it owns, and
+        // `write_bundle` creates or replaces a file at that same path.
+        // Windows refuses that while the handle is alive (os error 32);
+        // Unix permits it, which is why this passed everywhere else. Hand
+        // the writer a path inside a temp directory instead, so nothing
+        // else holds it open.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let bundle = dir.path().join("bundle.tar.gz");
         let report = Report {
             schema: 1,
             version: "0.99.9".to_string(),
@@ -634,15 +641,15 @@ mod tests {
         let opts = DoctorOptions {
             json: false,
             verbose: false,
-            bundle_path: Some(tmp.path().to_path_buf()),
+            bundle_path: Some(bundle.clone()),
             include_identifiers: true,
             remote_checks: vec![],
             skip: vec![],
             only: vec![],
             use_color: false,
         };
-        write_bundle(tmp.path(), &report, &opts).expect("bundle ok");
-        let bytes = std::fs::read(tmp.path()).expect("read bundle");
+        write_bundle(&bundle, &report, &opts).expect("bundle ok");
+        let bytes = std::fs::read(&bundle).expect("read bundle");
         // Cheap sanity check: the gzip header magic should be present.
         assert!(bytes.len() > 2);
         assert_eq!(bytes[0], 0x1f);

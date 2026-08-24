@@ -562,8 +562,10 @@ mod tests {
 
     #[test]
     fn write_output_atomic_creates_file_and_contents_match() {
+        // `/tmp` is a Unix path and does not exist on Windows; the write
+        // failed there before it could test anything.
         let pid = std::process::id();
-        let path = std::path::PathBuf::from(format!("/tmp/all-smi-atomic-test-{pid}.json"));
+        let path = std::env::temp_dir().join(format!("all-smi-atomic-test-{pid}.json"));
         let _ = std::fs::remove_file(&path);
         let contents = r#"{"test":true}"#;
         write_output_atomic(&path, contents).expect("atomic write should succeed");

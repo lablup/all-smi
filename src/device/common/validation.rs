@@ -136,11 +136,25 @@ mod tests {
     fn test_validate_command_path() {
         use std::path::PathBuf;
 
+        // Absoluteness is spelled differently per platform: a leading
+        // slash carries no drive letter, so `/bin/ls` is not absolute on
+        // Windows and was rejected for the wrong reason. The traversal
+        // case is per-platform for the same reason: a Unix-shaped path
+        // would be refused on Windows before the `..` check is reached,
+        // so the branch this test exists for would go unexercised.
+        #[cfg(unix)]
+        let (valid, traversal) = ("/bin/ls", "/usr/../etc/passwd");
+        #[cfg(windows)]
+        let (valid, traversal) = (
+            r"C:\Windows\System32\cmd.exe",
+            r"C:\Windows\..\Windows\System32\cmd.exe",
+        );
+
         // Valid paths
-        assert!(validate_command_path(&PathBuf::from("/bin/ls")));
+        assert!(validate_command_path(&PathBuf::from(valid)));
 
         // Invalid paths
         assert!(!validate_command_path(&PathBuf::from("relative/path")));
-        assert!(!validate_command_path(&PathBuf::from("/usr/../etc/passwd")));
+        assert!(!validate_command_path(&PathBuf::from(traversal)));
     }
 }
