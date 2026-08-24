@@ -96,6 +96,91 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           RELEASE_TAG_INPUT: ${{ github.event.inputs.release_tag }}
 
+      # Fails here, in two seconds, with a diagnosis. Before this step existed
+      # an unusable token surfaced as git's `remote: Invalid username or token`
+      # at the very end, after the job had already cloned the tap, downloaded
+      # four release assets, rewritten the formula and committed the result.
+      # That message names neither the secret nor which of the two places it
+      # can be set from, and the v0.26.0 release lost hours to exactly that.
+      #
+      # It also answers what the git error cannot: whether the token is
+      # rejected outright, cannot see the tap at all, or can see it read-only.
+      # Those are three different repairs, and git reports all three
+      # identically. A local reproduction confirmed that: pushing with a
+      # deliberately bogus token through the same credential helper produces
+      # byte-identical output to a real expired one, while removing the helper
+      # produces a different message. So the git error cannot distinguish a bad
+      # value from a bad mechanism either, and this step settles that too.
+      #
+      # This is the second step the tap token is exposed to, where the note on
+      # the push step below says one. A deliberate trade: one more step holding
+      # the credential, in exchange for a failure that arrives before anything
+      # is mutated and that names what to fix. The token still never reaches
+      # argv, a file, or a remote url. `printf` is a bash builtin, so no
+      # process on the runner carries it in its command line, and the header
+      # goes to curl on stdin for the same reason the push below keeps it out
+      # of `-c http.extraheader`.
+      - name: Verify the tap token
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          # Two places can define this secret and the narrower one wins, which
+          # is the failure mode worth naming explicitly rather than leaving a
+          # reader to discover: an environment secret on `packaging` shadows an
+          # organization secret of the same name. Rotating the organization copy
+          # while a stale environment copy exists changes nothing here.
+          scopes='the `packaging` environment secret first, then the organization secret of the same name; the environment one wins if both exist'
+
+          if [ -z "${HOMEBREW_TAP_TOKEN}" ]; then
+            echo "::error::HOMEBREW_TAP_TOKEN resolved to an empty value. Check ${scopes}."
+            exit 1
+          fi
+
+          body=$(mktemp)
+          code=$(
+            printf 'header = "Authorization: Bearer %s"\n' "${HOMEBREW_TAP_TOKEN}" |
+            curl --config - \
+                 --silent --show-error \
+                 --header 'Accept: application/vnd.github+json' \
+                 --header 'X-GitHub-Api-Version: 2022-11-28' \
+                 --output "$body" \
+                 --write-out '%{http_code}' \
+                 https://api.github.com/repos/lablup/homebrew-tap
+          )
+
+          case "$code" in
+            200)
+              ;;
+            401)
+              echo "::error::The tap token was rejected (HTTP 401): expired or revoked. Mint a replacement with Contents:write on lablup/homebrew-tap and set it in ${scopes}."
+              exit 1
+              ;;
+            403)
+              echo "::error::The tap token is refused for lablup/homebrew-tap (HTTP 403). Usually SSO authorization or an organization resource restriction rather than the value itself. Check ${scopes}."
+              exit 1
+              ;;
+            404)
+              echo "::error::The tap token cannot see lablup/homebrew-tap (HTTP 404). A fine-grained token reports 404 for a repository it was not granted, so this is most likely a token whose repository access does not include the tap. Check ${scopes}."
+              exit 1
+              ;;
+            *)
+              echo "::error::Unexpected HTTP ${code} from the GitHub API while checking the tap token."
+              exit 1
+              ;;
+          esac
+
+          # 200 only proves the token can read a public repository, which any
+          # token can. The push is what this job exists to do, so the write bit
+          # is the thing to assert.
+          if [ "$(jq -r '.permissions.push // false' "$body")" != "true" ]; then
+            echo "::error::The tap token can read lablup/homebrew-tap but not write to it. It needs Contents:write. Check ${scopes}."
+            exit 1
+          fi
+
+          echo "Tap token accepted, with write access to lablup/homebrew-tap."
+
       - name: Clone Homebrew tap repository
         run: |
           set -euo pipefail
