@@ -444,8 +444,20 @@ jobs:
             exit 1
           fi
           # Cheap guard against a future edit reintroducing the overwrite.
-          if ! codesign -dv "$STAGED" 2>&1 | grep -q "Authority=Developer ID Application"; then
+          #
+          # `--verbose=4` is required, not cosmetic: plain `codesign -dv`
+          # prints the identifier, format, and hashes but no `Authority=`
+          # lines at all, so the grep below could never match and the guard
+          # failed every run regardless of the signature. Same invocation as
+          # the assertions in the signing step, for the same reason.
+          #
+          # Read into a variable rather than piping into `grep -q`. This step
+          # runs under pipefail, where grep closing the pipe early can surface
+          # as a failed pipeline whether or not the pattern matched.
+          SIGNATURE="$(codesign -dv --verbose=4 "$STAGED" 2>&1 || true)"
+          if ! grep -q "Authority=Developer ID Application" <<<"$SIGNATURE"; then
             echo "::error::$STAGED lost its Developer ID signature between signing and packaging"
+            echo "$SIGNATURE"
             exit 1
           fi
 
