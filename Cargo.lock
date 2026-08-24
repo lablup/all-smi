@@ -72,7 +72,6 @@ dependencies = [
  "futures-util",
  "hyper",
  "hyper-util",
- "libamdgpu_top",
  "libc",
  "libloading 0.9.0",
  "luwen-api",
@@ -108,6 +107,19 @@ dependencies = [
  "windows-service",
  "wmi",
  "zstd",
+]
+
+[[package]]
+name = "all-smi-amd-plugin"
+version = "0.26.1"
+dependencies = [
+ "all-smi",
+ "chrono",
+ "libamdgpu_top",
+ "libc",
+ "serde",
+ "serde_json",
+ "sysinfo",
 ]
 
 [[package]]

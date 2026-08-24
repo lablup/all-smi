@@ -14,6 +14,7 @@ override_dh_auto_install:
 	# Install the pre-built binary
 	# The binary should be extracted to the project root before building the package
 	install -D -m 0755 all-smi debian/all-smi/usr/bin/all-smi
+	if [ -f liball_smi_amd.so ]; then install -D -m 0755 liball_smi_amd.so debian/all-smi/usr/lib/all-smi/liball_smi_amd.so; fi
 	# Operator-editable environment file consumed by the unit's
 	# `EnvironmentFile=-/etc/default/all-smi` line.
 	install -D -m 0644 debian/all-smi.default debian/all-smi/etc/default/all-smi

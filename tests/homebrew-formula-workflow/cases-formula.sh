@@ -82,6 +82,7 @@ case_state1_asset_and_stanza() {
 
     formula="$box/homebrew-tap/Formula/all-smi.rb"
     assert_file_has "version bumped" "$formula" "version \"${NEW_VERSION}\""
+    assert_file_has "Linux installs the AMD companion" "$formula" '(lib/"all-smi").install "liball_smi_amd.so" if OS.linux?'
     assert_eq "four sha256 stanzas" 4 "$(count_sha_stanzas "$formula")"
     assert_eq "aarch64 macOS url rewritten" "$mac_url" "$(url_of "$formula" all-smi-macos-aarch64.zip)"
     assert_eq "aarch64 macOS checksum is its own" "$SHA_MAC" "$(sha_after "$formula" all-smi-macos-aarch64.zip)"

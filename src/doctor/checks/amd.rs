@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! `amd.*` checks: ROCm, libamdgpu_top, DRI access, and build-time gating
-//! (the musl target gate and the default-on `amd` cargo feature).
+//! `amd.*` checks: ROCm, the runtime-loaded Linux AMD plugin, DRI access,
+//! the musl target gate, and Windows ADL diagnostics.
 
 #[cfg(target_os = "linux")]
 use std::time::Duration;
@@ -37,27 +37,6 @@ pub fn checks() -> &'static [&'static Check] {
     CHECKS
 }
 
-/// The exact `libamdgpu_top` version pinned in `Cargo.toml`.
-///
-/// Cargo hands the compiler no dependency versions, so `env!` cannot reach
-/// this and the value has to be transcribed. `check_libamdgpu_top` used to
-/// format `env!("CARGO_PKG_VERSION")` into the ABI string, which reported
-/// all-smi's own version as the dependency's (issue #362). The transcription
-/// is kept honest by `pinned_version_matches_cargo_toml`, which parses the `=`
-/// pin out of `Cargo.toml` and fails when the two disagree, so a pin bump that
-/// forgets this constant breaks a test instead of shipping a wrong ABI
-/// identifier.
-///
-/// The `test` arm of the `cfg` keeps the constant alive in configurations
-/// where the reporting arm below is compiled out (musl, non-Linux, or the
-/// `amd` feature off) so the guard test runs everywhere. Without it the
-/// constant would be dead code in exactly those builds.
-#[cfg(any(
-    all(target_os = "linux", not(target_env = "musl"), feature = "amd"),
-    test
-))]
-const LIBAMDGPU_TOP_PINNED_VERSION: &str = "0.11.5";
-
 static ROCM_VERSION: Check = Check {
     id: "amd.rocm.version",
     title: "ROCm version",
@@ -67,7 +46,7 @@ static ROCM_VERSION: Check = Check {
 
 static LIBAMDGPU_TOP_ABI: Check = Check {
     id: "amd.libamdgpu_top.abi",
-    title: "libamdgpu_top ABI",
+    title: "AMD runtime plugin",
     severity_on_fail: Severity::Warn,
     run: check_libamdgpu_top,
 };
@@ -80,7 +59,7 @@ static DRI_PERMS: Check = Check {
 };
 
 // The check id stays `amd.build.target_env` for compatibility with existing
-// bundles and docs even though it now reports the `amd` cargo feature as well.
+// bundles even though the cargo feature is now an accepted no-op.
 static BUILD_GATE: Check = Check {
     id: "amd.build.target_env",
     title: "AMD build-time availability",
@@ -536,31 +515,34 @@ fn check_rocm(_ctx: &CheckCtx) -> CheckResult {
 }
 
 fn check_libamdgpu_top(_ctx: &CheckCtx) -> CheckResult {
-    // Three distinct Linux outcomes, so a user never gets told the wrong
-    // reason for a missing AMD backend: linked, compiled out by the musl
-    // target gate, or compiled out by the `amd` cargo feature (issue #345).
-    #[cfg(all(target_os = "linux", not(target_env = "musl"), feature = "amd"))]
+    #[cfg(all(target_os = "linux", not(target_env = "musl")))]
     {
-        // The `libamdgpu_top` crate is linked at compile time; if this
-        // binary was built with AMD support the dep is present. Surface
-        // the dependency's pinned version as the ABI identifier, not
-        // all-smi's own version (issue #362).
-        CheckResult::Pass(format!(
-            "linked libamdgpu_top {LIBAMDGPU_TOP_PINNED_VERSION}"
-        ))
-    }
-    #[cfg(all(target_os = "linux", not(target_env = "musl"), not(feature = "amd")))]
-    {
-        CheckResult::Skip(
-            "libamdgpu_top not linked: built without the `amd` cargo feature (see \
-             amd.build.target_env)"
-                .to_string(),
-        )
+        use crate::device::readers::amd::{self, AmdBackendStatus};
+
+        match amd::backend_status() {
+            AmdBackendStatus::Loaded {
+                path,
+                abi_version,
+                plugin_version,
+                libamdgpu_top_version,
+            } => CheckResult::Pass(format!(
+                "loaded {} (plugin {plugin_version}, ABI v{abi_version}, libamdgpu_top {libamdgpu_top_version})",
+                path.display()
+            )),
+            AmdBackendStatus::Unavailable { reason } => CheckResult::Warn(
+                reason,
+                Some(
+                    "install the packaged AMD companion library, then rerun doctor; missing libdrm dependencies are reported by dlopen in this check"
+                        .to_string(),
+                ),
+            ),
+        }
     }
     #[cfg(all(target_os = "linux", target_env = "musl"))]
     {
         CheckResult::Skip(
-            "libamdgpu_top not linked in musl builds (see amd.build.target_env)".to_string(),
+            "AMD runtime plugin is unavailable in musl builds (see amd.build.target_env)"
+                .to_string(),
         )
     }
     #[cfg(not(target_os = "linux"))]
@@ -601,102 +583,35 @@ fn check_dri_perms(_ctx: &CheckCtx) -> CheckResult {
     }
 }
 
-/// Report which build-time gate, if any, compiled the AMD backend out.
+/// Report whether this target can host the runtime AMD plugin.
 ///
-/// Two independent gates can remove it: the musl target gate, and the
-/// default-on `amd` cargo feature (issue #345). The three arms below are
-/// mutually exclusive and exhaustive, and each names the gate that actually
-/// applies so `all-smi doctor` never blames the wrong one.
+/// The legacy `amd` cargo feature is intentionally irrelevant here: it is a
+/// compatibility no-op, so `default-features = false` consumers get the same
+/// loader as default builds without inheriting libdrm linkage.
 fn check_build_gate(_ctx: &CheckCtx) -> CheckResult {
     #[cfg(target_env = "musl")]
     {
         CheckResult::Warn(
-            "musl build — AMD support compiled out".to_string(),
+            "musl build — AMD runtime plugin loader is unavailable".to_string(),
             Some("use a glibc build (x86_64-unknown-linux-gnu) for AMD GPU monitoring".to_string()),
         )
     }
-    #[cfg(all(target_os = "linux", not(target_env = "musl"), not(feature = "amd")))]
+    #[cfg(all(target_os = "linux", not(target_env = "musl")))]
     {
-        CheckResult::Warn(
-            "glibc build without the `amd` cargo feature: AMD support compiled out".to_string(),
-            Some(
-                "rebuild with the default features, or add `--features amd`, for AMD GPU \
-                 monitoring; the feature is off here because something disabled it (typically a \
-                 downstream `default-features = false`) to avoid linking libdrm"
-                    .to_string(),
-            ),
+        CheckResult::Pass(
+            "glibc Linux build — AMD runtime loader compiled in; the `amd` cargo feature does not gate it"
+                .to_string(),
         )
     }
-    #[cfg(all(
-        not(target_env = "musl"),
-        any(not(target_os = "linux"), feature = "amd")
-    ))]
+    #[cfg(all(not(target_env = "musl"), not(target_os = "linux")))]
     {
-        CheckResult::Pass("glibc or non-Linux target — AMD support available".to_string())
+        CheckResult::Pass("non-Linux target — Linux AMD runtime plugin not applicable".to_string())
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{LIBAMDGPU_TOP_PINNED_VERSION, per_card_verdict};
-
-    /// `Cargo.toml` is embedded at compile time rather than read from a
-    /// runtime path so the test does not depend on the working directory,
-    /// and so editing the manifest forces a rebuild of this test.
-    const MANIFEST: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"));
-
-    /// Extract the exact version from the `libamdgpu_top` dependency line.
-    ///
-    /// Returns `None` when no dependency line is found or the version cannot
-    /// be read, which the caller turns into a failure: a manifest the parser
-    /// no longer understands must not quietly pass the guard. Comment lines
-    /// mentioning the crate are skipped because they start with `#`.
-    fn pinned_libamdgpu_top_version(manifest: &str) -> Option<&str> {
-        let line = manifest
-            .lines()
-            .map(str::trim)
-            .find(|l| l.starts_with("libamdgpu_top") && l.contains("version"))?;
-        let after_key = line.split_once("version")?.1;
-        let after_quote = after_key.split_once('"')?.1;
-        let value = after_quote.split_once('"')?.0;
-        Some(value.trim().trim_start_matches('=').trim())
-    }
-
-    /// The reported ABI identifier must be the pinned dependency version.
-    ///
-    /// This is the forcing function the `Cargo.toml` comment asks for by
-    /// hand: bumping the `=` pin without updating
-    /// [`LIBAMDGPU_TOP_PINNED_VERSION`] fails here rather than shipping a
-    /// wrong version to whoever is debugging an AMD ABI problem.
-    #[test]
-    fn pinned_version_matches_cargo_toml() {
-        let pinned = pinned_libamdgpu_top_version(MANIFEST).expect(
-            "could not parse the libamdgpu_top version out of Cargo.toml; if the dependency \
-             declaration moved or changed shape, update pinned_libamdgpu_top_version",
-        );
-        assert_eq!(
-            pinned, LIBAMDGPU_TOP_PINNED_VERSION,
-            "libamdgpu_top is pinned to {pinned} in Cargo.toml but amd.libamdgpu_top.abi reports \
-             {LIBAMDGPU_TOP_PINNED_VERSION}; update LIBAMDGPU_TOP_PINNED_VERSION to match the pin"
-        );
-    }
-
-    /// The pin must stay an exact `=` requirement. A caret or range would
-    /// let Cargo resolve a different version than the one reported, which
-    /// this guard could not detect.
-    #[test]
-    fn libamdgpu_top_is_pinned_exactly() {
-        let line = MANIFEST
-            .lines()
-            .map(str::trim)
-            .find(|l| l.starts_with("libamdgpu_top") && l.contains("version"))
-            .expect("libamdgpu_top dependency line not found in Cargo.toml");
-        assert!(
-            line.contains("\"="),
-            "libamdgpu_top must stay pinned with an exact `=` requirement so the reported ABI \
-             version is the resolved one, got: {line}"
-        );
-    }
+    use super::per_card_verdict;
 
     fn readout(power_w: f64) -> Option<String> {
         Some(format!("power=Some({power_w})W"))

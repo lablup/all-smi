@@ -135,6 +135,7 @@ make_tap() {  # dir fixture
 # the axis the four asset/stanza states turn on.
 export_artifact_env() {  # mac_x86_present
     export VERSION_NO_V="$NEW_VERSION"
+    export amd_plugin_present=true
     export mac_url="${NEW_BASE}/all-smi-macos-aarch64.zip"
     export mac_sha="$SHA_MAC"
     export linux_arm_url="${NEW_BASE}/all-smi-linux-aarch64.tar.gz"

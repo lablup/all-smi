@@ -47,10 +47,10 @@ use crate::device::readers::intel_gpu_linux;
 #[cfg(target_os = "windows")]
 use crate::device::readers::intel_gpu_windows;
 
-#[cfg(all(target_os = "linux", not(target_env = "musl"), feature = "amd"))]
+#[cfg(all(target_os = "linux", not(target_env = "musl")))]
 use crate::device::platform_detection::has_amd;
 
-#[cfg(all(target_os = "linux", not(target_env = "musl"), feature = "amd"))]
+#[cfg(all(target_os = "linux", not(target_env = "musl")))]
 use crate::device::readers::amd;
 
 pub fn get_gpu_readers() -> Vec<Box<dyn GpuReader>> {
@@ -100,11 +100,14 @@ pub fn get_gpu_readers() -> Vec<Box<dyn GpuReader>> {
                 readers.push(Box::new(google_tpu::GoogleTpuReader::new()));
             }
 
-            // Check for AMD GPU support (glibc only, not musl, and only when
-            // the default-on `amd` feature is enabled)
-            #[cfg(all(target_os = "linux", not(target_env = "musl"), feature = "amd"))]
+            // AMD hardware detection is always present on glibc Linux. The
+            // native backend is optional at runtime and never prevents startup.
+            #[cfg(all(target_os = "linux", not(target_env = "musl")))]
             if has_amd() {
-                readers.push(Box::new(amd::AmdGpuReader::new()));
+                match amd::AmdGpuReader::try_new() {
+                    Ok(reader) => readers.push(Box::new(reader)),
+                    Err(error) => eprintln!("AMD backend unavailable: {error}"),
+                }
             }
 
             // Check for Intel client GPU (Arc / Iris / Xe). Unlike

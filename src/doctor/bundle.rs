@@ -342,9 +342,9 @@ fn enabled_features() -> Vec<&'static str> {
     let mut v = vec![
         #[cfg(feature = "cli")]
         "cli",
-        // Recorded so a support bundle shows whether the AMD backend was compiled
-        // in; its absence here is the first thing to check when AMD GPUs are
-        // missing from a glibc build (issue #345).
+        // Retained as a cargo-feature record for compatibility. It is a no-op;
+        // `amd.libamdgpu_top.abi` in the doctor report carries effective plugin
+        // availability and the exact runtime failure reason.
         #[cfg(feature = "amd")]
         "amd",
         #[cfg(feature = "mock")]

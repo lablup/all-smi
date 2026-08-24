@@ -229,7 +229,34 @@ jobs:
 
       # 7) Build the release binary
       - name: Build release binary
-        run: cargo build --release --target ${{ matrix.target }} --locked
+        run: cargo build --release --target ${{ matrix.target }} --locked -p all-smi
+
+      - name: Build and verify AMD runtime plugin (Linux glibc only)
+        if: runner.os == 'Linux' && !contains(matrix.target, 'musl')
+        run: |
+          set -euo pipefail
+          echo "AMD_PLUGIN_BUILT=false" >> "$GITHUB_ENV"
+          if [ ! -f crates/all-smi-amd-plugin/Cargo.toml ]; then
+            echo "::notice::The selected source tag predates the AMD companion crate; preserving the self-healing old-tag release path."
+            exit 0
+          fi
+          cargo build --release --target ${{ matrix.target }} --locked -p all-smi-amd-plugin
+          BIN="target/${{ matrix.target }}/release/${{ matrix.artifact_name }}"
+          PLUGIN="target/${{ matrix.target }}/release/liball_smi_amd.so"
+          test -f "$PLUGIN"
+          if objdump -p "$BIN" | grep -q 'NEEDED.*libdrm'; then
+            echo "::error::$BIN inherits libdrm even though AMD is runtime-loaded"
+            exit 1
+          fi
+          if ! objdump -p "$PLUGIN" | grep -q 'NEEDED.*libdrm_amdgpu'; then
+            echo "::error::$PLUGIN does not own the expected libdrm_amdgpu linkage"
+            exit 1
+          fi
+          report="${RUNNER_TEMP}/amd-plugin-doctor.json"
+          ALL_SMI_AMD_PLUGIN="$PWD/$PLUGIN" "$BIN" doctor --only amd --json > "$report"
+          cat "$report"
+          test "$(jq -r '.checks[] | select(.id=="amd.libamdgpu_top.abi") | .status' "$report")" = pass
+          echo "AMD_PLUGIN_BUILT=true" >> "$GITHUB_ENV"
 
       # 8) macOS code signing
       #
@@ -421,9 +448,13 @@ jobs:
       - name: Package Linux binary (tar.gz)
         if: runner.os == 'Linux'
         run: |
+          set -euo pipefail
           BIN_DIR=target/${{ matrix.target }}/release
           mkdir -p package
           cp "$BIN_DIR/${{ matrix.artifact_name }}" package/
+          if [ "${AMD_PLUGIN_BUILT:-false}" = true ]; then
+            cp "$BIN_DIR/liball_smi_amd.so" package/
+          fi
           cp docs/man/all-smi.1 package/
           tar -C package -czf ${{ matrix.asset_name }}.tar.gz .
 

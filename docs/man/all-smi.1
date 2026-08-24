@@ -468,7 +468,10 @@ Quit the application
 Full support via nvidia-smi, including CUDA information, PCIe status, and performance states
 .TP
 .B AMD GPUs
-Support for Radeon and Instinct GPUs via ROCm/libamdgpu_top, including VRAM/GTT memory tracking and fdinfo-based process monitoring
+Support for Radeon and Instinct GPUs via ROCm/libamdgpu_top, including VRAM/GTT memory tracking and fdinfo-based process monitoring. On glibc Linux, libamdgpu_top is isolated in the runtime-loaded
+.I liball_smi_amd.so
+companion, so missing AMD userspace libraries never prevent the main program from starting. Release archives place the companion beside the executable; Debian packages install it in
+.IR /usr/lib/all-smi .
 .TP
 .B Intel Arc / Iris Xe / Xe client GPUs
 Support for Arc A/B-series discrete GPUs and Iris Xe/Xe-LPG integrated GPUs via i915/xe sysfs (Linux) and WMI (Windows), including architecture classification, SYCL/oneAPI capability detection, engine-busy utilization computed from sysfs per-engine monotonic counters (Linux; max of render and compute engines reported as primary utilization), and per-process GPU memory tracking via /proc fdinfo (Linux; dedupes shared DRM file descriptors by drm-client-id).
@@ -744,6 +747,9 @@ Sample-gap threshold in seconds (range
 above which the integrator switches from trapezoidal to hold-last
 integration. Default: 10.
 .SH ENVIRONMENT
+.TP
+.B ALL_SMI_AMD_PLUGIN
+Absolute path to the glibc Linux AMD companion library. When unset, all-smi searches beside the current executable, then ../lib/all-smi relative to it, then /usr/local/lib/all-smi and /usr/lib/all-smi. Relative overrides and world-writable plugin paths are refused; the current working directory is never searched.
 .TP
 .B RUST_LOG
 Set logging level (e.g., debug, info, warn, error)

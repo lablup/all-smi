@@ -133,9 +133,20 @@ jobs:
           echo "Error: Binary not found after extraction"
           exit 1
         fi
+        if git cat-file -e "${{ steps.get_tag.outputs.tag }}:crates/all-smi-amd-plugin/Cargo.toml" 2>/dev/null; then
+          if [ ! -f "liball_smi_amd.so" ]; then
+            echo "Error: AMD runtime plugin not found after extraction"
+            exit 1
+          fi
+        elif [ ! -f "liball_smi_amd.so" ]; then
+          echo "The selected release predates the AMD runtime plugin; packaging the legacy binary only."
+        fi
         
-        # Make it executable
+        # Make the executable and loadable companion executable by the package.
         chmod +x all-smi
+        if [ -f "liball_smi_amd.so" ]; then
+          chmod +x liball_smi_amd.so
+        fi
       env:
         GH_TOKEN: ${{ github.token }}
     

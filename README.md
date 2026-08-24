@@ -71,7 +71,7 @@ Download the latest release from the [GitHub releases page](https://github.com/l
 
 1. Go to https://github.com/lablup/all-smi/releases
 2. Download the appropriate binary for your platform
-3. Extract the archive and place the binary in your `$PATH`
+3. Extract the archive and place the binary in your `$PATH`. On glibc Linux, keep `liball_smi_amd.so` beside the binary or install it under `/usr/local/lib/all-smi`; the companion provides AMD monitoring without making the main binary depend on libdrm.
 
 > Release binaries are signed: macOS archives are notarized (so Gatekeeper does not block them as coming from an unidentified developer) and Windows binaries are Authenticode code-signed.
 
@@ -94,6 +94,8 @@ sudo dnf install pkg-config openssl-devel protobuf-compiler protobuf-devel
 ```
 
 After installation, the binary will be available in your `$PATH` as `all-smi`.
+
+`cargo install` installs Cargo binary targets only, so it does not install the Linux AMD companion library. The resulting binary still starts on every host and `all-smi doctor --only amd` reports the plugin as unavailable; use the release archive, Homebrew, PPA/Debian package, or the source-build instructions below when Linux AMD monitoring is required.
 
 ### Option 6: Build from Source
 
@@ -762,6 +764,8 @@ Stable check IDs (greppable across versions):
 - **Linux:**
   - NVIDIA GPUs via NVML and nvidia-smi (fallback)
   - AMD GPUs (Radeon and Instinct) via ROCm and libamdgpu_top library
+    - `libamdgpu_top` lives in the runtime-loaded `liball_smi_amd.so` companion, so the main binary and downstream Rust consumers carry no hard libdrm dependency
+    - Missing companion/native libraries degrade to no AMD reader and are diagnosed by `all-smi doctor --only amd`; they never prevent process startup
     - Real-time VRAM and GTT memory monitoring
     - GPU process detection with memory usage tracking
     - Temperature, power consumption, frequency, and fan speed metrics

@@ -62,12 +62,14 @@ cargo add all-smi
 | Feature | Default | Effect on a library consumer |
 |---------|---------|------------------------------|
 | `cli` | on | CLI parsing, TUI, and the `axum` API server. A library-only consumer usually does not need it. |
-| `amd` | on | AMD GPU backend on glibc Linux via `libamdgpu_top`. Adds `libdrm.so.2` and `libdrm_amdgpu.so.1` as link-time requirements. |
+| `amd` | on, accepted no-op | Retained for manifest compatibility. Every glibc Linux build contains the runtime AMD loader; this feature adds no dependency or link requirement. |
 | `mock` | off | Builds the mock server binary. |
 | `furiosa` | off | Furiosa NPU backend. |
 | `level_zero` | accepted no-op | The Intel Level Zero (Sysman) backend it used to gate is compiled into every Linux and Windows build. It adds no dependency (the loader is `dlopen`ed) and opens nothing on a machine with no Intel GPU, so there is nothing to opt out of; `build.rs` emits the `all_smi_level_zero` cfg for those targets and the readers gate on that. |
 
-`amd` is on by default so that adding this crate keeps AMD GPU monitoring without extra configuration. The cost is that `libamdgpu_top` links `libdrm.so.2` and `libdrm_amdgpu.so.1` unconditionally, and those become hard `NEEDED` entries on your binary too. A host that does not have AMD's userspace DRM libraries then fails to start your program with a loader error before `main` runs, which no amount of runtime handling can catch. Turn the feature off if your binary must run on hosts without those libraries:
+Linux AMD support is runtime-loaded. The `all-smi` crate detects AMD hardware and looks for the separately built `liball_smi_amd.so`; only that companion links `libdrm.so.2` and `libdrm_amdgpu.so.1`. Your binary has no libdrm `NEEDED` entry in either feature configuration and starts normally when the companion or AMD userspace libraries are absent.
+
+A library-only consumer can therefore disable default features without losing AMD detection:
 
 ```toml
 [dependencies]
@@ -81,7 +83,17 @@ all-smi = { version = "0.25", default-features = false }
 all-smi = { version = "0.25", default-features = false, features = ["cli"] }
 ```
 
-Confirm the result on Linux with `objdump -p <your-binary> | grep NEEDED`; neither `libdrm.so.2` nor `libdrm_amdgpu.so.1` should be listed. Everything except the AMD GPU readers is unaffected: NVIDIA, Apple Silicon, Intel, Tenstorrent, Rebellions, Furiosa, TPU, CPU, and memory collection all behave the same, and `GpuInfo` simply never reports AMD devices. AMD support on Windows goes through ADL/WMI and does not depend on this feature. The prebuilt musl artifacts have never included the AMD backend, so they are already free of the `libdrm` linkage.
+To activate AMD monitoring, deploy a companion from the same all-smi version in one of these locations, in order: the absolute path named by `ALL_SMI_AMD_PLUGIN`, beside the current executable, `../lib/all-smi` relative to the executable, `/usr/local/lib/all-smi`, or `/usr/lib/all-smi`. The override must be absolute. The loader canonicalizes candidates and refuses a plugin file or ancestor directory that is world-writable; it never searches the current working directory or passes an unqualified name to `dlopen`. A missing native dependency, missing entry point, ABI mismatch, or wire-format mismatch yields an empty AMD reader and a precise `all-smi doctor --only amd` message.
+
+The repository workspace builds both artifacts with:
+
+```bash
+cargo build --release -p all-smi -p all-smi-amd-plugin
+```
+
+Copy `target/release/liball_smi_amd.so` beside the embedding executable or into one of the fixed library directories above. Release archives, Homebrew, and Debian/PPA packages already do this. `cargo install all-smi` cannot install a `cdylib`, so it intentionally degrades without Linux AMD support unless you install the companion separately.
+
+Confirm the isolation with `objdump -p <your-binary> | grep NEEDED`; neither `libdrm.so.2` nor `libdrm_amdgpu.so.1` should be listed. `objdump -p liball_smi_amd.so | grep NEEDED` should show the native DRM dependencies instead. AMD support on Windows continues through ADL/WMI, and musl builds continue to report the Linux AMD plugin as unavailable.
 
 ## Quick Start
 

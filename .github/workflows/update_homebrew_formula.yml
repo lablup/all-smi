@@ -306,6 +306,18 @@ jobs:
           fetch linux_arm "${BASE}/all-smi-linux-aarch64.tar.gz" "${ARTIFACT_DIR}/linux-arm.tar.gz"
           fetch linux_x86 "${BASE}/all-smi-linux-x86_64.tar.gz"  "${ARTIFACT_DIR}/linux-x86.tar.gz"
 
+          tar -tzf "${ARTIFACT_DIR}/linux-arm.tar.gz" > "${ARTIFACT_DIR}/linux-arm.contents"
+          tar -tzf "${ARTIFACT_DIR}/linux-x86.tar.gz" > "${ARTIFACT_DIR}/linux-x86.contents"
+          arm_plugin=false
+          x86_plugin=false
+          grep -Eq '(^|/)liball_smi_amd\.so$' "${ARTIFACT_DIR}/linux-arm.contents" && arm_plugin=true
+          grep -Eq '(^|/)liball_smi_amd\.so$' "${ARTIFACT_DIR}/linux-x86.contents" && x86_plugin=true
+          if [ "$arm_plugin" != "$x86_plugin" ]; then
+            echo "::error::Linux release archives disagree about AMD plugin presence: arm=${arm_plugin}, x86=${x86_plugin}."
+            exit 1
+          fi
+          echo "amd_plugin_present=${arm_plugin}" >> "$GITHUB_ENV"
+
           # The Intel Mac zip only exists from the release that first built
           # x86_64-apple-darwin onwards (#306), so its absence is a normal state
           # for older tags rather than an error, and re-running this workflow
@@ -433,10 +445,42 @@ jobs:
             mv "${file}.new" "$file"
           }
 
+          sync_amd_plugin_install() {  # file present
+            local file="$1" n
+            n=$(grep -cF '(lib/"all-smi").install "liball_smi_amd.so" if OS.linux?' "$file" || true)
+            if [ "$n" -gt 1 ]; then
+              echo "::error::${file}: AMD plugin install line appears ${n} times."
+              exit 1
+            fi
+            if [ "$2" != "true" ]; then
+              if [ "$n" -eq 1 ]; then
+                gsed -i '\|(lib/"all-smi").install "liball_smi_amd.so" if OS.linux?|d' "$file"
+              fi
+              return
+            fi
+            if [ "$n" -eq 1 ]; then
+              return
+            fi
+            awk '
+              { print }
+              !inserted && /^[[:space:]]*bin\.install "all-smi"$/ {
+                print "    (lib/\"all-smi\").install \"liball_smi_amd.so\" if OS.linux?"
+                inserted = 1
+              }
+              END { exit(inserted ? 0 : 1) }
+            ' "$file" > "${file}.new" || {
+              echo "::error::${file}: could not locate bin.install \"all-smi\" to add the AMD plugin."
+              rm -f "${file}.new"
+              exit 1
+            }
+            mv "${file}.new" "$file"
+          }
+
           set_version  Formula/all-smi.rb "$VERSION"
           set_artifact Formula/all-smi.rb all-smi-macos-aarch64.zip    "$mac_url"       "$mac_sha"
           set_artifact Formula/all-smi.rb all-smi-linux-aarch64.tar.gz "$linux_arm_url" "$linux_arm_sha"
           set_artifact Formula/all-smi.rb all-smi-linux-x86_64.tar.gz  "$linux_x86_url" "$linux_x86_sha"
+          sync_amd_plugin_install Formula/all-smi.rb "${amd_plugin_present:-false}"
 
           # The Intel Mac artifact and the formula stanza that serves it arrive
           # independently: the asset appears in the first release built for
@@ -501,6 +545,16 @@ jobs:
 
           if ! grep -q "^[[:space:]]*version \"${VERSION}\"$" Formula/all-smi.rb; then
             echo "::error::Formula/all-smi.rb: version stanza is not ${VERSION}."
+            exit 1
+          fi
+
+          plugin_installs=$(grep -cF '(lib/"all-smi").install "liball_smi_amd.so" if OS.linux?' Formula/all-smi.rb || true)
+          expected_plugin_installs=0
+          if [ "${amd_plugin_present:-false}" = "true" ]; then
+            expected_plugin_installs=1
+          fi
+          if [ "$plugin_installs" -ne "$expected_plugin_installs" ]; then
+            echo "::error::Formula/all-smi.rb: expected ${expected_plugin_installs} Linux AMD plugin install line(s), found ${plugin_installs}."
             exit 1
           fi
 
