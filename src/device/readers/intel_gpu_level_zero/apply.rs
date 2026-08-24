@@ -59,6 +59,7 @@ pub fn apply_to_gpu_info(
                 gpu_info.total_memory = memory.total_bytes;
                 gpu_info.used_memory = memory.used_bytes.min(memory.total_bytes);
                 set_source(gpu_info, "Memory", memory.source);
+                set_source(gpu_info, "Memory Used", memory.source);
                 gpu_info.detail.insert(
                     "VRAM Total".to_string(),
                     format!("{} bytes", memory.total_bytes),

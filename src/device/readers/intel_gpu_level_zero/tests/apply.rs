@@ -94,6 +94,10 @@ fn linux_fresh_sysman_overwrites_fields() {
     assert_eq!(gpu.used_memory, 4 * 1024 * 1024 * 1024);
     assert_eq!(gpu.total_memory, 12 * 1024 * 1024 * 1024);
     assert_eq!(
+        gpu.detail.get("Source: Memory Used").map(String::as_str),
+        Some("Level Zero Sysman")
+    );
+    assert_eq!(
         gpu.detail.get("Power (L0)").map(String::as_str),
         Some("120.50 W")
     );
@@ -325,11 +329,16 @@ fn no_data_keeps_baseline() {
 fn integrated_after_dxgi() -> GpuInfo {
     let mut gpu = make_baseline_gpu_info();
     gpu.name = "Intel(R) Arc(TM) B390 GPU".to_string();
+    gpu.used_memory = 6 * 1024 * 1024 * 1024;
     gpu.total_memory = 19_202_415_943;
     gpu.detail
         .insert("Metrics Source".to_string(), "WMI".to_string());
     gpu.detail
         .insert("Source: Memory".to_string(), "DXGI (shared)".to_string());
+    gpu.detail.insert(
+        "Source: Memory Used".to_string(),
+        "PDH (shared)".to_string(),
+    );
     crate::device::readers::detail_keys::note_metrics_source(&mut gpu.detail, "DXGI");
     crate::device::readers::detail_keys::note_metrics_source(&mut gpu.detail, "PDH");
     gpu
@@ -354,9 +363,14 @@ fn a_dedicated_carve_out_never_replaces_a_shared_aperture() {
     apply_to_gpu_info(&mut gpu, &readout, ApplyPlatform::Windows);
 
     assert_eq!(gpu.total_memory, 19_202_415_943);
+    assert_eq!(gpu.used_memory, 6 * 1024 * 1024 * 1024);
     assert_eq!(
         gpu.detail.get("Source: Memory").map(String::as_str),
         Some("DXGI (shared)")
+    );
+    assert_eq!(
+        gpu.detail.get("Source: Memory Used").map(String::as_str),
+        Some("PDH (shared)")
     );
     // Not discarded: the carve-out is real, it is just not the capacity.
     assert_eq!(
@@ -375,6 +389,8 @@ fn a_discrete_card_still_takes_its_sysman_total() {
     let mut gpu = make_baseline_gpu_info();
     gpu.detail
         .insert("Source: Memory".to_string(), "WMI".to_string());
+    gpu.detail
+        .insert("Source: Memory Used".to_string(), "PDH".to_string());
     let readout = LevelZeroReadout {
         memory: Some(LevelZeroMemoryReadout {
             used_bytes: 2 * 1024 * 1024 * 1024,
@@ -390,6 +406,10 @@ fn a_discrete_card_still_takes_its_sysman_total() {
     assert_eq!(gpu.used_memory, 2 * 1024 * 1024 * 1024);
     assert_eq!(
         gpu.detail.get("Source: Memory").map(String::as_str),
+        Some("Level Zero Sysman")
+    );
+    assert_eq!(
+        gpu.detail.get("Source: Memory Used").map(String::as_str),
         Some("Level Zero Sysman")
     );
 }
