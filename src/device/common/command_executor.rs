@@ -115,9 +115,26 @@ pub fn execute_command_default(command: &str, args: &[&str]) -> DeviceResult<Com
 mod tests {
     use super::*;
 
+    // `echo` and `false` are shell builtins on Windows rather than
+    // executables on PATH, so `Command::new` cannot spawn them and both
+    // tests failed with `NotFound` there. Gating them to Unix would have
+    // been easier and wrong: `execute_command` runs on Windows in
+    // production (nvidia-smi, wmic), so it is worth testing there. Each
+    // platform therefore names a program it actually has.
+    #[cfg(unix)]
+    const ECHO: (&str, &[&str]) = ("echo", &["hello"]);
+    #[cfg(windows)]
+    const ECHO: (&str, &[&str]) = ("cmd", &["/C", "echo", "hello"]);
+
+    #[cfg(unix)]
+    const FAILS: (&str, &[&str]) = ("false", &[]);
+    #[cfg(windows)]
+    const FAILS: (&str, &[&str]) = ("cmd", &["/C", "exit", "1"]);
+
     #[test]
     fn test_execute_command_default_success() {
-        let out = execute_command_default("echo", &["hello"]).expect("echo should succeed");
+        let (cmd, args) = ECHO;
+        let out = execute_command_default(cmd, args).expect("echo should succeed");
         assert_eq!(out.status, 0);
         assert!(out.stdout.contains("hello"));
     }
@@ -128,8 +145,8 @@ mod tests {
             timeout: Some(Duration::from_secs(2)),
             check_status: true,
         };
-        // Use `false` which returns non-zero status on Unix
-        let err = execute_command("false", &[], &opts).unwrap_err();
+        let (cmd, args) = FAILS;
+        let err = execute_command(cmd, args, &opts).unwrap_err();
         match err {
             DeviceError::CommandFailed { .. } => {}
             _ => panic!("Expected CommandFailed error"),

@@ -766,6 +766,11 @@ mod tests {
         let truncated = (RECORD_LEN + 12) as u64;
         let f = OpenOptions::new().write(true).open(&path).unwrap();
         f.set_len(truncated).unwrap();
+        // Windows refuses the reopen below while this handle is alive
+        // (os error 32). Unix does not, which is why the leak went
+        // unnoticed. Close it before replaying rather than relying on
+        // end-of-scope.
+        drop(f);
 
         let mut integ = PowerIntegrator::default();
         let index = replay_from_path(&path, &mut integ).unwrap();
@@ -928,27 +933,20 @@ mod tests {
 
     #[test]
     fn expand_tilde_replaces_home_prefix() {
-        // Rust 2024 flags env mutations as unsafe because they can
-        // race with concurrent reads. We accept the risk in this
-        // single-threaded unit test and isolate by explicitly
-        // restoring the HOME variable at the end.
-        let original = std::env::var("HOME").ok();
-        unsafe {
-            std::env::set_var("HOME", "/tmp/fake-home");
-        }
+        // Compares against `dirs::home_dir()` rather than forcing `HOME`,
+        // which is both portable and safe. `expand_tilde` resolves through
+        // `dirs::home_dir()`, and that reads `USERPROFILE` on Windows, so
+        // overriding `HOME` changed nothing there and the assertion saw the
+        // real profile directory. Dropping the override also removes the
+        // `unsafe` env mutation the old comment admitted was a race. This is
+        // the shape `common::paths`'s own tilde tests already use.
+        let Some(home) = dirs::home_dir() else {
+            return;
+        };
         let expanded = expand_tilde(Path::new("~/.cache/all-smi/energy-wal.bin"));
-        assert_eq!(
-            expanded,
-            PathBuf::from("/tmp/fake-home/.cache/all-smi/energy-wal.bin")
-        );
+        assert_eq!(expanded, home.join(".cache/all-smi/energy-wal.bin"));
         let unchanged = expand_tilde(Path::new("/absolute/path"));
         assert_eq!(unchanged, PathBuf::from("/absolute/path"));
-        unsafe {
-            match original {
-                Some(v) => std::env::set_var("HOME", v),
-                None => std::env::remove_var("HOME"),
-            }
-        }
     }
 
     /// Verify that `WalFlushHandle::shutdown()` terminates the background
