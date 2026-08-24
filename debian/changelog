@@ -1,3 +1,16 @@
+all-smi (0.26.2-0) jammy; urgency=medium
+
+  * Move Linux AMD monitoring into a version-checked runtime companion so the main executable and `default-features = false` consumers no longer link libdrm directly
+  * Package `liball_smi_amd.so` beside Linux release binaries and install it through Homebrew and Debian packages
+  * Report the AMD companion path, plugin version, ABI version, libamdgpu_top version, and exact unavailable reason through `all-smi doctor`
+  * Mark unsourced Windows GPU utilization and power unavailable so Prometheus omits them and the TUI renders `N/A` instead of zero
+  * Keep the Level Zero used-memory source label synchronized when a dedicated or local Sysman sample replaces the value
+  * Identify dedicated and shared GPU memory capacity in Windows doctor output, include the AMD gfx temperature, and skip NVIDIA checks when no reachable device is detected
+  * Make seven unit tests portable to native Windows and clear nine native Windows Clippy denials
+  * Make native Windows format, Clippy, and library-test checks ordinary CI gates after all three passed on the self-hosted runner
+
+ -- Jeongkyu Shin <inureyes@gmail.com>  Tue, 25 Aug 2026 00:00:00 +0000
+
 all-smi (0.26.1-0) jammy; urgency=medium
 
   * Replace keychain-dependent macOS codesign with rcodesign and verify the Developer ID Application authority, hardened runtime flag, and bundle identifier before packaging

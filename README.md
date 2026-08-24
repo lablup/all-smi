@@ -1581,6 +1581,7 @@ See the [LICENSE](./LICENSE) file for details.
 ## Changelog
 
 ### Recent Updates
+- **v0.26.2 (2026/08/25):** Moved Linux AMD monitoring into a runtime-loaded companion, fixed unavailable Windows GPU metrics and Level Zero memory provenance, and made native Windows tests and lint checks pass.
 - **v0.26.1 (2026/08/24):** Fixed macOS release signing and recovery, added early validation for Homebrew credentials and native Windows checks, and refreshed Rust dependencies
 - **v0.26.0 (2026/08/24):** Run API mode as a supervised service on Linux, macOS, and Windows, add Windows GPU metrics via DXGI, PDH, and AMD ADL, and compile the Intel Level Zero backend into every Linux and Windows build
 - **v0.25.0 (2026/07/31):** Cut local-mode collection cost with continuous IOReport sampling and a parallelized collection pipeline, give local mode its own polling cadence instead of the remote one, and make Activity history graphs scroll in time instead of shrinking as history accumulates

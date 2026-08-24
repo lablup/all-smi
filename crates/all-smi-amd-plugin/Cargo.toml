@@ -1,6 +1,6 @@
 [package]
 name = "all-smi-amd-plugin"
-version = "0.26.1"
+version = "0.26.2"
 description = "Runtime-loaded Linux AMD GPU backend for all-smi"
 authors = ["Jeongkyu Shin <inureyes@gmail.com>"]
 license = "Apache-2.0"
