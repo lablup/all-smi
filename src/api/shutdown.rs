@@ -102,7 +102,13 @@ pub async fn wait_until_serving() {
 }
 
 /// Whether at least one listener has been bound.
-#[cfg_attr(not(windows), allow(dead_code))]
+///
+/// Unlike [`wait_until_serving`], which the Windows service host awaits,
+/// this has no caller outside the tests. The attribute below therefore
+/// keys on `test` rather than on the platform: it was copied from the
+/// sibling above, and `not(windows)` silenced every target except the one
+/// where the item is genuinely dead.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn is_serving() -> bool {
     serving_latch().is_triggered()
 }

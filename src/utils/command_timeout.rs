@@ -185,7 +185,19 @@ fn check_cgroup_container() -> bool {
     }
 }
 
-#[cfg(test)]
+// Both tests here drive Unix programs (`yes`, `printf`) to exercise the
+// output cap, so the module is gated rather than the import inside it.
+// Gating only `use super::*` would leave
+// `output_cap_leaves_small_outputs_alone` compiled on Windows with its
+// entire body behind `#[cfg(unix)]`, which is a test that reports `ok`
+// while asserting nothing. An empty pass is a worse signal than an
+// absent test.
+//
+// The cap itself is cross-platform product code and now has no Windows
+// coverage. Giving it some needs a Windows program that emits an
+// unbounded stream, which is a test to write rather than a lint to
+// silence, so it is left for its own change.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

@@ -225,17 +225,20 @@ impl AmdRyzenSource {
 impl Drop for AmdRyzenSource {
     fn drop(&mut self) {
         // Clean up the AMD library
-        if let Some(state) = write_lock(&self.library_state).take() {
-            if state.initialized {
-                // SAFETY: We're calling PlatformUninit to clean up resources.
-                let uninit_fn: Result<Symbol<PlatformUninitFn>, _> =
-                    unsafe { state.library.get(b"PlatformUninit\0") };
+        // `take()` runs either way, so the lock is cleared even when the
+        // library was never initialised; only the uninit call is
+        // conditional. Collapsing preserves that order.
+        if let Some(state) = write_lock(&self.library_state).take()
+            && state.initialized
+        {
+            // SAFETY: We're calling PlatformUninit to clean up resources.
+            let uninit_fn: Result<Symbol<PlatformUninitFn>, _> =
+                unsafe { state.library.get(b"PlatformUninit\0") };
 
-                if let Ok(uninit) = uninit_fn {
-                    // SAFETY: Calling the documented cleanup function.
-                    unsafe {
-                        uninit();
-                    }
+            if let Ok(uninit) = uninit_fn {
+                // SAFETY: Calling the documented cleanup function.
+                unsafe {
+                    uninit();
                 }
             }
             // Library is dropped when state goes out of scope

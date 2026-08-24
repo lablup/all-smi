@@ -268,6 +268,12 @@ impl DataCollectionStrategy for SshStrategy {
 /// Per-host collection driver. Returns `Ok((gpus, status))` on success
 /// (status `is_connected = true`); returns `Err((status,))` when the
 /// host failed — the status carries the error chip the UI renders.
+// Measured rather than assumed: see `boxing_the_error_would_not_shrink_the_result`
+// below. `ConnectionStatus` is 184 bytes, so the `Err` variant trips the lint's
+// 128-byte threshold, but the `Ok` variant carries the same struct plus a `Vec`
+// and is 208. The whole `Result` is 208 either way, so boxing the `Err` buys
+// nothing and costs an allocation on every failed host.
+#[allow(clippy::result_large_err)]
 async fn collect_one_host(
     hosts: Arc<Mutex<HashMap<String, HostState>>>,
     semaphore: Arc<Semaphore>,
@@ -409,6 +415,8 @@ async fn probe_simple(session: &SshSession, cmd: &str) -> ProbeResult {
     }
 }
 
+// Same signature, same measurement; see `collect_one_host` above.
+#[allow(clippy::result_large_err)]
 async fn exec_and_parse(
     hosts: &Arc<Mutex<HashMap<String, HostState>>>,
     target: &SshTarget,
@@ -607,5 +615,36 @@ mod tests {
             Err(other) => panic!("expected Other err, got {other:?}"),
             Ok(_) => panic!("expected err, got Ok"),
         }
+    }
+}
+
+#[cfg(test)]
+mod result_size {
+    use super::*;
+
+    /// Pins the fact the two `#[allow(clippy::result_large_err)]` above rest on.
+    ///
+    /// The conventional fix for that lint is to box the `Err`, and here it would
+    /// not shrink the type by one byte, because the `Ok` variant carries the same
+    /// `ConnectionStatus` plus a `Vec` and therefore dominates the enum. Suppressing
+    /// a lint on a claim about sizes is only honest if the claim is checked, so
+    /// check it. A failure here means the `Ok` variant got smaller and boxing the
+    /// `Err` may finally be worth its allocation.
+    #[test]
+    fn boxing_the_error_would_not_shrink_the_result() {
+        use std::mem::size_of;
+
+        type Collected = Result<(Vec<GpuInfo>, ConnectionStatus), (ConnectionStatus,)>;
+        type BoxedErr = Result<(Vec<GpuInfo>, ConnectionStatus), Box<ConnectionStatus>>;
+
+        assert_eq!(
+            size_of::<Collected>(),
+            size_of::<BoxedErr>(),
+            "boxing the Err changed the Result size, so the allow is no longer justified"
+        );
+        assert!(
+            size_of::<(Vec<GpuInfo>, ConnectionStatus)>() > size_of::<(ConnectionStatus,)>(),
+            "the Ok variant no longer dominates, so the Err is now worth shrinking"
+        );
     }
 }

@@ -125,6 +125,12 @@ pub struct Snapshot {
 }
 
 impl Snapshot {
+    /// Test-only today. This module is gated `cfg(any(target_os =
+    /// "windows", test))`, so off Windows it exists only under `test`,
+    /// where this is used and nothing is reported. A non-test Windows
+    /// build compiles it with no caller, which is the one configuration
+    /// that sees it as dead.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn is_empty(&self) -> bool {
         self.adapters.is_empty() && self.processes.is_empty()
     }

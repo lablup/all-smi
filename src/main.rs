@@ -36,7 +36,11 @@ mod view;
 use api::run_api_mode;
 use clap::FromArgMatches;
 use cli::{Cli, Commands, LocalArgs};
-use common::config_file::{self, Settings, SocketSetting};
+use common::config_file::{self, Settings};
+// Only read inside the `#[cfg(unix)]` block that resolves the socket
+// setting, so importing it unconditionally leaves it unused on Windows.
+#[cfg(unix)]
+use common::config_file::SocketSetting;
 use tokio::signal;
 use utils::{RuntimeEnvironment, ensure_sudo_permissions_for_api};
 
@@ -321,6 +325,12 @@ async fn run_command(cli: Cli, settings: Settings) {
                 }
             }
 
+            // Consumed only by the macOS and Linux initialisers below, both
+            // cfg-gated, so on Windows this binding had no reader. Gating the
+            // binding rather than allowing the warning means a future consumer
+            // on another target fails to compile instead of silently
+            // reintroducing the dead binding.
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
             let interval = args.interval.unwrap_or(3);
 
             // Initialize native metrics manager (no sudo required)
