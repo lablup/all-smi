@@ -1,3 +1,17 @@
+all-smi (0.26.1-0) jammy; urgency=medium
+
+  * Replace keychain-dependent macOS codesign with rcodesign and verify the Developer ID Application authority, hardened runtime flag, and bundle identifier before packaging
+  * Make recovery dispatches load local actions from the workflow revision, promote recovered releases, and require every expected artifact before promotion
+  * Fix the packaging signature guard to inspect the verbose codesign authority output
+  * Make release promotion fail when GitHub release state or asset inventory cannot be read instead of treating an API error as an already-promoted release
+  * Validate the Homebrew tap token before cloning or changing the tap, with diagnostics for revoked, inaccessible, and read-only credentials
+  * Warn when the Homebrew workflow intentionally keeps the tap on an older stable release because the newer published release is still a pre-release
+  * Refresh Rust dependencies, including russh 0.63.1 and the luwen 0.9.0 crates, and adapt SSH host-key verification to russh's PublicKeyOrCertificate API
+  * Add a protected self-hosted Windows workflow for format, Clippy, library test, hardware inventory, and doctor checks, and move the privileged service smoke test off the pull-request path
+  * Add bilingual technical reports for 17 pull requests from the v0.26.0 cycle
+
+ -- Jeongkyu Shin <inureyes@gmail.com>  Mon, 24 Aug 2026 00:00:00 +0000
+
 all-smi (0.26.0-0) jammy; urgency=medium
 
   * Run `all-smi api` as a supervised service on Linux, macOS, and Windows through a new `all-smi service` subcommand with install, uninstall, start, stop, and status, backed by systemd units, launchd LaunchDaemons and LaunchAgents, and the Windows Service Control Manager
