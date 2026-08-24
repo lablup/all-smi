@@ -49,6 +49,11 @@ pub struct AdapterLuid {
 }
 
 impl AdapterLuid {
+    /// Test-only today: production code builds this with a struct literal
+    /// from the DXGI descriptor, and every caller here is an assertion.
+    /// Dead only in a non-test Windows build, for the reason given on
+    /// `Snapshot::is_empty`.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn new(high: i32, low: u32) -> Self {
         Self { high, low }
     }
