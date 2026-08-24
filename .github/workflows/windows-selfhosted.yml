@@ -1,0 +1,390 @@
+name: Windows Self-Hosted
+
+# SECURITY: this workflow schedules jobs on the self-hosted
+# `windows-on-macmini02-x64` runner, and this repository is public. Both
+# triggers below are maintainer-only: `workflow_dispatch` requires write
+# access, and `push` fires only for commits already on `main`. Neither can be
+# fired by a pull request, so a fork PR can never run code on that machine. Do
+# NOT add `pull_request`, `pull_request_target`, or `issue_comment` triggers
+# here.
+#
+# That is the whole reason this file exists rather than a job in ci.yml.
+# ci.yml is `pull_request`-triggered, and release.yml's header already states
+# the rule: keep self-hosted runners out of it. The Windows service smoke test
+# was the one job breaking that rule. It was gated on a repository variable,
+# which kept it skipped in practice, but a repository variable is not a
+# documented security boundary against a fork pull request and should not be
+# load-bearing for one. Moving the job here removes the question instead of
+# answering it.
+#
+# Issue #368 asked for `cargo test`, `clippy` and `fmt` on the Windows runner.
+# `windows-checks` below is that, and it runs on every push to main rather
+# than on request, because coverage that has to be remembered is coverage that
+# lapses.
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_service_smoke:
+        description: 'Also run the Service Control Manager smoke test (registers and deletes a real service; needs an elevated runner)'
+        required: false
+        default: false
+        type: boolean
+  push:
+    branches: [ main ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+# One self-hosted box, one persistent CARGO_HOME, and a service smoke test
+# that registers a machine-wide service by a fixed name. Two runs at once
+# would fight over both.
+concurrency:
+  group: windows-selfhosted
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  # ═══════════════════════════════════════════════════════════════
+  # Job: native Windows build, lint and unit tests (issue #368)
+  # ═══════════════════════════════════════════════════════════════
+  # Every other job in this repository runs on Linux or macOS, so the
+  # Windows-only code has been compiled by CI only as a release binary
+  # and never linted or tested. Two issues exist purely because nobody
+  # could see the output: #366 records four failing `--lib` tests and
+  # #367 records four `clippy -D warnings` sites, both reported from a
+  # developer machine rather than from a run anyone else can read.
+  #
+  # `continue-on-error` on the three check steps is deliberate and
+  # temporary. The point of the first run is to produce the list, and a
+  # job that stops at `fmt` would hide whatever `clippy` and `test` have
+  # to say. The summary step at the end fails the job, so a red run is
+  # still red; it just reports all three first. Remove the flags once
+  # #366 and #367 are closed, and this becomes an ordinary gate.
+  # ───────────────────────────────────────────────────────────────
+  windows-checks:
+    name: Windows Checks
+    runs-on: windows-on-macmini02-x64
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      # Same persistent paths release.yml pins, so the registry and the
+      # toolchain survive workspace cleanup between jobs. Must run before
+      # any cargo or rustup invocation.
+      - name: Setup persistent cache paths
+        run: |
+          $cargoHome = "C:\.cargo"
+          if (!(Test-Path $cargoHome)) { New-Item -ItemType Directory -Path $cargoHome -Force | Out-Null }
+          echo "CARGO_HOME=$cargoHome" >> $env:GITHUB_ENV
+          echo "RUSTUP_HOME=C:\.rustup" >> $env:GITHUB_ENV
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      # What this host actually is, recorded once per run. Issues #370,
+      # #377 and #378 all need specific hardware (two or more AMD GPUs, an
+      # Arc B390, an Intel or AMD adapter reporting through DXGI and PDH),
+      # and reading that off this output is how anyone decides whether
+      # this runner can settle them or whether they stay open for want of
+      # a machine. `doctor` is the tool the project built for exactly this
+      # question, so use it rather than inventing a second probe.
+      - name: Record what this runner is
+        continue-on-error: true
+        run: |
+          rustc --version
+          cargo --version
+          Write-Output "--- OS"
+          (Get-CimInstance Win32_OperatingSystem) |
+            Select-Object Caption, Version, BuildNumber, OSArchitecture | Format-List
+          Write-Output "--- display adapters"
+          Get-CimInstance Win32_VideoController |
+            Select-Object Name, AdapterCompatibility, PNPDeviceID, AdapterRAM, DriverVersion |
+            Format-List
+          Write-Output "--- elevated"
+          $id = [Security.Principal.WindowsIdentity]::GetCurrent()
+          (New-Object Security.Principal.WindowsPrincipal($id)).IsInRole(
+            [Security.Principal.WindowsBuiltInRole]::Administrator)
+
+      - name: cargo fmt --check
+        id: fmt
+        continue-on-error: true
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy
+        id: clippy
+        continue-on-error: true
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: cargo test --lib
+        id: test
+        continue-on-error: true
+        run: cargo test --lib
+
+      # Diagnostics, not a gate. It runs the binary this job just built
+      # against the actual hardware, which is the only way #377 and #378
+      # get evidence rather than inference.
+      - name: all-smi doctor
+        continue-on-error: true
+        run: |
+          cargo run --bin all-smi -- doctor --verbose
+          Write-Output "--- level_zero only, as json"
+          cargo run --bin all-smi -- doctor --only level_zero --json
+
+      - name: Report
+        run: |
+          $results = [ordered]@{
+            'cargo fmt --check' = "${{ steps.fmt.outcome }}"
+            'cargo clippy'      = "${{ steps.clippy.outcome }}"
+            'cargo test --lib'  = "${{ steps.test.outcome }}"
+          }
+          $failed = @()
+          foreach ($k in $results.Keys) {
+            Write-Output ("{0,-18} {1}" -f $k, $results[$k])
+            if ($results[$k] -ne 'success') { $failed += $k }
+          }
+          if ($failed.Count -gt 0) {
+            Write-Output "::error::native Windows checks failed: $($failed -join ', '). See #366 and #367."
+            exit 1
+          }
+          Write-Output "All native Windows checks passed."
+
+  # ═══════════════════════════════════════════════════════════════
+  # Job: Windows Service Control Manager smoke test (issue #311)
+  # ═══════════════════════════════════════════════════════════════
+  # Moved here from ci.yml unchanged apart from this header and its
+  # gating. It needs an elevated runner service, because every mutating
+  # SCM action requires Administrator rights, and it registers and
+  # deletes a real service, so it runs only when asked for rather than on
+  # every push to main.
+  #
+  # THIS JOB HAS NEVER EXECUTED. It was written alongside the backend on
+  # a macOS host with no access to Windows or to the runner, so treat its
+  # first real run as part of the work, not as a regression signal. That
+  # first run is what settles issue #357.
+  #
+  # The cleanup step is `if: always()` on purpose: a half-finished run
+  # that left `all-smi` registered would poison every later run on a
+  # persistent self-hosted runner.
+  # ───────────────────────────────────────────────────────────────
+  windows-service:
+    name: Windows Service Smoke Test
+    if: github.event_name == 'workflow_dispatch' && inputs.run_service_smoke
+    runs-on: windows-on-macmini02-x64
+    needs: windows-checks
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      # Same persistent paths the release job pins, so registry and
+      # toolchain survive workspace cleanup between jobs.
+      - name: Setup persistent cache paths
+        run: |
+          $cargoHome = "C:\.cargo"
+          if (!(Test-Path $cargoHome)) { New-Item -ItemType Directory -Path $cargoHome -Force | Out-Null }
+          echo "CARGO_HOME=$cargoHome" >> $env:GITHUB_ENV
+          echo "RUSTUP_HOME=C:\.rustup" >> $env:GITHUB_ENV
+
+      # protoc is deliberately absent: build.rs compiles the TPU protos
+      # on Linux only, so a Windows build needs no protoc at all.
+      #
+      # No `--features level_zero` here, on purpose. build.rs emits the
+      # `all_smi_level_zero` cfg for every Windows target regardless of the
+      # feature, so a plain build already includes the backend. Passing the
+      # flag would compile the same thing while testing a configuration we
+      # do not ship; leaving it off means this job builds exactly what the
+      # release artifact is. The job is opt-in via
+      # ENABLE_WINDOWS_SERVICE_SMOKE, so this is coverage when the runner
+      # is available rather than a guarantee.
+      - name: Build all-smi
+        run: cargo build --bin all-smi
+
+      - name: Require an elevated runner
+        run: |
+          $id = [Security.Principal.WindowsIdentity]::GetCurrent()
+          $principal = New-Object Security.Principal.WindowsPrincipal($id)
+          if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+            Write-Output "::error::the runner service is not elevated; every mutating Service Control Manager action needs Administrator rights. Reconfigure the runner to run as an administrator, or unset ENABLE_WINDOWS_SERVICE_SMOKE."
+            exit 1
+          }
+
+      # The diagnostics function is not scaffolding. A Windows service
+      # that fails to start reports nothing but a numeric error code
+      # through the SCM, and the actual explanation is in the log file
+      # under %PROGRAMDATA%. Without dumping `sc.exe query`, `sc.exe qc`,
+      # and that log, a red run here is undebuggable from CI output
+      # alone. Keep it.
+      - name: Service lifecycle
+        run: |
+          $ErrorActionPreference = "Stop"
+          # PowerShell 7.4 turns a non-zero native exit code into a
+          # terminating error by default. This job asserts on exit codes 1
+          # and 3 as documented behaviour, so that has to stay off.
+          $PSNativeCommandUseErrorActionPreference = $false
+          $bin = Join-Path $PWD "target\debug\all-smi.exe"
+          $programData = [Environment]::GetFolderPath("CommonApplicationData")
+          $appDir = Join-Path $programData "all-smi"
+          $logDir = Join-Path $appDir "logs"
+          $configPath = Join-Path $appDir "config.toml"
+
+          function Show-Diagnostics {
+            Write-Output "::group::diagnostics: all-smi Windows service"
+            Write-Output "--- sc.exe query ---"
+            & sc.exe query all-smi 2>&1 | Out-String
+            Write-Output "--- sc.exe qc (registered configuration) ---"
+            & sc.exe qc all-smi 2>&1 | Out-String
+            Write-Output "--- sc.exe qfailure (recovery actions) ---"
+            & sc.exe qfailure all-smi 2>&1 | Out-String
+            Write-Output "--- all-smi service status --json ---"
+            & $bin service status --json 2>&1 | Out-String
+            Write-Output "--- effective configuration ($configPath) ---"
+            if (Test-Path $configPath) { Get-Content $configPath } else { Write-Output "(absent)" }
+            Write-Output "--- all-smi config path ---"
+            & $bin config path 2>&1 | Out-String
+            Write-Output "--- service log tail ($logDir) ---"
+            if (Test-Path $logDir) {
+              Get-ChildItem $logDir -File | Sort-Object LastWriteTime |
+                ForEach-Object {
+                  Write-Output "=== $($_.FullName) ==="
+                  Get-Content $_.FullName -Tail 200
+                }
+            } else {
+              Write-Output "(no log directory: the service never reached logging init)"
+            }
+            Write-Output "::endgroup::"
+          }
+
+          function Invoke-Step([string]$label, [scriptblock]$body) {
+            Write-Output "== $label"
+            try { & $body } catch { Show-Diagnostics; throw }
+          }
+
+          # Exit code contract, mirroring `systemctl is-active`: 0 when
+          # running, 3 when installed-but-stopped or absent, 1 on error.
+          function Get-ServiceExitCode([string[]]$serviceArgs) {
+            & $bin @serviceArgs | Out-Host
+            return $LASTEXITCODE
+          }
+
+          Invoke-Step "status on a machine with no service must exit 3" {
+            $code = Get-ServiceExitCode @("service", "status")
+            if ($code -ne 3) { throw "expected exit 3 for an absent service, got $code" }
+          }
+
+          Invoke-Step "--user must be refused, not silently downgraded" {
+            $out = & $bin service status --user 2>&1 | Out-String
+            if ($LASTEXITCODE -ne 1) { throw "expected exit 1 for --user, got $LASTEXITCODE" }
+            if ($out -notmatch "Task Scheduler") { throw "the --user refusal must point at Task Scheduler; got: $out" }
+          }
+
+          Invoke-Step "service run from a console must explain itself" {
+            $out = & $bin service run 2>&1 | Out-String
+            if ($LASTEXITCODE -ne 1) { throw "expected exit 1 for a console-launched service run, got $LASTEXITCODE" }
+            if ($out -notmatch "Service Control Manager entry point") { throw "unexpected message: $out" }
+          }
+
+          Invoke-Step "%PROGRAMDATA% config must be honoured by the service" {
+            New-Item -ItemType Directory -Path $appDir -Force | Out-Null
+            Set-Content -Path $configPath -Value "[api]`nport = 19191`n" -Encoding utf8
+            & $bin config path | Out-Host
+          }
+
+          Invoke-Step "install --now registers, autostarts, and starts" {
+            & $bin service install --now
+            if ($LASTEXITCODE -ne 0) { throw "install --now exited $LASTEXITCODE" }
+            $qc = & sc.exe qc all-smi | Out-String
+            if ($qc -notmatch "AUTO_START") { throw "start type must be AUTO_START: $qc" }
+            if ($qc -notmatch "service run") { throw "the registered command line must end in the service run arguments: $qc" }
+            if ($qc -notmatch "LocalSystem") { throw "the service must run as LocalSystem: $qc" }
+          }
+
+          Invoke-Step "the service reaches RUNNING and serves the configured port" {
+            $ok = $false
+            foreach ($i in 1..60) {
+              & $bin service status | Out-Null
+              if ($LASTEXITCODE -eq 0) { $ok = $true; break }
+              Start-Sleep -Seconds 1
+            }
+            if (-not $ok) { throw "the service never reported running" }
+            $body = (Invoke-WebRequest "http://127.0.0.1:19191/metrics" -UseBasicParsing -TimeoutSec 10).Content
+            if ($body -notmatch "all_smi_") { throw "the metrics endpoint returned no all-smi metrics" }
+            $json = & $bin service status --json | Out-String
+            if ($json -notmatch '"running": true') { throw "status --json disagrees with the SCM: $json" }
+          }
+
+          Invoke-Step "logs land under %PROGRAMDATA%" {
+            if (-not (Test-Path $logDir)) { throw "no log directory at $logDir" }
+            if (-not (Get-ChildItem $logDir -File)) { throw "the log directory at $logDir is empty" }
+          }
+
+          Invoke-Step "a killed process is restarted by the configured failure actions" {
+            $pidBefore = ((& $bin service status --json | Out-String) | ConvertFrom-Json).pid
+            & taskkill /F /PID $pidBefore | Out-Host
+            $recovered = $false
+            foreach ($i in 1..90) {
+              & $bin service status | Out-Null
+              if ($LASTEXITCODE -eq 0) {
+                $pidAfter = ((& $bin service status --json | Out-String) | ConvertFrom-Json).pid
+                if ($pidAfter -and $pidAfter -ne $pidBefore) { $recovered = $true; break }
+              }
+              Start-Sleep -Seconds 1
+            }
+            if (-not $recovered) { throw "the SCM did not restart the service after taskkill /F" }
+          }
+
+          Invoke-Step "stop settles before returning, and status agrees" {
+            & $bin service stop
+            if ($LASTEXITCODE -ne 0) { throw "stop exited $LASTEXITCODE" }
+            & $bin service status | Out-Null
+            if ($LASTEXITCODE -ne 3) { throw "a stopped service must report exit 3, got $LASTEXITCODE" }
+          }
+
+          Invoke-Step "restart brings it back" {
+            & $bin service restart
+            if ($LASTEXITCODE -ne 0) { throw "restart exited $LASTEXITCODE" }
+            $ok = $false
+            foreach ($i in 1..60) {
+              & $bin service status | Out-Null
+              if ($LASTEXITCODE -eq 0) { $ok = $true; break }
+              Start-Sleep -Seconds 1
+            }
+            if (-not $ok) { throw "the service did not come back after restart" }
+          }
+
+          Invoke-Step "uninstall stops and deregisters" {
+            & $bin service uninstall
+            if ($LASTEXITCODE -ne 0) { throw "uninstall exited $LASTEXITCODE" }
+            & $bin service status | Out-Null
+            if ($LASTEXITCODE -ne 3) { throw "an absent service must report exit 3, got $LASTEXITCODE" }
+          }
+
+      # Unconditional: a persistent self-hosted runner must never be
+      # left with a registered `all-smi` service or a stray config file,
+      # whatever happened above.
+      - name: Cleanup
+        if: always()
+        run: |
+          $ErrorActionPreference = "Continue"
+          $programData = [Environment]::GetFolderPath("CommonApplicationData")
+          $appDir = Join-Path $programData "all-smi"
+          & sc.exe stop all-smi 2>&1 | Out-Null
+          Start-Sleep -Seconds 3
+          & sc.exe delete all-smi 2>&1 | Out-Null
+          Remove-Item (Join-Path $appDir "config.toml") -Force -ErrorAction SilentlyContinue
+          Remove-Item (Join-Path $appDir "logs") -Recurse -Force -ErrorAction SilentlyContinue
+          $remaining = & sc.exe query all-smi 2>&1 | Out-String
+          if ($remaining -notmatch "1060") {
+            Write-Output "::warning::the all-smi service may still be registered on this runner: $remaining"
+          }
+          exit 0
+
