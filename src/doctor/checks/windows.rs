@@ -127,7 +127,19 @@ fn check_gpu_perf_counters(_ctx: &CheckCtx) -> CheckResult {
                     Some(value) => format!("{value:.1}%"),
                     None => "unavailable".to_string(),
                 };
-                format!("{description} ({total_gib:.1} GiB, utilization {utilization})")
+                // Which pool the figure came from, not just its size. The
+                // number alone is ambiguous: `resolve_adapter_memory` reports
+                // the dedicated pool when it clears the 1 GiB floor and the
+                // shared aperture otherwise, and those are different
+                // quantities. Reading a capacity off this check without
+                // knowing which one it is invites the wrong conclusion, which
+                // is what happened on the first Windows run (#378).
+                let pool = if adapter.memory_is_shared {
+                    "shared aperture"
+                } else {
+                    "dedicated"
+                };
+                format!("{description} ({total_gib:.1} GiB {pool}, utilization {utilization})")
             })
             .collect();
 

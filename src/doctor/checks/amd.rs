@@ -210,10 +210,20 @@ fn check_adl_adapters(_ctx: &CheckCtx) -> CheckResult {
 /// so the formatting lives here rather than at each call site.
 #[cfg(target_os = "windows")]
 fn describe_readout(readout: &crate::device::readers::amd_adl::sensors::AdlReadout) -> String {
+    // `temperature_gfx_c` is printed because it is the second link in
+    // `primary_temperature_c`'s chain (edge, then gfx, then hotspot), and
+    // omitting it made this dump contradict the reading all-smi actually
+    // publishes. A Strix Halo APU reports none of edge, mem or hotspot and
+    // does report gfx, so the summary said `edge=None hotspot=None mem=None`
+    // while the TUI correctly showed 41 C from the gfx sensor. The raw table
+    // below carried the answer at index 28 all along, which is the opposite
+    // of what a field-verification dump is for: it should not take reading
+    // the source to reconcile the interpreted line with the product.
     format!(
-        "edge={:?}C hotspot={:?}C mem={:?}C power={:?}W fan={:?}rpm gfx={:?}MHz \
-         mclk={:?}MHz activity={:?}%",
+        "edge={:?}C gfx={:?}C hotspot={:?}C mem={:?}C power={:?}W fan={:?}rpm \
+         gfxclk={:?}MHz mclk={:?}MHz activity={:?}%",
         readout.temperature_edge_c,
+        readout.temperature_gfx_c,
         readout.temperature_hotspot_c,
         readout.temperature_mem_c,
         readout.power_w,

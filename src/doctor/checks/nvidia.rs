@@ -17,6 +17,7 @@
 
 use std::time::Duration;
 
+use crate::device::platform_detection::has_nvidia;
 use crate::doctor::exec::{try_exec, which};
 use crate::doctor::types::{Check, CheckCtx, CheckResult, Severity};
 
@@ -67,7 +68,41 @@ static MIG_MODE: Check = Check {
     run: check_mig,
 };
 
+/// Why the NVIDIA checks stand down, phrased so it does not overclaim.
+///
+/// [`has_nvidia`] asks `nvidia-smi -L` on Windows and macOS, so a false
+/// answer covers three states this function cannot separate: no NVIDIA
+/// hardware at all, hardware whose driver cannot be reached, and on
+/// Windows an unelevated shell, where `nvidia-smi` refuses with a
+/// permission error before it ever reaches the driver. Naming all three
+/// beats asserting the first, and the middle one is the reason this is a
+/// skip rather than a pass.
+fn nvidia_absent_reason() -> String {
+    "no NVIDIA GPU visible to `nvidia-smi -L`; on Windows the same answer comes from an \
+     unelevated shell or from an external GPU that is currently detached. Re-run elevated, \
+     or with the GPU attached, if one is expected"
+        .to_string()
+}
+
 fn check_nvml_loadable(_ctx: &CheckCtx) -> CheckResult {
+    // A host with no NVIDIA GPU is not a broken host, and NVML failing to
+    // initialise on one is not a defect worth an Error. `level_zero.init`
+    // and `level_zero.devices` already take that position for Intel; this
+    // brings NVIDIA into line, for the same reason given there: an absent
+    // vendor stack degrades to reporting no device of that vendor rather
+    // than breaking a run, so the worst honest verdict is not a failure.
+    //
+    // The state that forced the question: a machine whose only NVIDIA GPU
+    // is external and currently detached, with the driver still installed.
+    // Every NVML error became `Fail`, so `doctor` exited 2 on a healthy
+    // host, and the error it printed was `NVML_ERROR_NO_PERMISSION`, which
+    // sent the operator looking for an elevation problem that did not
+    // exist. Elevated, the same machine reports the real condition: the
+    // driver cannot be reached because there is no GPU behind it.
+    if !has_nvidia() {
+        return CheckResult::Skip(nvidia_absent_reason());
+    }
+
     // The `nvml-wrapper` crate loads libnvidia-ml via dlopen on first
     // Nvml::init(). Attempting the init is the cheapest authoritative test:
     // if the library is missing or the driver isn't usable, init() fails
@@ -104,6 +139,18 @@ fn check_smi(_ctx: &CheckCtx) -> CheckResult {
             );
         }
     };
+
+    // The binary being installed says nothing about a GPU being present:
+    // an NVIDIA driver survives its hardware being unplugged, which is the
+    // ordinary state of a machine whose NVIDIA GPU is external. Report that
+    // as a skip rather than running a command whose failure would be
+    // reported as the host's fault.
+    if !has_nvidia() {
+        return CheckResult::Skip(format!(
+            "{path} is installed but {}",
+            nvidia_absent_reason()
+        ));
+    }
 
     match try_exec("nvidia-smi", &["--version"], Duration::from_millis(2_000)) {
         Some(out) if out.success() => {
