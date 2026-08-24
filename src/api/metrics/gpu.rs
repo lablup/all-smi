@@ -891,6 +891,33 @@ mod tests {
         assert!(output.contains("all_smi_gpu_memory_total_bytes{"));
     }
 
+    /// Issue #378: a Windows WMI baseline must keep an unsourced field
+    /// absent through Prometheus instead of turning it into a zero sample.
+    #[test]
+    fn exporter_omits_unsourced_windows_utilization_and_power() {
+        use crate::device::types::GPU_METRIC_UNAVAILABLE;
+
+        let mut gpu = make_nvidia_gpu();
+        gpu.name = "AMD Radeon Graphics".to_string();
+        gpu.utilization = GPU_METRIC_UNAVAILABLE;
+        gpu.power_consumption = GPU_METRIC_UNAVAILABLE;
+        gpu.detail
+            .insert("Source: Utilization".to_string(), "unavailable".to_string());
+        gpu.detail
+            .insert("Source: Power".to_string(), "unavailable".to_string());
+
+        let output = GpuMetricExporter::new(&[gpu]).export_metrics();
+
+        assert!(!output.contains("all_smi_gpu_utilization{"), "{output}");
+        assert!(
+            !output.contains("all_smi_gpu_power_consumption_watts{"),
+            "{output}"
+        );
+        assert!(output.contains("all_smi_gpu_info{"), "{output}");
+        assert!(output.contains("source__utilization=\"unavailable\""));
+        assert!(output.contains("source__power=\"unavailable\""));
+    }
+
     /// The other half of the contract: a real zero is still published, so
     /// omission unambiguously means "no data".
     #[test]

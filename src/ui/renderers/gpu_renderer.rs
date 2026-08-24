@@ -882,6 +882,24 @@ mod tests {
         assert!(!rendered.contains("0.0W"), "ANE gauge shows 0W: {rendered}");
     }
 
+    /// Issue #378: Windows readers use the same sentinel contract, so an
+    /// unsourced utilization or power field must render as N/A as well.
+    #[test]
+    fn unsourced_windows_fields_render_as_na_not_zero() {
+        let mut gpu = make_gpu(45);
+        gpu.name = "AMD Radeon Graphics".to_string();
+        gpu.utilization = crate::device::types::GPU_METRIC_UNAVAILABLE;
+        gpu.power_consumption = crate::device::types::GPU_METRIC_UNAVAILABLE;
+        gpu.frequency = 338;
+
+        let rendered = render_row(&gpu);
+
+        assert!(rendered.contains("Util:   N/A"), "{rendered}");
+        assert!(rendered.contains("Pwr:     N/A"), "{rendered}");
+        assert!(!rendered.contains("Util:  0.0%"), "{rendered}");
+        assert!(!rendered.contains("Pwr:      0W"), "{rendered}");
+    }
+
     /// The complement: a genuine zero reading renders as a zero, so N/A
     /// unambiguously means "no data" on screen too.
     #[test]

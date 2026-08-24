@@ -757,12 +757,13 @@ mod tests {
         let (_, shared_below) = resolve_adapter_memory(MIN_DISCRETE_DEDICATED_BYTES - 1, 32 * GIB);
         assert!(shared_below, "one byte below the floor is a carve-out");
     }
-    use crate::device::types::GpuInfo;
+    use crate::device::types::{GPU_METRIC_UNAVAILABLE, GpuInfo};
 
     fn blank_gpu() -> GpuInfo {
         let mut detail = HashMap::new();
         detail.insert("Metrics Source".to_string(), "WMI".to_string());
         detail.insert("Source: Utilization".to_string(), "unavailable".to_string());
+        detail.insert("Source: Power".to_string(), "unavailable".to_string());
         detail.insert("Source: Memory".to_string(), "WMI".to_string());
         GpuInfo {
             uuid: "PCI\\VEN_1002&DEV_744C".to_string(),
@@ -772,7 +773,7 @@ mod tests {
             host_id: String::new(),
             hostname: String::new(),
             instance: String::new(),
-            utilization: 0.0,
+            utilization: GPU_METRIC_UNAVAILABLE,
             ane_utilization: 0.0,
             dla_utilization: None,
             tensorcore_utilization: None,
@@ -780,7 +781,7 @@ mod tests {
             used_memory: 0,
             total_memory: 4_294_967_295,
             frequency: 0,
-            power_consumption: 0.0,
+            power_consumption: GPU_METRIC_UNAVAILABLE,
             gpu_core_count: None,
             temperature_threshold_slowdown: None,
             temperature_threshold_shutdown: None,
@@ -876,11 +877,12 @@ mod tests {
         // utilization stays at its baseline and is not falsely
         // attributed to PDH.
         let mut gpu = blank_gpu();
-        gpu.utilization = 0.0;
         apply_to_gpu_info(&mut gpu, &metrics(Some(1_073_741_824), None, None));
         assert_eq!(gpu.total_memory, 1_073_741_824);
-        assert_eq!(gpu.utilization, 0.0);
+        assert_eq!(gpu.utilization_reading(), None);
+        assert_eq!(gpu.power_consumption_reading(), None);
         assert_eq!(gpu.detail["Source: Utilization"], "unavailable");
+        assert_eq!(gpu.detail["Source: Power"], "unavailable");
         assert_eq!(gpu.detail["Metrics Source"], "WMI + DXGI");
     }
 

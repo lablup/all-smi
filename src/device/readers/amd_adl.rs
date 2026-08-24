@@ -249,6 +249,7 @@ pub fn augment(_gpus: &mut [GpuInfo]) {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::device::types::GPU_METRIC_UNAVAILABLE;
     use std::collections::HashMap;
 
     fn baseline_gpu() -> GpuInfo {
@@ -280,7 +281,7 @@ mod tests {
             used_memory: 1_073_741_824,
             total_memory: 25_769_803_776,
             frequency: 0,
-            power_consumption: 0.0,
+            power_consumption: GPU_METRIC_UNAVAILABLE,
             gpu_core_count: None,
             temperature_threshold_slowdown: None,
             temperature_threshold_shutdown: None,
@@ -319,6 +320,7 @@ mod tests {
 
         assert_eq!(gpu.temperature, 62);
         assert_eq!(gpu.power_consumption, 310.0);
+        assert_eq!(gpu.power_consumption_reading(), Some(310.0));
         assert_eq!(gpu.frequency, 2400);
         assert_eq!(gpu.detail["Hotspot Temperature"], "81 C");
         assert_eq!(gpu.detail["Memory Temperature"], "70 C");
@@ -432,7 +434,7 @@ mod tests {
         assert_eq!(gpu.utilization, 12.0);
         assert_eq!(gpu.detail["Source: Utilization"], "PDH");
         assert_eq!(gpu.detail["Source: Power"], "unavailable");
-        assert_eq!(gpu.power_consumption, 0.0);
+        assert_eq!(gpu.power_consumption_reading(), None);
         assert_eq!(gpu.detail["Metrics Source"], "WMI + DXGI + PDH + ADL");
     }
 

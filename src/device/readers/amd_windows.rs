@@ -26,7 +26,7 @@
 
 use crate::device::GpuReader;
 use crate::device::readers::windows_gpu_perf::{self, ids::AdapterLuid};
-use crate::device::types::{GpuInfo, ProcessInfo};
+use crate::device::types::{GPU_METRIC_UNAVAILABLE, GpuInfo, ProcessInfo};
 use crate::utils::get_hostname;
 use chrono::Local;
 use serde::Deserialize;
@@ -184,7 +184,13 @@ impl AmdWindowsGpuReader {
                     host_id: hostname.clone(),
                     hostname: hostname.clone(),
                     instance: hostname.clone(),
-                    utilization: 0.0, // Not available via WMI
+                    // WMI cannot source utilization or power. These f64
+                    // fields use the unavailable sentinel because zero is a
+                    // legitimate reading; PDH / ADL overwrite it when they
+                    // answer. ANE is not applicable off Apple, while the u32
+                    // temperature and frequency accessors deliberately use
+                    // zero as their unavailable marker.
+                    utilization: GPU_METRIC_UNAVAILABLE,
                     ane_utilization: 0.0,
                     dla_utilization: None,
                     tensorcore_utilization: None,
@@ -192,7 +198,7 @@ impl AmdWindowsGpuReader {
                     used_memory: 0, // Not available via WMI
                     total_memory,
                     frequency: 0,         // Not available via WMI
-                    power_consumption: 0.0, // Not available via WMI
+                    power_consumption: GPU_METRIC_UNAVAILABLE,
                     gpu_core_count: None,
                     // AMD-on-Windows surfaces nothing beyond the basic WMI
                     // query — NVML thermal thresholds / P-states and NVIDIA
