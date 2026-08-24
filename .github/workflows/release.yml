@@ -596,6 +596,14 @@ jobs:
       - name: Promote to full release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # This job checks out nothing, so `gh` has no git remote to infer the
+          # repository from and every call below fails with "not a git
+          # repository". That failure used to be indistinguishable from a
+          # promoted release: the command substitution returned empty, the
+          # `!= "true"` test passed, and the job exited 0 having done nothing
+          # while reporting success. GH_REPO is what actually fixes it; the
+          # explicit emptiness check below is what stops it being silent again.
+          GH_REPO: ${{ github.repository }}
           TAG: ${{ github.event.release.tag_name || github.event.inputs.release_tag }}
           ALL_ASSETS: ${{ needs.setup.outputs.all_assets }}
         run: |
@@ -606,9 +614,15 @@ jobs:
             exit 1
           fi
 
+          IS_PRERELEASE="$(gh release view "$TAG" --json isPrerelease -q .isPrerelease)"
+          if [ -z "$IS_PRERELEASE" ]; then
+            echo "::error::could not read the release state for $TAG; refusing to guess whether it needs promoting"
+            exit 1
+          fi
+
           # Idempotent: re-running a dispatch against an already-promoted tag
           # is a normal thing to do while recovering, and must not fail.
-          if [ "$(gh release view "$TAG" --json isPrerelease -q .isPrerelease)" != "true" ]; then
+          if [ "$IS_PRERELEASE" != "true" ]; then
             echo "$TAG is already a full release; nothing to promote"
             exit 0
           fi
@@ -619,6 +633,10 @@ jobs:
           # are not all there. Check the whole expected set, not just what was
           # built here.
           PRESENT="$(gh release view "$TAG" --json assets -q '.assets[].name')"
+          if [ -z "$PRESENT" ]; then
+            echo "::error::$TAG reports no assets at all; refusing to promote"
+            exit 1
+          fi
           MISSING=""
           while IFS= read -r want; do
             [ -n "$want" ] || continue
