@@ -1,3 +1,33 @@
+all-smi (0.26.0-0) jammy; urgency=medium
+
+  * Run `all-smi api` as a supervised service on Linux, macOS, and Windows through a new `all-smi service` subcommand with install, uninstall, start, stop, and status, backed by systemd units, launchd LaunchDaemons and LaunchAgents, and the Windows Service Control Manager
+  * Add `/etc/all-smi/config.toml`, `/Library/Application Support/all-smi/config.toml`, and `%PROGRAMDATA%\all-smi\config.toml` as system-wide config candidates so a daemon with no home directory can be configured
+  * Add vendor-neutral Windows GPU metrics through DXGI and PDH, replacing the WMI-only baseline that hardcoded utilization, used memory, frequency, and power to 0 and truncated total memory above 4 GB
+  * Read AMD temperature, board power, fan speed, and clocks on Windows from `atiadlxx.dll` via ADL PMLog, loaded at runtime from an absolute path so a machine without the AMD driver starts normally
+  * Attribute ADL telemetry per card on multi-GPU AMD Windows hosts by grouping AdapterInfo rows by PCI bus/device/function and matching them to WMI PNPDeviceID, restoring sensors on the Ryzen APU plus Radeon dGPU configuration
+  * Compile the Intel Level Zero Sysman backend into every Linux and Windows build through an `all_smi_level_zero` build cfg instead of the default-off `level_zero` cargo feature, which is retained as an accepted no-op
+  * Add Intel Mac support for CPU, SMC, and chassis metrics with per-core data and temperatures, and publish an `x86_64-apple-darwin` release artifact
+  * Promote GPU fan speed to a typed `GpuInfo::fan_speed_rpm` field and export it as the `all_smi_gpu_fan_speed_rpm` gauge, with `None` rendered as absent rather than 0
+  * Emit an `all_smi_up` and build-info baseline from the first `/metrics` response and add a `/-/ready` endpoint that answers 503 until the first collection cycle lands, so a scrape during startup is no longer recorded as a successful scrape with zero samples
+  * Cut Apple Silicon client construction from 1.28-1.54s to 273-285ms by binary-searching the SMC key span instead of walking all 3,739 keys, enumerating IOReport channel groups concurrently, and caching the merged channel dictionary process-wide
+  * Derive Apple Silicon CPU cluster frequency from the IOKit pmgr table, fixing CPU frequency metrics that read 0 on every Apple Silicon machine
+  * Omit Apple Silicon GPU metrics when IOReport is unavailable instead of publishing 0% utilization, 0 W, and 0 degrees for a device that measured nothing
+  * Report the Intel Arc B390 as an integrated Xe3 (Panther Lake) part with its shared aperture as total memory, and treat a dedicated pool below 1 GiB as a stolen-memory carve-out, which also corrects every Radeon APU on Windows
+  * Report shared-usage memory for Intel and AMD integrated GPUs on Windows, which previously read 0 bytes in use because PDH sampled only the dedicated pool
+  * Append rather than overwrite `Metrics Source`, so a Windows host with the full stack reports WMI, DXGI, PDH, and Level Zero Sysman instead of only the last layer to run
+  * Add `level_zero.build`, `level_zero.loader`, `level_zero.init`, and `level_zero.devices` doctor checks that report whether the loader was found, which Sysman route initialised, and how many devices were enumerated
+  * Add an `amd.adl.per_adapter` doctor check that exercises the per-index PMLog sampling path unreachable on a single-GPU host
+  * Report the pinned libamdgpu_top version in the `amd.libamdgpu_top.abi` doctor check instead of all-smi's own version
+  * Move the AMD backend behind a default-on `amd` cargo feature, so a downstream crate declaring `default-features = false` no longer inherits `libdrm.so.2` and `libdrm_amdgpu.so.1` as hard NEEDED entries
+  * Survive a terminal that reports no size, replacing a missing dimension with $COLUMNS/$LINES or 80x24 and rendering a single-line notice below a 20x3 minimum instead of underflowing
+  * Add the local `c` shortcut for CPU sorting in the Processes view and advertise it in the help overlay and status bar
+  * Unify the `Fan Speed` detail key across readers so the unit is carried in the value rather than the key
+  * Remove the vendored OpenSSL dependency, which nothing linked against and which every musl and cross-compiled aarch64 release build compiled from source
+  * Remove the Docker image, its compose example, and its CI job; container deployment is no longer supported
+  * Resolve benchmark CPU topology through Intel hybrid sysfs CPU lists and ARM `CPU part` grouping when neither cpufreq nor cpu_capacity is readable
+
+ -- Jeongkyu Shin <inureyes@gmail.com>  Mon, 24 Aug 2026 00:00:00 +0000
+
 all-smi (0.25.0-0) jammy; urgency=medium
 
   * Dispatch every synchronous reader pass in the local collection pipeline to the blocking pool and join at the end, on both the first-iteration and steady-state paths, cutting wall clock per cycle about 28% on an Apple M5 Max with no increase in process CPU time

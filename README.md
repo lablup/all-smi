@@ -1577,6 +1577,7 @@ See the [LICENSE](./LICENSE) file for details.
 ## Changelog
 
 ### Recent Updates
+- **v0.26.0 (2026/08/24):** Run API mode as a supervised service on Linux, macOS, and Windows, add Windows GPU metrics via DXGI, PDH, and AMD ADL, and compile the Intel Level Zero backend into every Linux and Windows build
 - **v0.25.0 (2026/07/31):** Cut local-mode collection cost with continuous IOReport sampling and a parallelized collection pipeline, give local mode its own polling cadence instead of the remote one, and make Activity history graphs scroll in time instead of shrinking as history accumulates
 - **v0.24.2 (2026/07/24):** Report VRAM total, VRAM used, and power draw for Intel Battlemage GPUs on the mainline `xe` driver, which does not expose the `tile0/vram0` sysfs counters the `i915` path relies on
 - **v0.24.1 (2026/07/20):** Replace the yanked `aes` and `crypto-bigint` crates (pulled in transitively through `russh`) with their latest non-yanked releases, and bump `russh` to 0.62 and `tower-http` to 0.7, moving several transitive crypto crates from prerelease to stable
