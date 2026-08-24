@@ -87,10 +87,45 @@ jobs:
           # workflow_dispatch input is free text and reaches exactly as far.
           if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ -n "$RELEASE_TAG_INPUT" ]; then
             echo "VERSION=$RELEASE_TAG_INPUT" >> "$GITHUB_ENV"
-          else
-            TAG=$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq .tag_name)
-            echo "VERSION=$TAG" >> "$GITHUB_ENV"
+            exit 0
           fi
+
+          # `releases/latest` is deliberate rather than "the newest tag": it
+          # excludes prereleases and drafts, and `brew install` must not hand a
+          # user a prerelease. What it cannot do is notice when it has answered
+          # a stale question.
+          #
+          # This job triggers on the Release workflow completing, and the step
+          # that promotes a prerelease to a full release lives inside that same
+          # workflow. If that promotion does not run, or fails, or the release
+          # is a deliberate prerelease, `releases/latest` returns the previous
+          # version, the formula already matches it, and the push step exits 0
+          # with "nothing to push". A green run that moved nothing.
+          #
+          # That is not hypothetical: run 32688159260 resolved v0.25.0 while
+          # v0.26.0 sat published-as-prerelease, reported success, and left the
+          # tap a version behind. The promotion had failed silently, which
+          # #388 fixed, but the silence here is its own defect and outlives
+          # that one cause.
+          #
+          # So resolve as before, and then say out loud when a newer release
+          # exists that this job is declining to serve. A warning rather than an
+          # error: refusing to publish a prerelease to `brew` users is correct
+          # behaviour, and only the silence was wrong.
+          NEWEST=$(gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=20" \
+            --jq '[.[] | select(.draft | not)] | sort_by(.published_at) | (last // {}) | .tag_name // empty')
+
+          if ! TAG=$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq .tag_name 2>/dev/null); then
+            echo "::error::${GITHUB_REPOSITORY} has no full release. The tap serves only full releases, and the newest published one is ${NEWEST:-none}."
+            exit 1
+          fi
+
+          if [ -n "$NEWEST" ] && [ "$NEWEST" != "$TAG" ]; then
+            echo "::warning::${NEWEST} is published but is not a full release, so the tap stays at ${TAG}. Promote ${NEWEST} out of prerelease and re-run this workflow to publish it."
+          fi
+
+          echo "Resolved ${TAG} (newest published release: ${NEWEST:-none})."
+          echo "VERSION=$TAG" >> "$GITHUB_ENV"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           EVENT_NAME: ${{ github.event_name }}
