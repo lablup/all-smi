@@ -167,8 +167,15 @@ jobs:
   #
   # THIS JOB HAS NEVER EXECUTED. It was written alongside the backend on
   # a macOS host with no access to Windows or to the runner, so treat its
-  # first real run as part of the work, not as a regression signal. That
-  # first run is what settles issue #357.
+  # first real run as part of the work, not as a regression signal.
+  #
+  # It will not be this runner that runs it first. `windows-on-macmini02-x64`
+  # reports `elevated: False`, measured in run 32705270378, and the decision
+  # was to leave it that way: an elevated persistent runner executes whatever
+  # lands on main with Administrator rights, and a one-off check on a
+  # dedicated machine is the cheaper risk. Issue #357 records that, and the
+  # guard below states it rather than telling the next reader to go and
+  # elevate the box.
   #
   # The cleanup step is `if: always()` on purpose: a half-finished run
   # that left `all-smi` registered would poison every later run on a
@@ -203,9 +210,9 @@ jobs:
       # feature, so a plain build already includes the backend. Passing the
       # flag would compile the same thing while testing a configuration we
       # do not ship; leaving it off means this job builds exactly what the
-      # release artifact is. The job is opt-in via
-      # ENABLE_WINDOWS_SERVICE_SMOKE, so this is coverage when the runner
-      # is available rather than a guarantee.
+      # release artifact is. The job runs only when dispatched with
+      # `run_service_smoke`, so this is coverage when someone asks for it
+      # rather than a guarantee.
       - name: Build all-smi
         run: cargo build --bin all-smi
 
@@ -214,7 +221,7 @@ jobs:
           $id = [Security.Principal.WindowsIdentity]::GetCurrent()
           $principal = New-Object Security.Principal.WindowsPrincipal($id)
           if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-            Write-Output "::error::the runner service is not elevated; every mutating Service Control Manager action needs Administrator rights. Reconfigure the runner to run as an administrator, or unset ENABLE_WINDOWS_SERVICE_SMOKE."
+            Write-Output "::error::the runner service is not elevated, so every mutating Service Control Manager action here would fail. This is expected on windows-on-macmini02-x64 and is not a defect to work around: elevating a shared persistent runner was considered and declined (see #357). Run this on a dedicated Windows machine instead."
             exit 1
           }
 
