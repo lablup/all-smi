@@ -1,0 +1,250 @@
+name: "macOS signing setup"
+description: >-
+  Extract the Developer ID Application signing certificate to a PEM, verify it
+  really is a Developer ID certificate, and install rcodesign, exporting
+  PEM_FILE and SIGNING_READY for the rest of the job.
+
+  Mirrored from lablup/bssh, which adopted this procedure after an "Apple
+  Distribution" certificate shipped in its releases and was later revoked.
+  Keep the two in sync when either changes.
+
+inputs:
+  certificate:
+    description: "Base64-encoded Developer ID Application .p12 (the APPLE_CERTIFICATE secret)."
+    required: true
+  certificate-password:
+    description: "Password for the .p12 (the APPLE_CERTIFICATE_PASSWORD secret)."
+    required: true
+  required:
+    description: >-
+      'true' fails the job when the certificate secrets are missing or unusable.
+      'false' emits a warning, sets SIGNING_READY=false, and lets the job carry
+      on producing unsigned artifacts.
+    required: false
+    default: "true"
+
+# secrets.* is not readable from inside a composite action, so every secret this
+# action needs is passed in by the caller as an input.
+runs:
+  using: composite
+  steps:
+    - name: Prepare signing certificate (rcodesign)
+      shell: bash
+      env:
+        APPLE_CERTIFICATE: ${{ inputs.certificate }}
+        APPLE_CERTIFICATE_PASSWORD: ${{ inputs.certificate-password }}
+        CERTIFICATE_REQUIRED: ${{ inputs.required }}
+      run: |
+        # Use rcodesign instead of Apple's codesign. rcodesign reads the p12
+        # file directly: no keychain, no SecurityAgent, no GUI session required,
+        # and no ambiguous substring matching against whatever identities happen
+        # to be in the keychain.
+
+        echo "=== Checking certificate availability ==="
+        MISSING=""
+        if [ -z "$APPLE_CERTIFICATE" ]; then
+          MISSING="APPLE_CERTIFICATE"
+        fi
+        if [ -z "$APPLE_CERTIFICATE_PASSWORD" ]; then
+          MISSING="${MISSING:+$MISSING, }APPLE_CERTIFICATE_PASSWORD"
+        fi
+
+        if [ -n "$MISSING" ]; then
+          if [ "$CERTIFICATE_REQUIRED" = "true" ]; then
+            echo "::error::signing certificate secrets are not set or empty: $MISSING"
+            exit 1
+          fi
+          echo "::warning::signing certificate secrets are not set or empty ($MISSING); continuing without a Developer ID signature"
+          echo "SIGNING_READY=false" >> "$GITHUB_ENV"
+          exit 0
+        fi
+
+        echo "=== Decoding certificate ==="
+        echo "$APPLE_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/original.p12"
+
+        # Apple's exported p12 uses RC2-40-CBC, which only OpenSSL's legacy
+        # provider reads, so the extraction needs `openssl pkcs12 -legacy`.
+        # rcodesign's own p12 parser cannot read it either, which is why it is
+        # handed a PEM instead.
+        #
+        # Do NOT let PATH decide which openssl runs. Apple's /usr/bin/openssl is
+        # LibreSSL, which has no -legacy option at all and exits 1 on it.
+        # Installing a Homebrew openssl does not make the bare name safe either:
+        # the versioned formulae are keg-only, so they are never symlinked into
+        # the prefix bin.
+        #
+        # Select by capability rather than by version. Whichever binary
+        # advertises -legacy is by definition the one that can do this, which
+        # keeps working on a future openssl@5 and rejects LibreSSL for the
+        # reason that matters.
+        echo "=== Selecting an OpenSSL with legacy provider support ==="
+        # Probe through a variable rather than `cmd | grep -q`. A composite
+        # action's `shell: bash` runs with `-o pipefail`. `grep -q` exits as soon
+        # as it matches, so the writer on the left can take a SIGPIPE on a later
+        # line and pipefail would report the probe as failed even though
+        # `-legacy` was present. A here-string has no writer process, so it
+        # cannot.
+        supports_legacy() {
+          local help_output
+          help_output="$("$1" pkcs12 -help 2>&1 || true)"
+          grep -q -- '-legacy' <<<"$help_output"
+        }
+
+        OPENSSL_BIN=""
+        for FORMULA in openssl@4 openssl@3 openssl; do
+          PREFIX="$(brew --prefix "$FORMULA" 2>/dev/null || true)"
+          [ -n "$PREFIX" ] || continue
+          CANDIDATE="$PREFIX/bin/openssl"
+          if [ -x "$CANDIDATE" ] && supports_legacy "$CANDIDATE"; then
+            OPENSSL_BIN="$CANDIDATE"
+            break
+          fi
+        done
+        if [ -z "$OPENSSL_BIN" ]; then
+          CANDIDATE="$(command -v openssl || true)"
+          if [ -n "$CANDIDATE" ] && supports_legacy "$CANDIDATE"; then
+            OPENSSL_BIN="$CANDIDATE"
+          fi
+        fi
+
+        if [ -z "$OPENSSL_BIN" ]; then
+          echo "::error::No openssl on this runner supports 'pkcs12 -legacy', which is required to read the RC2-40-CBC signing certificate. Install one with: brew install openssl@3"
+          echo "openssl resolved from PATH: $(command -v openssl || echo none)"
+          command -v openssl >/dev/null 2>&1 && openssl version || true
+          rm -f "$RUNNER_TEMP/original.p12"
+          exit 1
+        fi
+        echo "Using $OPENSSL_BIN ($("$OPENSSL_BIN" version))"
+
+        echo "=== Extracting certificate to PEM ==="
+        # stderr is deliberately kept. openssl writes diagnostics here, not key
+        # material, and without them a failure surfaces only as "exit code 1".
+        if ! "$OPENSSL_BIN" pkcs12 -in "$RUNNER_TEMP/original.p12" \
+          -passin "pass:$APPLE_CERTIFICATE_PASSWORD" \
+          -legacy -nodes -out "$RUNNER_TEMP/signing.pem"; then
+          echo "::error::openssl could not extract the signing certificate from the p12"
+          rm -f "$RUNNER_TEMP/original.p12" "$RUNNER_TEMP/signing.pem"
+          exit 1
+        fi
+
+        rm -f "$RUNNER_TEMP/original.p12"
+
+        if [ ! -s "$RUNNER_TEMP/signing.pem" ]; then
+          echo "::error::Extraction reported success but produced an empty PEM"
+          exit 1
+        fi
+
+        echo "Certificate extracted successfully"
+
+        echo "=== Certificate details ==="
+        "$OPENSSL_BIN" x509 -in "$RUNNER_TEMP/signing.pem" \
+          -noout -subject -issuer -dates || echo "::warning::Could not read certificate details"
+
+        # Gate on the certificate TYPE, not just its presence.
+        #
+        # Releases up to v2.4.1 shipped signed with "Apple Distribution: Lablup
+        # Inc.", an App Store / TestFlight submission certificate. Its leaf
+        # carries 1.2.840.113635.100.6.1.7 but not 1.2.840.113635.100.6.1.13, so
+        # Gatekeeper refused every quarantined download even though `codesign`
+        # itself verified the signature happily; when that certificate was later
+        # revoked, macOS started killing installed binaries on launch and
+        # deleting them as malware. Only a "Developer ID Application"
+        # certificate satisfies the Developer ID policy.
+        #
+        # Check the whole PEM, not only the first block: `pkcs12 -nodes` emits
+        # the private key and the full chain, and the bag order that puts the
+        # leaf first is a convention rather than a guarantee.
+        echo "=== Verifying this is a Developer ID Application certificate ==="
+        # crl2pkcs7 | pkcs7 -print_certs lists every certificate in the PEM in
+        # one pass and ignores the private key block. Assigned into a variable
+        # with `|| true` so a pipefail-visible SIGPIPE cannot fail the step.
+        CERT_SUBJECTS="$("$OPENSSL_BIN" crl2pkcs7 -nocrl -certfile "$RUNNER_TEMP/signing.pem" 2>/dev/null \
+          | "$OPENSSL_BIN" pkcs7 -print_certs -noout 2>/dev/null || true)"
+        if [ -z "$CERT_SUBJECTS" ]; then
+          CERT_SUBJECTS="$("$OPENSSL_BIN" x509 -in "$RUNNER_TEMP/signing.pem" -noout -subject 2>/dev/null || true)"
+        fi
+        echo "$CERT_SUBJECTS"
+
+        if ! grep -q "Developer ID Application" <<<"$CERT_SUBJECTS"; then
+          echo "::error::the p12 in APPLE_CERTIFICATE contains no 'Developer ID Application' certificate, so anything signed with it is rejected by Gatekeeper on download. Issue a Developer ID Application certificate in the Apple Developer portal (Account Holder role required), export it as a .p12, and replace the secret."
+          if grep -qE "Apple Distribution|Apple Development|iPhone Distribution" <<<"$CERT_SUBJECTS"; then
+            echo "::error::the certificate present is an App Store / development certificate, which is only valid for submissions through App Store Connect"
+          fi
+          rm -f "$RUNNER_TEMP/signing.pem"
+          exit 1
+        fi
+        echo "Developer ID Application certificate confirmed"
+
+        echo "PEM_FILE=$RUNNER_TEMP/signing.pem" >> "$GITHUB_ENV"
+        echo "SIGNING_READY=true" >> "$GITHUB_ENV"
+
+    - name: Install rcodesign
+      shell: bash
+      run: |
+        if [ "${SIGNING_READY:-}" != "true" ]; then
+          echo "Signing is not ready; skipping rcodesign installation"
+          exit 0
+        fi
+
+        # rcodesign is a keychain-free Apple code signing tool. That is the
+        # property this repository needs. The keychain-based pipeline this
+        # replaces failed on the self-hosted Intel Mac with "unable to build
+        # chain to self-signed root" and errSecInternalComponent, while the
+        # same certificate signed cleanly on a GitHub-hosted runner: codesign
+        # depends on host keychain and SecurityAgent state that a headless
+        # runner does not reliably have.
+        RCODESIGN_VERSION="0.29.0"
+        RCODESIGN_DIR="$HOME/.rcodesign"
+        RCODESIGN_BIN="$RCODESIGN_DIR/rcodesign"
+
+        case "$(uname -m)" in
+          arm64|aarch64) RCODESIGN_ARCH="aarch64" ;;
+          x86_64)        RCODESIGN_ARCH="x86_64" ;;
+          *)
+            echo "::error::no rcodesign release build for $(uname -m)"
+            exit 1
+            ;;
+        esac
+
+        # Read the version into a variable and match that, so a SIGPIPE on the
+        # writer cannot be mistaken for a version mismatch under pipefail. -F
+        # because the version is a literal, not a regex whose dots match any
+        # character.
+        INSTALLED_VERSION=""
+        if [ -x "$RCODESIGN_BIN" ]; then
+          INSTALLED_VERSION="$("$RCODESIGN_BIN" --version 2>/dev/null || true)"
+        fi
+
+        if grep -qF "$RCODESIGN_VERSION" <<<"$INSTALLED_VERSION"; then
+          echo "rcodesign $RCODESIGN_VERSION already installed"
+        else
+          echo "Installing rcodesign $RCODESIGN_VERSION for $RCODESIGN_ARCH..."
+          mkdir -p "$RCODESIGN_DIR"
+          curl -fsSL "https://github.com/indygreg/apple-platform-rs/releases/download/apple-codesign%2F${RCODESIGN_VERSION}/apple-codesign-${RCODESIGN_VERSION}-${RCODESIGN_ARCH}-apple-darwin.tar.gz" \
+            | tar xz -C "$RCODESIGN_DIR" --strip-components=1
+          echo "Installed: $("$RCODESIGN_BIN" --version)"
+        fi
+
+        echo "$RCODESIGN_DIR" >> "$GITHUB_PATH"
+
+    - name: Verify signing tools
+      shell: bash
+      run: |
+        if [ "${SIGNING_READY:-}" != "true" ]; then
+          echo "Signing is not ready; skipping signing tool verification"
+          exit 0
+        fi
+
+        # $GITHUB_PATH from the previous step does not apply until the next step
+        # boundary, which this is, so rcodesign resolves by bare name here.
+        echo "rcodesign: $(rcodesign --version)"
+
+        # The trailing `|| true` is load-bearing. A composite action's
+        # `shell: bash` runs `bash --noprofile --norc -eo pipefail`. `head -20`
+        # closes the pipe as soon as it has its 20 lines, so rcodesign
+        # (line-buffered stdout, well over 20 lines of output) can take a
+        # SIGPIPE on a later line. Without this, pipefail would surface that as
+        # exit 141 and a purely informational step would fail the release job.
+        echo "=== Verifying PEM readability ==="
+        rcodesign analyze-certificate --pem-file "$PEM_FILE" 2>&1 | head -20 || true
+        echo "rcodesign can read the signing certificate"
