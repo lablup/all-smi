@@ -29,7 +29,7 @@
 //! 4. `~/.ssh/id_rsa`
 //!
 //! NOTE: SSH agent forwarding is not attempted in this initial cut;
-//! russh 0.60 includes an `russh::client::Handle::agent_auth` but it
+//! russh 0.63 includes a `russh::client::Handle::agent_auth` method, but it
 //! requires a running agent. Detection is deferred until we add agent
 //! support in a follow-up. Password auth is intentionally unsupported.
 //!
@@ -44,7 +44,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use russh::client::{self, Handle};
-use russh::keys::{PrivateKeyWithHashAlg, load_secret_key, ssh_key};
+use russh::keys::{PrivateKeyWithHashAlg, PublicKeyOrCertificate, load_secret_key, ssh_key};
 use russh::{ChannelMsg, Disconnect};
 
 use crate::network::ssh_target::SshTarget;
@@ -189,11 +189,15 @@ impl client::Handler for RusshClient {
 
     async fn check_server_key(
         &mut self,
-        server_public_key: &ssh_key::PublicKey,
+        server_public_key: &PublicKeyOrCertificate,
     ) -> Result<bool, Self::Error> {
+        // russh 0.63 passes either a plain host key or an OpenSSH host
+        // certificate. Our verifier and known_hosts storage operate on the
+        // certified public key in both cases.
+        let server_public_key = server_public_key.public_key();
         match self
             .verifier
-            .verify(&self.host, self.port, server_public_key)
+            .verify(&self.host, self.port, &server_public_key)
             .await
         {
             Ok(accept) => Ok(accept),

@@ -339,32 +339,33 @@ fn level_zero_effective() -> &'static str {
 }
 
 fn enabled_features() -> Vec<&'static str> {
-    let mut v: Vec<&'static str> = Vec::new();
-    #[cfg(feature = "cli")]
-    v.push("cli");
-    // Recorded so a support bundle shows whether the AMD backend was compiled
-    // in; its absence here is the first thing to check when AMD GPUs are
-    // missing from a glibc build (issue #345).
-    #[cfg(feature = "amd")]
-    v.push("amd");
-    #[cfg(feature = "mock")]
-    v.push("mock");
-    #[cfg(feature = "furiosa")]
-    v.push("furiosa");
-    // Recorded because this feature decides what the Intel GPU readers can
-    // collect at all: with it the readers dlopen the Level Zero loader and
-    // surface per-engine activity plus Sysman power, without it they fall
-    // back to the sysfs/WMI baseline. Omitting it hid the one fact that
-    // explains why two builds report different Intel GPU metrics (issue
-    // #362). Every feature declared in Cargo.toml except `default` must have
-    // an arm here; `bundle_covers_every_declared_feature` enforces that.
-    //
-    // This arm tracks the cargo feature and nothing else. On Windows the
-    // backend is compiled in whether or not the feature is set, so read the
-    // `level_zero:` line of version.txt for the effective state; see
-    // `level_zero_effective`.
-    #[cfg(feature = "level_zero")]
-    v.push("level_zero");
+    let mut v = vec![
+        #[cfg(feature = "cli")]
+        "cli",
+        // Recorded so a support bundle shows whether the AMD backend was compiled
+        // in; its absence here is the first thing to check when AMD GPUs are
+        // missing from a glibc build (issue #345).
+        #[cfg(feature = "amd")]
+        "amd",
+        #[cfg(feature = "mock")]
+        "mock",
+        #[cfg(feature = "furiosa")]
+        "furiosa",
+        // Recorded because this feature decides what the Intel GPU readers can
+        // collect at all: with it the readers dlopen the Level Zero loader and
+        // surface per-engine activity plus Sysman power, without it they fall
+        // back to the sysfs/WMI baseline. Omitting it hid the one fact that
+        // explains why two builds report different Intel GPU metrics (issue
+        // #362). Every feature declared in Cargo.toml except `default` must have
+        // an arm here; `bundle_covers_every_declared_feature` enforces that.
+        //
+        // This arm tracks the cargo feature and nothing else. On Windows the
+        // backend is compiled in whether or not the feature is set, so read the
+        // `level_zero:` line of version.txt for the effective state; see
+        // `level_zero_effective`.
+        #[cfg(feature = "level_zero")]
+        "level_zero",
+    ];
     if v.is_empty() {
         v.push("none");
     }
