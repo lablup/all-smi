@@ -203,49 +203,105 @@ jobs:
         run: cargo build --release --target ${{ matrix.target }} --locked
 
       # 8) macOS code signing
-      # The Developer ID key goes into a keychain named after this run. That
-      # matters on the self-hosted Intel Mac, which is persistent: with the
-      # action's default fixed name (`signing_temp`) two runs would collide and
-      # every run would append another certificate to the same keychain.
       #
-      # Cleanup is the import action's own post step, which runs
-      # `security delete-keychain` at the end of the job on success, failure,
-      # and cancellation. Do NOT add a step that deletes this keychain: the
-      # post step would then fail with "The specified keychain could not be
-      # found" and fail the whole job after the artifacts were uploaded, which
-      # also skips the notify-teams and promote-release jobs.
-      - name: Remove stale signing keychains
+      # rcodesign, not Apple's codesign, and therefore no keychain at all.
+      #
+      # The keychain route this replaces worked on GitHub-hosted macOS and
+      # failed on the self-hosted Intel Mac, with the same certificate and the
+      # same command:
+      #
+      #   Warning: unable to build chain to self-signed root for signer
+      #            "Developer ID Application: Lablup Inc. (NVWJ7XZ6BY)"
+      #   all-smi: errSecInternalComponent
+      #
+      # That is codesign asking the Security framework to complete a trust
+      # chain out of host keychain state, on a machine with no logged-in GUI
+      # session. rcodesign reads the certificate from a PEM and builds the
+      # signature itself, so the whole failure class is gone rather than
+      # worked around, and it no longer matters which identities happen to be
+      # in the runner's keychain.
+      #
+      # Mirrored from lablup/bssh. The certificate-type gate inside the action
+      # is the reason that pipeline exists: bssh shipped releases signed by an
+      # "Apple Distribution" certificate, an App Store submission identity
+      # that Gatekeeper rejects for downloads, and when it was revoked macOS
+      # began deleting installed binaries as malware. codesign had verified
+      # those signatures happily, because nothing ever checked the authority.
+      - name: Prepare signing certificate and tools
+        if: runner.os == 'macOS'
+        uses: ./.github/actions/macos-signing-setup
+        with:
+          certificate: ${{ secrets.DEV_ID_CERT_P12 }}
+          certificate-password: ${{ secrets.DEV_ID_CERT_PASSWORD }}
+          # Release artifacts must never ship unsigned, so a missing or wrong
+          # certificate fails the job rather than degrading quietly.
+          required: "true"
+
+      # Sign into `package/` rather than in place. `target/` is restored from
+      # actions/cache across runs, so signing the build output there would put
+      # a signed binary into the cache; every later step reads the staged copy
+      # instead, and the packaging step below zips this same directory.
+      - name: Sign macOS binary
         if: runner.os == 'macOS'
         run: |
-          # Safety net for the persistent runner, reachable only when an
-          # earlier run was hard-killed before its post step could delete its
-          # keychain. Scoped to this workflow's own name prefix and to files
-          # older than a day, so it can never remove a keychain this workflow
-          # did not create nor one belonging to a run still in flight.
-          STALE=$(find "$HOME/Library/Keychains" -maxdepth 1 -name 'all-smi-signing-*' -mtime +0 2>/dev/null || true)
-          if [ -n "$STALE" ]; then
-            echo "$STALE" | while IFS= read -r kc; do
-              echo "Removing stale signing keychain: $kc"
-              security delete-keychain "$kc" || true
-            done
-          else
-            echo "No stale signing keychains"
+          set -euo pipefail
+
+          BIN="target/${{ matrix.target }}/release/${{ matrix.artifact_name }}"
+          if [ ! -f "$BIN" ]; then
+            echo "::error::binary to sign not found: $BIN"
+            exit 1
           fi
 
-      - name: Import Developer ID certificate
-        if: runner.os == 'macOS'
-        uses: apple-actions/import-codesign-certs@v6
-        with:
-          p12-file-base64: ${{ secrets.DEV_ID_CERT_P12 }}
-          p12-password: ${{ secrets.DEV_ID_CERT_PASSWORD }}
-          keychain: all-smi-signing-${{ github.run_id }}-${{ github.run_attempt }}
+          mkdir -p package
+          STAGED="package/${{ matrix.artifact_name }}"
+          cp "$BIN" "$STAGED"
+          chmod +x "$STAGED"
 
-      - name: Code sign macOS binary
-        if: runner.os == 'macOS'
-        run: |
-          BIN=target/${{ matrix.target }}/release/${{ matrix.artifact_name }}
-          codesign --force --timestamp --options runtime \
-                   --sign "Developer ID Application" "$BIN"
+          # A composite action cannot enforce `required` on its inputs at
+          # runtime, and an empty identifier would make rcodesign fall back to
+          # the bare file name. Pin it, or the sealed identifier drifts with
+          # the artifact name.
+          if [ -z "${BUNDLE_ID:-}" ]; then
+            echo "::error::BUNDLE_ID is not set on the packaging environment; set it to a reverse-DNS identifier such as com.lablup.all-smi"
+            exit 1
+          fi
+
+          # rcodesign requests a secure timestamp from Apple by default, which
+          # notarization requires. No entitlements: all-smi is a self-contained
+          # Rust CLI that links no third-party dylib, so the hardened runtime
+          # applies with Apple's defaults.
+          rcodesign sign \
+            --pem-file "$PEM_FILE" \
+            --code-signature-flags runtime \
+            --binary-identifier "$BUNDLE_ID" \
+            "$STAGED"
+
+          echo "=== Verifying signature ==="
+          # `|| true` so a codesign failure surfaces as the named assertions
+          # below rather than as a bare non-zero exit under `set -e`.
+          CODESIGN_OUTPUT="$(codesign -dv --verbose=4 "$STAGED" 2>&1 || true)"
+          echo "$CODESIGN_OUTPUT"
+
+          # Matched from here-strings, not `echo | grep`: this runs under
+          # pipefail, where `grep -q` closing the pipe early can surface as a
+          # failed pipeline whether or not the pattern matched.
+          #
+          # This is the assertion that would have caught bssh's defect.
+          if ! grep -q "Authority=Developer ID Application" <<<"$CODESIGN_OUTPUT"; then
+            echo "::error::the binary is not signed by a Developer ID Application authority, so Gatekeeper will refuse it on download"
+            exit 1
+          fi
+          # By flag name, not by a literal hex value: other code signature
+          # flags combine into the same field.
+          if ! grep -Eq 'flags=0x[0-9a-f]+\(.*runtime.*\)' <<<"$CODESIGN_OUTPUT"; then
+            echo "::error::the binary is missing the hardened runtime flag, which notarization requires"
+            exit 1
+          fi
+          if ! grep -qxF "Identifier=$BUNDLE_ID" <<<"$CODESIGN_OUTPUT"; then
+            echo "::error::the binary was signed with a code signature identifier other than the requested $BUNDLE_ID"
+            exit 1
+          fi
+          echo "Signed as $BUNDLE_ID with a Developer ID Application authority and the hardened runtime"
 
       # 8.5) macOS notarization via App Store Connect API key
       # We submit a temporary zip wrapping the already-codesigned binary
@@ -262,7 +318,10 @@ jobs:
         run: |
           set -euo pipefail
 
-          BIN="target/${{ matrix.target }}/release/${{ matrix.artifact_name }}"
+          # The staged copy the signing step produced. Notarizing the build
+          # output in target/ would submit an unsigned binary, which
+          # notarytool rejects.
+          BIN="package/${{ matrix.artifact_name }}"
           NOTARIZE_ZIP="${RUNNER_TEMP}/notarize.zip"
           KEY_FILE="${RUNNER_TEMP}/AuthKey.p8"
 
@@ -273,9 +332,8 @@ jobs:
           trap cleanup EXIT
 
           # The AC_API_PRIVATE_KEY_P8 secret stores the App Store Connect .p8
-          # key base64-encoded (same convention as DEV_ID_CERT_P12, which the
-          # import-codesign-certs action consumes as base64). Decode it back to
-          # PEM here. Also tolerate a raw .p8 pasted verbatim, and strip CR so a
+          # key base64-encoded, the same convention DEV_ID_CERT_P12 follows for
+          # the signing certificate. Decode it back to PEM here. Also tolerate a raw .p8 pasted verbatim, and strip CR so a
           # CRLF-mangled paste still parses. Writing the secret verbatim without
           # decoding makes notarytool fail with the opaque "Error: invalidAsn1".
           if [ -z "${AC_API_PRIVATE_KEY_P8:-}" ]; then
@@ -340,14 +398,30 @@ jobs:
           cp docs/man/all-smi.1 package/
           tar -C package -czf ${{ matrix.asset_name }}.tar.gz .
 
+      # `package/` already holds the signed binary, staged and sealed by the
+      # signing step above. Copying it again from target/ here would replace it
+      # with the unsigned build output and ship an unsigned, notarization-less
+      # artifact whose zip still looked correct.
       - name: Package macOS binary (zip)
         if: runner.os == 'macOS'
         run: |
-          BIN="target/${{ matrix.target }}/release/${{ matrix.artifact_name }}"
+          set -euo pipefail
+
           ASSET="${{ matrix.asset_name }}.zip"
-          mkdir -p package
-          cp "$BIN" package/
+          STAGED="package/${{ matrix.artifact_name }}"
+
+          if [ ! -f "$STAGED" ]; then
+            echo "::error::signed binary not found at $STAGED; the signing step must run before packaging"
+            exit 1
+          fi
+          # Cheap guard against a future edit reintroducing the overwrite.
+          if ! codesign -dv "$STAGED" 2>&1 | grep -q "Authority=Developer ID Application"; then
+            echo "::error::$STAGED lost its Developer ID signature between signing and packaging"
+            exit 1
+          fi
+
           cp docs/man/all-smi.1 package/
+          # ditto preserves the exec bit and the embedded signature.
           ditto -c -k --sequesterRsrc package "$ASSET"
 
       # Sign the Windows binary before packaging so the .zip artifact contains
