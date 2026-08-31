@@ -36,12 +36,16 @@ use crate::ui::buffer::BufferWriter;
 use crate::ui::dashboard::{draw_dashboard_items, draw_system_view};
 use crate::ui::gpu_sparkline_panel;
 use crate::ui::layout::LayoutCalculator;
+use crate::ui::local_details::{
+    print_chassis_details, print_cpu_details, print_gpu_details, print_memory_details,
+};
 use crate::ui::local_header::draw_local_header_bar;
 use crate::ui::renderer::{
     print_chassis_info, print_cpu_info, print_function_keys, print_gpu_info,
     print_loading_indicator, print_memory_info, print_mig_section, print_process_info,
     print_storage_info, print_vgpu_section,
 };
+use crate::ui::renderers::gpu_renderer::print_gpu_diagnostic_rows;
 use crate::ui::renderers::print_chassis_energy_row;
 use crate::ui::tabs::draw_tabs;
 use crate::ui::text::print_colored_text;
@@ -376,15 +380,20 @@ impl FrameRenderer {
 
             if matched && !flashing {
                 // Fast path: no filter mismatch, no flash — emit directly.
-                print_gpu_info(
-                    buffer,
-                    i,
-                    gpu_info,
-                    cols as usize,
-                    device_name_scroll_offset,
-                    hostname_scroll_offset,
-                    !view_state.is_local_mode,
-                );
+                if view_state.is_local_mode {
+                    print_gpu_details(buffer, gpu_info, cols as usize);
+                    print_gpu_diagnostic_rows(buffer, gpu_info);
+                } else {
+                    print_gpu_info(
+                        buffer,
+                        i,
+                        gpu_info,
+                        cols as usize,
+                        device_name_scroll_offset,
+                        hostname_scroll_offset,
+                        true,
+                    );
+                }
                 if let Some(vgpu_host) =
                     lookup_vgpu_host(&vgpu_lookup, &snapshot.vgpu_info, gpu_info)
                 {
@@ -398,15 +407,20 @@ impl FrameRenderer {
                 // (dim for filter-mismatch, prefix for flash) before the
                 // bytes reach the main output.
                 let mut scratch = BufferWriter::new();
-                print_gpu_info(
-                    &mut scratch,
-                    i,
-                    gpu_info,
-                    cols as usize,
-                    device_name_scroll_offset,
-                    hostname_scroll_offset,
-                    !view_state.is_local_mode,
-                );
+                if view_state.is_local_mode {
+                    print_gpu_details(&mut scratch, gpu_info, cols as usize);
+                    print_gpu_diagnostic_rows(&mut scratch, gpu_info);
+                } else {
+                    print_gpu_info(
+                        &mut scratch,
+                        i,
+                        gpu_info,
+                        cols as usize,
+                        device_name_scroll_offset,
+                        hostname_scroll_offset,
+                        true,
+                    );
+                }
                 if let Some(vgpu_host) =
                     lookup_vgpu_host(&vgpu_lookup, &snapshot.vgpu_info, gpu_info)
                 {
@@ -461,7 +475,11 @@ impl FrameRenderer {
                     .get(&chassis.host_id)
                     .copied()
                     .unwrap_or(0);
-                print_chassis_info(buffer, i, chassis, width, hostname_scroll_offset);
+                if snapshot.is_local_mode {
+                    print_chassis_details(buffer, chassis, width);
+                } else {
+                    print_chassis_info(buffer, i, chassis, width, hostname_scroll_offset);
+                }
                 // Energy session + cost row (issue #191). Self-hides
                 // when no chassis samples have been recorded yet.
                 print_chassis_energy_row(
@@ -496,7 +514,11 @@ impl FrameRenderer {
                 .get(&chassis.host_id)
                 .copied()
                 .unwrap_or(0);
-            print_chassis_info(buffer, i, chassis, width, hostname_scroll_offset);
+            if snapshot.is_local_mode {
+                print_chassis_details(buffer, chassis, width);
+            } else {
+                print_chassis_info(buffer, i, chassis, width, hostname_scroll_offset);
+            }
             // Energy session + cost row (issue #191). Self-hides when no
             // chassis samples have been recorded yet.
             print_chassis_energy_row(
@@ -721,40 +743,16 @@ impl FrameRenderer {
     ) -> usize {
         let width = cols as usize;
 
-        // CPU information for local mode
-        // Per-core bars are now always shown in the Activity panel above,
-        // so we pass show_per_core=false here to avoid duplication.
-        for (i, cpu_info) in snapshot.cpu_info.iter().enumerate() {
-            let cpu_name_scroll_offset = snapshot
-                .cpu_name_scroll_offsets
-                .get(&format!("{}-{}", cpu_info.hostname, cpu_info.cpu_model))
-                .copied()
-                .unwrap_or(0);
-            let hostname_scroll_offset = snapshot
-                .host_id_scroll_offsets
-                .get(&cpu_info.host_id)
-                .copied()
-                .unwrap_or(0);
-            print_cpu_info(
-                buffer,
-                i,
-                cpu_info,
-                width,
-                false,
-                cpu_name_scroll_offset,
-                hostname_scroll_offset,
-                false,
-            );
+        // The header owns live CPU values and the Activity panel owns
+        // utilization history, so this row is inventory-only.
+        for cpu_info in &snapshot.cpu_info {
+            print_cpu_details(buffer, cpu_info, width);
         }
 
-        // Memory information for local mode
-        for (i, memory_info) in snapshot.memory_info.iter().enumerate() {
-            let hostname_scroll_offset = snapshot
-                .host_id_scroll_offsets
-                .get(&memory_info.host_id)
-                .copied()
-                .unwrap_or(0);
-            print_memory_info(buffer, i, memory_info, width, hostname_scroll_offset, false);
+        // Host RAM used/total is already in the summary. Swap pressure is
+        // separate information and appears only when swap exists.
+        for memory_info in &snapshot.memory_info {
+            print_memory_details(buffer, memory_info, width);
         }
 
         // Storage information for local mode
@@ -1317,6 +1315,27 @@ mod tests {
             content.contains("h:Help"),
             "the status bar must render on a resolved zero-size pty"
         );
+    }
+
+    #[test]
+    fn local_frame_assigns_live_values_to_the_summary_only() {
+        let snapshot = make_populated_snapshot();
+        let args = make_local_args();
+        let (content, _) = FrameRenderer::render_main(&snapshot, &args, 120, 40, None);
+
+        // Inventory rows remain, but the former NODE/GPU/CPU/Memory live
+        // fields and duplicate gauges do not compete with the summary and
+        // Activity panel anymore.
+        assert!(
+            content.contains("Cores "),
+            "hardware details missing: {content}"
+        );
+        for repeated in [" Util:", " VRAM:", "Host Memory", " Pwr:"] {
+            assert!(
+                !content.contains(repeated),
+                "duplicate local metric {repeated:?} remained: {content}"
+            );
+        }
     }
 
     #[test]

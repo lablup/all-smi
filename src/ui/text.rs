@@ -35,6 +35,118 @@ pub fn display_width(s: &str) -> usize {
     s.chars().map(char_display_width).sum()
 }
 
+/// Calculate the visible width of text containing ANSI escape sequences.
+///
+/// Crossterm emits CSI sequences for colors and styles. Those bytes do not
+/// occupy terminal cells and therefore must not participate in responsive
+/// layout calculations.
+pub fn ansi_display_width(s: &str) -> usize {
+    let mut width = 0;
+    let mut chars = s.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            skip_ansi_sequence(&mut chars);
+        } else if c != '\r' && c != '\n' {
+            width += char_display_width(c);
+        }
+    }
+
+    width
+}
+
+/// Truncate ANSI-styled text to at most `max_width` visible terminal cells.
+///
+/// Escape sequences are copied atomically and do not consume width. A reset
+/// sequence is appended only on the truncating path so a clipped colored span
+/// cannot leak its style into the next terminal row.
+pub fn truncate_ansi_to_width(s: &str, max_width: usize) -> Cow<'_, str> {
+    if ansi_display_width(s) <= max_width {
+        return Cow::Borrowed(s);
+    }
+
+    let mut output = String::with_capacity(s.len().min(max_width.saturating_mul(2)) + 4);
+    let mut visible_width = 0;
+    let mut chars = s.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            output.push(c);
+            copy_ansi_sequence(&mut chars, &mut output);
+            continue;
+        }
+
+        if c == '\r' || c == '\n' {
+            break;
+        }
+
+        let char_width = char_display_width(c);
+        if visible_width + char_width > max_width {
+            break;
+        }
+        output.push(c);
+        visible_width += char_width;
+    }
+
+    output.push_str("\x1b[0m");
+    Cow::Owned(output)
+}
+
+fn skip_ansi_sequence(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
+    let Some(kind) = chars.next() else {
+        return;
+    };
+
+    match kind {
+        '[' => {
+            for c in chars.by_ref() {
+                if ('@'..='~').contains(&c) {
+                    break;
+                }
+            }
+        }
+        ']' => {
+            let mut previous_was_escape = false;
+            for c in chars.by_ref() {
+                if c == '\u{7}' || (previous_was_escape && c == '\\') {
+                    break;
+                }
+                previous_was_escape = c == '\x1b';
+            }
+        }
+        _ => {}
+    }
+}
+
+fn copy_ansi_sequence(chars: &mut std::iter::Peekable<std::str::Chars<'_>>, output: &mut String) {
+    let Some(kind) = chars.next() else {
+        return;
+    };
+    output.push(kind);
+
+    match kind {
+        '[' => {
+            for c in chars.by_ref() {
+                output.push(c);
+                if ('@'..='~').contains(&c) {
+                    break;
+                }
+            }
+        }
+        ']' => {
+            let mut previous_was_escape = false;
+            for c in chars.by_ref() {
+                output.push(c);
+                if c == '\u{7}' || (previous_was_escape && c == '\\') {
+                    break;
+                }
+                previous_was_escape = c == '\x1b';
+            }
+        }
+        _ => {}
+    }
+}
+
 // Helper function to truncate a string to fit within a given display width.
 //
 // Returns `Cow::Borrowed` when the string already fits, avoiding allocation.
@@ -215,6 +327,29 @@ mod tests {
     #[test]
     fn test_display_width_empty() {
         assert_eq!(display_width(""), 0);
+    }
+
+    #[test]
+    fn test_ansi_display_width_ignores_style_sequences() {
+        assert_eq!(ansi_display_width("\x1b[31mGPU 42%\x1b[0m"), 7);
+        assert_eq!(ansi_display_width("\x1b]0;title\u{7}CPU"), 3);
+    }
+
+    #[test]
+    fn test_truncate_ansi_to_width_preserves_complete_sequences() {
+        let input = "\x1b[31mGPU 42%\x1b[0m trailing";
+        let truncated = truncate_ansi_to_width(input, 7);
+
+        assert_eq!(ansi_display_width(&truncated), 7);
+        assert!(truncated.starts_with("\x1b[31mGPU 42%"));
+        assert!(truncated.ends_with("\x1b[0m"));
+        assert!(!truncated.contains("trailing"));
+    }
+
+    #[test]
+    fn test_truncate_ansi_to_width_borrows_when_text_fits() {
+        let input = "\x1b[32mok\x1b[0m";
+        assert!(matches!(truncate_ansi_to_width(input, 2), Cow::Borrowed(_)));
     }
 
     // -----------------------------------------------------------------------

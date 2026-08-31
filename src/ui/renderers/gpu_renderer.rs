@@ -740,6 +740,16 @@ fn render_hardware_details_row<W: Write>(stdout: &mut W, info: &GpuInfo) {
     queue!(stdout, Print("\r\n")).unwrap();
 }
 
+/// Render the optional GPU diagnostic rows without the live-value header or
+/// gauges. Local mode uses this after its compact inventory row so NVML
+/// health/topology data remains available while current values stay owned by
+/// the summary and Activity panel.
+#[allow(dead_code)] // Called by the binary-only view module; absent from lib.rs.
+pub(crate) fn print_gpu_diagnostic_rows<W: Write>(stdout: &mut W, info: &GpuInfo) {
+    render_thermal_pstate_row(stdout, info);
+    render_hardware_details_row(stdout, info);
+}
+
 /// Tally NvLinks by remote-type classification for the summary column.
 /// Returns `(gpu, switch, ibmnpu, unknown)` counts.
 fn count_nvlink_remote_types(

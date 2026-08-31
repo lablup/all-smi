@@ -32,15 +32,17 @@ impl LayoutCalculator {
     /// so their line contributions are excluded here.  This keeps the content
     /// area (process list, GPU rows) from being unnecessarily clipped and
     /// preserves the "reserved space for function keys" regression fix.
-    pub fn calculate_header_lines(state: &AppState) -> u16 {
+    pub fn calculate_header_lines(state: &AppState, cols: u16) -> u16 {
         let mut lines = 0u16;
 
         // Basic header (title line)
         lines += 1;
 
         if state.is_local_mode {
-            // Local mode shows the two-line host summary bar (identity + sparklines)
-            lines += 2;
+            // Local mode shows an identity row plus responsive metrics. The
+            // metrics intentionally occupy two rows below 40 columns rather
+            // than relying on terminal auto-wrap.
+            lines += crate::ui::local_header::local_header_line_count(cols);
         } else {
             // "Cluster Overview" label line
             lines += 1;
@@ -62,7 +64,7 @@ impl LayoutCalculator {
 
     /// Calculate available content area
     pub fn calculate_content_area(state: &AppState, cols: u16, rows: u16) -> ContentArea {
-        let header_lines = Self::calculate_header_lines(state);
+        let header_lines = Self::calculate_header_lines(state, cols);
         let function_keys_lines = 1; // Reserve space for function keys
 
         // In local mode, the Activity panel (CPU left + GPU right) consumes
@@ -139,7 +141,16 @@ impl LayoutCalculator {
         // mixed pages may under-fill by one row, which is acceptable —
         // overshooting would clip the gauges off-screen and corrupt the
         // scroll math.
-        let lines_per_gpu = max_gpu_lines_for_tab(state).max(2);
+        let full_gpu_lines = max_gpu_lines_for_tab(state);
+        let lines_per_gpu = if is_remote {
+            full_gpu_lines.max(2)
+        } else {
+            // Local mode replaces the duplicated live-value header + gauge
+            // pair with one inventory row, while preserving every optional
+            // diagnostic/vGPU/MIG row. The general renderer's count therefore
+            // differs by exactly one base row.
+            full_gpu_lines.saturating_sub(1).max(1)
+        };
         let max_gpu_items = gpu_display_rows / lines_per_gpu;
 
         GpuDisplayParams {
@@ -411,7 +422,7 @@ mod tests {
             is_local_mode: true,
             ..AppState::default()
         };
-        let local_lines = LayoutCalculator::calculate_header_lines(&local_state);
+        let local_lines = LayoutCalculator::calculate_header_lines(&local_state, 120);
 
         // Remote mode without history: title + "Cluster Overview" label +
         // dashboard card rows + tabs row.
@@ -419,7 +430,7 @@ mod tests {
             is_local_mode: false,
             ..AppState::default()
         };
-        let remote_lines_no_history = LayoutCalculator::calculate_header_lines(&remote_state);
+        let remote_lines_no_history = LayoutCalculator::calculate_header_lines(&remote_state, 120);
 
         assert!(
             local_lines < remote_lines_no_history,
@@ -428,11 +439,29 @@ mod tests {
 
         // Remote mode with non-empty utilization history adds more lines.
         remote_state.utilization_history.push_back(42.0);
-        let remote_lines_with_history = LayoutCalculator::calculate_header_lines(&remote_state);
+        let remote_lines_with_history =
+            LayoutCalculator::calculate_header_lines(&remote_state, 120);
 
         assert!(
             remote_lines_no_history < remote_lines_with_history,
             "remote mode with history ({remote_lines_with_history}) should use more header lines than without ({remote_lines_no_history})"
+        );
+    }
+
+    #[test]
+    fn narrow_local_header_reserves_its_intentional_second_metric_row() {
+        let local_state = AppState {
+            is_local_mode: true,
+            ..AppState::default()
+        };
+
+        assert_eq!(
+            LayoutCalculator::calculate_header_lines(&local_state, 39),
+            4
+        );
+        assert_eq!(
+            LayoutCalculator::calculate_header_lines(&local_state, 40),
+            3
         );
     }
 
@@ -480,7 +509,7 @@ mod tests {
             time: String::new(),
         });
 
-        let header = LayoutCalculator::calculate_header_lines(&state);
+        let header = LayoutCalculator::calculate_header_lines(&state, 120);
 
         // Short terminal -> fallback: CPU 5 rows, GPU 6 rows -> panel 6.
         let short = LayoutCalculator::calculate_content_area(&state, 120, 24);

@@ -18,13 +18,17 @@
 //!
 //! **Line 1** — identity row:
 //! ```text
-//! Host <hostname> · <cpu_model> · arch <arch> · up <uptime>    ● Live
+//! Host <hostname> · up <uptime>                             ● Live
 //! ```
 //!
-//! **Line 2** — metrics sparkline row (8-cell braille sparklines):
+//! **Line 2** — metrics sparkline row (8-cell braille sparklines when they fit):
 //! ```text
 //! CPU <pct>%<t> ⣿⣷⣶…  GPU <pct>%<t> ⣿⣷…  RAM <used>/<total>GB<t> ⣿…  Pwr <W>W<t> ⣿…  Tmp <°C>°C<t> ⣿…
 //! ```
+//!
+//! The row progressively drops sparklines and then switches to short labels
+//! as width decreases. Below 40 columns it intentionally uses two complete
+//! metric rows instead of allowing the terminal to wrap one oversized row.
 //!
 //! Each metric carries a one-cell trend glyph `<t>` (`↑ ↗ → ↘ ↓`) immediately
 //! after its latest value, coloured in the metric's theme colour, derived from
@@ -44,11 +48,12 @@ use crossterm::{queue, style::Color, style::Print};
 use crate::app_state::AppState;
 use crate::common::config::ThemeConfig;
 use crate::ui::braille::sparkline_braille;
+use crate::ui::buffer::BufferWriter;
 use crate::ui::scale::{
     PERCENT_DOMAIN, PERCENT_SOFT_GRID, PERCENT_SOFT_MIN_SPAN, TEMP_SOFT_GRID, TEMP_SOFT_MIN_SPAN,
     power_range, power_soft_grid, power_soft_min_span, soft_range, temp_range,
 };
-use crate::ui::text::print_colored_text;
+use crate::ui::text::{ansi_display_width, print_colored_text, truncate_to_width};
 
 /// Width in braille cells for each metric sparkline.
 const SPARKLINE_WIDTH: usize = 8;
@@ -68,20 +73,34 @@ const TREND_POWER: (f64, f64) = (0.2, 1.0);
 /// How many samples back the trend slope is measured over.
 const TREND_LOOKBACK: usize = 5;
 
-/// Render the two-line local-mode host summary bar.
+#[derive(Debug, Clone, Copy)]
+struct MetricPresentation {
+    color: Color,
+    range: Option<(f64, f64)>,
+    trend: (f64, f64),
+    sparkline_width: Option<usize>,
+}
+
+/// Render the local-mode host summary bar.
 ///
 /// This function is called from `render_main()` in `frame_renderer.rs` when
 /// `view_state.is_local_mode` is `true`, in place of the Cluster Overview.
-pub fn draw_local_header_bar<W: Write>(stdout: &mut W, state: &AppState, _cols: u16) {
-    draw_identity_line(stdout, state);
-    draw_metrics_line(stdout, state);
+pub fn draw_local_header_bar<W: Write>(stdout: &mut W, state: &AppState, cols: u16) {
+    draw_identity_line(stdout, state, cols);
+    draw_metrics_line(stdout, state, cols);
+}
+
+/// Number of rows emitted by [`draw_local_header_bar`] at `cols`.
+#[must_use]
+pub fn local_header_line_count(cols: u16) -> u16 {
+    if cols < 40 { 3 } else { 2 }
 }
 
 // ─── Line 1: identity ────────────────────────────────────────────────────────
 
 /// Render the identity line:
-/// `Host <hostname> · <cpu_model> · arch <arch> · up <uptime>    ● Live`
-fn draw_identity_line<W: Write>(stdout: &mut W, state: &AppState) {
+/// `Host <hostname> · up <uptime>    ● Live`
+fn draw_identity_line<W: Write>(stdout: &mut W, state: &AppState, cols: u16) {
     // Hostname — use the first CPU entry's hostname (always available in local mode)
     let hostname = state
         .cpu_info
@@ -89,40 +108,33 @@ fn draw_identity_line<W: Write>(stdout: &mut W, state: &AppState) {
         .map(|c| c.hostname.as_str())
         .unwrap_or("localhost");
 
-    // CPU model — first CPU entry
-    let cpu_model = state
-        .cpu_info
-        .first()
-        .map(|c| c.cpu_model.as_str())
-        .unwrap_or("unknown");
-
-    // Architecture — first CPU entry
-    let arch = state
-        .cpu_info
-        .first()
-        .map(|c| c.architecture.as_str())
-        .unwrap_or("unknown");
-
     // Uptime — read from sysinfo (cheap: sysinfo re-reads /proc/uptime on each call on Linux,
     // uses sysctl kern.boottime on macOS; both are lightweight system calls)
     let uptime_secs = sysinfo::System::uptime();
     let uptime_str = format_uptime(uptime_secs);
 
-    // Print: "Host <hostname>"
+    let width = cols as usize;
+    let live_width = 6; // "● Live"
+    let host_prefix_width = 5; // "Host "
+    let uptime_suffix = format!(" · up {uptime_str}");
+
+    // Keep the liveness signal visible even when the host name is unusually
+    // long. At ordinary widths uptime is the only identity metadata carried
+    // here; CPU identity belongs to the non-repeating hardware detail row.
+    let show_uptime = width >= host_prefix_width + 4 + uptime_suffix.len() + 2 + live_width;
+    let suffix_width = if show_uptime { uptime_suffix.len() } else { 0 };
+    let hostname_budget = width
+        .saturating_sub(host_prefix_width + suffix_width + 2 + live_width)
+        .max(1);
+    let hostname_display = truncate_to_width(hostname, hostname_budget);
+
+    // Print: "Host <hostname> [· up <uptime>]"
     print_colored_text(stdout, "Host ", Color::DarkGrey, None, None);
-    print_colored_text(stdout, hostname, Color::White, None, None);
-
-    // " · <cpu_model>"
-    print_colored_text(stdout, " · ", Color::DarkGrey, None, None);
-    print_colored_text(stdout, cpu_model, Color::White, None, None);
-
-    // " · arch <arch>"
-    print_colored_text(stdout, " · arch ", Color::DarkGrey, None, None);
-    print_colored_text(stdout, arch, ThemeConfig::accent_color(), None, None);
-
-    // " · up <uptime>"
-    print_colored_text(stdout, " · up ", Color::DarkGrey, None, None);
-    print_colored_text(stdout, &uptime_str, ThemeConfig::memory_color(), None, None);
+    print_colored_text(stdout, &hostname_display, Color::White, None, None);
+    if show_uptime {
+        print_colored_text(stdout, " · up ", Color::DarkGrey, None, None);
+        print_colored_text(stdout, &uptime_str, ThemeConfig::memory_color(), None, None);
+    }
 
     // Right-side "● Live" indicator — blinks on even frame counts
     // `frame_counter` is incremented on every render tick by the UI loop
@@ -131,7 +143,9 @@ fn draw_identity_line<W: Write>(stdout: &mut W, state: &AppState) {
     } else {
         Color::DarkGreen
     };
-    print_colored_text(stdout, "    ", Color::White, None, None);
+    let used = host_prefix_width + hostname_display.chars().count() + suffix_width;
+    let gap = width.saturating_sub(used + live_width).max(1);
+    print_colored_text(stdout, &" ".repeat(gap), Color::White, None, None);
     print_colored_text(stdout, "●", live_color, None, None);
     print_colored_text(stdout, " Live", Color::DarkGrey, None, None);
 
@@ -141,54 +155,81 @@ fn draw_identity_line<W: Write>(stdout: &mut W, state: &AppState) {
 // ─── Line 2: metrics sparklines ──────────────────────────────────────────────
 
 /// Render the metrics sparkline row.
-fn draw_metrics_line<W: Write>(stdout: &mut W, state: &AppState) {
+fn draw_metrics_line<W: Write>(stdout: &mut W, state: &AppState, cols: u16) {
+    let width = cols as usize;
+    let detailed = render_metrics_line(state, Some(SPARKLINE_WIDTH));
+    if ansi_display_width(&detailed) <= width {
+        stdout.write_all(detailed.as_bytes()).unwrap();
+        queue!(stdout, Print("\r\n")).unwrap();
+        return;
+    }
+
+    let values_only = render_metrics_line(state, None);
+    if ansi_display_width(&values_only) <= width {
+        stdout.write_all(values_only.as_bytes()).unwrap();
+        queue!(stdout, Print("\r\n")).unwrap();
+        return;
+    }
+
+    draw_tiny_metrics(stdout, state, width);
+}
+
+fn render_metrics_line(state: &AppState, sparkline_width: Option<usize>) -> String {
+    let mut stdout = BufferWriter::new();
+
     // CPU% — theme color Cyan
     let cpu_history: Vec<f64> = state.cpu_utilization_history.iter().copied().collect();
     draw_metric_sparkline(
-        stdout,
+        &mut stdout,
         "CPU",
         &cpu_history,
         format_pct(state.cpu_utilization_history.back().copied()),
-        ThemeConfig::cpu_color(),
-        Some(soft_range(
-            &cpu_history,
-            PERCENT_SOFT_MIN_SPAN,
-            PERCENT_SOFT_GRID,
-            PERCENT_DOMAIN,
-        )),
-        TREND_PERCENT,
+        MetricPresentation {
+            color: ThemeConfig::cpu_color(),
+            range: Some(soft_range(
+                &cpu_history,
+                PERCENT_SOFT_MIN_SPAN,
+                PERCENT_SOFT_GRID,
+                PERCENT_DOMAIN,
+            )),
+            trend: TREND_PERCENT,
+            sparkline_width,
+        },
     );
 
-    print_colored_text(stdout, "  ", Color::White, None, None);
+    print_colored_text(&mut stdout, "  ", Color::White, None, None);
 
     // GPU% — theme color Blue
     let gpu_history: Vec<f64> = state.utilization_history.iter().copied().collect();
     draw_metric_sparkline(
-        stdout,
+        &mut stdout,
         "GPU",
         &gpu_history,
         format_pct(state.utilization_history.back().copied()),
-        ThemeConfig::gpu_color(),
-        Some(soft_range(
-            &gpu_history,
-            PERCENT_SOFT_MIN_SPAN,
-            PERCENT_SOFT_GRID,
-            PERCENT_DOMAIN,
-        )),
-        TREND_PERCENT,
+        MetricPresentation {
+            color: ThemeConfig::gpu_color(),
+            range: Some(soft_range(
+                &gpu_history,
+                PERCENT_SOFT_MIN_SPAN,
+                PERCENT_SOFT_GRID,
+                PERCENT_DOMAIN,
+            )),
+            trend: TREND_PERCENT,
+            sparkline_width,
+        },
     );
 
-    print_colored_text(stdout, "  ", Color::White, None, None);
+    print_colored_text(&mut stdout, "  ", Color::White, None, None);
 
     // RAM used/total — theme color Green
-    draw_ram_sparkline(stdout, state);
+    draw_ram_sparkline(&mut stdout, state, sparkline_width);
 
-    print_colored_text(stdout, "  ", Color::White, None, None);
+    print_colored_text(&mut stdout, "  ", Color::White, None, None);
 
     // Package power — theme color Red
-    draw_power_sparkline(stdout, state);
+    draw_power_sparkline(&mut stdout, state, sparkline_width);
 
-    print_colored_text(stdout, "  ", Color::White, None, None);
+    print_colored_text(&mut stdout, "  ", Color::White, None, None);
 
     // Temperature — theme color Magenta
     let temp_history: Vec<f64> = state.cpu_temperature_history.iter().copied().collect();
@@ -197,21 +238,76 @@ fn draw_metrics_line<W: Write>(stdout: &mut W, state: &AppState) {
     // cool sensor can zoom below 30°C. The window then tracks small changes.
     let temp_ceiling = temp_range(None).1;
     draw_metric_sparkline(
-        stdout,
+        &mut stdout,
         "Tmp",
         &temp_history,
         format_temp(state.cpu_temperature_history.back().copied()),
-        ThemeConfig::thermal_color(),
-        Some(soft_range(
-            &temp_history,
-            TEMP_SOFT_MIN_SPAN,
-            TEMP_SOFT_GRID,
-            (0.0, temp_ceiling),
-        )),
-        TREND_TEMP,
+        MetricPresentation {
+            color: ThemeConfig::thermal_color(),
+            range: Some(soft_range(
+                &temp_history,
+                TEMP_SOFT_MIN_SPAN,
+                TEMP_SOFT_GRID,
+                (0.0, temp_ceiling),
+            )),
+            trend: TREND_TEMP,
+            sparkline_width,
+        },
     );
 
+    stdout.get_buffer().to_string()
+}
+
+fn draw_tiny_metrics<W: Write>(stdout: &mut W, state: &AppState, width: usize) {
+    let cpu = compact_pct(state.cpu_utilization_history.back().copied());
+    let gpu = compact_pct(state.utilization_history.back().copied());
+    let memory = compact_memory_pct(state);
+    let power = format!("{:.0}W", current_power_watts(state));
+    let temp = state
+        .cpu_temperature_history
+        .back()
+        .map_or_else(|| "N/A".to_string(), |value| format!("{value:.0}°"));
+
+    draw_tiny_metric(stdout, "C", &cpu, ThemeConfig::cpu_color());
+    print_colored_text(stdout, " ", Color::White, None, None);
+    draw_tiny_metric(stdout, "G", &gpu, ThemeConfig::gpu_color());
+
+    if width < 40 {
+        print_colored_text(stdout, " ", Color::White, None, None);
+        draw_tiny_metric(stdout, "M", &memory, ThemeConfig::memory_color());
+        queue!(stdout, Print("\r\n")).unwrap();
+        draw_tiny_metric(stdout, "P", &power, ThemeConfig::power_color());
+        print_colored_text(stdout, " ", Color::White, None, None);
+        draw_tiny_metric(stdout, "T", &temp, ThemeConfig::thermal_color());
+    } else {
+        print_colored_text(stdout, " ", Color::White, None, None);
+        draw_tiny_metric(stdout, "M", &memory, ThemeConfig::memory_color());
+        print_colored_text(stdout, " ", Color::White, None, None);
+        draw_tiny_metric(stdout, "P", &power, ThemeConfig::power_color());
+        print_colored_text(stdout, " ", Color::White, None, None);
+        draw_tiny_metric(stdout, "T", &temp, ThemeConfig::thermal_color());
+    }
+
     queue!(stdout, Print("\r\n")).unwrap();
+}
+
+fn draw_tiny_metric<W: Write>(stdout: &mut W, label: &str, value: &str, color: Color) {
+    print_colored_text(stdout, label, color, None, None);
+    print_colored_text(stdout, value, Color::White, None, None);
+}
+
+fn compact_pct(value: Option<f64>) -> String {
+    value.map_or_else(|| "N/A".to_string(), |value| format!("{value:.0}%"))
+}
+
+fn compact_memory_pct(state: &AppState) -> String {
+    let total = state.memory_info.iter().map(|m| m.total_bytes).sum::<u64>();
+    let used = state.memory_info.iter().map(|m| m.used_bytes).sum::<u64>();
+    if total == 0 {
+        "N/A".to_string()
+    } else {
+        format!("{:.0}%", used as f64 / total as f64 * 100.0)
+    }
 }
 
 /// Draw a single labelled metric with a braille sparkline.
@@ -223,19 +319,25 @@ fn draw_metric_sparkline<W: Write>(
     label: &str,
     history: &[f64],
     value_str: String,
-    color: Color,
-    range: Option<(f64, f64)>,
-    trend: (f64, f64),
+    presentation: MetricPresentation,
 ) {
-    let sparkline = sparkline_braille(history, SPARKLINE_WIDTH, range);
+    let MetricPresentation {
+        color,
+        range,
+        trend,
+        sparkline_width,
+    } = presentation;
     let glyph = trend_glyph(history, trend.0, trend.1);
 
     print_colored_text(stdout, label, color, None, None);
     print_colored_text(stdout, " ", Color::White, None, None);
     print_colored_text(stdout, &value_str, Color::White, None, None);
     print_colored_text(stdout, glyph, color, None, None);
-    print_colored_text(stdout, " ", Color::DarkGrey, None, None);
-    print_colored_text(stdout, &sparkline, color, None, None);
+    if let Some(width) = sparkline_width {
+        let sparkline = sparkline_braille(history, width, range);
+        print_colored_text(stdout, " ", Color::DarkGrey, None, None);
+        print_colored_text(stdout, &sparkline, color, None, None);
+    }
 }
 
 /// Classify the recent slope of `history` into one of five trend glyphs.
@@ -278,7 +380,7 @@ fn trend_glyph(history: &[f64], flat: f64, steep: f64) -> &'static str {
 /// Draw the RAM metric: `RAM <used>/<total>GB <sparkline>`.
 ///
 /// The sparkline tracks `system_memory_history` (memory utilization %).
-fn draw_ram_sparkline<W: Write>(stdout: &mut W, state: &AppState) {
+fn draw_ram_sparkline<W: Write>(stdout: &mut W, state: &AppState, sparkline_width: Option<usize>) {
     let total_gb = state.memory_info.iter().map(|m| m.total_bytes).sum::<u64>() as f64
         / (1024.0 * 1024.0 * 1024.0);
 
@@ -297,15 +399,17 @@ fn draw_ram_sparkline<W: Write>(stdout: &mut W, state: &AppState) {
         PERCENT_SOFT_GRID,
         PERCENT_DOMAIN,
     );
-    let sparkline = sparkline_braille(&history, SPARKLINE_WIDTH, Some(range));
     let glyph = trend_glyph(&history, TREND_PERCENT.0, TREND_PERCENT.1);
 
     print_colored_text(stdout, "RAM", ThemeConfig::memory_color(), None, None);
     print_colored_text(stdout, " ", Color::White, None, None);
     print_colored_text(stdout, &value_str, Color::White, None, None);
     print_colored_text(stdout, glyph, ThemeConfig::memory_color(), None, None);
-    print_colored_text(stdout, " ", Color::DarkGrey, None, None);
-    print_colored_text(stdout, &sparkline, ThemeConfig::memory_color(), None, None);
+    if let Some(width) = sparkline_width {
+        let sparkline = sparkline_braille(&history, width, Some(range));
+        print_colored_text(stdout, " ", Color::DarkGrey, None, None);
+        print_colored_text(stdout, &sparkline, ThemeConfig::memory_color(), None, None);
+    }
 }
 
 /// Draw the power metric: `Pwr <W>W <sparkline>`.
@@ -315,31 +419,12 @@ fn draw_ram_sparkline<W: Write>(stdout: &mut W, state: &AppState) {
 ///
 /// The sparkline tracks the dedicated package-power history maintained by the
 /// data aggregator.
-fn draw_power_sparkline<W: Write>(stdout: &mut W, state: &AppState) {
-    let is_apple_silicon = state.gpu_info.iter().any(|gpu| {
-        gpu.detail
-            .get("architecture")
-            .map(|arch| arch == "Apple Silicon")
-            .unwrap_or(false)
-    });
-
-    let power_watts = if is_apple_silicon {
-        // Apple Silicon: combined CPU+GPU+ANE power from the native metrics manager
-        state
-            .gpu_info
-            .iter()
-            .filter_map(|gpu| {
-                gpu.detail
-                    .get("combined_power_mw")
-                    .and_then(|s| s.parse::<f64>().ok())
-                    .map(|mw| mw / 1000.0)
-            })
-            .next()
-            .unwrap_or_else(|| crate::metrics::gpu_readings::total_power_watts(&state.gpu_info))
-    } else {
-        // Linux/NVIDIA: aggregate GPU power
-        crate::metrics::gpu_readings::total_power_watts(&state.gpu_info)
-    };
+fn draw_power_sparkline<W: Write>(
+    stdout: &mut W,
+    state: &AppState,
+    sparkline_width: Option<usize>,
+) {
+    let power_watts = current_power_watts(state);
 
     let value_str = format!("{power_watts:>5.1}W");
 
@@ -355,15 +440,44 @@ fn draw_power_sparkline<W: Write>(stdout: &mut W, state: &AppState) {
         power_soft_grid(ceiling),
         (0.0, ceiling),
     );
-    let sparkline = sparkline_braille(&history, SPARKLINE_WIDTH, Some(range));
     let glyph = trend_glyph(&history, TREND_POWER.0, TREND_POWER.1);
 
     print_colored_text(stdout, "Pwr", ThemeConfig::power_color(), None, None);
     print_colored_text(stdout, " ", Color::White, None, None);
     print_colored_text(stdout, &value_str, Color::White, None, None);
     print_colored_text(stdout, glyph, ThemeConfig::power_color(), None, None);
-    print_colored_text(stdout, " ", Color::DarkGrey, None, None);
-    print_colored_text(stdout, &sparkline, ThemeConfig::power_color(), None, None);
+    if let Some(width) = sparkline_width {
+        let sparkline = sparkline_braille(&history, width, Some(range));
+        print_colored_text(stdout, " ", Color::DarkGrey, None, None);
+        print_colored_text(stdout, &sparkline, ThemeConfig::power_color(), None, None);
+    }
+}
+
+fn current_power_watts(state: &AppState) -> f64 {
+    let is_apple_silicon = state.gpu_info.iter().any(|gpu| {
+        gpu.detail
+            .get("architecture")
+            .map(|arch| arch == "Apple Silicon")
+            .unwrap_or(false)
+    });
+
+    if is_apple_silicon {
+        // Apple Silicon: combined CPU+GPU+ANE power from the native metrics manager
+        state
+            .gpu_info
+            .iter()
+            .filter_map(|gpu| {
+                gpu.detail
+                    .get("combined_power_mw")
+                    .and_then(|s| s.parse::<f64>().ok())
+                    .map(|mw| mw / 1000.0)
+            })
+            .next()
+            .unwrap_or_else(|| crate::metrics::gpu_readings::total_power_watts(&state.gpu_info))
+    } else {
+        // Linux/NVIDIA: aggregate GPU power
+        crate::metrics::gpu_readings::total_power_watts(&state.gpu_info)
+    }
 }
 
 // ─── Formatting helpers ───────────────────────────────────────────────────────
@@ -620,6 +734,43 @@ mod tests {
         draw_local_header_bar(&mut buf, &state, 120);
         // Buffer must be non-empty
         assert!(!buf.is_empty());
+    }
+
+    #[test]
+    fn local_header_uses_only_intentional_rows_and_never_overflows() {
+        use crate::app_state::AppState;
+        use crate::ui::text::ansi_display_width;
+
+        let mut state = AppState::new();
+        for value in [10.0, 20.0, 30.0] {
+            state.cpu_utilization_history.push_back(value);
+            state.utilization_history.push_back(value);
+            state.system_memory_history.push_back(value);
+            state.package_power_history.push_back(value);
+            state.cpu_temperature_history.push_back(40.0 + value);
+        }
+
+        for cols in [20, 39, 40, 64, 80, 110, 160] {
+            let mut buffer = Vec::new();
+            draw_local_header_bar(&mut buffer, &state, cols);
+            let rendered = String::from_utf8(buffer).unwrap();
+            let lines: Vec<_> = rendered
+                .split("\r\n")
+                .filter(|line| !line.is_empty())
+                .collect();
+
+            assert_eq!(
+                lines.len(),
+                local_header_line_count(cols) as usize,
+                "header row accounting drifted at {cols} columns"
+            );
+            for line in lines {
+                assert!(
+                    ansi_display_width(line) <= cols as usize,
+                    "header overflowed {cols} columns: {line:?}"
+                );
+            }
+        }
     }
 
     /// [`trend_glyph`] is covered in isolation above, but nothing previously

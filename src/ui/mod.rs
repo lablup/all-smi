@@ -25,6 +25,7 @@ pub mod gpu_sparkline_panel;
 pub mod help;
 pub mod layout;
 pub mod led_grid;
+pub mod local_details;
 pub mod local_header;
 pub mod notification;
 pub mod process_renderer;

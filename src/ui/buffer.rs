@@ -19,6 +19,8 @@ use crossterm::{
 };
 use std::io::{Write, stdout};
 
+use crate::ui::text::truncate_ansi_to_width;
+
 pub struct BufferWriter {
     buffer: String,
     line_count: usize,
@@ -146,11 +148,20 @@ impl DifferentialRenderer {
         // Process lines directly from iterator, updating previous_lines in-place.
         // Per-line string comparison is the authoritative change-detection mechanism.
         // Rust's String `!=` checks length first, so identical lines are O(1).
-        for (line_num, current_line) in content.lines().enumerate() {
+        for (line_num, raw_line) in content.lines().enumerate() {
             if line_num >= self.screen_height {
                 break;
             }
             current_line_count = line_num + 1;
+
+            // A terminal wraps a line before the differential renderer can
+            // move to the next logical row. Clamp every row at this final
+            // boundary so an unexpectedly long device value can never
+            // overwrite the rows below it. Semantic renderers still choose
+            // which fields to show; this is the invariant-preserving safety
+            // net for unusual driver strings and future fields.
+            let current_line = truncate_ansi_to_width(raw_line, self.screen_width);
+            let current_line = current_line.as_ref();
 
             // Check if this line has changed (cheap pointer + length comparison first)
             if self.previous_lines[line_num] != current_line {
