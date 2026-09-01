@@ -65,7 +65,7 @@ pub enum ServiceAction {
     /// but stopped or not installed at all, mirroring the `systemctl
     /// is-active` convention.
     Status(ServiceStatusArgs),
-    /// Service Control Manager entry point (Windows only, issue #311).
+    /// Run as the registered Windows service process.
     ///
     /// Hidden from `--help`: this is not something an operator runs. The
     /// Windows SCM starts the registered binary with these arguments and
@@ -74,9 +74,7 @@ pub enum ServiceAction {
     /// explanation rather than starting a server, because there is no
     /// dispatcher to connect to. Use `all-smi api` for that.
     ///
-    /// The variant exists on every platform so the argument surface does
-    /// not change shape per target; non-Windows builds answer with the
-    /// standard "not supported" error.
+    /// Non-Windows builds exit with a clear "not supported" error.
     #[command(hide = true)]
     Run(ServiceRunArgs),
 }

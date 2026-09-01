@@ -220,7 +220,7 @@ The canonical schema carries `schema_version = 1` at the top level and nine sect
 |-----|------|---------|---------|-------------|
 | `default_mode` | string | `"local"` | `ALL_SMI_GENERAL_DEFAULT_MODE` | Which subcommand runs when none is specified: `"local"`, `"view"`, or `"api"`. |
 | `theme` | string | `"auto"` | `ALL_SMI_GENERAL_THEME` | TUI colour theme: `"auto"`, `"light"`, `"dark"`, `"high-contrast"`, `"mono"`. |
-| `locale` | string | `"en"` | `ALL_SMI_GENERAL_LOCALE` | Display locale (reserved for future i18n). |
+| `locale` | string | `"en"` | `ALL_SMI_GENERAL_LOCALE` | Display locale setting. It is accepted but currently has no effect; output remains in English. |
 
 **`[local]`** — options for `all-smi local`
 
@@ -266,7 +266,7 @@ The canonical schema carries `schema_version = 1` at the top level and nine sect
 | `price_per_kwh` | float | `0.12` | `ALL_SMI_ENERGY_PRICE_PER_KWH` | Electricity price in $/kWh for cost estimation. |
 | `currency` | string | `"USD"` | `ALL_SMI_ENERGY_CURRENCY` | Currency symbol shown in the TUI. |
 | `show_cost` | bool | `true` | `ALL_SMI_ENERGY_SHOW_COST` | Toggle cost column in the TUI. |
-| `wal_path` | string | platform cache dir + `all-smi/energy-wal.bin` [^cache] | `ALL_SMI_ENERGY_WAL_PATH` | Path to the energy write-ahead log for persistent kWh accumulation. Operator override is resolved with `~` expansion; unset uses the platform cache helper (#229). |
+| `wal_path` | string | platform cache dir + `all-smi/energy-wal.bin` [^cache] | `ALL_SMI_ENERGY_WAL_PATH` | Path to the energy write-ahead log for persistent kWh accumulation. Operator overrides support `~` expansion; when unset, the platform cache directory is used. |
 | `gap_interpolate_seconds` | integer | `10` | `ALL_SMI_ENERGY_GAP_INTERPOLATE_SECONDS` | Max gap (1–3600 s) to interpolate across when the WAL has a hole. |
 | `wal_enabled` | bool | `true` | `ALL_SMI_ENERGY_WAL_ENABLED` | Enable the WAL. Disable in read-only container environments. |
 
@@ -282,9 +282,9 @@ The canonical schema carries `schema_version = 1` at the top level and nine sect
 
 | Key | Type | Default | Env var | Description |
 |-----|------|---------|---------|-------------|
-| `output_dir` | string | platform cache dir + `all-smi/records` [^cache] | `ALL_SMI_RECORD_OUTPUT_DIR` | Directory where recording segments are written. Operator override is resolved with `~` expansion; unset uses the platform cache helper (#229). |
+| `output_dir` | string | platform cache dir + `all-smi/records` [^cache] | `ALL_SMI_RECORD_OUTPUT_DIR` | Directory where recording segments are written. Operator overrides support `~` expansion; when unset, the platform cache directory is used. |
 
-[^cache]: The platform cache directory is `$XDG_CACHE_HOME` (or `~/.cache`) on Linux, `~/Library/Caches` on macOS, and `%LOCALAPPDATA%` on Windows. All three cache consumers (record output, energy WAL, users-CSV export) go through `dirs::cache_dir()` so the layout is consistent across platforms.
+[^cache]: The platform cache directory is `$XDG_CACHE_HOME` (or `~/.cache`) on Linux, `~/Library/Caches` on macOS, and `%LOCALAPPDATA%` on Windows. Record output, the energy WAL, and users-CSV exports use this location consistently when no explicit path is configured.
 | `compress` | string | `"zstd"` | `ALL_SMI_RECORD_COMPRESS` | Compression codec: `"zstd"`, `"gzip"`, or `"none"`. |
 
 **`[snapshot]`** — defaults for `all-smi snapshot`
@@ -1025,8 +1025,10 @@ message without committing.
 
 **Threshold alerts**
 
-Alert thresholds live in the compiled defaults today (the config-file loader
-lands in a separate issue). Override them with CLI flags:
+Alert settings follow the standard precedence order: CLI flags, environment
+variables, the `[alerts]` section of the TOML config file, then built-in
+defaults. The CLI exposes direct overrides for warning temperature and idle
+duration:
 
 ```bash
 all-smi local --alert-temp 75 --alert-util-low-mins 10
