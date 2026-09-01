@@ -52,7 +52,7 @@ pub enum ConfigAction {
     Validate(ConfigValidateArgs),
     /// Print the active config-file path and the candidate search
     /// order. Read-only — performs no file writes. Pass `--json` for
-    /// scripts. (Issue #213.)
+    /// scripts.
     Path(ConfigPathArgs),
 }
 

@@ -84,7 +84,7 @@ pub enum Commands {
     /// `snapshot` subcommand (same serializer). Subsequent `all-smi view
     /// --replay <file>` invocations reconstruct the exact TUI frames the
     /// operator would have seen live, making post-hoc incident investigation
-    /// possible without a Prometheus retention store. See issue #187.
+    /// possible without a Prometheus retention store.
     Record(RecordArgs),
     /// Run self-diagnosis checks and optionally produce a support bundle.
     ///
@@ -93,13 +93,13 @@ pub enum Commands {
     /// Intel GPU, Apple, Gaudi, TPU, Tenstorrent, Rebellions, Furiosa,
     /// Windows), the relevant environment variables, and optional remote
     /// endpoint connectivity. Every check is read-only and bounded by a
-    /// hard 3-second timeout. See issue #188.
+    /// hard 3-second timeout.
     Doctor(DoctorArgs),
-    /// Inspect, initialise, or validate the TOML configuration file
-    /// (issue #192). See `all-smi config --help` for subcommands.
+    /// Inspect, initialise, or validate the TOML configuration file.
+    /// See `all-smi config --help` for subcommands.
     Config(ConfigArgs),
     /// Install and control `all-smi api` as a supervised background
-    /// service (issue #309).
+    /// service.
     ///
     /// On Linux and macOS, the system scope requires root and registers
     /// the service machine-wide; `--user` installs a per-user service
@@ -133,11 +133,8 @@ pub struct ApiArgs {
     /// Use `--processes` or `--processes=true` to force-enable,
     /// `--processes=false` to force-disable. When omitted, value is
     /// taken from the config file or the `ALL_SMI_API_PROCESSES` env
-    /// var. Modelled as `Option<bool>` (not `bool`) so the CLI can
-    /// express the third state "no explicit override" — without this
-    /// an operator could not turn the flag OFF from the CLI when the
-    /// config file already set `processes = true`, since a bare
-    /// `--processes` flag has no natural "disable" spelling.
+    /// var. An explicit CLI value overrides either source, including
+    /// turning off a value enabled by the config file.
     #[arg(long, num_args = 0..=1, default_missing_value = "true")]
     pub processes: Option<bool>,
     /// Unix domain socket path for local IPC (Unix only).
@@ -196,7 +193,7 @@ pub struct ViewArgs {
     /// Accepts `.ndjson`, `.ndjson.zst`, `.ndjson.gz` — compression is
     /// auto-detected from the file extension. In replay mode `--hosts`
     /// and `--hostfile` are ignored; tabs and GPUs come entirely from the
-    /// recorded frames. See issue #187.
+    /// recorded frames.
     #[arg(long)]
     pub replay: Option<PathBuf>,
     /// Playback speed multiplier for `--replay`. Valid discrete values:
@@ -210,8 +207,7 @@ pub struct ViewArgs {
     #[arg(long)]
     pub start: Option<String>,
     /// Loop playback: when the last frame is reached, jump back to the
-    /// first frame and continue. Renamed from `loop` to avoid the Rust
-    /// keyword; the CLI surface remains `--loop`.
+    /// first frame and continue.
     #[arg(long = "loop")]
     pub replay_loop: bool,
 
@@ -235,8 +231,9 @@ pub struct ViewArgs {
     #[arg(long = "ssh-key")]
     pub ssh_key: Option<PathBuf>,
 
-    /// OpenSSH config file (`~/.ssh/config`). Currently unused but
-    /// reserved so the flag is stable across versions.
+    /// OpenSSH config file path. This option is accepted for compatibility
+    /// but currently has no effect; connection settings are taken from the
+    /// other SSH flags.
     #[arg(long = "ssh-config")]
     pub ssh_config: Option<PathBuf>,
 
@@ -245,8 +242,8 @@ pub struct ViewArgs {
     #[arg(long = "ssh-strict-host-key", default_value = "yes")]
     pub ssh_strict_host_key: String,
 
-    /// Per-target SSH connect timeout in seconds. Exec timeouts are
-    /// bounded separately by [`crate::network::ssh_client::DEFAULT_EXEC_TIMEOUT`].
+    /// Per-target SSH connect timeout in seconds. Remote commands have a
+    /// separate fixed 15-second execution timeout.
     #[arg(long = "ssh-timeout-secs", default_value_t = 10)]
     pub ssh_timeout_secs: u64,
 
@@ -372,8 +369,7 @@ pub struct SnapshotArgs {
     /// path already exists as a symlink. The write is atomic: output first
     /// goes to a sibling `<path>.tmp` file, is fsynced, then renamed over
     /// the destination. On Windows the file is opened with exclusive
-    /// sharing; symlink-based TOCTOU has different mitigations on that
-    /// platform which are out of scope for this flag.
+    /// sharing to prevent concurrent access while it is written.
     #[arg(long, short)]
     pub output: Option<String>,
 }
@@ -518,8 +514,8 @@ pub struct RecordArgs {
 
     /// Rotation threshold for the active segment. Accepts a size in bytes
     /// (`1048576`) or with suffix (`1K`, `10M`, `2G`). `0` disables
-    /// rotation. Matches the issue spec: `--max-size 1K --max-files 3`
-    /// caps total on-disk footprint to three segments.
+    /// rotation. For example, `--max-size 1K --max-files 3` caps the
+    /// retained stream to three segments of at most 1 KiB each.
     #[arg(long, default_value = "100M")]
     pub max_size: String,
 
@@ -559,15 +555,12 @@ impl RecordArgs {
     }
 }
 
-/// Arguments for the `doctor` subcommand (issue #188).
-///
-/// The flag surface intentionally mirrors the issue spec so scripts and
-/// support templates can depend on stable names across versions.
+/// Arguments for the `doctor` subcommand.
 #[derive(Parser, Clone, Debug)]
 pub struct DoctorArgs {
     /// Emit a machine-readable JSON report instead of the human-readable
     /// text output. The JSON schema is versioned via a top-level `schema`
-    /// field; see `src/doctor/report.rs` for the current version.
+    /// field so consumers can detect incompatible changes.
     #[arg(long)]
     pub json: bool,
 

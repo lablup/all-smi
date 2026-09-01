@@ -359,8 +359,8 @@ fn check_adl_per_adapter(_ctx: &CheckCtx) -> CheckResult {
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn per_card_verdict(per_card_first: &[Option<String>], card_count: usize) -> String {
     if card_count < 2 {
-        return "1 physical card, so per-card differentiation is unobservable on this host \
-                (issue #370 tracks confirming it on a two-card host)"
+        return "1 physical card, so per-card differentiation is unobservable on this host; \
+                at least 2 physical cards must answer to verify distinct per-card telemetry"
             .to_string();
     }
     let seen: Vec<&String> = per_card_first.iter().flatten().collect();
@@ -631,6 +631,14 @@ mod tests {
         assert!(
             !verdict.contains("IDENTICAL") && !verdict.contains("DISTINCT"),
             "single-card verdict must claim neither outcome, got: {verdict}"
+        );
+        assert!(
+            verdict.contains("at least 2 physical cards"),
+            "single-card verdict must explain how to verify differentiation, got: {verdict}"
+        );
+        assert!(
+            !verdict.to_ascii_lowercase().contains("issue") && !verdict.contains('#'),
+            "single-card verdict must not depend on an internal tracker reference, got: {verdict}"
         );
     }
 
