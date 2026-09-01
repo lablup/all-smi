@@ -34,6 +34,14 @@ fn run_all_smi(home: &Path, args: &[&str]) -> Output {
         .expect("run all-smi")
 }
 
+fn entered_alternate_screen(output: &Output) -> bool {
+    const ENTER_ALTERNATE_SCREEN: &[u8] = b"\x1b[?1049h";
+    output
+        .stdout
+        .windows(ENTER_ALTERNATE_SCREEN.len())
+        .any(|bytes| bytes == ENTER_ALTERNATE_SCREEN)
+}
+
 #[test]
 fn view_rejects_invalid_host_before_entering_the_tui() {
     let home = tempfile::tempdir().expect("create isolated home");
@@ -47,7 +55,7 @@ fn view_rejects_invalid_host_before_entering_the_tui() {
     assert!(stderr.contains("host-b:not-a-port"), "{stderr}");
     assert!(stderr.contains("invalid port"), "{stderr}");
     assert!(
-        !output.stdout.windows(6).any(|bytes| bytes == b"\x1b[?1049"),
+        !entered_alternate_screen(&output),
         "invalid host must be rejected before alternate-screen output"
     );
 }
@@ -64,12 +72,7 @@ fn view_validates_config_and_environment_hosts_before_entering_the_tui() {
     assert!(!from_config.status.success());
     assert!(config_stderr.contains("http://"), "{config_stderr}");
     assert!(config_stderr.contains("missing host"), "{config_stderr}");
-    assert!(
-        !from_config
-            .stdout
-            .windows(6)
-            .any(|bytes| bytes == b"\x1b[?1049")
-    );
+    assert!(!entered_alternate_screen(&from_config));
 
     let from_env = all_smi_command(home.path())
         .env("ALL_SMI_VIEW_HOSTS", "host-a:9090,,https://host-b:9443")
@@ -79,12 +82,7 @@ fn view_validates_config_and_environment_hosts_before_entering_the_tui() {
     let env_stderr = String::from_utf8_lossy(&from_env.stderr);
     assert!(!from_env.status.success());
     assert!(env_stderr.contains("empty entry"), "{env_stderr}");
-    assert!(
-        !from_env
-            .stdout
-            .windows(6)
-            .any(|bytes| bytes == b"\x1b[?1049")
-    );
+    assert!(!entered_alternate_screen(&from_env));
 }
 
 #[test]
