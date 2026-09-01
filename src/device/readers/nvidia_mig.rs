@@ -192,7 +192,7 @@ fn collect_single_mig_instance(
 
 /// Query the GPU instance id for a MIG handle via raw NVML FFI.
 ///
-/// nvml-wrapper 0.12 does not expose `nvmlDeviceGetGpuInstanceId` as a
+/// nvml-wrapper 0.13 does not expose `nvmlDeviceGetGpuInstanceId` as a
 /// high-level method (it is only present indirectly inside `ProcessInfo`),
 /// so we call the symbol ourselves and degrade silently on any failure.
 fn mig_gpu_instance_id(nvml: &Nvml, device: &nvml_wrapper::Device) -> Option<u32> {
@@ -208,7 +208,7 @@ fn mig_gpu_instance_id(nvml: &Nvml, device: &nvml_wrapper::Device) -> Option<u32
 /// Query the compute instance id for a MIG handle via raw NVML FFI.
 ///
 /// Same rationale as [`mig_gpu_instance_id`] — the high-level wrapper does
-/// not expose it directly in 0.12, so we go through the raw symbol and
+/// not expose it directly in 0.13, so we go through the raw symbol and
 /// degrade silently on any failure.
 fn mig_compute_instance_id(nvml: &Nvml, device: &nvml_wrapper::Device) -> Option<u32> {
     let sym = nvml.lib().nvmlDeviceGetComputeInstanceId.as_ref().ok()?;

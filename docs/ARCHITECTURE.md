@@ -580,12 +580,11 @@ level_zero = []
 ### Platform Dependencies
 
 ```toml
-[target.'cfg(target_os = "linux")'.dependencies]
-nvml-wrapper = "0.10.0"
+[dependencies]
+nvml-wrapper = "0.13.0"
 
 [target.'cfg(target_os = "macos")'.dependencies]
-metal = "0.29"
-objc = "0.2"
+core-foundation = "0.10"
 ```
 
 ### Build Optimizations

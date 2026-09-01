@@ -188,7 +188,7 @@ impl HardwareDetailCache {
 /// treated as permanently unavailable and cached as `None`.
 fn numa_node_id_result(device: &nvml_wrapper::Device) -> Result<i32, NvmlError> {
     // `Device::numa_node_id()` is available on all platforms in
-    // nvml-wrapper 0.12.1 — no `cfg(target_os = "linux")` gate is needed.
+    // nvml-wrapper 0.13.0 — no `cfg(target_os = "linux")` gate is needed.
     // Returns `u32` per the C API: negative values are not possible, but
     // drivers sometimes return the all-bits-set sentinel when no NUMA
     // topology is present.
@@ -240,7 +240,7 @@ fn gsp_firmware_version_result(device: &nvml_wrapper::Device) -> Result<String, 
 /// We iterate up to [`NVML_NVLINK_MAX_LINKS`] and skip any link whose
 /// `is_active()` probe errors or returns `false`. For active links we
 /// query the remote device type via the raw FFI symbol so we avoid the
-/// latent-bug path in `nvml-wrapper-0.12.1::nv_link::remote_device_type`
+/// latent-bug path in `nvml-wrapper-0.13.0::nv_link::remote_device_type`
 /// (that wrapper mistakenly writes to an immutable temporary, leaving the
 /// out-parameter untouched).
 pub fn collect_nvlink_remote_devices(
@@ -282,7 +282,7 @@ pub fn collect_nvlink_remote_devices(
 
 /// Query `nvmlDeviceGetNvLinkRemoteDeviceType` directly via the FFI symbol.
 ///
-/// The high-level `NvLink::remote_device_type` method in nvml-wrapper 0.12.1
+/// The high-level `NvLink::remote_device_type` method in nvml-wrapper 0.13.0
 /// has a latent bug: it passes `&mut device_type.as_c()` which creates an
 /// immutable temporary, so NVML never writes back to the local variable.
 /// Calling the symbol directly avoids that defect and keeps the logic

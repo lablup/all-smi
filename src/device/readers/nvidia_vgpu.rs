@@ -116,7 +116,7 @@ pub fn collect_vgpu_info(nvml: &Nvml) -> Vec<VgpuHostInfo> {
 
         // Collect active vGPU instances via the raw NVML FFI. The high-level
         // `device.active_vgpus()` helper is `#[cfg(target_os = "linux")]`
-        // in nvml-wrapper 0.12.1, which would break the Windows build. Using
+        // in nvml-wrapper 0.13.0, which would break the Windows build. Using
         // the raw symbol keeps the reader cross-platform while preserving the
         // graceful-degradation contract: any NVML error becomes an empty vec.
         let vgpus = active_vgpus_ffi(nvml, &device)
@@ -193,7 +193,7 @@ fn collect_single_vgpu(nvml: &Nvml, device: &nvml_wrapper::Device, instance_id: 
 /// Query the active vGPU instances for a device via the raw NVML FFI.
 ///
 /// This is a platform-portable alternative to `Device::active_vgpus()`
-/// (which is `#[cfg(target_os = "linux")]` in nvml-wrapper 0.12.1). By going
+/// (which is `#[cfg(target_os = "linux")]` in nvml-wrapper 0.13.0). By going
 /// through the raw symbol we keep the NVIDIA reader — and therefore the
 /// whole crate — compiling on Windows where `NvidiaGpuReader` is still used.
 ///
