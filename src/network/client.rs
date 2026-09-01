@@ -22,7 +22,6 @@ use std::time::{Duration, Instant};
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use regex::Regex;
 use tokio::sync::RwLock;
-use url::Url;
 
 use crate::app_state::ConnectionStatus;
 use crate::common::config::{AppConfig, EnvConfig};
@@ -134,21 +133,10 @@ impl NetworkClient {
 
     /// Validate and build a secure URL from the host string
     fn validate_and_build_url(host: &str) -> Result<String, String> {
-        // Prevent SSRF attacks by validating the host
-        let base_url = if host.starts_with("http://") || host.starts_with("https://") {
-            host.to_string()
-        } else {
-            format!("http://{host}")
-        };
-
-        // Parse and validate URL
-        let mut url = Url::parse(&base_url).map_err(|e| format!("Invalid URL format: {e}"))?;
-
-        // Check for suspicious schemes
-        match url.scheme() {
-            "http" | "https" => {}
-            scheme => return Err(format!("Invalid scheme: {scheme}. Only http/https allowed")),
-        }
+        // Use the same syntax contract as startup validation so collector
+        // retries cannot reinterpret an endpoint that was accepted earlier.
+        let mut url = crate::common::http_hosts::parse_http_host_url(host)
+            .map_err(|error| error.to_string())?;
 
         // Validate host is not localhost or private IP (unless explicitly allowed)
         if let Some(host_str) = url.host_str() {
@@ -188,15 +176,6 @@ impl NetworkClient {
                     }
                 }
             }
-
-            // Check port is in reasonable range (port 0 is invalid)
-            if let Some(port) = url.port()
-                && port == 0
-            {
-                return Err(format!("Invalid port number: {port}"));
-            }
-        } else {
-            return Err("Missing host in URL".to_string());
         }
 
         // Set the path to /metrics

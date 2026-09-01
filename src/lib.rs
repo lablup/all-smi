@@ -219,6 +219,9 @@ pub mod common {
     /// On-disk schema types for the TOML configuration file.
     #[cfg(feature = "cli")]
     pub mod config_schema;
+    /// HTTP remote-host list normalization and syntax validation.
+    #[cfg(feature = "cli")]
+    pub mod http_hosts;
     /// Platform-aware configuration path resolution.
     #[cfg(feature = "cli")]
     pub mod paths;

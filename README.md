@@ -124,6 +124,7 @@ sudo all-smi local
 
 # Remote monitoring (requires API endpoints)
 all-smi view --hosts http://node1:9090 http://node2:9090
+all-smi view --hosts http://node1:9090,http://node2:9090
 all-smi view --hostfile hosts.csv
 
 # API mode (expose metrics server)
@@ -163,12 +164,13 @@ The `view` mode monitors multiple remote systems that are running in API mode. T
 ```bash
 # Direct host specification (required)
 all-smi view --hosts http://gpu-node1:9090 http://gpu-node2:9090
+all-smi view --hosts http://gpu-node1:9090,http://gpu-node2:9090
 
 # Using host file (required)
 all-smi view --hostfile hosts.csv --interval 2
 ```
 
-**Note:** The `view` command requires either `--hosts` or `--hostfile`. For local monitoring, use `all-smi local` instead.
+**Note:** The `view` command requires either `--hosts` or `--hostfile`. `--hosts` accepts endpoints separated by spaces, commas, or a mixture of both; explicit `http://` and `https://` schemes are preserved. Invalid endpoint syntax is reported before the TUI starts. For local monitoring, use `all-smi local` instead.
 
 Host file format (CSV):
 ```
@@ -1348,7 +1350,7 @@ all-smi record --output trace.ndjson.zst --max-size 100M --max-files 10
 
 # Record remote cluster scrapes (same HTTP path as `view`).
 all-smi record --source remote \
-  --hosts http://gpu-node1:9090 http://gpu-node2:9090 \
+  --hosts http://gpu-node1:9090,http://gpu-node2:9090 \
   --output cluster.ndjson.gz --compress gzip --duration 1h
 
 # Replay a captured file — identical TUI to the live view.
@@ -1385,7 +1387,7 @@ operator can filter the visible GPUs mid-playback.
 | `--interval` / `-i` | `3`                             | Seconds between frames.                          |
 | `--duration`      | `0` (= record until SIGTERM)      | Accepts `30s`, `5m`, `1h`, `1d`, or bare seconds. |
 | `--source`        | `local`                           | `local` (hardware readers) or `remote` (HTTP scrape). |
-| `--hosts` / `--hostfile` | (none)                     | Required when `--source=remote`.                 |
+| `--hosts` / `--hostfile` | (none)                     | Required when `--source=remote`; `--hosts` accepts space-separated, comma-separated, or mixed endpoints. |
 | `--include`       | `gpu,cpu,memory,chassis`          | Comma-separated sections (plus `process`).       |
 | `--max-size`      | `100M`                            | Rotation threshold per segment (`1K`, `10M`, `2G`). `0` disables rotation. |
 | `--max-files`     | `10`                              | Max segments on disk (active + rotated).         |

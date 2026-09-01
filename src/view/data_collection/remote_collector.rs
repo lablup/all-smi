@@ -366,24 +366,12 @@ impl RemoteCollectorBuilder {
                     return None;
                 }
 
-                // Validate host format (basic validation)
-                let host = if let Some(stripped) = s.strip_prefix("http://") {
-                    stripped.to_string()
-                } else if let Some(stripped) = s.strip_prefix("https://") {
-                    stripped.to_string()
-                } else {
-                    s.to_string()
-                };
-
-                // Basic validation: must contain valid characters
-                if host
-                    .chars()
-                    .all(|c| c.is_ascii() && (c.is_alphanumeric() || ".-:_".contains(c)))
-                {
-                    Some(host)
-                } else {
-                    eprintln!("Warning: Invalid host format skipped: {s}");
-                    None
+                match crate::common::http_hosts::parse_http_host_url(s) {
+                    Ok(_) => Some(s.to_string()),
+                    Err(error) => {
+                        eprintln!("Warning: {error}; skipping hostfile entry");
+                        None
+                    }
                 }
             })
             .collect();

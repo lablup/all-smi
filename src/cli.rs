@@ -167,7 +167,11 @@ pub struct LocalArgs {
 
 #[derive(Parser, Clone)]
 pub struct ViewArgs {
-    /// A list of host addresses to connect to for remote monitoring.
+    /// Remote HTTP endpoints separated by spaces and/or commas.
+    ///
+    /// Examples: `--hosts node-a:9090 node-b:9090`,
+    /// `--hosts node-a:9090,node-b:9090`, or a mixture of both forms.
+    /// Explicit `http://` and `https://` schemes are preserved.
     #[arg(long, num_args = 1..)]
     pub hosts: Option<Vec<String>>,
     /// A file containing a list of host addresses to connect to for remote monitoring.
@@ -498,7 +502,8 @@ pub struct RecordArgs {
     #[arg(long, value_enum, default_value_t = RecordSource::Local)]
     pub source: RecordSource,
 
-    /// Remote hosts to scrape when `--source=remote`.
+    /// Remote HTTP endpoints separated by spaces and/or commas when
+    /// `--source=remote`. Explicit HTTP and HTTPS schemes are preserved.
     #[arg(long, num_args = 1..)]
     pub hosts: Option<Vec<String>>,
 
@@ -851,6 +856,22 @@ mod tests {
                 "help" => {}
                 other => assert!(!hidden, "`service {other}` must stay visible in --help"),
             }
+        }
+    }
+
+    #[test]
+    fn remote_host_help_documents_space_and_comma_separators() {
+        let mut command = build_command_with_runtime_help();
+        for subcommand in ["view", "record"] {
+            let help = command
+                .find_subcommand_mut(subcommand)
+                .expect("remote-capable subcommand must exist")
+                .render_long_help()
+                .to_string();
+            assert!(
+                help.contains("spaces and/or commas"),
+                "{subcommand} help must document both host separators:\n{help}"
+            );
         }
     }
 

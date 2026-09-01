@@ -211,23 +211,9 @@ impl DataCollector {
     pub async fn run_remote_mode(
         &self,
         args: ViewArgs,
-        mut hosts: Vec<String>,
+        hosts: Vec<String>,
         hostfile: Option<String>,
     ) {
-        // Strip protocol prefix from command line hosts
-        hosts = hosts
-            .into_iter()
-            .map(|host| {
-                if let Some(stripped) = host.strip_prefix("http://") {
-                    stripped.to_string()
-                } else if let Some(stripped) = host.strip_prefix("https://") {
-                    stripped.to_string()
-                } else {
-                    host
-                }
-            })
-            .collect();
-
         // Load hosts from file if specified
         let mut builder = RemoteCollectorBuilder::new().with_hosts(hosts.clone());
 
@@ -264,22 +250,9 @@ impl DataCollector {
                                 .filter(|s| !s.starts_with('#'))
                                 .take(MAX_HOSTS)
                                 .filter_map(|s| {
-                                    let host = if let Some(stripped) = s.strip_prefix("http://") {
-                                        stripped.to_string()
-                                    } else if let Some(stripped) = s.strip_prefix("https://") {
-                                        stripped.to_string()
-                                    } else {
-                                        s.to_string()
-                                    };
-
-                                    // Basic host validation
-                                    if host.chars().all(|c| {
-                                        c.is_ascii() && (c.is_alphanumeric() || ".-:_".contains(c))
-                                    }) {
-                                        Some(host)
-                                    } else {
-                                        None
-                                    }
+                                    crate::common::http_hosts::parse_http_host_url(s)
+                                        .ok()
+                                        .map(|_| s.to_string())
                                 })
                                 .collect();
                             hosts_vec.extend(file_hosts);
