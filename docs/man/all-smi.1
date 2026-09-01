@@ -90,7 +90,7 @@ Default: 1 second (Apple Silicon) or 2 seconds (others)
 .SS View Mode Options (Remote Monitoring)
 .TP
 .B \-\-hosts \fIURL\fR...
-(Required) A list of host addresses to connect to for remote monitoring. Multiple hosts can be specified.
+(Required) A list of host addresses to connect to for remote monitoring. Separate endpoints with spaces, commas, or a mixture of both. Explicit HTTP and HTTPS schemes are preserved, and invalid endpoint syntax is rejected before the terminal interface starts.
 Format: http://hostname:port or https://hostname:port
 .TP
 .B \-\-hostfile \fIFILE\fR
@@ -573,6 +573,12 @@ Monitor local hardware with custom interval:
 .TP
 Monitor remote hosts (requires API endpoints):
 .B all-smi view --hosts http://node1:9090 http://node2:9090
+.TP
+Monitor remote hosts with comma-separated endpoints:
+.B all-smi view --hosts http://node1:9090,http://node2:9090
+.TP
+Record remote hosts (the same space/comma separator rules apply):
+.B all-smi record --source=remote --hosts http://node1:9090,http://node2:9090 --output cluster.ndjson.zst
 .TP
 Monitor hosts from file:
 .B all-smi view --hostfile cluster_hosts.csv

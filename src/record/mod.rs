@@ -122,7 +122,12 @@ impl RecorderOptions {
             bail!("--max-files must be >= 1");
         }
 
-        let hosts: Vec<String> = args.hosts.clone().unwrap_or_default();
+        let raw_hosts: Vec<String> = args.hosts.clone().unwrap_or_default();
+        let hosts = if args.source == RecordSource::Remote {
+            crate::common::http_hosts::normalize_http_hosts(&raw_hosts)?
+        } else {
+            raw_hosts
+        };
         if args.source == RecordSource::Remote && hosts.is_empty() && args.hostfile.is_none() {
             bail!("--source=remote requires --hosts or --hostfile");
         }
@@ -581,6 +586,22 @@ mod tests {
             max_files: 10,
             compress: None,
         }
+    }
+
+    #[test]
+    fn remote_record_normalizes_mixed_host_separators() {
+        let mut args = record_args(Some(PathBuf::from("cluster.ndjson")));
+        args.source = RecordSource::Remote;
+        args.hosts = Some(vec![
+            "host-a:9090, https://host-b:9443".to_string(),
+            "[2001:db8::1]:9090".to_string(),
+        ]);
+
+        let opts = RecorderOptions::from_args(&args).unwrap();
+        assert_eq!(
+            opts.hosts,
+            vec!["host-a:9090", "https://host-b:9443", "[2001:db8::1]:9090"]
+        );
     }
 
     /// No `-o`, no config: the default basename should resolve to the

@@ -603,6 +603,21 @@ async fn run_command(cli: Cli, settings: Settings) {
                     std::process::exit(1);
                 }
             }
+
+            // Normalize and validate the fully-resolved inline host list only
+            // after CLI/config/environment/auto-discovery precedence has been
+            // applied, but before the view runner initializes the terminal.
+            // This check is syntax-only: DNS and endpoint reachability remain
+            // the background collector's responsibility.
+            if let Some(hosts) = args.hosts.as_ref() {
+                match common::http_hosts::normalize_http_hosts(hosts) {
+                    Ok(normalized) => args.hosts = Some(normalized),
+                    Err(error) => {
+                        eprintln!("error: {error}");
+                        std::process::exit(2);
+                    }
+                }
+            }
             view::run_view_mode(&args, &settings).await;
 
             // Cleanup after view mode exits

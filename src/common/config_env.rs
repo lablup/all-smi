@@ -91,11 +91,7 @@ fn apply_env_view(settings: &mut Settings) {
     if let Ok(v) = env::var("ALL_SMI_VIEW_HOSTS")
         && !v.trim().is_empty()
     {
-        settings.view.hosts = v
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect();
+        settings.view.hosts = v.split(',').map(|s| s.trim().to_string()).collect();
     }
     if let Ok(v) = env::var("ALL_SMI_VIEW_INTERVAL_SECS")
         && let Ok(n) = v.parse::<u64>()

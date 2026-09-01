@@ -25,6 +25,8 @@ pub mod config_file;
 pub mod config_schema;
 pub mod error_handling;
 #[cfg(feature = "cli")]
+pub mod http_hosts;
+#[cfg(feature = "cli")]
 pub mod paths;
 #[cfg(feature = "cli")]
 pub mod progress_bar;
