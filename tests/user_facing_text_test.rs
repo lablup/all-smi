@@ -29,7 +29,7 @@ const IMPLEMENTATION_PHRASES: &[(&str, &str)] = &[
 
 fn tracker_reference() -> Regex {
     Regex::new(
-        r"(?i)\b(?:issue|pr|pull request)\s*#?\s*\d+\b|(?:^|[^[:alnum:]_/])#\d+\b|\bissue spec(?:ification)?\b",
+        r"(?i)\b(?:issue|pr|pull request)\s*#?\s*\d+\b|/(?:issues|pull)/\d+\b|(?:^|[^[:alnum:]_/])#\d+\b|\bissue spec(?:ification)?\b",
     )
     .expect("tracker-reference regex must compile")
 }
@@ -78,6 +78,13 @@ fn installed_roff_text(manpage: &str) -> String {
         .join("\n")
 }
 
+fn readme_operator_text(readme: &str) -> &str {
+    readme
+        .split_once("\n## Changelog\n")
+        .map(|(operator_text, _)| operator_text)
+        .expect("README.md must retain a distinct historical changelog section")
+}
+
 #[test]
 fn every_directly_addressable_help_page_is_operator_facing() {
     let command = build_command_with_runtime_help();
@@ -98,7 +105,10 @@ fn every_directly_addressable_help_page_is_operator_facing() {
 
 #[test]
 fn readme_operator_text_is_free_of_internal_churn() {
-    assert_surface_is_operator_facing("README.md", include_str!("../README.md"));
+    assert_surface_is_operator_facing(
+        "README.md operator guidance",
+        readme_operator_text(include_str!("../README.md")),
+    );
 }
 
 #[test]
@@ -127,4 +137,23 @@ fn tracker_guard_ignores_normal_operator_prose_and_roff_comments() {
         tracker_reference().find(&installed_text).is_none(),
         "tracker guard must ignore roff comments that are absent from the installed manpage"
     );
+
+    let readme = "# Tool\nOperator guidance.\n\n## Changelog\n\n- Fixed issue #123.";
+    assert_surface_is_operator_facing("README.md operator guidance", readme_operator_text(readme));
+}
+
+#[test]
+fn tracker_guard_rejects_numbered_references_in_text_and_urls() {
+    for reference in [
+        "issue #123",
+        "PR 456",
+        "pull request #789",
+        "https://github.com/lablup/all-smi/issues/123",
+        "https://github.com/lablup/all-smi/pull/456",
+    ] {
+        assert!(
+            tracker_reference().find(reference).is_some(),
+            "tracker guard must reject numbered reference `{reference}`"
+        );
+    }
 }
