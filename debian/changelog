@@ -1,3 +1,17 @@
+all-smi (0.26.3-0) jammy; urgency=medium
+
+  * Stop narrow terminals from wrapping ANSI-styled metric rows in local mode by clamping every rendered line to the visible width
+  * Split the local view into a live summary, trend panels, and a hardware detail section so CPU, GPU, memory, temperature, and power values are shown once
+  * Degrade the local header from sparklines to plain values as the terminal narrows, leaving the remote CPU, GPU, memory, and storage gauges unchanged
+  * Accept space-separated, comma-separated, and mixed `--hosts` lists in `view` and `record --source=remote`, preserving input order and explicit HTTP or HTTPS schemes (#404)
+  * Reject malformed remote endpoints before the view TUI or remote recorder starts instead of failing later in the collector
+  * Replace internal issue references and Rust review terminology in the rendered CLI help tree, README, and installed manpage with descriptions of actual behavior (#405)
+  * Explain in the AMD single-card doctor check that verifying per-card telemetry requires at least two answering physical cards
+  * Correct the README locale, cache-path, and alert-precedence descriptions, which documented behavior the code no longer had
+  * Update Rust dependencies, including nvml-wrapper 0.13.0, miniz_oxide 0.9.1, uuid 1.26.0, and the release builds of argon2 0.6.0 and blake2 0.11.0
+
+ -- Jeongkyu Shin <inureyes@gmail.com>  Tue, 01 Sep 2026 00:00:00 +0000
+
 all-smi (0.26.2-0) jammy; urgency=medium
 
   * Move Linux AMD monitoring into a version-checked runtime companion so the main executable and `default-features = false` consumers no longer link libdrm directly

@@ -56,7 +56,7 @@ dependencies = [
 
 [[package]]
 name = "all-smi"
-version = "0.26.2"
+version = "0.26.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -111,7 +111,7 @@ dependencies = [
 
 [[package]]
 name = "all-smi-amd-plugin"
-version = "0.26.2"
+version = "0.26.3"
 dependencies = [
  "all-smi",
  "chrono",

@@ -1585,6 +1585,7 @@ See the [LICENSE](./LICENSE) file for details.
 ## Changelog
 
 ### Recent Updates
+- **v0.26.3 (2026/09/01):** Fixed local TUI wrapping and duplicated metrics in narrow terminals, accepted comma-separated `--hosts` lists with startup validation, corrected user-facing CLI and doc text, and updated Rust dependencies including nvml-wrapper 0.13
 - **v0.26.2 (2026/08/25):** Moved Linux AMD monitoring into a runtime-loaded companion, fixed unavailable Windows GPU metrics and Level Zero memory provenance, and made native Windows tests and lint checks pass.
 - **v0.26.1 (2026/08/24):** Fixed macOS release signing and recovery, added early validation for Homebrew credentials and native Windows checks, and refreshed Rust dependencies
 - **v0.26.0 (2026/08/24):** Run API mode as a supervised service on Linux, macOS, and Windows, add Windows GPU metrics via DXGI, PDH, and AMD ADL, and compile the Intel Level Zero backend into every Linux and Windows build
