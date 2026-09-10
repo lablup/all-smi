@@ -35,6 +35,19 @@ const MIN_PUBLICATION_SPAN_NS: u64 = 50_000_000;
 /// dropped, in nanoseconds. Keeps a stalled provider from showing as live.
 const STALE_PUBLICATION_NS: u64 = 10_000_000_000;
 
+/// How far ahead of the observation time a driver timestamp may sit and still
+/// be trusted, in nanoseconds.
+///
+/// A stamp on the observation clock is never later than the observation: the
+/// driver writes the element before `IOReportCreateSamples` returns, and
+/// `observed_at_ns` is read after it returns. A stamp further ahead than this
+/// comes from another clock (for example a driver on `mach_continuous_time`
+/// after a system sleep) or is not a timestamp at all (the element layout
+/// changed), and honoring it would let a stalled channel hold its reading
+/// forever, since the staleness check below can never see it fall behind. 1 s
+/// of slack is deliberate headroom, not a measured bound.
+const MAX_TIMESTAMP_LEAD_NS: u64 = 1_000_000_000;
+
 /// The power rail an `Energy Model` channel is summed into.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EnergyRail {
@@ -187,7 +200,8 @@ struct ChannelState {
     /// after a counter reset, and once the channel goes stale.
     watts: Option<f64>,
     /// Timed by when samples were taken instead of by the driver's
-    /// timestamps. Set once those timestamps prove unusable, never cleared.
+    /// timestamps. Set once those timestamps prove unusable (missing, frozen
+    /// while the value moves, or later than the observation), never cleared.
     /// The switch restarts the span from the previous observation, so the
     /// first reading on the observation clock is the poll window, not a
     /// span that mixes a driver timestamp with an observation time.
@@ -196,9 +210,19 @@ struct ChannelState {
     last_seen: u64,
 }
 
+/// Whether `ts` could plausibly be a publication timestamp on the observation
+/// clock, given that the observation happened at `observed_at_ns`. See
+/// [`MAX_TIMESTAMP_LEAD_NS`] for why a stamp further ahead cannot be one.
+fn plausible_timestamp(ts: u64, observed_at_ns: u64) -> bool {
+    ts <= observed_at_ns.saturating_add(MAX_TIMESTAMP_LEAD_NS)
+}
+
 impl ChannelState {
     fn first_sighting(obs: &EnergyObservation, observed_at_ns: u64, sample: u64) -> Self {
-        let published_ns = obs.timestamp_ns.unwrap_or(observed_at_ns);
+        let usable_ts = obs
+            .timestamp_ns
+            .filter(|ts| plausible_timestamp(*ts, observed_at_ns));
+        let published_ns = usable_ts.unwrap_or(observed_at_ns);
         Self {
             baseline_value: obs.value,
             baseline_ns: published_ns,
@@ -206,7 +230,7 @@ impl ChannelState {
             last_ns: published_ns,
             last_observed_ns: observed_at_ns,
             watts: None,
-            observation_clock: obs.timestamp_ns.is_none(),
+            observation_clock: usable_ts.is_none(),
             last_seen: sample,
         }
     }
@@ -215,7 +239,9 @@ impl ChannelState {
         let stamped = match obs.timestamp_ns {
             // A counter that moved while its timestamp did not is not being
             // stamped at publication, so its timestamps cannot time a span.
-            Some(ts) if !self.observation_clock => {
+            // A timestamp further ahead of the observation than plausible is
+            // not on our clock at all, so it cannot time a span either.
+            Some(ts) if !self.observation_clock && plausible_timestamp(ts, observed_at_ns) => {
                 (ts != self.last_ns || obs.value == self.last_value).then_some(ts)
             }
             _ => None,

@@ -441,6 +441,49 @@ fn timestamps_disappearing_mid_stream_switch_to_the_poll_window() {
 }
 
 #[test]
+fn stalled_channel_with_a_future_timestamp_does_not_hold_forever() {
+    // A stamp far ahead of the observation clock, for example a driver on
+    // mach_continuous_time after a system sleep. Left unfiltered it never
+    // falls behind observed_at_ns, so the staleness check can never fire and
+    // a stalled provider's held reading would live forever.
+    let lead = 60_000 * MS;
+    let t0 = 1_000 * MS;
+    let mut tracker = EnergyTracker::default();
+    tracker.observe_sample(t0, [cpu(0, t0 + lead)]);
+
+    let t1 = t0 + 2_000 * MS;
+    tracker.observe_sample(t1, [cpu(2_000, t1 + lead)]);
+    assert_watts(tracker.readings().cpu, 1.0);
+
+    // The provider stalls: value and stamp both frozen. Fifteen polls at 1 s.
+    for step in 1..=15 {
+        tracker.observe_sample(t1 + step * 1_000 * MS, [cpu(2_000, t1 + lead)]);
+    }
+    assert_watts(tracker.readings().cpu, 0.0);
+}
+
+#[test]
+fn future_timestamp_mid_stream_switches_to_the_poll_window() {
+    let t0 = 1_000 * MS;
+    let mut tracker = EnergyTracker::default();
+    tracker.observe_sample(t0 + 10 * MS, [cpu(0, t0)]);
+
+    let t1 = t0 + ms(2043.0);
+    tracker.observe_sample(t1 + 10 * MS, [cpu(4_969, t1)]);
+    assert_watts(tracker.readings().cpu, 4.969 / 2.043);
+
+    // A future timestamp arrives mid-stream: unusable, so the channel falls
+    // back to the observation clock, rebased onto the previous observation.
+    let t2 = t1 + 1_010 * MS;
+    tracker.observe_sample(t2, [cpu(5_969, t2 + 30_000 * MS)]);
+    assert_watts(tracker.readings().cpu, 1.0);
+
+    // The switch is sticky: a plausible stamp does not undo it.
+    tracker.observe_sample(t2 + 1_000 * MS, [cpu(6_969, t2 + 900 * MS)]);
+    assert_watts(tracker.readings().cpu, 1.0);
+}
+
+#[test]
 fn gpu_resolution_drops_channels_missing_from_the_latest_sample() {
     // GPU Energy and GPU0 carry the same energy on real hardware; they are
     // given different watts here so the readings show which source won.
