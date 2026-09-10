@@ -100,7 +100,8 @@ use core_foundation::base::{
 };
 use core_foundation::data::{CFData, CFDataGetTypeID, CFDataRef};
 use core_foundation::dictionary::{
-    CFDictionary, CFDictionaryGetValue, CFDictionaryRef, CFMutableDictionaryRef,
+    CFDictionary, CFDictionaryGetTypeID, CFDictionaryGetValue, CFDictionaryRef,
+    CFMutableDictionaryRef,
 };
 use core_foundation::string::{CFString, CFStringRef};
 use std::ffi::c_void;
@@ -811,6 +812,15 @@ fn get_io_channels(dict: CFDictionaryRef) -> Vec<CFDictionaryRef> {
         return vec![];
     }
 
+    // SAFETY: `dict` is a valid sample dictionary the caller keeps alive for
+    // the duration of this call. `wrap_under_get_rule` and `CFDictionary::find`
+    // follow the CF get-rule (no extra retain on values borrowed from `dict`).
+    // The `IOReportChannels` value is null-checked and type-checked as a
+    // `CFArray` before it is wrapped, and every element of that array is
+    // null-checked and type-checked as a `CFDictionary` before being handed
+    // back, so a sample whose structure does not match what IOReport
+    // normally returns yields an empty or filtered list instead of driving a
+    // CF accessor with the wrong type.
     unsafe {
         let cf_dict = CFDictionary::<CFType, CFType>::wrap_under_get_rule(dict);
         let key = CFString::new("IOReportChannels");
@@ -818,7 +828,9 @@ fn get_io_channels(dict: CFDictionaryRef) -> Vec<CFDictionaryRef> {
         if let Some(channels) = cf_dict.find(key.as_CFType().as_CFTypeRef()) {
             // The channels value is a CFArray - get its raw pointer
             let arr_ref = channels.as_CFTypeRef() as core_foundation::array::CFArrayRef;
-            if arr_ref.is_null() {
+            if arr_ref.is_null()
+                || CFGetTypeID(arr_ref as CFTypeRef) != core_foundation::array::CFArrayGetTypeID()
+            {
                 return vec![];
             }
 
@@ -827,7 +839,7 @@ fn get_io_channels(dict: CFDictionaryRef) -> Vec<CFDictionaryRef> {
 
             (0..count)
                 .filter_map(|i| arr.get(i).map(|v| v.as_CFTypeRef() as CFDictionaryRef))
-                .filter(|d| !d.is_null())
+                .filter(|d| !d.is_null() && CFGetTypeID(*d as CFTypeRef) == CFDictionaryGetTypeID())
                 .collect()
         } else {
             vec![]
@@ -854,8 +866,15 @@ fn mach_timebase() -> (u32, u32) {
 }
 
 /// Scale mach ticks to nanoseconds with an explicit timebase.
+///
+/// Saturates to `u64::MAX` instead of wrapping when the result overflows a
+/// `u64`, which an out-of-range tick count from garbage `RawElements` bytes
+/// (or an extreme timebase) could otherwise turn into an arbitrary,
+/// possibly earlier-looking time. A zero `denom` is read as 1 rather than
+/// dividing by zero.
 fn scale_mach_ticks(ticks: u64, numer: u32, denom: u32) -> u64 {
-    (u128::from(ticks) * u128::from(numer) / u128::from(denom)) as u64
+    let ns = u128::from(ticks) * u128::from(numer) / u128::from(denom.max(1));
+    u64::try_from(ns).unwrap_or(u64::MAX)
 }
 
 /// Convert `mach_absolute_time` ticks to nanoseconds.
@@ -1653,6 +1672,10 @@ mod tests {
         // The intermediate product must not overflow.
         let ticks = u64::MAX / 125 * 3;
         assert_eq!(scale_mach_ticks(ticks, 125, 3), u64::MAX / 125 * 125);
+        // An out-of-range result saturates instead of wrapping.
+        assert_eq!(scale_mach_ticks(u64::MAX, 125, 3), u64::MAX);
+        // A zero denom is read as 1 rather than dividing by zero.
+        assert_eq!(scale_mach_ticks(42, 1, 0), 42);
     }
 
     /// Hardware diagnostic for the Energy Model (issue #410). Prints this
@@ -1694,6 +1717,8 @@ mod tests {
             }
         }
         println!("# {inventory} channels");
+        // SAFETY: `sample` is the +1 reference `take_sample` returns, released
+        // exactly once here and not used afterwards.
         unsafe { CFRelease(sample as *const c_void) };
 
         println!("# per tracked channel: dv = counter delta, dts = publication span");
@@ -1706,6 +1731,10 @@ mod tests {
             };
             let now_ns = mach_now_ns();
             let observations = energy_observations(sample);
+            // SAFETY: `sample` is the +1 reference `take_sample` returns for
+            // this iteration, released exactly once here; `energy_observations`
+            // has already copied out everything it needs, so `sample` is not
+            // used afterwards.
             unsafe { CFRelease(sample as *const c_void) };
 
             let ms = |ns: u64| format!("{:.1}ms", ns as f64 / 1e6);
