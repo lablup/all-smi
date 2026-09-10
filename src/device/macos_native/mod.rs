@@ -25,10 +25,12 @@
 //!
 //! ## Modules
 //! - `ioreport`: IOReport API for power and residency metrics
+//! - `energy`: Energy Model channel classification and per-channel power
 //! - `smc`: Apple SMC for temperature and system power metrics
 //! - `thermal`: NSProcessInfo thermal state binding
 //! - `manager`: Unified manager for native metrics collection
 
+mod energy;
 mod ioreport;
 mod metrics;
 mod thermal;

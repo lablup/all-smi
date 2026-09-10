@@ -256,8 +256,9 @@ impl NativeMetricsManager {
                 }
 
                 match ioreport.get_sample(config.sample_interval_ms) {
-                    Ok((iterator, duration_ns)) => {
-                        let metrics = IOReportMetrics::from_sample(iterator, duration_ns);
+                    Ok(iterator) => {
+                        let metrics =
+                            IOReportMetrics::from_sample(iterator, ioreport.energy_readings());
                         samples.push(metrics);
                     }
                     Err(_e) => {
@@ -410,27 +411,30 @@ impl NativeMetricsManager {
         let mut ioreport_guard = self.ioreport.lock().map_err(|_| "IOReport lock poisoned")?;
         let ioreport = ioreport_guard.as_mut().ok_or("IOReport not initialized")?;
 
-        // Delta against the sample retained by the previous collection. Every
-        // subscribed channel is a cumulative counter, so this covers the whole
-        // interval since that collection rather than a short synthetic window,
-        // and it needs neither a `sleep` nor repeated samples to average: the
-        // long delta already *is* the interval's time average.
+        // Residency deltas against the sample retained by the previous
+        // collection. The residency channels are cumulative counters, so this
+        // covers the whole interval since that collection rather than a short
+        // synthetic window, and it needs neither a `sleep` nor repeated samples
+        // to average: the long delta already *is* the interval's time average.
         //
         // Only the very first collection of a session has no baseline. It pays
         // one blocking `sample_interval_ms` window so the caller gets data
         // immediately instead of waiting a full poll for the second call.
-        let avg_metrics = match ioreport.get_sample_since_last()? {
-            Some((iterator, duration_ns)) => IOReportMetrics::from_sample(iterator, duration_ns),
-            None => {
-                // The call above already retained a baseline, so the next
-                // collection deltas against it and this branch runs once per
-                // session. The short window measured here overlaps the start of
-                // that first interval, which is harmless.
-                let (iterator, duration_ns) =
-                    ioreport.get_sample(self.config.sample_interval_ms)?;
-                IOReportMetrics::from_sample(iterator, duration_ns)
-            }
+        let residency = match ioreport.get_sample_since_last()? {
+            Some(iterator) => iterator,
+            // The call above already retained a baseline, so the next
+            // collection deltas against it and this branch runs once per
+            // session. The short window measured here overlaps the start of
+            // that first interval, which is harmless.
+            None => ioreport.get_sample(self.config.sample_interval_ms)?,
         };
+
+        // Power is not taken from that delta. Every sample above also fed the
+        // subscription's energy tracker, which times each Energy Model channel
+        // by its own publication timestamps and holds the last reading between
+        // publications, so a poll that lands between two ~2.1 s batches no
+        // longer reads 0 W (issue #410).
+        let avg_metrics = IOReportMetrics::from_sample(residency, ioreport.energy_readings());
 
         // Collect SMC metrics
         let smc_metrics = SMCMetrics::collect();

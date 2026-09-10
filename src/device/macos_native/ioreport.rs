@@ -22,14 +22,86 @@
 //! - `CPU Stats`: CPU core performance states and residency
 //! - `GPU Stats`: GPU performance states and residency
 //!
+//! ## Energy Model: exact channel matching
+//!
+//! The group is a hierarchy, not a list of rails. On an M5 Max (macOS 27) it
+//! holds 364 channels: the `CPU Energy` roll-up, the clusters that sum to it
+//! (`MCPU0`, `MCPU1`, `PCPU`), per-core channels, `*_SRAM`, 300 `*DTL*`
+//! telemetry channels, `GPU0`, `GPU Energy`, and a dozen other blocks (see
+//! `tests/fixtures/ioreport/m5_max_energy_model.tsv`). Substring matching on
+//! `CPU` summed the roll-up together with everything under it. One loaded
+//! batch:
+//!
+//! | family | channels | watts |
+//! |---|---|---|
+//! | `CPU Energy` (roll-up) | 1 | 36.17 |
+//! | `MCPU0`, `MCPU1`, `PCPU` (clusters) | 3 | 36.17 |
+//! | `MCPU*DTL*`, `PCPUDTL*` (per-core telemetry) | 300 | 26.01 |
+//! | `MCPUx_y` (per-core) | 12 | 5.20 |
+//! | `*_SRAM` | 18 | 3.13 |
+//! | reported as CPU power | 334 | 106.68 |
+//!
+//! That is 2.95x the roll-up. `GPU0` (mJ) and `GPU Energy` (nJ) carry the
+//! same energy, so matching both counted the GPU twice. Channels are matched
+//! by exact name in [`classify_energy_channel`]: `GPU Energy`; names ending in
+//! `CPU Energy` (`DIE_<n>_CPU Energy` on multi-die packages); `GPU<n>` only
+//! when a sample has no `GPU Energy`; and the top-level `ANE`/`DRAM` shapes
+//! (`ANE`, `ANE0`, `ANE0_1`). Nothing else is summed.
+//!
+//! ## Energy Model: power from publication timestamps
+//!
+//! The mJ counters do not advance continuously. On an M5 Max (macOS 27) the
+//! driver publishes all of them together in batches 2.03 to 2.23 s apart
+//! (measured spans 2027.5 to 2228.1 ms); between publications both the value
+//! and its timestamp are frozen. Dividing by the poll window misreads at every
+//! interval. At 1 s it alternates between 0 W and a whole batch over 1 s
+//! (about 2x). Holding the zero ticks is not enough either, because the window
+//! stays quantized to the poll grid: a 2.1 s batch spans 2 s or 3 s of polls,
+//! so a 1 s poll reads 1.05x or 0.70x, and at the 3 s API default every window
+//! holds one or two batches and the reading beats between 0.7x and 1.4x.
+//!
+//! Two more measured behaviors constrain the design:
+//! - `GPU Energy` (nJ) is stamped at sample time (0.1 to 0.4 ms old) and moves
+//!   on every sample under load. At idle it reads exactly 0 nJ per window, so
+//!   a zero there is 0 W, not a missing publication.
+//! - Publications split. A batch is sometimes followed 9 to 26 ms later by a
+//!   small second publication with its own timestamp (`CPU Energy`: 4969 mJ
+//!   over 2043.0 ms, then 65 mJ over 14.8 ms), and one channel can land a
+//!   sample after the others (`DRAM0` once published 25 ms after
+//!   `CPU Energy`, with its own 2158.5 ms span). A single "the roll-up moved"
+//!   clock cannot time both, so timing is per channel.
+//!
+//! So power comes from the driver's own publication times. Each channel's
+//! `RawElements` data holds xnu's `IOReportElement`
+//! (`IOKernelReportStructs.h`): provider id at byte 0, channel id at 8,
+//! channel type at 16, the `mach_absolute_time` of the driver's last update at
+//! 24, and the value at 32. [`EnergyTracker`] keeps a `(value, timestamp)`
+//! baseline per channel and, when a channel publishes, reports
+//! `(value - baseline) / (timestamp - baseline timestamp)`. It holds the
+//! previous reading while a channel has not published, folds publications
+//! under 50 ms into the next span, and drops a reading after 10 s without
+//! one. A channel whose elements carry no usable timestamp is timed by when
+//! each sample was taken, which is the old poll-window behavior.
+//!
+//! The timestamps have to be read from raw samples. In the output of
+//! `IOReportCreateSamplesDelta` an element's timestamp is the older sample's,
+//! so a delta cannot say when the energy it carries was published. Residency
+//! and frequency still come from the delta: those counters advance on every
+//! sample.
+//!
 //! ## References
 //! - macmon project by vladkens
 //! - asitop project by tlkh
 //! - OSXPrivateSDK IOReport.h
 
-use core_foundation::base::{CFRelease, CFRetain, CFType, CFTypeRef, TCFType};
-use core_foundation::data::CFData;
-use core_foundation::dictionary::{CFDictionary, CFDictionaryRef, CFMutableDictionaryRef};
+use super::energy::{EnergyObservation, EnergyReadings, EnergyTracker, classify_energy_channel};
+use core_foundation::base::{
+    CFEqual, CFGetTypeID, CFRelease, CFRetain, CFType, CFTypeRef, TCFType,
+};
+use core_foundation::data::{CFData, CFDataGetTypeID, CFDataRef};
+use core_foundation::dictionary::{
+    CFDictionary, CFDictionaryGetValue, CFDictionaryRef, CFMutableDictionaryRef,
+};
 use core_foundation::string::{CFString, CFStringRef};
 use std::ffi::c_void;
 use std::marker::{PhantomData, PhantomPinned};
@@ -37,7 +109,7 @@ use std::ptr;
 use std::sync::OnceLock;
 use std::time::Instant;
 
-/// Static CFStringRef constants for IOReport channel groups.
+/// Static CFStringRef constants for IOReport channel groups and dictionary keys.
 /// These are created once, retained with CFRetain, and kept for the lifetime
 /// of the application to avoid use-after-free issues with temporary CFString objects.
 ///
@@ -49,6 +121,7 @@ struct CFStringRefs {
     cpu_perf_states: CFStringRef,
     gpu_stats: CFStringRef,
     gpu_perf_states: CFStringRef,
+    raw_elements: CFStringRef,
 }
 
 // SAFETY: CFStringRef is an immutable reference type. Once created and retained,
@@ -92,6 +165,12 @@ impl CFStringRefs {
                 CFRetain(ptr as *const c_void);
                 ptr
             };
+            let raw_elements = {
+                let s = CFString::new(RAW_ELEMENTS);
+                let ptr = s.as_concrete_TypeRef();
+                CFRetain(ptr as *const c_void);
+                ptr
+            };
 
             Self {
                 energy_model,
@@ -99,6 +178,7 @@ impl CFStringRefs {
                 cpu_perf_states,
                 gpu_stats,
                 gpu_perf_states,
+                raw_elements,
             }
         }
     }
@@ -355,6 +435,23 @@ unsafe extern "C" {
         options: u32,
     ) -> i32;
     fn IOObjectRelease(object: u32) -> i32;
+}
+
+/// `mach_timebase_info_data_t`: `mach_absolute_time` ticks convert to
+/// nanoseconds as `ticks * numer / denom`.
+#[repr(C)]
+#[derive(Default)]
+struct MachTimebaseInfo {
+    numer: u32,
+    denom: u32,
+}
+
+// The mach clock IOReport stamps its elements with. Both live in libSystem,
+// which every macOS binary links; they are declared here because the `libc`
+// bindings for them are deprecated.
+unsafe extern "C" {
+    fn mach_absolute_time() -> u64;
+    fn mach_timebase_info(info: *mut MachTimebaseInfo) -> i32;
 }
 
 /// Every `voltage-states*` table published by the IOKit pmgr/clpc device.
@@ -738,25 +835,120 @@ fn get_io_channels(dict: CFDictionaryRef) -> Vec<CFDictionaryRef> {
     }
 }
 
+/// `mach_absolute_time` timebase as `(numer, denom)`, read once.
+static MACH_TIMEBASE: OnceLock<(u32, u32)> = OnceLock::new();
+
+fn mach_timebase() -> (u32, u32) {
+    *MACH_TIMEBASE.get_or_init(|| {
+        let mut info = MachTimebaseInfo::default();
+        // SAFETY: `info` is a valid, writable `mach_timebase_info_data_t`.
+        let status = unsafe { mach_timebase_info(&mut info) };
+        // The call does not fail in practice; 1/1 only keeps the arithmetic
+        // defined if it ever does.
+        if status == 0 && info.numer != 0 && info.denom != 0 {
+            (info.numer, info.denom)
+        } else {
+            (1, 1)
+        }
+    })
+}
+
+/// Scale mach ticks to nanoseconds with an explicit timebase.
+fn scale_mach_ticks(ticks: u64, numer: u32, denom: u32) -> u64 {
+    (u128::from(ticks) * u128::from(numer) / u128::from(denom)) as u64
+}
+
+/// Convert `mach_absolute_time` ticks to nanoseconds.
+///
+/// A tick is not a nanosecond on Apple Silicon: the timebase is 125/3, one
+/// tick per 41.67 ns.
+fn mach_ticks_to_ns(ticks: u64) -> u64 {
+    let (numer, denom) = mach_timebase();
+    scale_mach_ticks(ticks, numer, denom)
+}
+
+/// Now, on the clock IOReport stamps elements with, in nanoseconds.
+fn mach_now_ns() -> u64 {
+    // SAFETY: takes no arguments and has no preconditions.
+    mach_ticks_to_ns(unsafe { mach_absolute_time() })
+}
+
+/// Offset of the publication timestamp inside an `IOReportElement`: the
+/// `mach_absolute_time` of the driver's last update (see the module docs for
+/// the whole layout).
+const RAW_ELEMENT_TIMESTAMP_OFFSET: usize = 24;
+
+/// Read the publication timestamp out of a channel's `RawElements` bytes.
+///
+/// Returns `None` when the data is too short to hold one.
+fn parse_raw_element_timestamp(bytes: &[u8]) -> Option<u64> {
+    let raw = bytes.get(RAW_ELEMENT_TIMESTAMP_OFFSET..RAW_ELEMENT_TIMESTAMP_OFFSET + 8)?;
+    Some(u64::from_le_bytes(raw.try_into().ok()?))
+}
+
+/// The publication timestamp of one channel of a raw sample, in mach ticks.
+fn raw_element_timestamp(item: CFDictionaryRef) -> Option<u64> {
+    let key = get_cfstring_refs().raw_elements;
+    unsafe {
+        let value = CFDictionaryGetValue(item, key as *const c_void);
+        if value.is_null() || CFGetTypeID(value) != CFDataGetTypeID() {
+            return None;
+        }
+        let data = CFData::wrap_under_get_rule(value as CFDataRef);
+        parse_raw_element_timestamp(data.bytes())
+    }
+}
+
+/// The channel's name, if it belongs to the `Energy Model` group.
+///
+/// The group is compared as a CFString, so a channel from another group costs
+/// no string conversion.
+fn energy_channel_name(item: CFDictionaryRef) -> Option<String> {
+    let energy_model = get_cfstring_refs().energy_model as CFTypeRef;
+    unsafe {
+        let group = IOReportChannelGetGroup(item);
+        if group.is_null() || CFEqual(group as CFTypeRef, energy_model) == 0 {
+            return None;
+        }
+        cfstr_to_string(IOReportChannelGetChannelName(item))
+    }
+}
+
+/// The channel's unit label (`mJ`, `uJ`, `nJ`, ...), empty when it has none.
+fn channel_unit(item: CFDictionaryRef) -> String {
+    unsafe { cfstr_to_string(IOReportChannelGetUnitLabel(item)).unwrap_or_default() }
+}
+
+/// Read every tracked `Energy Model` channel out of a raw (non-delta) sample.
+///
+/// Only channels that classify into a rail are read past their name, so the
+/// ~360 untracked channels of an M5 Max cost one name conversion each.
+fn energy_observations(sample: CFDictionaryRef) -> Vec<EnergyObservation> {
+    get_io_channels(sample)
+        .into_iter()
+        .filter_map(|item| {
+            let channel = energy_channel_name(item)?;
+            classify_energy_channel(&channel)?;
+            Some(EnergyObservation {
+                unit: channel_unit(item),
+                value: unsafe { IOReportSimpleGetIntegerValue(item, 0) },
+                timestamp_ns: raw_element_timestamp(item).map(mach_ticks_to_ns),
+                channel,
+            })
+        })
+        .collect()
+}
+
 /// Item from IOReport iteration
 #[derive(Debug, Clone)]
 pub struct IOReportChannelItem {
     pub group: String,
     pub subgroup: String,
     pub channel: String,
-    pub unit: String,
     pub item: CFDictionaryRef,
 }
 
 impl IOReportChannelItem {
-    /// Get simple integer value from this channel
-    pub fn get_integer_value(&self) -> i64 {
-        if self.item.is_null() {
-            return 0;
-        }
-        unsafe { IOReportSimpleGetIntegerValue(self.item, 0) }
-    }
-
     /// Get state residencies as (name, residency) pairs
     pub fn get_residencies(&self) -> Vec<(String, i64)> {
         if self.item.is_null() {
@@ -774,27 +966,6 @@ impl IOReportChannelItem {
                 })
                 .collect()
         }
-    }
-
-    /// Calculate power consumption in watts from energy value
-    pub fn calculate_watts(&self, duration_ns: u64) -> f64 {
-        let value = self.get_integer_value();
-        if value <= 0 || duration_ns == 0 {
-            return 0.0;
-        }
-
-        // Determine conversion factor based on unit
-        let unit_factor = match self.unit.as_str() {
-            "mJ" => 1e-3, // millijoules to joules
-            "uJ" => 1e-6, // microjoules to joules
-            "nJ" => 1e-9, // nanojoules to joules
-            _ => 1e-9,    // Default to nanojoules
-        };
-
-        // Convert energy to watts: W = J / s
-        let energy_joules = value as f64 * unit_factor;
-        let duration_secs = duration_ns as f64 / 1e9;
-        energy_joules / duration_secs
     }
 }
 
@@ -851,13 +1022,11 @@ impl Iterator for IOReportIterator {
             let group = cfstr_to_string(IOReportChannelGetGroup(item)).unwrap_or_default();
             let subgroup = cfstr_to_string(IOReportChannelGetSubGroup(item)).unwrap_or_default();
             let channel = cfstr_to_string(IOReportChannelGetChannelName(item)).unwrap_or_default();
-            let unit = cfstr_to_string(IOReportChannelGetUnitLabel(item)).unwrap_or_default();
 
             Some(IOReportChannelItem {
                 group,
                 subgroup,
                 channel,
-                unit,
                 item,
             })
         }
@@ -871,17 +1040,22 @@ const CPU_PERF_STATES: &str = "CPU Core Performance States";
 const GPU_STATS: &str = "GPU Stats";
 const GPU_PERF_STATES: &str = "GPU Performance States";
 
+/// Key of the raw element data inside each channel of a sample.
+const RAW_ELEMENTS: &str = "RawElements";
+
 /// Shortest interval [`IOReport::get_sample_since_last`] will turn into a
-/// delta. Power and residency are counter deltas divided by elapsed time, so a
-/// window this short is dominated by sampling jitter; below it the call
-/// reports "no delta yet" instead of a wild rate.
+/// delta. Residency over a window this short is dominated by sampling jitter;
+/// below it the call reports "no delta yet" instead of a wild rate.
 const MIN_DELTA_WINDOW: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// IOReport subscription manager
 pub struct IOReport {
     subscription: IOReportSubscriptionRef,
     channels: CFMutableDictionaryRef,
+    /// Baseline for the residency delta.
     prev_sample: Option<(CFDictionaryRef, Instant)>,
+    /// Per-channel energy baselines, fed by every raw sample taken here.
+    energy: EnergyTracker,
 }
 
 impl IOReport {
@@ -929,6 +1103,7 @@ impl IOReport {
                 subscription,
                 channels,
                 prev_sample: None,
+                energy: EnergyTracker::default(),
             })
         }
     }
@@ -941,17 +1116,26 @@ impl IOReport {
     /// against the previous call and therefore covers the whole interval
     /// without sleeping. This variant remains for the first sample of a
     /// session, where there is no previous sample to delta against.
-    pub fn get_sample(
-        &mut self,
-        duration_ms: u64,
-    ) -> Result<(IOReportIterator, u64), &'static str> {
+    ///
+    /// Both samples feed the energy tracker, so power after this call is
+    /// whatever the tracker holds, not energy over this window. On an M5 Max
+    /// that is usually no reading yet, since the mJ counters publish every
+    /// ~2.1 s and rarely inside a 100 ms window; an exact reading when a
+    /// publication did land in it; and never the ~20x spike that dividing a
+    /// whole 2.1 s batch by a 100 ms window used to produce. Channels stamped
+    /// at sample time, such as `GPU Energy`, read normally.
+    pub fn get_sample(&mut self, duration_ms: u64) -> Result<IOReportIterator, &'static str> {
         let sample1 = self.take_sample()?;
 
-        let start = Instant::now();
         std::thread::sleep(std::time::Duration::from_millis(duration_ms));
 
-        let sample2 = self.take_sample()?;
-        let duration_ns = start.elapsed().as_nanos() as u64;
+        let sample2 = match self.take_sample() {
+            Ok(sample) => sample,
+            Err(e) => {
+                unsafe { CFRelease(sample1 as *const c_void) };
+                return Err(e);
+            }
+        };
 
         // Calculate delta
         let delta = unsafe {
@@ -965,19 +1149,22 @@ impl IOReport {
             return Err("Failed to create sample delta");
         }
 
-        Ok((IOReportIterator::new(delta), duration_ns))
+        Ok(IOReportIterator::new(delta))
     }
 
     /// Get a delta sample covering the time since the previous call, without
     /// blocking.
     ///
-    /// Every channel subscribed here is a cumulative counter (energy in the
-    /// Energy Model group, residency ticks in the CPU/GPU stats groups), so a
-    /// delta between two arbitrary samples is exactly the activity that
-    /// occurred between them. Retaining the newest sample and differencing the
-    /// next call against it therefore yields a window equal to the caller's
-    /// polling period, with no `sleep` and a single `IOReportCreateSamples`
-    /// call per poll.
+    /// The residency channels in the CPU/GPU stats groups are cumulative
+    /// counters, so a delta between two arbitrary samples is exactly the
+    /// activity that occurred between them. Retaining the newest sample and
+    /// differencing the next call against it therefore yields a window equal
+    /// to the caller's polling period, with no `sleep` and a single
+    /// `IOReportCreateSamples` call per poll.
+    ///
+    /// Power does not come from this delta. The sample also feeds the energy
+    /// tracker, read through [`energy_readings`], which times each Energy
+    /// Model channel by its own publication timestamps (see the module docs).
     ///
     /// Returns `Ok(None)` when no usable delta is available, which happens in
     /// two cases: the first call of a session (nothing to delta against yet),
@@ -989,9 +1176,8 @@ impl IOReport {
     ///
     /// [`get_sample`]: Self::get_sample
     /// [`get_sample_since_last`]: Self::get_sample_since_last
-    pub fn get_sample_since_last(
-        &mut self,
-    ) -> Result<Option<(IOReportIterator, u64)>, &'static str> {
+    /// [`energy_readings`]: Self::energy_readings
+    pub fn get_sample_since_last(&mut self) -> Result<Option<IOReportIterator>, &'static str> {
         let sample = self.take_sample()?;
         let now = Instant::now();
 
@@ -1005,12 +1191,10 @@ impl IOReport {
             return Ok(None);
         }
 
-        let Some((prev, prev_at)) = self.prev_sample.replace((sample, now)) else {
+        let Some((prev, _)) = self.prev_sample.replace((sample, now)) else {
             // First call: `sample` is now retained as the baseline.
             return Ok(None);
         };
-
-        let duration_ns = now.duration_since(prev_at).as_nanos() as u64;
 
         // `IOReportCreateSamplesDelta` does not take ownership of either
         // argument. `sample` stays retained as the new baseline (it is already
@@ -1025,18 +1209,29 @@ impl IOReport {
             return Err("Failed to create sample delta");
         }
 
-        Ok(Some((IOReportIterator::new(delta), duration_ns)))
+        Ok(Some(IOReportIterator::new(delta)))
     }
 
-    /// Take a single sample
-    fn take_sample(&self) -> Result<CFDictionaryRef, &'static str> {
-        unsafe {
-            let sample = IOReportCreateSamples(self.subscription, self.channels, ptr::null());
-            if sample.is_null() {
-                return Err("Failed to create IOReport sample");
-            }
-            Ok(sample)
+    /// Power per rail as of the most recent raw sample.
+    pub fn energy_readings(&self) -> EnergyReadings {
+        self.energy.readings()
+    }
+
+    /// Take a single raw sample and feed its energy channels to the tracker.
+    ///
+    /// Every sample this subscription takes passes through here, so the
+    /// tracker sees all of them, in order, and reads its timestamps from raw
+    /// samples rather than from a delta.
+    fn take_sample(&mut self) -> Result<CFDictionaryRef, &'static str> {
+        let sample =
+            unsafe { IOReportCreateSamples(self.subscription, self.channels, ptr::null()) };
+        if sample.is_null() {
+            return Err("Failed to create IOReport sample");
         }
+        let observed_at_ns = mach_now_ns();
+        self.energy
+            .observe_sample(observed_at_ns, energy_observations(sample));
+        Ok(sample)
     }
 }
 
@@ -1095,9 +1290,22 @@ pub struct IOReportMetrics {
 }
 
 impl IOReportMetrics {
-    /// Collect metrics from an IOReport sample
-    pub fn from_sample(iterator: IOReportIterator, duration_ns: u64) -> Self {
-        let mut metrics = Self::default();
+    /// Collect metrics from an IOReport delta sample and the subscription's
+    /// current power readings.
+    ///
+    /// Residency and frequency come from `iterator`, the delta between two
+    /// samples. Power comes from `power` ([`IOReport::energy_readings`]), not
+    /// from the delta, because the Energy Model counters have to be timed by
+    /// their own publication timestamps (see the module docs).
+    pub fn from_sample(iterator: IOReportIterator, power: EnergyReadings) -> Self {
+        let mut metrics = Self {
+            cpu_power: power.cpu,
+            gpu_power: power.gpu,
+            ane_power: power.ane,
+            dram_power: power.dram,
+            package_power: power.package(),
+            ..Self::default()
+        };
 
         let mut s_cluster_freqs: Vec<(u32, f64)> = vec![];
         let mut e_cluster_freqs: Vec<(u32, f64)> = vec![];
@@ -1106,9 +1314,6 @@ impl IOReportMetrics {
 
         for item in iterator {
             match (item.group.as_str(), item.subgroup.as_str()) {
-                ("Energy Model", _) => {
-                    Self::process_energy_channel(&item, duration_ns, &mut metrics);
-                }
                 ("CPU Stats", "CPU Core Performance States") => {
                     Self::process_cpu_channel(
                         &item,
@@ -1147,28 +1352,6 @@ impl IOReportMetrics {
         }
 
         metrics
-    }
-
-    fn process_energy_channel(item: &IOReportChannelItem, duration_ns: u64, metrics: &mut Self) {
-        let watts = item.calculate_watts(duration_ns);
-        let channel = item.channel.as_str();
-
-        // Match known energy channels
-        if channel.contains("CPU") && !channel.contains("GPU") {
-            metrics.cpu_power += watts;
-        } else if channel.contains("GPU") && !channel.contains("CPU") {
-            metrics.gpu_power += watts;
-        } else if channel.contains("ANE") {
-            metrics.ane_power += watts;
-        } else if channel.contains("DRAM") {
-            metrics.dram_power += watts;
-        }
-
-        // Track package power
-        if channel == "CPU Energy" || channel.starts_with("CPU") {
-            // Package includes CPU, GPU, ANE
-            metrics.package_power = metrics.cpu_power + metrics.gpu_power + metrics.ane_power;
-        }
     }
 
     fn process_cpu_channel(
@@ -1415,6 +1598,133 @@ mod tests {
             first.channels, second.channels,
             "each subscription needs its own channel dictionary"
         );
+    }
+
+    #[test]
+    fn raw_element_timestamp_is_read_at_offset_24() {
+        // An `IOReportElement` laid out as the M5 Max reports one: provider
+        // id, channel id, channel type, timestamp, value, then the rest of the
+        // 64 bytes.
+        let mut element = Vec::with_capacity(64);
+        element.extend_from_slice(&0x1000_0abcu64.to_le_bytes());
+        element.extend_from_slice(&7u64.to_le_bytes());
+        element.extend_from_slice(&0x0001_0002u64.to_le_bytes());
+        element.extend_from_slice(&123_456_789_012u64.to_le_bytes());
+        element.extend_from_slice(&4_969i64.to_le_bytes());
+        element.resize(64, 0);
+
+        assert_eq!(parse_raw_element_timestamp(&element), Some(123_456_789_012));
+        assert_eq!(
+            parse_raw_element_timestamp(&element[..32]),
+            Some(123_456_789_012)
+        );
+        assert_eq!(parse_raw_element_timestamp(&element[..31]), None);
+        assert_eq!(parse_raw_element_timestamp(&[]), None);
+    }
+
+    #[test]
+    fn mach_ticks_scale_by_the_timebase() {
+        // Apple Silicon's 125/3 timebase is a 24 MHz tick.
+        assert_eq!(scale_mach_ticks(24_000_000, 125, 3), 1_000_000_000);
+        assert_eq!(scale_mach_ticks(3, 125, 3), 125);
+        // Intel's 1/1: ticks are already nanoseconds.
+        assert_eq!(scale_mach_ticks(42, 1, 1), 42);
+        // The intermediate product must not overflow.
+        let ticks = u64::MAX / 125 * 3;
+        assert_eq!(scale_mach_ticks(ticks, 125, 3), u64::MAX / 125 * 125);
+    }
+
+    /// Hardware diagnostic for the Energy Model (issue #410). Prints this
+    /// machine's channel inventory in the fixture format, then for six seconds
+    /// at 100 ms every tracked channel's counter delta (`dv`), publication
+    /// span (`dts`), and publication age, read from raw samples, next to the
+    /// rail readings the tracker produced from them.
+    ///
+    /// Use it to record another chip family next to
+    /// `tests/fixtures/ioreport/m5_max_energy_model.tsv` and to check that its
+    /// publication cadence matches what the tracker assumes:
+    ///
+    /// ```text
+    /// cargo test --lib ioreport_energy_diagnostics -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "hardware diagnostic; run by hand with --ignored --nocapture"]
+    #[cfg(target_os = "macos")]
+    fn ioreport_energy_diagnostics() {
+        use std::collections::HashMap;
+
+        let Ok(mut report) = IOReport::new() else {
+            println!("IOReport is unavailable on this host; nothing to report");
+            return;
+        };
+        let Ok(sample) = report.take_sample() else {
+            println!("IOReport returned no sample; nothing to report");
+            return;
+        };
+
+        let (numer, denom) = mach_timebase();
+        println!("# mach timebase {numer}/{denom}");
+        println!("# Energy Model inventory (name<TAB>unit)");
+        let mut inventory = 0;
+        for item in get_io_channels(sample) {
+            if let Some(name) = energy_channel_name(item) {
+                println!("{name}\t{}", channel_unit(item));
+                inventory += 1;
+            }
+        }
+        println!("# {inventory} channels");
+        unsafe { CFRelease(sample as *const c_void) };
+
+        println!("# per tracked channel: dv = counter delta, dts = publication span");
+        let mut previous: HashMap<String, (i64, Option<u64>)> = HashMap::new();
+        let start = Instant::now();
+        for tick in 0..60 {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            let Ok(sample) = report.take_sample() else {
+                continue;
+            };
+            let now_ns = mach_now_ns();
+            let observations = energy_observations(sample);
+            unsafe { CFRelease(sample as *const c_void) };
+
+            let ms = |ns: u64| format!("{:.1}ms", ns as f64 / 1e6);
+            let fields: Vec<String> = observations
+                .iter()
+                .map(|obs| {
+                    let (prev_value, prev_ts) = previous
+                        .get(&obs.channel)
+                        .copied()
+                        .unwrap_or((obs.value, obs.timestamp_ns));
+                    let dts = match (obs.timestamp_ns, prev_ts) {
+                        (Some(ts), Some(prev)) => ms(ts.saturating_sub(prev)),
+                        _ => "none".to_string(),
+                    };
+                    let age = obs
+                        .timestamp_ns
+                        .map_or("none".to_string(), |ts| ms(now_ns.saturating_sub(ts)));
+                    format!(
+                        "{} dv={}{} dts={dts} age={age}",
+                        obs.channel,
+                        obs.value.saturating_sub(prev_value),
+                        obs.unit
+                    )
+                })
+                .collect();
+            for obs in observations {
+                previous.insert(obs.channel, (obs.value, obs.timestamp_ns));
+            }
+
+            let rails = report.energy_readings();
+            println!(
+                "{tick:03} t={:.3}s {} || cpu={:.2}W gpu={:.2}W ane={:.2}W dram={:.2}W",
+                start.elapsed().as_secs_f64(),
+                fields.join(" | "),
+                rails.cpu,
+                rails.gpu,
+                rails.ane,
+                rails.dram
+            );
+        }
     }
 
     #[test]
