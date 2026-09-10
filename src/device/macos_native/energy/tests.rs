@@ -380,17 +380,92 @@ fn missing_timestamps_fall_back_to_observation_time() {
 #[test]
 fn frozen_timestamp_with_a_moving_value_switches_to_observation_time() {
     // The value moved but its timestamp did not, so this driver does not
-    // stamp publications. The switch is permanent for the channel.
+    // stamp publications. The switch is permanent for the channel, and it
+    // rebases onto the previous observation so this first switched span is
+    // the 1.0 s poll window (100 ms to 1100 ms), not a span back to the
+    // frozen driver timestamp t0.
     let t0 = 1_000 * MS;
     let mut tracker = EnergyTracker::default();
     tracker.observe_sample(t0 + 100 * MS, [cpu(0, t0)]);
 
     tracker.observe_sample(t0 + 1_100 * MS, [cpu(1_100, t0)]);
-    assert_watts(tracker.readings().cpu, 1.0);
+    assert_watts(tracker.readings().cpu, 1.1);
 
     // Later timestamps are ignored even when they advance.
     tracker.observe_sample(t0 + 2_100 * MS, [cpu(3_100, t0 + 2_050 * MS)]);
     assert_watts(tracker.readings().cpu, 2.0);
+}
+
+#[test]
+fn constant_stale_timestamp_switches_to_the_poll_window() {
+    // Every element carries the same old timestamp (frozen at 0) while the
+    // value moves. Dividing by a span back to that frozen stamp would read
+    // about 0.33 W; the switch must instead use the 1.0 s poll window.
+    let t0 = 5_000 * MS;
+    let stale = |value: i64, ts: u64| obs("CPU Energy", "mJ", value, Some(ts));
+    let mut tracker = EnergyTracker::default();
+    tracker.observe_sample(t0, [stale(0, 0)]);
+
+    tracker.observe_sample(t0 + 1_000 * MS, [stale(2_000, 0)]);
+    assert_watts(tracker.readings().cpu, 2.0);
+}
+
+#[test]
+fn timestamps_disappearing_mid_stream_switch_to_the_poll_window() {
+    // A stamped first sighting, a stamped batch that reads exactly, and then
+    // `RawElements` stops carrying a timestamp entirely. The switched
+    // reading must be the value change since the previous observation over
+    // the time since the previous observation, and later observations must
+    // stay on the observation clock even when a stale driver timestamp
+    // reappears.
+    let t0 = 1_000 * MS;
+    let mut tracker = EnergyTracker::default();
+    tracker.observe_sample(t0 + 10 * MS, [cpu(0, t0)]);
+
+    let t1 = t0 + ms(2043.0);
+    tracker.observe_sample(t1 + 10 * MS, [cpu(4_969, t1)]);
+    let batch_watts = 4.969 / 2.043;
+    assert_watts(tracker.readings().cpu, batch_watts);
+
+    // Timestamp goes missing one second after the previous observation
+    // (t1 + 10 ms), carrying 1000 mJ more.
+    let t2 = t1 + 1_010 * MS;
+    tracker.observe_sample(t2, [obs("CPU Energy", "mJ", 5_969, None)]);
+    assert_watts(tracker.readings().cpu, 1.0);
+
+    // A later observation with a stale, backward-looking driver timestamp
+    // must not be honored: the channel stays on the observation clock.
+    let t3 = t2 + 1_000 * MS;
+    tracker.observe_sample(t3, [cpu(6_969, t1)]);
+    assert_watts(tracker.readings().cpu, 1.0);
+}
+
+#[test]
+fn gpu_resolution_drops_channels_missing_from_the_latest_sample() {
+    // GPU Energy and GPU0 carry the same energy on real hardware; they are
+    // given different watts here so the readings show which source won.
+    let t0 = 1_000 * MS;
+    let gpu_energy = |value: i64, ts: u64| obs("GPU Energy", "nJ", value, Some(ts));
+    let gpu0 = |value: i64, ts: u64| obs("GPU0", "mJ", value, Some(ts));
+    let mut tracker = EnergyTracker::default();
+    tracker.observe_sample(t0 + 10 * MS, [gpu_energy(0, t0), gpu0(0, t0)]);
+
+    let t1 = t0 + 2_000 * MS;
+    tracker.observe_sample(
+        t1 + 10 * MS,
+        [
+            gpu_energy(counts(25.0, "nJ", 2.0), t1),
+            gpu0(counts(70.0, "mJ", 2.0), t1),
+        ],
+    );
+    assert_watts(tracker.readings().gpu, 25.0);
+
+    // GPU Energy is absent from this sample: its last reading must not
+    // count, and GPU0 becomes the only source for the rail.
+    let t2 = t1 + 2_000 * MS;
+    let gpu0_value = 2 * counts(70.0, "mJ", 2.0);
+    tracker.observe_sample(t2 + 10 * MS, [gpu0(gpu0_value, t2)]);
+    assert_watts(tracker.readings().gpu, 70.0);
 }
 
 #[test]

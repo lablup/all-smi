@@ -177,11 +177,20 @@ struct ChannelState {
     /// moves while its timestamp stands still.
     last_value: i64,
     last_ns: u64,
+    /// When the previous observation of this channel was taken, in
+    /// nanoseconds on the observation clock. Used to rebase the baseline
+    /// when the channel switches from driver timestamps to the observation
+    /// clock, so the switch does not mix a driver timestamp with an
+    /// observation time.
+    last_observed_ns: u64,
     /// Watts over the most recent span. `None` until the first span closes,
     /// after a counter reset, and once the channel goes stale.
     watts: Option<f64>,
     /// Timed by when samples were taken instead of by the driver's
     /// timestamps. Set once those timestamps prove unusable, never cleared.
+    /// The switch restarts the span from the previous observation, so the
+    /// first reading on the observation clock is the poll window, not a
+    /// span that mixes a driver timestamp with an observation time.
     observation_clock: bool,
     /// Sequence number of the last sample this channel appeared in.
     last_seen: u64,
@@ -195,6 +204,7 @@ impl ChannelState {
             baseline_ns: published_ns,
             last_value: obs.value,
             last_ns: published_ns,
+            last_observed_ns: observed_at_ns,
             watts: None,
             observation_clock: obs.timestamp_ns.is_none(),
             last_seen: sample,
@@ -210,12 +220,25 @@ impl ChannelState {
             }
             _ => None,
         };
-        let published_ns = stamped.unwrap_or_else(|| {
-            self.observation_clock = true;
-            observed_at_ns
-        });
+        let published_ns = match stamped {
+            Some(ts) => ts,
+            None if self.observation_clock => observed_at_ns,
+            None => {
+                // First fallback for this channel: the driver's timestamps
+                // are unusable. Rebase the baseline onto the observation
+                // clock at the previous observation instead of leaving it on
+                // a driver timestamp, so this span is the poll window
+                // between the previous and current observation rather than
+                // a span mixing the two clocks.
+                self.baseline_value = self.last_value;
+                self.baseline_ns = self.last_observed_ns;
+                self.observation_clock = true;
+                observed_at_ns
+            }
+        };
         self.last_value = obs.value;
         self.last_ns = published_ns;
+        self.last_observed_ns = observed_at_ns;
 
         if obs.value < self.baseline_value || published_ns < self.baseline_ns {
             // Counter reset. There is no valid span to report until the next

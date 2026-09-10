@@ -889,6 +889,12 @@ fn parse_raw_element_timestamp(bytes: &[u8]) -> Option<u64> {
 /// The publication timestamp of one channel of a raw sample, in mach ticks.
 fn raw_element_timestamp(item: CFDictionaryRef) -> Option<u64> {
     let key = get_cfstring_refs().raw_elements;
+    // SAFETY: `item` is a channel dictionary borrowed from a raw sample the
+    // caller keeps alive for the duration of this call. `CFDictionaryGetValue`
+    // follows the get rule (no retain) and `key` is the process-lifetime
+    // static `RawElements` CFString. The returned value is null-checked and
+    // type-checked as CFData before `wrap_under_get_rule` retains it, so
+    // `data.bytes()` borrows memory valid for the life of `data`.
     unsafe {
         let value = CFDictionaryGetValue(item, key as *const c_void);
         if value.is_null() || CFGetTypeID(value) != CFDataGetTypeID() {
@@ -905,6 +911,10 @@ fn raw_element_timestamp(item: CFDictionaryRef) -> Option<u64> {
 /// no string conversion.
 fn energy_channel_name(item: CFDictionaryRef) -> Option<String> {
     let energy_model = get_cfstring_refs().energy_model as CFTypeRef;
+    // SAFETY: `item` is a live channel dictionary from the caller's sample.
+    // `IOReportChannelGetGroup` returns a get-rule reference, null-checked
+    // before `CFEqual`, and `energy_model` is the process-lifetime static
+    // `Energy Model` CFString, so both operands stay valid for the call.
     unsafe {
         let group = IOReportChannelGetGroup(item);
         if group.is_null() || CFEqual(group as CFTypeRef, energy_model) == 0 {
@@ -916,6 +926,8 @@ fn energy_channel_name(item: CFDictionaryRef) -> Option<String> {
 
 /// The channel's unit label (`mJ`, `uJ`, `nJ`, ...), empty when it has none.
 fn channel_unit(item: CFDictionaryRef) -> String {
+    // SAFETY: `item` is a live channel dictionary from the caller's sample,
+    // owned and kept alive by the caller for the duration of this call.
     unsafe { cfstr_to_string(IOReportChannelGetUnitLabel(item)).unwrap_or_default() }
 }
 
@@ -931,6 +943,8 @@ fn energy_observations(sample: CFDictionaryRef) -> Vec<EnergyObservation> {
             classify_energy_channel(&channel)?;
             Some(EnergyObservation {
                 unit: channel_unit(item),
+                // SAFETY: `item` is a live channel dictionary from `sample`,
+                // which the caller keeps alive for the duration of this call.
                 value: unsafe { IOReportSimpleGetIntegerValue(item, 0) },
                 timestamp_ns: raw_element_timestamp(item).map(mach_ticks_to_ns),
                 channel,
@@ -1132,6 +1146,9 @@ impl IOReport {
         let sample2 = match self.take_sample() {
             Ok(sample) => sample,
             Err(e) => {
+                // SAFETY: `sample1` is the +1 sample taken above by
+                // `take_sample`; this error path returns without using it
+                // again, so releasing it here is the only release it gets.
                 unsafe { CFRelease(sample1 as *const c_void) };
                 return Err(e);
             }
@@ -1223,6 +1240,10 @@ impl IOReport {
     /// tracker sees all of them, in order, and reads its timestamps from raw
     /// samples rather than from a delta.
     fn take_sample(&mut self) -> Result<CFDictionaryRef, &'static str> {
+        // SAFETY: `self.subscription` and `self.channels` are owned by
+        // `self` and stay valid until `Drop`. The returned sample is a +1
+        // reference; ownership passes to the caller, which is responsible
+        // for releasing it (directly, or via `IOReportIterator`'s `Drop`).
         let sample =
             unsafe { IOReportCreateSamples(self.subscription, self.channels, ptr::null()) };
         if sample.is_null() {
