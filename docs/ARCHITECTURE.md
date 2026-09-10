@@ -192,6 +192,7 @@ pub trait MetricsExporter: Send + Sync {
 
 #### Apple Silicon (`src/device/readers/apple_silicon_native.rs`)
 - Uses the native IOReport API (`src/device/macos_native/ioreport.rs`) for energy counters and CPU/GPU residency
+- Power per rail comes from exact-named `Energy Model` channels (`src/device/macos_native/energy.rs`), each timed by its own driver publication timestamp rather than the poll window, because the M5 Max publishes its mJ counters in batches about 2.1 s apart
 - Reads temperature and system power from the SMC (`src/device/macos_native/smc.rs`)
 - No sudo and no external `powermetrics` process
 - Provides unified memory metrics
