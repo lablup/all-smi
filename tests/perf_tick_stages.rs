@@ -17,7 +17,9 @@
 //! Builds the readers the way the collectors do and replays the stages of
 //! `LocalCollector::collect_steady_state` one after another at the real 1 s
 //! cadence, so each stage's cost is measured on its own and at the clock
-//! speeds an idle machine actually runs the tick at. Prints markdown tables:
+//! speeds an idle machine actually runs the tick at. The GPU pass goes first,
+//! as it does in both collectors: stages that run earlier in the tick run on
+//! a colder core, so the order changes what each one appears to cost. Prints markdown tables:
 //! the first tick, the steady state (first tick excluded), the
 //! `collect_once` breakdown on Apple Silicon, and the process CPU the
 //! collection alone used while ticking.
@@ -155,10 +157,6 @@ fn perf_tick_stages() {
         let (tick_wall, tick_cpu) = (Instant::now(), process_cpu_time());
 
         let started = Instant::now();
-        let storage = disks.storage_info(&hostname);
-        let t_storage = started.elapsed();
-
-        let started = Instant::now();
         let gpu_info: Vec<_> = gpu_readers.iter().flat_map(|r| r.get_gpu_info()).collect();
         let t_gpu = started.elapsed();
 
@@ -188,6 +186,10 @@ fn perf_tick_stages() {
         let started = Instant::now();
         let _ = chassis_reader.get_chassis_info();
         let t_chassis = started.elapsed();
+
+        let started = Instant::now();
+        let storage = disks.storage_info(&hostname);
+        let t_storage = started.elapsed();
 
         let full = tick % FULL_REFRESH_INTERVAL == 0 || tracked.is_empty();
         let (t_refresh, t_cache, processes) = with_global_system(|system| {
@@ -231,9 +233,9 @@ fn perf_tick_stages() {
                 storage.len()
             );
             first = vec![
-                ("storage (initial list)", t_storage),
                 ("gpu.get_gpu_info", t_gpu),
                 ("cpu.get_cpu_info", t_cpu),
+                ("storage (initial list)", t_storage),
                 ("process refresh (full)", t_refresh),
                 ("update_process_cache", t_cache),
                 ("whole tick", t_tick),
@@ -268,12 +270,12 @@ fn perf_tick_stages() {
 
     println!("\n| steady-state stage (1 s cadence) | avg | min | max | ticks |");
     println!("|---|---|---|---|---|");
-    stages.storage.row("storage (DiskCache::storage_info)");
     stages.gpu.row("gpu.get_gpu_info (runs collect_once)");
     stages.gpu_rest.row("gpu processes + vgpu + mig");
     stages.cpu.row("cpu.get_cpu_info");
     stages.memory.row("memory.get_memory_info");
     stages.chassis.row("chassis.get_chassis_info");
+    stages.storage.row("storage (DiskCache::storage_info)");
     stages.refresh_full.row("process refresh (full, every 5th)");
     stages.refresh_selective.row("process refresh (selective)");
     stages.cache_full.row("update_process_cache (full ticks)");
