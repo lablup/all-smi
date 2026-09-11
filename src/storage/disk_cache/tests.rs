@@ -82,11 +82,22 @@ fn network_filesystems_are_recognized() {
         "cifs",
         "smb3",
         "fuse.sshfs",
+        "gpfs",
+        "beegfs",
+        "wekafs",
+        "panfs",
+        "pvfs2",
+        "afs",
+        "fuse.ceph-fuse",
+        "fuse.juicefs",
+        "fuse.rclone",
+        "fuse.s3fs",
+        "fuse.gcsfuse",
     ] {
         assert!(is_network_file_system(fs), "{fs}");
     }
     for fs in [
-        "apfs", "hfs", "ext4", "xfs", "btrfs", "zfs", "overlay", "tmpfs", "ntfs",
+        "apfs", "hfs", "ext4", "xfs", "btrfs", "zfs", "overlay", "tmpfs", "ntfs", "fuseblk",
     ] {
         assert!(!is_network_file_system(fs), "{fs}");
     }
@@ -188,6 +199,36 @@ fn the_list_is_enumerated_again_once_due() {
     let restarted = cache.enumerated_at.expect("an enumeration started");
     assert!(restarted > long_ago);
     assert!(restarted.elapsed() < LIST_REFRESH_INTERVAL);
+}
+
+/// The interval counts from when the previous list arrived, not from when
+/// that enumeration started: a slow enumeration must not make the next one
+/// due the instant it lands.
+#[test]
+fn the_interval_counts_from_when_the_list_arrived() {
+    let mut cache = DiskCache::new();
+    let _ = cache.storage_info("h");
+
+    let Some(long_ago) = Instant::now().checked_sub(LIST_REFRESH_INTERVAL + Duration::from_secs(1))
+    else {
+        return;
+    };
+
+    let (sender, receiver) = mpsc::channel::<Listing>();
+    cache.pending = Some(receiver);
+    cache.enumerated_at = Some(long_ago);
+    sender.send(Listing::enumerate()).expect("receiver alive");
+
+    let _ = cache.storage_info("h");
+    assert!(cache.pending.is_none());
+    let arrived = cache.enumerated_at.expect("the list arrived");
+    assert!(arrived.elapsed() < LIST_REFRESH_INTERVAL);
+
+    let _ = cache.storage_info("h");
+    assert!(
+        cache.pending.is_none(),
+        "no new enumeration started right after the slow one landed"
+    );
 }
 
 /// An enumeration that never finishes, as on a hung network mount, leaves

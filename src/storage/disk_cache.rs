@@ -109,6 +109,19 @@ const NETWORK_FILE_SYSTEMS: &[&str] = &[
     "fuse.glusterfs",
     "fuse.sshfs",
     "lustre",
+    // Cluster filesystems common on GPU cluster nodes
+    "gpfs",
+    "beegfs",
+    "wekafs",
+    "panfs",
+    "pvfs2",
+    "afs",
+    // Cloud-backed FUSE filesystems
+    "fuse.ceph-fuse",
+    "fuse.juicefs",
+    "fuse.rclone",
+    "fuse.s3fs",
+    "fuse.gcsfuse",
 ];
 
 fn is_network_file_system(file_system: &str) -> bool {
@@ -256,10 +269,14 @@ fn statfs_free_bytes(mount_point: &std::path::Path) -> Option<u64> {
     }
     // SAFETY: `statfs` returned 0, so it initialized `stat`.
     let stat = unsafe { stat.assume_init() };
-    // SAFETY: the kernel NUL-terminates `f_mntonname` inside its fixed-size
-    // array, which lives as long as `stat`.
-    let mounted_on = unsafe { std::ffi::CStr::from_ptr(stat.f_mntonname.as_ptr()) };
-    if mounted_on != path.as_c_str() {
+    // `f_mntonname` is a fixed-size array the kernel NUL-terminates. Compare
+    // up to the first NUL, bounded by the array, without relying on it.
+    let mounted_on = stat
+        .f_mntonname
+        .iter()
+        .map(|&c| c as u8)
+        .take_while(|&byte| byte != 0);
+    if !mounted_on.eq(path.as_bytes().iter().copied()) {
         return None;
     }
     Some(stat.f_bavail.saturating_mul(u64::from(stat.f_bsize)))
@@ -292,7 +309,10 @@ pub struct DiskCache {
     listing: Option<Listing>,
     /// A list refresh running on a background thread.
     pending: Option<Receiver<Listing>>,
-    /// When the most recent enumeration started.
+    /// When the most recent enumeration started, moved to when its list
+    /// arrived once it does, so the next enumeration is due
+    /// [`LIST_REFRESH_INTERVAL`] after the last list arrived, however long
+    /// enumerating took.
     enumerated_at: Option<Instant>,
     /// Whether the bounded wait for the first list has been spent.
     waited_for_first_list: bool,
@@ -367,8 +387,8 @@ impl DiskCache {
         if self.listing.is_none() && self.first_list_wait.is_none() {
             // No bound on the first list: build it here, as a direct
             // enumeration would. Later lists come from the background.
-            self.enumerated_at = Some(Instant::now());
             self.listing = Some(Listing::enumerate());
+            self.enumerated_at = Some(Instant::now());
             return;
         }
 
@@ -381,6 +401,7 @@ impl DiskCache {
             if self.pending.is_none() && self.listing.is_none() {
                 // No thread to run it on, and no list to show meanwhile.
                 self.listing = Some(Listing::enumerate());
+                self.enumerated_at = Some(Instant::now());
             }
         }
 
@@ -404,6 +425,7 @@ impl DiskCache {
             Ok(listing) => {
                 self.listing = Some(listing);
                 self.pending = None;
+                self.enumerated_at = Some(Instant::now());
             }
             // Still enumerating: keep showing the previous list.
             Err(TryRecvError::Empty) => {}
