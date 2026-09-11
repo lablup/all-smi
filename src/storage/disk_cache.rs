@@ -47,6 +47,25 @@
 //! On other platforms the per-disk refresh runs a live `statvfs`, so it is
 //! used on every tick as it is.
 //!
+//! ## The first list
+//!
+//! A cache has no list until its first enumeration finishes, and the two
+//! kinds of caller need different things from that first call:
+//!
+//! - [`DiskCache::new`], used by the view and API collection loops, waits at
+//!   most 2 s for the first list and returns no rows if it is not ready by
+//!   then, so a mount that hangs at startup cannot stall a tick. The rows
+//!   appear on the first tick after the enumeration finishes.
+//! - [`DiskCache::with_blocking_first_list`], used by
+//!   [`LocalStorageReader`](crate::storage::LocalStorageReader), enumerates
+//!   the first list on the calling thread and returns it however long that
+//!   takes, the same contract `Disks::new_with_refreshed_list` gives. A
+//!   library caller's first call is never empty just because enumeration
+//!   was slow.
+//!
+//! After the first list both behave the same: later lists are enumerated on
+//! a background thread and never waited for.
+//!
 //! ## Network filesystems
 //!
 //! Volumes on [`NETWORK_FILE_SYSTEMS`] keep the capacity from the last list
@@ -66,10 +85,11 @@ use crate::utils::filter_docker_aware_disks;
 /// How often the mount table is enumerated again.
 pub const LIST_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 
-/// How long the first call waits for the initial list. Enumeration normally
-/// takes tens of milliseconds; a volume that hangs longer than this leaves the
-/// first rows empty until the background enumeration finishes, instead of
-/// stalling the caller.
+/// How long the first call of a [`DiskCache::new`] cache waits for the
+/// initial list. Enumeration normally takes tens of milliseconds; a volume
+/// that hangs longer than this leaves the first rows empty until the
+/// background enumeration finishes, instead of stalling the caller.
+/// [`DiskCache::with_blocking_first_list`] does not use this bound.
 const INITIAL_LIST_WAIT: Duration = Duration::from_secs(2);
 
 /// Filesystem types whose capacity is not re-read between list refreshes.
@@ -217,6 +237,12 @@ fn anchor_for(_disk: &sysinfo::Disk) -> Option<Anchor> {
 }
 
 /// Free space `statfs` reports for the volume mounted at `mount_point`.
+///
+/// `None` when the call fails or when `mount_point` is no longer a mount
+/// point. A volume unmounted from a directory that stays behind would
+/// otherwise report the free space of the filesystem holding that directory,
+/// moving the anchored value by an unrelated amount until the next list
+/// drops the row.
 #[cfg(target_os = "macos")]
 fn statfs_free_bytes(mount_point: &std::path::Path) -> Option<u64> {
     use std::os::unix::ffi::OsStrExt;
@@ -230,6 +256,12 @@ fn statfs_free_bytes(mount_point: &std::path::Path) -> Option<u64> {
     }
     // SAFETY: `statfs` returned 0, so it initialized `stat`.
     let stat = unsafe { stat.assume_init() };
+    // SAFETY: the kernel NUL-terminates `f_mntonname` inside its fixed-size
+    // array, which lives as long as `stat`.
+    let mounted_on = unsafe { std::ffi::CStr::from_ptr(stat.f_mntonname.as_ptr()) };
+    if mounted_on != path.as_c_str() {
+        return None;
+    }
     Some(stat.f_bavail.saturating_mul(u64::from(stat.f_bsize)))
 }
 
@@ -253,7 +285,7 @@ fn spawn_enumeration() -> Option<Receiver<Listing>> {
 /// and call [`storage_info`](Self::storage_info) once per tick. Rows are
 /// selected, ordered and numbered exactly as `Disks::new_with_refreshed_list`
 /// plus `filter_docker_aware_disks` always did; see the module docs for how
-/// fresh each field is.
+/// fresh each field is and how the two constructors differ on the first call.
 ///
 /// [`LocalStorageReader`]: crate::storage::LocalStorageReader
 pub struct DiskCache {
@@ -264,8 +296,9 @@ pub struct DiskCache {
     enumerated_at: Option<Instant>,
     /// Whether the bounded wait for the first list has been spent.
     waited_for_first_list: bool,
-    /// How long that wait may take.
-    initial_wait: Duration,
+    /// How long the first call may wait for the first list, or `None` to
+    /// build it on the calling thread however long that takes.
+    first_list_wait: Option<Duration>,
 }
 
 impl Default for DiskCache {
@@ -275,15 +308,34 @@ impl Default for DiskCache {
 }
 
 impl DiskCache {
-    /// An empty cache. The first [`storage_info`](Self::storage_info) call
-    /// enumerates the mount table.
+    /// An empty cache for a collection loop. The first
+    /// [`storage_info`](Self::storage_info) call starts enumerating the mount
+    /// table in the background and waits at most 2 s for it; if the list is
+    /// not ready by then that call returns no rows, and the rows appear on
+    /// the first call after it is.
     pub fn new() -> Self {
+        Self::with_first_list_wait(Some(INITIAL_LIST_WAIT))
+    }
+
+    /// An empty cache whose first [`storage_info`](Self::storage_info) call
+    /// enumerates the mount table on the calling thread and returns the
+    /// complete list, however long that takes, as
+    /// `Disks::new_with_refreshed_list` does. Later calls behave as with
+    /// [`new`](Self::new). [`LocalStorageReader`] uses this so a library
+    /// caller never gets an empty first list from a slow enumeration.
+    ///
+    /// [`LocalStorageReader`]: crate::storage::LocalStorageReader
+    pub fn with_blocking_first_list() -> Self {
+        Self::with_first_list_wait(None)
+    }
+
+    fn with_first_list_wait(first_list_wait: Option<Duration>) -> Self {
         Self {
             listing: None,
             pending: None,
             enumerated_at: None,
             waited_for_first_list: false,
-            initial_wait: INITIAL_LIST_WAIT,
+            first_list_wait,
         }
     }
 
@@ -312,6 +364,14 @@ impl DiskCache {
 
     /// Start a list refresh when one is due and swap in one that finished.
     fn update_listing(&mut self) {
+        if self.listing.is_none() && self.first_list_wait.is_none() {
+            // No bound on the first list: build it here, as a direct
+            // enumeration would. Later lists come from the background.
+            self.enumerated_at = Some(Instant::now());
+            self.listing = Some(Listing::enumerate());
+            return;
+        }
+
         let due = self
             .enumerated_at
             .is_none_or(|started| started.elapsed() >= LIST_REFRESH_INTERVAL);
@@ -327,18 +387,17 @@ impl DiskCache {
         let Some(receiver) = self.pending.as_ref() else {
             return;
         };
-        let received = if self.listing.is_none() && !self.waited_for_first_list {
+        let received = match self.first_list_wait {
             // Nothing to show until the first list exists, so wait for it,
             // but only once and only for a bounded time.
-            self.waited_for_first_list = true;
-            receiver
-                .recv_timeout(self.initial_wait)
-                .map_err(|err| match err {
+            Some(limit) if self.listing.is_none() && !self.waited_for_first_list => {
+                self.waited_for_first_list = true;
+                receiver.recv_timeout(limit).map_err(|err| match err {
                     RecvTimeoutError::Timeout => TryRecvError::Empty,
                     RecvTimeoutError::Disconnected => TryRecvError::Disconnected,
                 })
-        } else {
-            receiver.try_recv()
+            }
+            _ => receiver.try_recv(),
         };
 
         match received {

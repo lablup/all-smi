@@ -181,7 +181,7 @@ fn main() -> Result<()> {
 | `get_process_info()` | `Vec<ProcessInfo>` | Get GPU process information |
 | `get_cpu_info()` | `Vec<CpuInfo>` | Get CPU information |
 | `get_memory_info()` | `Vec<MemoryInfo>` | Get system memory information |
-| `get_storage_info()` | `Vec<StorageInfo>` | Get disk/storage information (the mount table is re-enumerated at most every 30 s; capacities are refreshed on every call) |
+| `get_storage_info()` | `Vec<StorageInfo>` | Get disk/storage information (the first call returns the complete list however long enumeration takes; after that the mount table is re-enumerated in the background at most every 30 s and capacities are refreshed on every call) |
 | `get_chassis_info()` | `Option<ChassisInfo>` | Get chassis-level information |
 | `has_gpus()` | `bool` | Check if any GPUs are detected |
 | `has_cpu_monitoring()` | `bool` | Check if CPU monitoring is available |

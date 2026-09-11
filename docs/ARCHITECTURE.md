@@ -94,7 +94,7 @@ src/
 - **UI Layer**: Terminal rendering with differential updates
 - **Network Layer**: Robust HTTP client with retry logic and security validations
 - **Parsing Layer**: Efficient text processing with macro-based DSL
-- **Storage Layer**: Disk usage monitoring and reporting. `src/storage/disk_cache.rs` backs every storage path (view collector, API loop, `LocalStorageReader`): it enumerates the mount table on a background thread at most every 30 s and refreshes only capacities on each tick. On macOS the per-tick available space is the last enumeration's exact value moved by the `statfs` free-space change since then, because sysinfo's per-disk refresh returns cached values there and a fresh purgeable-aware read costs 6 to 15 ms per volume
+- **Storage Layer**: Disk usage monitoring and reporting. `src/storage/disk_cache.rs` backs every storage path (view collector, API loop, `LocalStorageReader`): it enumerates the mount table on a background thread at most every 30 s and refreshes only capacities on each tick. The collection loops wait at most 2 s for the first list so a hung mount cannot stall their first tick; `LocalStorageReader` builds its first list on the calling thread and returns it complete, as it always has. On macOS the per-tick available space is the last enumeration's exact value moved by the `statfs` free-space change since then, because sysinfo's per-disk refresh returns cached values there and a fresh purgeable-aware read costs 6 to 15 ms per volume
 - **Utils Layer**: Cross-cutting concerns and helper functions
 
 ## Data Flow Architecture

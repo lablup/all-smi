@@ -57,7 +57,14 @@ pub trait StorageReader: Send + Sync {
 ///
 /// The disk list is kept between calls in a [`DiskCache`], so repeated calls
 /// (the `record` loop, a library consumer polling) enumerate the mount table
-/// at most every 30 s rather than on every call.
+/// at most every 30 s rather than on every call; a volume mounted in the
+/// meantime appears within 30 s.
+///
+/// The first call enumerates the mount table on the calling thread and
+/// returns the complete list however long that takes, as this reader always
+/// has. The view and API collection loops use a cache whose first call waits
+/// at most 2 s instead, so a hung mount cannot stall their first tick (see
+/// [`DiskCache::with_blocking_first_list`] and [`DiskCache::new`]).
 ///
 /// # Example
 ///
@@ -89,7 +96,7 @@ impl LocalStorageReader {
     pub fn new() -> Self {
         Self {
             hostname: get_hostname(),
-            disks: Mutex::new(DiskCache::new()),
+            disks: Mutex::new(DiskCache::with_blocking_first_list()),
         }
     }
 }
@@ -157,6 +164,33 @@ mod tests {
             assert!(!storage.mount_point.is_empty());
             assert!(!storage.hostname.is_empty());
         }
+    }
+
+    /// The first call returns the complete list, the same rows a fresh
+    /// enumeration produces, rather than whatever a bounded wait allowed.
+    #[test]
+    fn the_first_call_returns_the_complete_list() {
+        use crate::utils::filter_docker_aware_disks;
+        use sysinfo::Disks;
+
+        let reader = LocalStorageReader::new();
+        let rows: Vec<String> = reader
+            .get_storage_info()
+            .into_iter()
+            .map(|row| row.mount_point)
+            .collect();
+
+        let disks = Disks::new_with_refreshed_list();
+        let mut expected: Vec<String> = filter_docker_aware_disks(&disks)
+            .iter()
+            .map(|disk| disk.mount_point().to_string_lossy().into_owned())
+            .collect();
+        expected.sort();
+        if rows.len() != expected.len() {
+            // The mount table changed between the two enumerations.
+            return;
+        }
+        assert_eq!(rows, expected);
     }
 
     #[test]

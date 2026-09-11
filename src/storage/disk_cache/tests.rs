@@ -191,21 +191,23 @@ fn the_list_is_enumerated_again_once_due() {
 }
 
 /// An enumeration that never finishes, as on a hung network mount, leaves
-/// the tick on the previous list instead of waiting for it.
+/// the tick on the previous list instead of waiting for it. That holds for a
+/// blocking cache too once it has its first list.
 #[test]
 fn a_hung_enumeration_does_not_hold_up_the_tick() {
-    let mut cache = DiskCache::new();
-    let before = cache.storage_info("h");
+    for mut cache in [DiskCache::new(), DiskCache::with_blocking_first_list()] {
+        let before = cache.storage_info("h");
 
-    let (sender, receiver) = mpsc::channel::<Listing>();
-    cache.pending = Some(receiver);
-    let started = Instant::now();
-    let during = cache.storage_info("h");
+        let (sender, receiver) = mpsc::channel::<Listing>();
+        cache.pending = Some(receiver);
+        let started = Instant::now();
+        let during = cache.storage_info("h");
 
-    assert!(started.elapsed() < Duration::from_millis(500));
-    assert_eq!(before.len(), during.len());
-    assert!(cache.pending.is_some(), "still waiting for the enumeration");
-    drop(sender);
+        assert!(started.elapsed() < Duration::from_millis(500));
+        assert_eq!(before.len(), during.len());
+        assert!(cache.pending.is_some(), "still waiting for the enumeration");
+        drop(sender);
+    }
 }
 
 /// An enumeration thread that died leaves the previous list in place.
@@ -228,7 +230,7 @@ fn a_failed_enumeration_keeps_the_previous_list() {
 #[test]
 fn the_first_list_is_waited_for_once_and_briefly() {
     let mut cache = DiskCache::new();
-    cache.initial_wait = Duration::from_millis(50);
+    cache.first_list_wait = Some(Duration::from_millis(50));
     cache.enumerated_at = Some(Instant::now());
     let (sender, receiver) = mpsc::channel::<Listing>();
     cache.pending = Some(receiver);
@@ -246,6 +248,33 @@ fn the_first_list_is_waited_for_once_and_briefly() {
     let _ = cache.storage_info("h");
     assert!(cache.listing.is_some());
     assert!(cache.pending.is_none());
+}
+
+/// A blocking cache builds its first list on the calling thread and returns
+/// it whole: no background thread, no bounded wait spent.
+#[test]
+fn a_blocking_cache_returns_its_first_list_from_the_caller() {
+    let mut cache = DiskCache::with_blocking_first_list();
+    let rows = cache.storage_info("h");
+
+    let listing = cache.listing.as_ref().expect("the first call built a list");
+    assert_eq!(rows.len(), listing.volumes.len());
+    assert!(
+        cache.pending.is_none(),
+        "the first list did not go to a thread"
+    );
+    assert!(cache.enumerated_at.is_some());
+    assert!(!cache.waited_for_first_list);
+}
+
+/// A path inside a volume is not that volume's mount point, so `statfs`
+/// reports another filesystem for it, and that reading must not move an
+/// anchor.
+#[test]
+#[cfg(target_os = "macos")]
+fn statfs_is_read_only_for_a_mount_point() {
+    assert!(statfs_free_bytes(std::path::Path::new("/")).is_some());
+    assert_eq!(statfs_free_bytes(std::path::Path::new("/usr/bin")), None);
 }
 
 /// On macOS every shown local volume carries an anchor, and a tick reports
