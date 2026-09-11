@@ -94,7 +94,7 @@ src/
 - **UI Layer**: Terminal rendering with differential updates
 - **Network Layer**: Robust HTTP client with retry logic and security validations
 - **Parsing Layer**: Efficient text processing with macro-based DSL
-- **Storage Layer**: Disk usage monitoring and reporting
+- **Storage Layer**: Disk usage monitoring and reporting. `src/storage/disk_cache.rs` backs every storage path (view collector, API loop, `LocalStorageReader`): it enumerates the mount table on a background thread at most every 30 s and refreshes only capacities on each tick. On macOS the per-tick available space is the last enumeration's exact value moved by the `statfs` free-space change since then, because sysinfo's per-disk refresh returns cached values there and a fresh purgeable-aware read costs 6 to 15 ms per volume
 - **Utils Layer**: Cross-cutting concerns and helper functions
 
 ## Data Flow Architecture
@@ -191,9 +191,9 @@ pub trait MetricsExporter: Send + Sync {
 ### GPU Reader Implementations
 
 #### Apple Silicon (`src/device/readers/apple_silicon_native.rs`)
-- Uses the native IOReport API (`src/device/macos_native/ioreport.rs`) for energy counters and CPU/GPU residency
+- Uses the native IOReport API (`src/device/macos_native/ioreport.rs`) for energy counters and CPU/GPU residency. The subscription holds only the channels something reads (24 of 383 on an M5 Max, `src/device/macos_native/ioreport/channel_filter.rs`); the one `IOReportCreateSamples` call per collection is still the floor of its cost, because the providers work per sample rather than per channel
 - Power per rail comes from exact-named `Energy Model` channels (`src/device/macos_native/energy.rs`), each timed by its own driver publication timestamp rather than the poll window, because the M5 Max publishes its mJ counters in batches about 2.1 s apart
-- Reads temperature and system power from the SMC (`src/device/macos_native/smc.rs`)
+- Reads temperature and system power from the SMC (`src/device/macos_native/smc.rs`) over one connection kept between collections (`SmcSampler`): key info is looked up once per key, keys the SMC lacks included, temperatures are read every collection and system power and fans every 5 s, and a connection that fails is reopened on the next collection
 - No sudo and no external `powermetrics` process
 - Provides unified memory metrics
 
@@ -650,8 +650,8 @@ The trait defines a unified interface for all data collection strategies, enabli
 - Implements lazy initialization pattern
 - Features:
   - Direct hardware access via platform APIs
-  - Process information collection
-  - Storage metrics gathering
+  - Process information collection (on macOS, priority and nice come from `proc_pidinfo` and `getpriority` in-process; nothing is spawned per PID)
+  - Storage metrics gathering through the shared disk cache
   - System information aggregation
 
 ###### RemoteCollector
