@@ -17,10 +17,11 @@
 //! This module provides the [`StorageReader`] trait for reading storage/disk
 //! information and a [`LocalStorageReader`] implementation using `sysinfo::Disks`.
 
-use sysinfo::Disks;
+use std::sync::{Mutex, PoisonError};
 
+use crate::storage::disk_cache::DiskCache;
 use crate::storage::info::StorageInfo;
-use crate::utils::{filter_docker_aware_disks, get_hostname};
+use crate::utils::get_hostname;
 
 /// Trait for reading storage/disk information.
 ///
@@ -54,6 +55,10 @@ pub trait StorageReader: Send + Sync {
 /// the `sysinfo` crate. It applies Docker-aware filtering to exclude
 /// system directories and Docker-specific bind mounts.
 ///
+/// The disk list is kept between calls in a [`DiskCache`], so repeated calls
+/// (the `record` loop, a library consumer polling) enumerate the mount table
+/// at most every 30 s rather than on every call.
+///
 /// # Example
 ///
 /// ```rust,no_run
@@ -73,6 +78,7 @@ pub trait StorageReader: Send + Sync {
 #[allow(dead_code)] // Public API struct - used by library consumers
 pub struct LocalStorageReader {
     hostname: String,
+    disks: Mutex<DiskCache>,
 }
 
 impl LocalStorageReader {
@@ -83,6 +89,7 @@ impl LocalStorageReader {
     pub fn new() -> Self {
         Self {
             hostname: get_hostname(),
+            disks: Mutex::new(DiskCache::new()),
         }
     }
 }
@@ -95,27 +102,12 @@ impl Default for LocalStorageReader {
 
 impl StorageReader for LocalStorageReader {
     fn get_storage_info(&self) -> Vec<StorageInfo> {
-        let disks = Disks::new_with_refreshed_list();
-
-        let mut filtered_disks = filter_docker_aware_disks(&disks);
-        filtered_disks.sort_by(|a, b| {
-            a.mount_point()
-                .to_string_lossy()
-                .cmp(&b.mount_point().to_string_lossy())
-        });
-
-        filtered_disks
-            .iter()
-            .enumerate()
-            .map(|(index, disk)| StorageInfo {
-                mount_point: disk.mount_point().to_string_lossy().to_string(),
-                total_bytes: disk.total_space(),
-                available_bytes: disk.available_space(),
-                host_id: self.hostname.clone(),
-                hostname: self.hostname.clone(),
-                index: index as u32,
-            })
-            .collect()
+        // The cache holds plain disk data that stays usable after a panic in
+        // another caller, so recover from poisoning instead of propagating it.
+        self.disks
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .storage_info(&self.hostname)
     }
 }
 

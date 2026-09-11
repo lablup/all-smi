@@ -161,7 +161,7 @@ async fn measure_collection_arms() {
         }
         {
             let t = std::time::Instant::now();
-            let _ = LocalCollector::collect_storage_info();
+            let _ = LocalCollector::collect_storage_info(&collector.disk_cache);
             storage.push(t.elapsed());
         }
         {
@@ -291,7 +291,7 @@ async fn collect_reference(collector: &LocalCollector) -> CollectionData {
     });
     all_processes.truncate(MAX_DISPLAY_PROCESSES);
 
-    let all_storage_info = LocalCollector::collect_storage_info();
+    let all_storage_info = LocalCollector::collect_storage_info(&collector.disk_cache);
     let all_chassis_info: Vec<ChassisInfo> = collector
         .chassis_reader
         .read()

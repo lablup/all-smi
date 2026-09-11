@@ -17,12 +17,15 @@
 //! This module provides storage/disk information reading capabilities
 //! for local system monitoring.
 
+pub mod disk_cache;
 pub mod info;
 pub mod reader;
 
 // Re-export commonly used items for the public library API.
 // These exports are used by the prelude module and external library users,
 // even though internal code may import from submodules directly.
+#[allow(unused_imports)]
+pub use disk_cache::DiskCache;
 #[allow(unused_imports)]
 pub use info::StorageInfo;
 #[allow(unused_imports)]

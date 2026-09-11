@@ -17,7 +17,6 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
-use sysinfo::Disks;
 use tokio::sync::{Mutex, RwLock};
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
@@ -42,8 +41,9 @@ use crate::device::get_tenstorrent_status_message;
 use crate::device::get_tpu_status_message;
 #[cfg(target_os = "linux")]
 use crate::device::platform_detection::has_google_tpu;
+use crate::storage::disk_cache::DiskCache;
 use crate::storage::info::StorageInfo;
-use crate::utils::{filter_docker_aware_disks, get_hostname, with_global_system};
+use crate::utils::{get_hostname, with_global_system};
 
 use super::aggregator::DataAggregator;
 use super::strategy::{
@@ -188,6 +188,10 @@ pub struct LocalCollector {
     /// On each collection, existing objects are updated in place rather than reallocated.
     /// Uses std::sync::RwLock for synchronous access within with_global_system closure.
     process_cache: Arc<ProcessCache>,
+    /// Disk list shared across cycles. The mount table is enumerated off the
+    /// collection path every 30 s; each cycle only refreshes capacities.
+    /// std::sync::Mutex because it is only ever locked from the blocking pool.
+    disk_cache: Arc<std::sync::Mutex<DiskCache>>,
 }
 
 impl LocalCollector {
@@ -204,6 +208,7 @@ impl LocalCollector {
             process_cache: Arc::new(std::sync::RwLock::new(HashMap::with_capacity(
                 MAX_DISPLAY_PROCESSES,
             ))),
+            disk_cache: Arc::new(std::sync::Mutex::new(DiskCache::new())),
         }
     }
 
@@ -410,8 +415,9 @@ impl LocalCollector {
         )
         .await;
 
+        let disk_cache = Arc::clone(&self.disk_cache);
         let storage_task = task::spawn_blocking(move || {
-            let storage_info = Self::collect_storage_info();
+            let storage_info = Self::collect_storage_info(&disk_cache);
             let _ =
                 status_tx_storage.blocking_send((4, "✓ Storage information collected".to_string()));
             storage_info
@@ -560,7 +566,9 @@ impl LocalCollector {
         )
         .await;
 
-        let storage_task = tokio::task::spawn_blocking(Self::collect_storage_info);
+        let disk_cache = Arc::clone(&self.disk_cache);
+        let storage_task =
+            tokio::task::spawn_blocking(move || Self::collect_storage_info(&disk_cache));
 
         // Determine if we should do a full refresh or selective refresh
         let cycle = self.refresh_cycle.fetch_add(1, Ordering::Relaxed);
@@ -672,31 +680,13 @@ impl LocalCollector {
         }
     }
 
-    fn collect_storage_info() -> Vec<StorageInfo> {
-        let mut all_storage_info = Vec::new();
-        let disks = Disks::new_with_refreshed_list();
-        let hostname = get_hostname();
-
-        let mut filtered_disks = filter_docker_aware_disks(&disks);
-        filtered_disks.sort_by(|a, b| {
-            a.mount_point()
-                .to_string_lossy()
-                .cmp(&b.mount_point().to_string_lossy())
-        });
-
-        for (index, disk) in filtered_disks.iter().enumerate() {
-            let mount_point_str = disk.mount_point().to_string_lossy();
-            all_storage_info.push(StorageInfo {
-                mount_point: mount_point_str.to_string(),
-                total_bytes: disk.total_space(),
-                available_bytes: disk.available_space(),
-                host_id: hostname.clone(),
-                hostname: hostname.clone(),
-                index: index as u32,
-            });
-        }
-
-        all_storage_info
+    fn collect_storage_info(disk_cache: &std::sync::Mutex<DiskCache>) -> Vec<StorageInfo> {
+        // The cache holds plain disk data that stays usable after a panic
+        // elsewhere, so recover from poisoning instead of propagating it.
+        disk_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .storage_info(&get_hostname())
     }
 
     fn update_notifications(state: &mut AppState) {

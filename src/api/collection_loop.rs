@@ -20,8 +20,6 @@
 
 use std::time::Duration;
 
-use sysinfo::Disks;
-
 use crate::api::FrameBus;
 use crate::api::handlers::SharedState;
 use crate::app_state::AppState;
@@ -30,8 +28,8 @@ use crate::device::{
     get_gpu_readers, get_memory_readers,
 };
 use crate::snapshot::{SNAPSHOT_SCHEMA_VERSION, Snapshot};
-use crate::storage::info::StorageInfo;
-use crate::utils::{filter_docker_aware_disks, get_hostname};
+use crate::storage::disk_cache::DiskCache;
+use crate::utils::get_hostname;
 
 /// Run the collection loop forever. Caller spawns this as a tokio task.
 ///
@@ -61,7 +59,10 @@ pub async fn run_collection_loop(
     let cpu_readers = get_cpu_readers();
     let memory_readers = get_memory_readers();
     let chassis_reader = create_chassis_reader();
-    let mut disks = Disks::new_with_refreshed_list();
+    // Shared with the view collector and `LocalStorageReader`: the mount
+    // table is enumerated off the loop every 30 s, and each cycle only
+    // refreshes capacities.
+    let mut disks = DiskCache::new();
     let hostname = get_hostname();
     let interval = Duration::from_secs(interval_secs);
 
@@ -107,8 +108,7 @@ pub async fn run_collection_loop(
             })
             .collect();
 
-        disks.refresh(true);
-        let storage_info = collect_storage_info_from(&disks, &hostname);
+        let storage_info = disks.storage_info(&hostname);
 
         // Build the shared `Snapshot` first using cloned collections so
         // the Prometheus-serving `AppState` and the SSE/snapshot frame
@@ -208,46 +208,5 @@ pub(crate) fn integrate_power_samples(state: &mut AppState) {
             wal_index.seed_if_matches(&key, integrator);
         }
         integrator.record_sample(key, now, watts);
-    }
-}
-
-/// Collect storage/disk information from a pre-existing Disks instance.
-/// The caller is responsible for calling `refresh_list()` before this function.
-fn collect_storage_info_from(disks: &Disks, hostname: &str) -> Vec<StorageInfo> {
-    let mut storage_info = Vec::new();
-    let mut filtered_disks = filter_docker_aware_disks(disks);
-    filtered_disks.sort_by(|a, b| {
-        a.mount_point()
-            .to_string_lossy()
-            .cmp(&b.mount_point().to_string_lossy())
-    });
-
-    for (index, disk) in filtered_disks.iter().enumerate() {
-        let mount_point_str = disk.mount_point().to_string_lossy();
-        storage_info.push(StorageInfo {
-            mount_point: mount_point_str.to_string(),
-            total_bytes: disk.total_space(),
-            available_bytes: disk.available_space(),
-            host_id: hostname.to_string(),
-            hostname: hostname.to_string(),
-            index: index as u32,
-        });
-    }
-
-    storage_info
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn collect_storage_info_respects_hostname() {
-        // Driving the helper with an empty Disks instance is enough to
-        // prove the hostname is threaded through. A deeper disk-level
-        // test would depend on the host's mount table, which we do not
-        // want in unit tests.
-        let disks = Disks::new_with_refreshed_list();
-        let _ = collect_storage_info_from(&disks, "h");
     }
 }
