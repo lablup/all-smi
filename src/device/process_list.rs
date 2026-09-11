@@ -16,6 +16,10 @@ use crate::device::types::ProcessInfo;
 use std::collections::{HashMap, HashSet};
 use sysinfo::{ProcessStatus, System};
 
+#[cfg(target_os = "macos")]
+#[path = "process_list/priority_macos.rs"]
+mod priority_macos;
+
 /// Get all system processes with GPU usage information
 pub fn get_all_processes(system: &System, gpu_pids: &HashSet<u32>) -> Vec<ProcessInfo> {
     let mut processes = Vec::new();
@@ -194,7 +198,17 @@ fn get_process_command(process: &sysinfo::Process) -> String {
     }
 }
 
+/// Get process priority and nice value.
+///
+/// On macOS both come from libc in-process; see `priority_macos` for what the
+/// priority column means there and why nothing is spawned.
+#[cfg(target_os = "macos")]
+fn get_process_priority_nice(pid: u32) -> (i32, i32) {
+    priority_macos::priority_nice(pid)
+}
+
 /// Get process priority and nice value
+#[cfg(not(target_os = "macos"))]
 #[allow(unused_variables)]
 fn get_process_priority_nice(pid: u32) -> (i32, i32) {
     #[cfg(target_os = "linux")]
@@ -224,28 +238,6 @@ fn get_process_priority_nice(pid: u32) -> (i32, i32) {
                         .get(16) // nice is at index 16 after the name
                         .and_then(|s| s.parse::<i32>().ok())
                         .unwrap_or(0);
-                    return (priority, nice);
-                }
-            }
-        }
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        use crate::utils::command::new_command;
-
-        // On macOS, use ps command to get priority and nice
-        if let Ok(output) = new_command("ps")
-            .args(["-p", &pid.to_string(), "-o", "pri,nice"])
-            .output()
-        {
-            let output_str = String::from_utf8_lossy(&output.stdout);
-            let lines: Vec<&str> = output_str.lines().collect();
-            if lines.len() > 1 {
-                let fields: Vec<&str> = lines[1].split_whitespace().collect();
-                if fields.len() >= 2 {
-                    let priority = fields[0].parse::<i32>().unwrap_or(20);
-                    let nice = fields[1].parse::<i32>().unwrap_or(0);
                     return (priority, nice);
                 }
             }
