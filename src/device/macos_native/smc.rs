@@ -140,6 +140,9 @@ const SMC_CMD_READ_INDEX: u8 = 8;
 /// SMC kernel selector
 const KERNEL_INDEX_SMC: u32 = 2;
 
+/// `result` of an SMC command that succeeded.
+const SMC_RESULT_SUCCESS: u8 = 0;
+
 /// `result` of a key-info read for a key this SMC does not have
 /// (`kSMCKeyNotFound`). The IOKit call itself still succeeds, with a zero data
 /// size and type, and the value read that follows reports result 137, so the
@@ -669,7 +672,10 @@ impl SMC {
     /// Keys the SMC does not have are remembered too, so the static
     /// candidates in [`get_cpu_temperature`](Self::get_cpu_temperature) that
     /// a chip lacks (all eight on an M5 Max) cost nothing after the first
-    /// call. A failed IOKit call is not remembered; the next read asks again.
+    /// call. Only the two definitive answers are remembered: success (result
+    /// 0, what every present key returns on an M5 Max) and key not found. A
+    /// failed IOKit call or any other result is used for this read only, as
+    /// every read did before the cache existed, and the next read asks again.
     fn cached_key_info(&mut self, key_code: u32) -> Result<KeyInfo, &'static str> {
         if let Some(cached) = self.key_info.get(&key_code) {
             return cached.ok_or("SMC key not found");
@@ -682,7 +688,11 @@ impl SMC {
         };
         let output = self.read(&input).inspect_err(|_| self.read_failed = true)?;
 
-        let info = (output.result != SMC_RESULT_KEY_NOT_FOUND).then_some(output.key_info);
+        let info = match output.result {
+            SMC_RESULT_SUCCESS => Some(output.key_info),
+            SMC_RESULT_KEY_NOT_FOUND => None,
+            _ => return Ok(output.key_info),
+        };
         self.key_info.insert(key_code, info);
         info.ok_or("SMC key not found")
     }
@@ -1046,8 +1056,23 @@ pub struct SMCMetrics {
 }
 
 impl SMCMetrics {
+    /// Collect all SMC metrics over a connection opened for this call.
+    ///
+    /// Every field is empty when the SMC cannot be opened. A caller that
+    /// collects repeatedly should keep a connection and use
+    /// [`collect_from`](Self::collect_from), or keep an [`SmcSampler`]:
+    /// opening a connection costs an IOKit handshake, and key info is looked
+    /// up again on every new connection.
+    #[allow(dead_code)] // Public API for library consumers; the manager uses `SmcSampler`
+    pub fn collect() -> Self {
+        match SMC::new() {
+            Ok(mut smc) => Self::collect_from(&mut smc),
+            Err(_) => Self::default(),
+        }
+    }
+
     /// Read every SMC metric over an open connection.
-    pub fn collect(smc: &mut SMC) -> Self {
+    pub fn collect_from(smc: &mut SMC) -> Self {
         Self {
             cpu_temperature: smc.get_cpu_temperature(),
             gpu_temperature: smc.get_gpu_temperature(),
@@ -1080,7 +1105,8 @@ impl SMCMetrics {
 ///
 /// A failed open leaves every field empty for that call, as a failed
 /// `SMC::new` always did, and is retried on the next call. A connection whose
-/// IOKit calls start failing is closed so the next call opens a fresh one.
+/// IOKit calls start failing is closed so the next call opens a fresh one and
+/// reads every metric again.
 #[derive(Default)]
 pub struct SmcSampler {
     connection: SmcConnection,
@@ -1104,7 +1130,7 @@ impl SmcSampler {
                 SMCMetrics::collect_temperatures(smc, previous)
             }
             _ => {
-                let metrics = SMCMetrics::collect(smc);
+                let metrics = SMCMetrics::collect_from(smc);
                 self.last_full = Some((Instant::now(), metrics.clone()));
                 metrics
             }
@@ -1112,6 +1138,9 @@ impl SmcSampler {
 
         if smc.take_read_failure() {
             self.connection.reset();
+            // What the failing connection read is not worth repeating for
+            // the next 5 s; the new connection starts with a full read.
+            self.last_full = None;
         }
         metrics
     }
@@ -1329,6 +1358,45 @@ mod tests {
             !smc.take_read_failure(),
             "an absent key is not an IOKit failure"
         );
+    }
+
+    /// `SMCMetrics::collect()` is library API that opens a connection for the
+    /// call, as it did before the manager kept one; the variant that takes a
+    /// connection has its own name.
+    #[test]
+    fn collect_keeps_its_public_signature() {
+        let _: fn() -> SMCMetrics = SMCMetrics::collect;
+        let _: fn(&mut SMC) -> SMCMetrics = SMCMetrics::collect_from;
+    }
+
+    /// Reading over a connection opened for the call finds the same metrics
+    /// as reading over a kept one.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn collect_on_its_own_connection_matches_a_kept_connection() {
+        let Ok(mut smc) = SMC::new() else {
+            return;
+        };
+        let kept = SMCMetrics::collect_from(&mut smc);
+        let opened = SMCMetrics::collect();
+
+        assert_eq!(
+            opened.cpu_temperature.is_some(),
+            kept.cpu_temperature.is_some()
+        );
+        assert_eq!(
+            opened.gpu_temperature.is_some(),
+            kept.gpu_temperature.is_some()
+        );
+        assert_eq!(opened.system_power.is_some(), kept.system_power.is_some());
+        let fans = |metrics: &SMCMetrics| -> Vec<String> {
+            metrics
+                .fan_speeds
+                .iter()
+                .map(|(name, _)| name.clone())
+                .collect()
+        };
+        assert_eq!(fans(&opened), fans(&kept));
     }
 
     /// The native metrics manager must retry a failed open on its next
