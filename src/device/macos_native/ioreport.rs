@@ -22,6 +22,10 @@
 //! - `CPU Stats`: CPU core performance states and residency
 //! - `GPU Stats`: GPU performance states and residency
 //!
+//! The subscription holds only the channels of these groups that something
+//! reads (24 of 383 on an M5 Max); `channel_filter` has the rules and the
+//! measured cost.
+//!
 //! ## Energy Model: exact channel matching
 //!
 //! The group is a hierarchy, not a list of rails. On an M5 Max (macOS 27) it
@@ -95,6 +99,9 @@
 //! - OSXPrivateSDK IOReport.h
 
 use super::energy::{EnergyObservation, EnergyReadings, EnergyTracker, classify_energy_channel};
+use channel_filter::{
+    KeepChannel, keep_cpu_channel, keep_energy_channel, keep_gpu_channel, retain_channels,
+};
 use core_foundation::base::{
     CFEqual, CFGetTypeID, CFRelease, CFRetain, CFType, CFTypeRef, TCFType,
 };
@@ -109,6 +116,9 @@ use std::marker::{PhantomData, PhantomPinned};
 use std::ptr;
 use std::sync::OnceLock;
 use std::time::Instant;
+
+#[path = "ioreport/channel_filter.rs"]
+mod channel_filter;
 
 /// Static CFStringRef constants for IOReport channel groups and dictionary keys.
 /// These are created once, retained with CFRetain, and kept for the lifetime
@@ -196,21 +206,27 @@ fn get_cfstring_refs() -> &'static CFStringRefs {
 /// One `IOReportCopyChannelsInGroup` query, in a form that can cross a thread
 /// boundary.
 ///
-/// SAFETY: both fields are `CFStringRef`s owned by [`CFStringRefs`], which
-/// retains them for the life of the process and never mutates them. The same
-/// reasoning that makes `CFStringRefs` `Sync` makes this `Send`.
+/// SAFETY: `group` and `subgroup` are `CFStringRef`s owned by
+/// [`CFStringRefs`], which retains them for the life of the process and never
+/// mutates them. The same reasoning that makes `CFStringRefs` `Sync` makes
+/// this `Send`; `keep` is a plain function pointer.
 #[derive(Clone, Copy)]
 struct ChannelGroupQuery {
     group: CFStringRef,
     subgroup: CFStringRef,
+    /// Which of the group's channels to subscribe to (see `channel_filter`).
+    keep: KeepChannel,
 }
 
 unsafe impl Send for ChannelGroupQuery {}
 
 impl ChannelGroupQuery {
-    /// Run the query. Returns null when the group does not exist on this host.
+    /// Run the query and keep only the channels something reads. Returns null
+    /// when the group does not exist on this host.
     fn copy_channels(self) -> CFDictionaryRef {
-        unsafe { IOReportCopyChannelsInGroup(self.group, self.subgroup, 0, 0, 0) }
+        let description =
+            unsafe { IOReportCopyChannelsInGroup(self.group, self.subgroup, 0, 0, 0) };
+        retain_channels(description, self.keep)
     }
 }
 
@@ -243,14 +259,18 @@ static MERGED_CHANNELS: OnceLock<MergedChannels> = OnceLock::new();
 /// and GPU stats groups are tolerated as absent, which is the same asymmetry
 /// the sequential version had.
 ///
+/// Each group is cut down to the channels the parsers read before the merge
+/// (383 channels become 24 on an M5 Max; see `channel_filter`), so the
+/// subscription built from this never samples a channel nothing looks at.
+///
 /// Returns an owned (+1 retained) dictionary.
 fn build_merged_channels() -> Result<CFDictionaryRef, &'static str> {
     let refs = get_cfstring_refs();
 
     // Spawn all three before joining any, so they overlap.
-    let energy = spawn_channel_query(refs.energy_model, ptr::null());
-    let cpu = spawn_channel_query(refs.cpu_stats, refs.cpu_perf_states);
-    let gpu = spawn_channel_query(refs.gpu_stats, refs.gpu_perf_states);
+    let energy = spawn_channel_query(refs.energy_model, ptr::null(), keep_energy_channel);
+    let cpu = spawn_channel_query(refs.cpu_stats, refs.cpu_perf_states, keep_cpu_channel);
+    let gpu = spawn_channel_query(refs.gpu_stats, refs.gpu_perf_states, keep_gpu_channel);
 
     // `Err` means that worker panicked, which is distinct from a group that
     // simply does not exist on this host: the latter returns a null dictionary.
@@ -325,8 +345,16 @@ impl ChannelQuery {
 /// panics when it does. This is reached from `AllSmi::with_config`, a library
 /// entry point that reports failure through `Result`, so a refused thread
 /// degrades to running the query inline instead of unwinding through it.
-fn spawn_channel_query(group: CFStringRef, subgroup: CFStringRef) -> ChannelQuery {
-    let query = ChannelGroupQuery { group, subgroup };
+fn spawn_channel_query(
+    group: CFStringRef,
+    subgroup: CFStringRef,
+    keep: KeepChannel,
+) -> ChannelQuery {
+    let query = ChannelGroupQuery {
+        group,
+        subgroup,
+        keep,
+    };
     match std::thread::Builder::new()
         .name("all-smi-ioreport".to_string())
         .spawn(move || OwnedDict(query.copy_channels()))
@@ -952,8 +980,9 @@ fn channel_unit(item: CFDictionaryRef) -> String {
 
 /// Read every tracked `Energy Model` channel out of a raw (non-delta) sample.
 ///
-/// Only channels that classify into a rail are read past their name, so the
-/// ~360 untracked channels of an M5 Max cost one name conversion each.
+/// The subscription holds only tracked channels (see `channel_filter`), but
+/// the check stays so that a sample from any subscription reads correctly:
+/// only channels that classify into a rail are read past their name.
 fn energy_observations(sample: CFDictionaryRef) -> Vec<EnergyObservation> {
     get_io_channels(sample)
         .into_iter()
@@ -1089,6 +1118,8 @@ pub struct IOReport {
     prev_sample: Option<(CFDictionaryRef, Instant)>,
     /// Per-channel energy baselines, fed by every raw sample taken here.
     energy: EnergyTracker,
+    /// How long the most recent `IOReportCreateSamples` call took.
+    last_sample_duration: std::time::Duration,
 }
 
 impl IOReport {
@@ -1137,6 +1168,7 @@ impl IOReport {
                 channels,
                 prev_sample: None,
                 energy: EnergyTracker::default(),
+                last_sample_duration: std::time::Duration::ZERO,
             })
         }
     }
@@ -1253,6 +1285,16 @@ impl IOReport {
         self.energy.readings()
     }
 
+    /// How long the most recent `IOReportCreateSamples` call took.
+    ///
+    /// That call is the floor of every collection: the providers do their
+    /// work per sample, so it costs about the same whether the subscription
+    /// holds 383 channels or 24 (10.2 ms against 8.7 ms per call at a 1 s
+    /// poll on an M5 Max).
+    pub fn last_sample_duration(&self) -> std::time::Duration {
+        self.last_sample_duration
+    }
+
     /// Take a single raw sample and feed its energy channels to the tracker.
     ///
     /// Every sample this subscription takes passes through here, so the
@@ -1263,8 +1305,10 @@ impl IOReport {
         // `self` and stay valid until `Drop`. The returned sample is a +1
         // reference; ownership passes to the caller, which is responsible
         // for releasing it (directly, or via `IOReportIterator`'s `Drop`).
+        let started = Instant::now();
         let sample =
             unsafe { IOReportCreateSamples(self.subscription, self.channels, ptr::null()) };
+        self.last_sample_duration = started.elapsed();
         if sample.is_null() {
             return Err("Failed to create IOReport sample");
         }
@@ -1679,7 +1723,8 @@ mod tests {
     }
 
     /// Hardware diagnostic for the Energy Model (issue #410). Prints this
-    /// machine's channel inventory in the fixture format, then for six seconds
+    /// machine's full channel inventory in the fixture format (enumerated from
+    /// the group itself, since the subscription is filtered), then for six seconds
     /// at 100 ms every tracked channel's counter delta (`dv`), publication
     /// span (`dts`), and publication age, read from raw samples, next to the
     /// rail readings the tracker produced from them.
@@ -1701,25 +1746,29 @@ mod tests {
             println!("IOReport is unavailable on this host; nothing to report");
             return;
         };
-        let Ok(sample) = report.take_sample() else {
-            println!("IOReport returned no sample; nothing to report");
-            return;
-        };
 
         let (numer, denom) = mach_timebase();
         println!("# mach timebase {numer}/{denom}");
+        // The whole group, not the subscription: the subscription holds only
+        // the tracked channels, and the inventory exists to record the rest.
+        // SAFETY: the group name is the process-lifetime static CFString and a
+        // null subgroup means "all"; the result is a +1 dictionary (or null),
+        // released once below after `get_io_channels` has read it.
+        let description = unsafe {
+            IOReportCopyChannelsInGroup(get_cfstring_refs().energy_model, ptr::null(), 0, 0, 0)
+        };
         println!("# Energy Model inventory (name<TAB>unit)");
         let mut inventory = 0;
-        for item in get_io_channels(sample) {
+        for item in get_io_channels(description) {
             if let Some(name) = energy_channel_name(item) {
                 println!("{name}\t{}", channel_unit(item));
                 inventory += 1;
             }
         }
         println!("# {inventory} channels");
-        // SAFETY: `sample` is the +1 reference `take_sample` returns, released
-        // exactly once here and not used afterwards.
-        unsafe { CFRelease(sample as *const c_void) };
+        if !description.is_null() {
+            unsafe { CFRelease(description as *const c_void) };
+        }
 
         println!("# per tracked channel: dv = counter delta, dts = publication span");
         let mut previous: HashMap<String, (i64, Option<u64>)> = HashMap::new();

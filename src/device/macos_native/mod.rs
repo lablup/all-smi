@@ -48,7 +48,7 @@ pub use thermal::get_thermal_state;
 // Re-export public types for use by apple_silicon_native reader and main
 #[allow(unused_imports)]
 pub use manager::{
-    NativeMetricsManager, acquire_native_metrics_manager, get_native_metrics_manager,
-    initialize_native_metrics_manager, release_native_metrics_manager,
+    CollectionTimings, NativeMetricsManager, acquire_native_metrics_manager,
+    get_native_metrics_manager, initialize_native_metrics_manager, release_native_metrics_manager,
     shutdown_native_metrics_manager,
 };

@@ -91,13 +91,13 @@
 
 use super::ioreport::{IOReport, IOReportMetrics};
 use super::metrics::NativeMetricsData;
-use super::smc::SMCMetrics;
+use super::smc::{SMCMetrics, SmcSampler};
 use super::thermal::get_thermal_state;
 use once_cell::sync::Lazy;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// The process-global manager together with the number of live handles that
 /// asked for it to be kept alive.
@@ -142,11 +142,36 @@ impl Default for NativeMetricsConfig {
     }
 }
 
+/// Where the time of the most recent uncached [`NativeMetricsManager::collect_once`]
+/// went. Diagnostic only: nothing reads it on the collection path, and
+/// `tests/perf_tick_stages.rs` prints it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CollectionTimings {
+    /// `IOReportCreateSamples` for the residency sample. This is the
+    /// provider's own cost, paid per sample whatever the subscription holds.
+    pub ioreport_sample: Duration,
+    /// Everything else IOReport: reading the energy channels out of the raw
+    /// sample, the residency delta, and turning it into cluster metrics. On
+    /// the first collection of a session it also holds the blocking baseline
+    /// window.
+    pub ioreport_parse: Duration,
+    /// SMC temperatures, plus power and fans when they were due.
+    pub smc: Duration,
+    /// Thermal state and assembling the result.
+    pub other: Duration,
+    /// The whole collection.
+    pub total: Duration,
+}
+
 /// Manages native metrics collection for Apple Silicon
 pub struct NativeMetricsManager {
     config: NativeMetricsConfig,
     #[allow(dead_code)]
     ioreport: Mutex<Option<IOReport>>,
+    /// The SMC connection and slow-changing readings kept between collections.
+    smc: Mutex<SmcSampler>,
+    /// Stage timings of the most recent uncached collection.
+    last_timings: Mutex<Option<CollectionTimings>>,
     latest_data: RwLock<Option<NativeMetricsData>>,
     last_collection_time: RwLock<Option<std::time::Instant>>,
     /// Mutex to prevent concurrent collections (only one collection at a time)
@@ -184,6 +209,8 @@ impl NativeMetricsManager {
         Ok(Self {
             config,
             ioreport: Mutex::new(Some(ioreport)),
+            smc: Mutex::new(SmcSampler::default()),
+            last_timings: Mutex::new(None),
             latest_data: RwLock::new(None),
             last_collection_time: RwLock::new(None),
             collection_lock: Mutex::new(()),
@@ -246,6 +273,7 @@ impl NativeMetricsManager {
         is_running: Arc<AtomicBool>,
         tx: std::sync::mpsc::Sender<NativeMetricsData>,
     ) {
+        let mut smc = SmcSampler::default();
         while is_running.load(Ordering::Relaxed) {
             // Collect multiple samples and average them
             let mut samples: Vec<IOReportMetrics> = Vec::with_capacity(config.sample_count);
@@ -278,7 +306,7 @@ impl NativeMetricsManager {
 
             // Collect SMC metrics
             let smc_metrics = if config.enable_smc {
-                SMCMetrics::collect()
+                smc.collect()
             } else {
                 SMCMetrics::default()
             };
@@ -411,6 +439,8 @@ impl NativeMetricsManager {
         let mut ioreport_guard = self.ioreport.lock().map_err(|_| "IOReport lock poisoned")?;
         let ioreport = ioreport_guard.as_mut().ok_or("IOReport not initialized")?;
 
+        let started = Instant::now();
+
         // Residency deltas against the sample retained by the previous
         // collection. The residency channels are cumulative counters, so this
         // covers the whole interval since that collection rather than a short
@@ -428,6 +458,8 @@ impl NativeMetricsManager {
             // that first interval, which is harmless.
             None => ioreport.get_sample(self.config.sample_interval_ms)?,
         };
+        let sampled = Instant::now();
+        let ioreport_sample = ioreport.last_sample_duration();
 
         // Power is not taken from that delta. Every sample above also fed the
         // subscription's energy tracker, which times each Energy Model channel
@@ -435,15 +467,33 @@ impl NativeMetricsManager {
         // publications, so a poll that lands between two ~2.1 s batches no
         // longer reads 0 W (issue #410).
         let avg_metrics = IOReportMetrics::from_sample(residency, ioreport.energy_readings());
+        let parsed = Instant::now();
 
-        // Collect SMC metrics
-        let smc_metrics = SMCMetrics::collect();
+        // SMC over the connection kept from the previous collection.
+        let smc_metrics = self
+            .smc
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .collect();
+        let smc_done = Instant::now();
 
         // Get thermal state
         let thermal_state = get_thermal_state();
 
         // Combine
         let data = NativeMetricsData::from_components(avg_metrics, smc_metrics, thermal_state);
+        let finished = Instant::now();
+
+        if let Ok(mut guard) = self.last_timings.lock() {
+            *guard = Some(CollectionTimings {
+                ioreport_sample,
+                ioreport_parse: (sampled - started).saturating_sub(ioreport_sample)
+                    + (parsed - sampled),
+                smc: smc_done - parsed,
+                other: finished - smc_done,
+                total: finished - started,
+            });
+        }
 
         // Update latest data and timestamp
         if let Ok(mut guard) = self.latest_data.write() {
@@ -455,6 +505,15 @@ impl NativeMetricsManager {
         }
 
         Ok(data)
+    }
+
+    /// Stage timings of the most recent collection that was not served from
+    /// cache, or `None` before the first one.
+    ///
+    /// Read by `tests/perf_tick_stages.rs`; the binary never asks.
+    #[allow(dead_code)]
+    pub fn last_collection_timings(&self) -> Option<CollectionTimings> {
+        self.last_timings.lock().ok().and_then(|guard| *guard)
     }
 
     /// Shutdown the manager

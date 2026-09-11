@@ -32,8 +32,10 @@
 //! - osx-cpu-temp project
 //! - mactop project for dynamic key discovery
 
+use std::collections::HashMap;
 use std::ffi::c_void;
 use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 /// Upper bound on discovered CPU temperature keys (`Tp*`/`Te*` on Apple
 /// Silicon, `TC*` on Intel).
@@ -137,6 +139,12 @@ const SMC_CMD_READ_INDEX: u8 = 8;
 
 /// SMC kernel selector
 const KERNEL_INDEX_SMC: u32 = 2;
+
+/// `result` of a key-info read for a key this SMC does not have
+/// (`kSMCKeyNotFound`). The IOKit call itself still succeeds, with a zero data
+/// size and type, and the value read that follows reports result 137, so the
+/// bytes it returns are not a reading.
+const SMC_RESULT_KEY_NOT_FOUND: u8 = 0x84;
 
 /// SMC key information structure
 #[repr(C)]
@@ -293,6 +301,12 @@ fn str_to_fourcc(s: &str) -> u32 {
 #[allow(clippy::upper_case_acronyms)]
 pub struct SMC {
     conn: u32,
+    /// Key info per FourCC, looked up once per connection; `None` for a key
+    /// this SMC does not have. See [`SMC::cached_key_info`].
+    key_info: HashMap<u32, Option<KeyInfo>>,
+    /// Set when an IOKit call made by [`SMC::read_value`] fails, which is how
+    /// a caller that keeps the connection learns it has gone bad.
+    read_failed: bool,
 }
 
 impl SMC {
@@ -316,16 +330,24 @@ impl SMC {
             // the caller owns. `IOServiceOpen` creates an independent user
             // client and does not adopt that reference, so the service handle
             // has to be released on both outcomes or every call leaks a mach
-            // port right. `SMCMetrics::collect` opens a fresh connection once
-            // per collection cycle, so the leak was unbounded over the
-            // lifetime of a long-running `view` or `api` process.
+            // port right. The native metrics manager used to open a fresh
+            // connection once per collection cycle, so the leak was unbounded
+            // over the lifetime of a long-running `view` or `api` process.
             IOObjectRelease(device);
 
             if result != 0 {
                 return Err("Failed to open SMC connection");
             }
 
-            Ok(Self { conn })
+            Ok(Self::from_conn(conn))
+        }
+    }
+
+    fn from_conn(conn: u32) -> Self {
+        Self {
+            conn,
+            key_info: HashMap::new(),
+            read_failed: false,
         }
     }
 
@@ -615,9 +637,11 @@ impl SMC {
     }
 
     /// Read a value from the SMC
+    ///
+    /// A key this SMC does not have is an error rather than a zero reading.
     pub fn read_value(&mut self, key: &str) -> Result<f64, &'static str> {
-        let key_info = self.read_key_info(key)?;
         let key_code = str_to_fourcc(key);
+        let key_info = self.cached_key_info(key_code)?;
 
         let input = KeyData {
             key: key_code,
@@ -629,12 +653,44 @@ impl SMC {
             ..Default::default()
         };
 
-        let output = self.read(&input)?;
+        let output = self.read(&input).inspect_err(|_| self.read_failed = true)?;
 
         // Convert bytes to value based on data type
         let value = self.convert_value(&output.bytes, key_info.data_type, key_info.data_size);
 
         Ok(value)
+    }
+
+    /// Key info (size and type) for `key_code`, looked up once per connection.
+    ///
+    /// A key's size and type do not change while the machine is up, and
+    /// looking them up is a second IOKit round trip per read: 200 to 300 us on
+    /// an M5 Max, about as much as reading a sensor's value (100 to 350 us).
+    /// Keys the SMC does not have are remembered too, so the static
+    /// candidates in [`get_cpu_temperature`](Self::get_cpu_temperature) that
+    /// a chip lacks (all eight on an M5 Max) cost nothing after the first
+    /// call. A failed IOKit call is not remembered; the next read asks again.
+    fn cached_key_info(&mut self, key_code: u32) -> Result<KeyInfo, &'static str> {
+        if let Some(cached) = self.key_info.get(&key_code) {
+            return cached.ok_or("SMC key not found");
+        }
+
+        let input = KeyData {
+            key: key_code,
+            data8: SMC_CMD_READ_KEY_INFO,
+            ..Default::default()
+        };
+        let output = self.read(&input).inspect_err(|_| self.read_failed = true)?;
+
+        let info = (output.result != SMC_RESULT_KEY_NOT_FOUND).then_some(output.key_info);
+        self.key_info.insert(key_code, info);
+        info.ok_or("SMC key not found")
+    }
+
+    /// Whether an IOKit call made by [`read_value`](Self::read_value) failed
+    /// since the last time this was asked.
+    fn take_read_failure(&mut self) -> bool {
+        std::mem::take(&mut self.read_failed)
     }
 
     /// Convert raw bytes to a floating point value based on SMC data type
@@ -889,11 +945,11 @@ impl SMC {
 /// Lazily opened, reusable SMC connection.
 ///
 /// Readers are polled on the UI refresh interval, so the connection is opened
-/// once and then reused instead of handshaking with IOKit on every cycle
-/// (which is what [`SMCMetrics::collect`] does, acceptable there because the
-/// native metrics manager caches its results). A failed open is remembered as
-/// `Unavailable` so a machine without a reachable SMC does not pay for a retry
-/// on every poll either.
+/// once and then reused instead of handshaking with IOKit on every cycle.
+/// Through [`get`](Self::get) a failed open is remembered as `Unavailable`, so
+/// a machine without a reachable SMC does not pay for a retry on every poll;
+/// the Intel readers rely on that. [`get_or_retry`](Self::get_or_retry) is
+/// the variant for callers that want the next poll to try again.
 #[derive(Default)]
 pub enum SmcConnection {
     #[default]
@@ -918,6 +974,20 @@ impl SmcConnection {
             SmcConnection::Open(smc) => Some(smc),
             _ => None,
         }
+    }
+
+    /// Like [`get`](Self::get), but an earlier failed open is tried again
+    /// instead of being taken as final.
+    pub fn get_or_retry(&mut self) -> Option<&mut SMC> {
+        if matches!(self, SmcConnection::Unavailable) {
+            *self = SmcConnection::Unopened;
+        }
+        self.get()
+    }
+
+    /// Close the connection, if one is open, so the next call opens a new one.
+    pub fn reset(&mut self) {
+        *self = SmcConnection::Unopened;
     }
 }
 
@@ -976,17 +1046,73 @@ pub struct SMCMetrics {
 }
 
 impl SMCMetrics {
-    /// Collect all SMC metrics
-    pub fn collect() -> Self {
-        let mut metrics = Self::default();
-
-        if let Ok(mut smc) = SMC::new() {
-            metrics.cpu_temperature = smc.get_cpu_temperature();
-            metrics.gpu_temperature = smc.get_gpu_temperature();
-            metrics.system_power = smc.get_system_power();
-            metrics.fan_speeds = smc.get_fan_speeds();
+    /// Read every SMC metric over an open connection.
+    pub fn collect(smc: &mut SMC) -> Self {
+        Self {
+            cpu_temperature: smc.get_cpu_temperature(),
+            gpu_temperature: smc.get_gpu_temperature(),
+            system_power: smc.get_system_power(),
+            fan_speeds: smc.get_fan_speeds(),
         }
+    }
 
+    /// Read the temperatures and carry system power and fan speeds over from
+    /// `previous`.
+    fn collect_temperatures(smc: &mut SMC, previous: &SMCMetrics) -> Self {
+        Self {
+            cpu_temperature: smc.get_cpu_temperature(),
+            gpu_temperature: smc.get_gpu_temperature(),
+            system_power: previous.system_power,
+            fan_speeds: previous.fan_speeds.clone(),
+        }
+    }
+}
+
+/// SMC state the native metrics manager keeps from one collection to the
+/// next.
+///
+/// Opening a connection per collection cost an IOKit handshake every tick,
+/// and the key-info cache on [`SMC`] only pays off on a connection that
+/// lives. Temperatures are read on every call; system power and fan speeds
+/// change slowly and cost a read for `PSTR`, one for the fan count and two per
+/// fan, so they are refreshed every
+/// [`SLOW_READ_INTERVAL`](Self::SLOW_READ_INTERVAL) and repeated in between.
+///
+/// A failed open leaves every field empty for that call, as a failed
+/// `SMC::new` always did, and is retried on the next call. A connection whose
+/// IOKit calls start failing is closed so the next call opens a fresh one.
+#[derive(Default)]
+pub struct SmcSampler {
+    connection: SmcConnection,
+    /// The last full read and when it was taken.
+    last_full: Option<(Instant, SMCMetrics)>,
+}
+
+impl SmcSampler {
+    /// How long system power and fan speeds are reused before being read
+    /// again.
+    pub const SLOW_READ_INTERVAL: Duration = Duration::from_secs(5);
+
+    /// Read the SMC metrics for one collection.
+    pub fn collect(&mut self) -> SMCMetrics {
+        let Some(smc) = self.connection.get_or_retry() else {
+            return SMCMetrics::default();
+        };
+
+        let metrics = match &self.last_full {
+            Some((read_at, previous)) if read_at.elapsed() < Self::SLOW_READ_INTERVAL => {
+                SMCMetrics::collect_temperatures(smc, previous)
+            }
+            _ => {
+                let metrics = SMCMetrics::collect(smc);
+                self.last_full = Some((Instant::now(), metrics.clone()));
+                metrics
+            }
+        };
+
+        if smc.take_read_failure() {
+            self.connection.reset();
+        }
         metrics
     }
 }
@@ -1152,6 +1278,77 @@ mod tests {
         );
     }
 
+    /// Cached key info must be exactly what a key-info round trip returns,
+    /// so reading through the cache decodes every present key the same way.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn cached_key_info_matches_a_fresh_lookup() {
+        let Ok(mut smc) = SMC::new() else {
+            return;
+        };
+        let (cpu_keys, gpu_keys) = smc.discover_temperature_keys();
+        let keys: Vec<String> = cpu_keys
+            .into_iter()
+            .chain(gpu_keys)
+            .take(8)
+            .chain(["PSTR".to_string(), "FNum".to_string()])
+            .collect();
+
+        for key in keys {
+            let Ok(fresh) = smc.read_key_info(&key) else {
+                continue;
+            };
+            if fresh.data_size == 0 {
+                continue;
+            }
+            let cached = smc
+                .cached_key_info(str_to_fourcc(&key))
+                .expect("a key with a data size exists");
+            assert_eq!(
+                (cached.data_size, cached.data_type),
+                (fresh.data_size, fresh.data_type),
+                "{key}"
+            );
+        }
+    }
+
+    /// A key the SMC does not have is an error, not a zero reading, and is
+    /// remembered so it is not looked up again on the next read.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn absent_keys_are_errors_and_are_remembered() {
+        let Ok(mut smc) = SMC::new() else {
+            return;
+        };
+        let code = str_to_fourcc("ZZZZ");
+
+        assert!(smc.read_value("ZZZZ").is_err());
+        assert!(matches!(smc.key_info.get(&code), Some(None)));
+        assert!(smc.read_value("ZZZZ").is_err());
+        assert!(
+            !smc.take_read_failure(),
+            "an absent key is not an IOKit failure"
+        );
+    }
+
+    /// The native metrics manager must retry a failed open on its next
+    /// collection, while `get` keeps the Intel readers' latching behavior.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn get_or_retry_does_not_latch_a_failed_open() {
+        let reachable = SMC::new().is_ok();
+
+        let mut latched = SmcConnection::Unavailable;
+        assert!(
+            latched.get().is_none(),
+            "`get` treats a failed open as final"
+        );
+        assert_eq!(latched.get_or_retry().is_some(), reachable);
+
+        latched.reset();
+        assert!(matches!(latched, SmcConnection::Unopened));
+    }
+
     #[test]
     fn test_fourcc_conversion() {
         assert_eq!(str_to_fourcc("TC0P"), u32::from_be_bytes(*b"TC0P"));
@@ -1252,7 +1449,7 @@ mod tests {
     /// temperatures. Getting the divisor wrong yields readings off by 256x.
     #[test]
     fn test_sp78_fixed_point_decoding() {
-        let smc = SMC { conn: 0 }; // convert_value doesn't touch the connection
+        let smc = SMC::from_conn(0); // convert_value doesn't touch the connection
         let mut bytes = [0u8; 32];
         // 52.5°C in signed 7.8 fixed point = 52.5 * 256 = 13440 = 0x3480
         bytes[0..2].copy_from_slice(&0x3480_i16.to_be_bytes());
@@ -1279,7 +1476,7 @@ mod tests {
     /// temperatures (the symptom that motivated this conversion).
     #[test]
     fn test_flt_little_endian_decoding() {
-        let smc = SMC { conn: 0 }; // convert_value doesn't touch the connection
+        let smc = SMC::from_conn(0); // convert_value doesn't touch the connection
         let mut bytes = [0u8; 32];
         // 51.2°C as IEEE 754 single = 0x424ccccd
         bytes[0..4].copy_from_slice(&0x424ccccd_u32.to_le_bytes());
