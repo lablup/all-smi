@@ -404,7 +404,7 @@ fn list_gpu_processes() -> Result<()> {
 | `threads` | `u32` | Number of threads |
 | `uses_gpu` | `bool` | Whether process uses GPU |
 | `priority` | `i32` | Process priority (on macOS the task's base priority; 20 when it cannot be read) |
-| `nice_value` | `i32` | Nice value |
+| `nice_value` | `i32` | Nice value (on macOS from `getpriority`; 0 when it cannot be read) |
 | `gpu_utilization` | `f64` | GPU utilization percentage |
 
 ### CpuInfo
