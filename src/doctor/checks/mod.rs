@@ -28,6 +28,7 @@ pub mod furiosa;
 pub mod gaudi;
 pub mod level_zero;
 pub mod network;
+pub mod neuron;
 pub mod nvidia;
 pub mod platform;
 pub mod privileges;
@@ -49,6 +50,7 @@ pub fn all() -> Vec<&'static Check> {
     v.extend(gaudi::checks());
     v.extend(tpu::checks());
     v.extend(tenstorrent::checks());
+    v.extend(neuron::checks());
     v.extend(rebellions::checks());
     v.extend(furiosa::checks());
     v.extend(level_zero::checks());
