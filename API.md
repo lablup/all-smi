@@ -512,17 +512,16 @@ Note: Tenstorrent NPUs use the same basic metric names as GPUs for compatibility
 #### Rebellions-Specific Metrics
 | Metric                                    | Description                          | Unit  | Labels                                                               |
 |-------------------------------------------|--------------------------------------|-------|----------------------------------------------------------------------|
-| `all_smi_rebellions_device_info`          | Device model and variant information | info  | `npu`, `instance`, `npu_uuid`, `npu_index`, `model`, `variant`              |
-| `all_smi_rebellions_firmware_info`        | NPU firmware version                 | info  | `npu`, `instance`, `npu_uuid`, `npu_index`, `firmware_version`              |
-| `all_smi_rebellions_kmd_info`             | Kernel Mode Driver version           | info  | `npu`, `instance`, `npu_uuid`, `npu_index`, `kmd_version`                   |
-| `all_smi_rebellions_device_status`        | Device operational status            | gauge | `npu`, `instance`, `npu_uuid`, `npu_index`                                  |
-| `all_smi_rebellions_performance_state`    | NPU performance state (P0-P15)       | gauge | `npu`, `instance`, `npu_uuid`, `npu_index`                                  |
-| `all_smi_rebellions_pcie_generation`      | PCIe generation (Gen4)               | gauge | `npu`, `instance`, `npu_uuid`, `npu_index`                                  |
-| `all_smi_rebellions_pcie_width`           | PCIe link width (x16)                | gauge | `npu`, `instance`, `npu_uuid`, `npu_index`                                  |
-| `all_smi_rebellions_memory_bandwidth_gbps`| Memory bandwidth capacity            | gauge | `npu`, `instance`, `npu_uuid`, `npu_index`                                  |
-| `all_smi_rebellions_compute_tops`         | Compute capacity in TOPS             | gauge | `npu`, `instance`, `npu_uuid`, `npu_index`                                  |
+| `all_smi_rebellions_device_info`       | Device model, board serial and slot     | gauge | `npu`, `instance`, `npu_uuid`, `npu_index`, `model`, `sid`, `location` |
+| `all_smi_rebellions_firmware_info`     | NPU firmware version                    | gauge | `npu`, `instance`, `npu_uuid`, `npu_index`, `firmware`                 |
+| `all_smi_rebellions_kmd_info`          | Kernel Mode Driver version              | gauge | `instance`, `version`                                                  |
+| `all_smi_rebellions_pstate_info`       | Current performance state (P0-P15)      | gauge | `npu`, `instance`, `npu_uuid`, `npu_index`, `pstate`                   |
+| `all_smi_rebellions_status`            | Device operational status               | gauge | `npu`, `instance`, `npu_uuid`, `npu_index`, `status`                   |
 
-Note: Rebellions NPUs support ATOM, ATOM+, and ATOM Max variants with varying compute and memory capabilities. All variants use PCIe Gen4 x16 interface.
+Note: Rebellions NPUs come as ATOM, ATOM+ and ATOM Max boards. On ATOM Max a single
+physical card carries four dies, and `rbln-stat` enumerates dies rather than cards --
+group by the `sid` label to recover cards. Both ATOM+ (`RBLN-CA22`) and ATOM Max
+(`RBLN-CA25`) report a PCIe 32.0 GT/s x16 link, i.e. Gen5 x16.
 
 ### Furiosa NPU Metrics
 
