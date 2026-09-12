@@ -51,6 +51,12 @@ pub mod tpu_sysfs;
 #[cfg(target_os = "linux")]
 pub mod tenstorrent;
 
+// AWS Neuron (Trainium / Inferentia). Linux-only: the `neuron` kernel
+// module, its sysfs tree, and the `aws-neuronx-tools` CLIs exist on no
+// other platform.
+#[cfg(target_os = "linux")]
+pub mod neuron;
+
 // The main crate owns only a runtime loader. The companion cdylib keeps
 // `libamdgpu_top` and its libdrm linkage out of every consumer binary.
 #[cfg(all(target_os = "linux", not(target_env = "musl")))]
