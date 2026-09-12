@@ -14,9 +14,7 @@
 
 use crate::device::GpuReader;
 use crate::device::common::execute_command_default;
-use crate::device::common::parsers::{
-    parse_device_id, parse_power, parse_temperature, parse_utilization,
-};
+use crate::device::common::parsers::{parse_power, parse_temperature, parse_utilization};
 use crate::device::readers::common_cache::{DetailBuilder, DeviceStaticInfo};
 use crate::device::types::{GpuInfo, ProcessInfo};
 use crate::utils::get_hostname;
@@ -78,7 +76,6 @@ struct RblnMemoryInfo {
 #[derive(Debug, Deserialize)]
 struct RblnDevice {
     #[serde(deserialize_with = "deserialize_string_or_u32")]
-    #[allow(dead_code)]
     npu: u32,
     name: String,
     sid: String,
@@ -112,10 +109,21 @@ struct RblnResponse {
 struct RblnContext {
     #[allow(dead_code)]
     ctx_id: String,
-    npu: String,
+    /// Index of the device owning this context. `rbln-stat` 3.0.0 emits this as
+    /// a JSON integer; a string is accepted too so other builds keep working.
+    #[serde(deserialize_with = "deserialize_string_or_u32")]
+    npu: u32,
+    /// Process name. The tool spells this `process`; `cmd` is kept as an alias.
+    #[serde(alias = "cmd")]
+    process: String,
+    /// PID, emitted as a quoted string by `rbln-stat` 3.0.0.
+    #[serde(deserialize_with = "deserialize_string_or_u32")]
     pid: u32,
-    cmd: String,
-    memory: String,
+    /// Device memory held by this context, as a human-readable string such as
+    /// "3.5GiB" or "72.0MiB" -- unlike the device-level memory fields, which
+    /// are bare byte counts.
+    #[serde(alias = "memory")]
+    memalloc: String,
 }
 
 /// Type alias for the cached command information
@@ -334,10 +342,16 @@ impl RebellionsNpuReader {
             Err(_) => return Vec::new(),
         };
 
+        let uuid_by_npu: std::collections::HashMap<u32, String> = response
+            .devices
+            .iter()
+            .map(|device| (device.npu, device.uuid.clone()))
+            .collect();
+
         response
             .contexts
             .into_iter()
-            .map(create_process_info_from_context)
+            .map(|ctx| create_process_info_from_context(ctx, &uuid_by_npu))
             .collect()
     }
 }
@@ -437,24 +451,31 @@ fn create_gpu_info_from_device(
     })
 }
 
-fn create_process_info_from_context(ctx: RblnContext) -> ProcessInfo {
-    let device_id = parse_device_id(&ctx.npu).unwrap_or_else(|| {
-        eprintln!("Failed to parse device ID: {}", ctx.npu);
-        0
-    });
-    let used_memory = parse_rbln_memory_bytes(&ctx.memory).unwrap_or_else(|| {
+fn create_process_info_from_context(
+    ctx: RblnContext,
+    uuid_by_npu: &std::collections::HashMap<u32, String>,
+) -> ProcessInfo {
+    let used_memory = parse_rbln_memory_bytes(&ctx.memalloc).unwrap_or_else(|| {
         eprintln!(
             "Failed to parse memory for process {}: {}",
-            ctx.pid, ctx.memory
+            ctx.pid, ctx.memalloc
         );
         0
     });
 
+    // Join back to the device that owns the context. On ATOM Max `npu` repeats
+    // once per card, so this can be ambiguous there -- rbln-stat's JSON exposes
+    // no per-context card key to disambiguate with.
+    let device_uuid = uuid_by_npu
+        .get(&ctx.npu)
+        .cloned()
+        .unwrap_or_else(|| format!("rbln{}", ctx.npu));
+
     ProcessInfo {
-        device_id,
-        device_uuid: ctx.npu,
+        device_id: ctx.npu as usize,
+        device_uuid,
         pid: ctx.pid,
-        process_name: extract_process_name(&ctx.cmd),
+        process_name: extract_process_name(&ctx.process),
         used_memory,
         cpu_percent: 0.0,
         memory_percent: 0.0,
@@ -464,7 +485,7 @@ fn create_process_info_from_context(ctx: RblnContext) -> ProcessInfo {
         state: String::new(),
         start_time: String::new(),
         cpu_time: 0,
-        command: ctx.cmd,
+        command: ctx.process,
         ppid: 0,
         threads: 0,
         uses_gpu: true,
@@ -509,17 +530,33 @@ fn parse_util_safe(util_str: &str) -> f64 {
 /// An explicit `MB` / `MiB` suffix is still honoured so that an SDK release
 /// which starts labelling the unit is not read as a byte count.
 fn parse_rbln_memory_bytes(mem_str: &str) -> Option<u64> {
+    // Device-level fields are bare byte counts; per-context `memalloc` is a
+    // human-readable string like "3.5GiB". Longest suffixes first so that "MB"
+    // is never shadowed by "B".
+    const UNITS: &[(&str, u64)] = &[
+        ("TiB", 1 << 40),
+        ("GiB", 1 << 30),
+        ("MiB", 1 << 20),
+        ("KiB", 1 << 10),
+        ("TB", 1 << 40),
+        ("GB", 1 << 30),
+        ("MB", 1 << 20),
+        ("KB", 1 << 10),
+        ("B", 1),
+    ];
+
     let value = mem_str.trim();
 
-    if let Some(megabytes) = value
-        .strip_suffix("MiB")
-        .or_else(|| value.strip_suffix("MB"))
-    {
-        return megabytes
-            .trim()
-            .parse::<u64>()
-            .ok()
-            .and_then(|mb| mb.checked_mul(1024 * 1024));
+    for (suffix, multiplier) in UNITS {
+        if let Some(number) = value.strip_suffix(suffix) {
+            let scaled = number.trim().parse::<f64>().ok()? * (*multiplier as f64);
+            // `as u64` saturates rather than wrapping, so reject out-of-range
+            // values explicitly instead of silently clamping to u64::MAX.
+            if !scaled.is_finite() || scaled < 0.0 || scaled > u64::MAX as f64 {
+                return None;
+            }
+            return Some(scaled as u64);
+        }
     }
 
     value.parse::<u64>().ok()
@@ -824,5 +861,83 @@ mod tests {
     fn process_name_is_the_executable_basename() {
         assert_eq!(extract_process_name("/usr/bin/python3 train.py"), "python3");
         assert_eq!(extract_process_name("rbln-serve"), "rbln-serve");
+    }
+}
+
+#[cfg(test)]
+mod loaded_node_tests {
+    use super::*;
+
+    /// Verbatim `rbln-stat --json` from an 8-card ATOM Plus node running vLLM.
+    /// Before the `RblnContext` fields were corrected, this input failed to
+    /// deserialize entirely, so `get_npu_info` returned an empty vector and
+    /// every device disappeared from all-smi the moment a workload started.
+    const LOADED: &str = include_str!("../../../tests/fixtures/rbln-stat-loaded.json");
+
+    fn parse() -> RblnResponse {
+        serde_json::from_str(LOADED).expect("output from a busy node must deserialize")
+    }
+
+    #[test]
+    fn devices_survive_when_contexts_are_present() {
+        let response = parse();
+        assert_eq!(
+            response.devices.len(),
+            8,
+            "devices must not vanish under load"
+        );
+        assert_eq!(response.contexts.len(), 8);
+    }
+
+    #[test]
+    fn context_fields_match_what_the_tool_emits() {
+        let response = parse();
+        // npu is a JSON integer, pid a quoted string, and the process and
+        // memory keys are `process` / `memalloc` -- all four differed from
+        // what the struct used to declare.
+        let ctx = response
+            .contexts
+            .iter()
+            .find(|c| c.ctx_id == "10001")
+            .expect("vLLM engine context");
+        assert_eq!(ctx.npu, 0);
+        assert_eq!(ctx.pid, 2733390);
+        assert_eq!(ctx.process, "VLLM::EngineCore");
+        assert_eq!(ctx.memalloc, "3.5GiB");
+    }
+
+    #[test]
+    fn context_memory_is_parsed_from_its_human_readable_suffix() {
+        assert_eq!(parse_rbln_memory_bytes("3.5GiB"), Some(3_758_096_384));
+        assert_eq!(parse_rbln_memory_bytes("72.0MiB"), Some(75_497_472));
+        assert_eq!(parse_rbln_memory_bytes("58.0MiB"), Some(60_817_408));
+    }
+
+    #[test]
+    fn processes_are_joined_to_the_device_that_owns_them() {
+        let response = parse();
+        let uuid_by_npu: std::collections::HashMap<u32, String> = response
+            .devices
+            .iter()
+            .map(|device| (device.npu, device.uuid.clone()))
+            .collect();
+        let expected_uuid = uuid_by_npu.get(&0).cloned().expect("device 0");
+
+        let processes: Vec<ProcessInfo> = response
+            .contexts
+            .into_iter()
+            .map(|ctx| create_process_info_from_context(ctx, &uuid_by_npu))
+            .collect();
+
+        assert_eq!(processes.len(), 8);
+        let engine = processes
+            .iter()
+            .find(|p| p.pid == 2733390 && p.used_memory > 1 << 30)
+            .expect("vLLM engine process");
+        assert_eq!(engine.process_name, "VLLM::EngineCore");
+        assert_eq!(engine.used_memory, 3_758_096_384);
+        assert_eq!(engine.device_id, 0);
+        assert_eq!(engine.device_uuid, expected_uuid);
+        assert!(engine.uses_gpu);
     }
 }

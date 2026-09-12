@@ -1,0 +1,303 @@
+{
+  "KMD_version": "3.0.0",
+  "devices": [
+    {
+      "npu": 0,
+      "name": "RBLN-CA22",
+      "sid": "0000000022513364",
+      "uuid": "3a5d3eec-4b2e-4fa0-afa0-192c9b99a7c2",
+      "device": "rbln0",
+      "status": "normal",
+      "fw_ver": "3.0.0",
+      "pci": {
+        "dev": "0x1220",
+        "bus_id": "0000:03:00.0",
+        "numa_node": "0",
+        "link_speed": "32.0GT/s",
+        "link_width": "16"
+      },
+      "temperature": "29C",
+      "card_power": "18109794uW",
+      "pstate": "P14",
+      "memory": {
+        "used": "75497472",
+        "total": "16877879296"
+      },
+      "util": "0.0",
+      "board_info": "0005000c",
+      "location": 5
+    },
+    {
+      "npu": 0,
+      "name": "RBLN-CA22",
+      "sid": "0000000022513360",
+      "uuid": "918c99a4-958a-42e1-832a-f80e2dd4c130",
+      "device": "rbln2",
+      "status": "normal",
+      "fw_ver": "3.0.0",
+      "pci": {
+        "dev": "0x1220",
+        "bus_id": "0000:63:00.0",
+        "numa_node": "0",
+        "link_speed": "32.0GT/s",
+        "link_width": "16"
+      },
+      "temperature": "32C",
+      "card_power": "18477963uW",
+      "pstate": "P14",
+      "memory": {
+        "used": "3816816640",
+        "total": "16877879296"
+      },
+      "util": "0.0",
+      "board_info": "0005000c",
+      "location": 5
+    },
+    {
+      "npu": 1,
+      "name": "RBLN-CA22",
+      "sid": "0000000022513361",
+      "uuid": "b40b124b-0c39-41c5-9648-6a18cbd5a68b",
+      "device": "rbln3",
+      "status": "normal",
+      "fw_ver": "3.0.0",
+      "pci": {
+        "dev": "0x1220",
+        "bus_id": "0000:64:00.0",
+        "numa_node": "0",
+        "link_speed": "32.0GT/s",
+        "link_width": "16"
+      },
+      "temperature": "31C",
+      "card_power": "17585667uW",
+      "pstate": "P14",
+      "memory": {
+        "used": "3747610624",
+        "total": "16877879296"
+      },
+      "util": "0.0",
+      "board_info": "0005000c",
+      "location": 5
+    },
+    {
+      "npu": 2,
+      "name": "RBLN-CA22",
+      "sid": "0000000022513305",
+      "uuid": "67882f46-4417-4c8a-b8c0-7fd22f6b848f",
+      "device": "rbln6",
+      "status": "normal",
+      "fw_ver": "3.0.0",
+      "pci": {
+        "dev": "0x1220",
+        "bus_id": "0000:e3:00.0",
+        "numa_node": "1",
+        "link_speed": "32.0GT/s",
+        "link_width": "16"
+      },
+      "temperature": "31C",
+      "card_power": "17864077uW",
+      "pstate": "P14",
+      "memory": {
+        "used": "3747610624",
+        "total": "16877879296"
+      },
+      "util": "0.0",
+      "board_info": "0005000c",
+      "location": 5
+    },
+    {
+      "npu": 3,
+      "name": "RBLN-CA22",
+      "sid": "0000000022513304",
+      "uuid": "08a4999a-63d0-43fe-8259-d7ef66fec052",
+      "device": "rbln7",
+      "status": "normal",
+      "fw_ver": "3.0.0",
+      "pci": {
+        "dev": "0x1220",
+        "bus_id": "0000:e4:00.0",
+        "numa_node": "1",
+        "link_speed": "32.0GT/s",
+        "link_width": "16"
+      },
+      "temperature": "31C",
+      "card_power": "18657485uW",
+      "pstate": "P14",
+      "memory": {
+        "used": "3747610624",
+        "total": "16877879296"
+      },
+      "util": "0.0",
+      "board_info": "0005000c",
+      "location": 5
+    },
+    {
+      "npu": 0,
+      "name": "RBLN-CA22",
+      "sid": "0000000022513415",
+      "uuid": "714d6bdf-9282-4e01-9096-161e55c2a906",
+      "device": "rbln5",
+      "status": "normal",
+      "fw_ver": "3.0.0",
+      "pci": {
+        "dev": "0x1220",
+        "bus_id": "0000:84:00.0",
+        "numa_node": "1",
+        "link_speed": "32.0GT/s",
+        "link_width": "16"
+      },
+      "temperature": "45C",
+      "card_power": "37257088uW",
+      "pstate": "P2",
+      "memory": {
+        "used": "1545601024",
+        "total": "16877879296"
+      },
+      "util": "4.4",
+      "board_info": "0005000c",
+      "location": 5
+    },
+    {
+      "npu": 0,
+      "name": "RBLN-CA22",
+      "sid": "0000000022513363",
+      "uuid": "c618c7c7-97c4-4ed5-9c11-fcfeb0b80a27",
+      "device": "rbln1",
+      "status": "normal",
+      "fw_ver": "3.0.0",
+      "pci": {
+        "dev": "0x1220",
+        "bus_id": "0000:04:00.0",
+        "numa_node": "0",
+        "link_speed": "32.0GT/s",
+        "link_width": "16"
+      },
+      "temperature": "31C",
+      "card_power": "18555726uW",
+      "pstate": "P14",
+      "memory": {
+        "used": "0",
+        "total": "16877879296"
+      },
+      "util": "0.0",
+      "board_info": "0005000c",
+      "location": 5
+    },
+    {
+      "npu": 1,
+      "name": "RBLN-CA22",
+      "sid": "0000000022513413",
+      "uuid": "69c341a4-cda4-4d47-97a9-e1d72fa76571",
+      "device": "rbln4",
+      "status": "normal",
+      "fw_ver": "3.0.0",
+      "pci": {
+        "dev": "0x1220",
+        "bus_id": "0000:83:00.0",
+        "numa_node": "1",
+        "link_speed": "32.0GT/s",
+        "link_width": "16"
+      },
+      "temperature": "33C",
+      "card_power": "18129496uW",
+      "pstate": "P14",
+      "memory": {
+        "used": "0",
+        "total": "16877879296"
+      },
+      "util": "0.0",
+      "board_info": "0005000c",
+      "location": 5
+    }
+  ],
+  "contexts": [
+    {
+      "ctx_id": "30001",
+      "npu": 0,
+      "process": "python",
+      "pid": "957143",
+      "priority": "normal",
+      "ptid": "0",
+      "memalloc": "72.0MiB",
+      "status": "idle",
+      "util_info": "26.4"
+    },
+    {
+      "ctx_id": "10001",
+      "npu": 0,
+      "process": "VLLM::EngineCore",
+      "pid": "2733390",
+      "priority": "normal",
+      "ptid": "0",
+      "memalloc": "3.5GiB",
+      "status": "idle",
+      "util_info": "1.1"
+    },
+    {
+      "ctx_id": "20001",
+      "npu": 0,
+      "process": "VLLM::EngineCore",
+      "pid": "2733390",
+      "priority": "normal",
+      "ptid": "1",
+      "memalloc": "58.0MiB",
+      "status": "idle",
+      "util_info": "19.1"
+    },
+    {
+      "ctx_id": "10002",
+      "npu": 1,
+      "process": "VLLM::EngineCore",
+      "pid": "2733390",
+      "priority": "normal",
+      "ptid": "0",
+      "memalloc": "3.5GiB",
+      "status": "idle",
+      "util_info": "16.6"
+    },
+    {
+      "ctx_id": "10003",
+      "npu": 2,
+      "process": "VLLM::EngineCore",
+      "pid": "2733390",
+      "priority": "normal",
+      "ptid": "0",
+      "memalloc": "3.5GiB",
+      "status": "idle",
+      "util_info": "16.7"
+    },
+    {
+      "ctx_id": "10004",
+      "npu": 3,
+      "process": "VLLM::EngineCore",
+      "pid": "2733390",
+      "priority": "normal",
+      "ptid": "0",
+      "memalloc": "3.5GiB",
+      "status": "idle",
+      "util_info": "17.4"
+    },
+    {
+      "ctx_id": "50001",
+      "npu": 0,
+      "process": "python3",
+      "pid": "4189859",
+      "priority": "normal",
+      "ptid": "0",
+      "memalloc": "1.4GiB",
+      "status": "idle",
+      "util_info": "55.6"
+    },
+    {
+      "ctx_id": "60001",
+      "npu": 0,
+      "process": "python3",
+      "pid": "1165830",
+      "priority": "normal",
+      "ptid": "1",
+      "memalloc": "54.0MiB",
+      "status": "idle",
+      "util_info": "32.0"
+    }
+  ]
+}
