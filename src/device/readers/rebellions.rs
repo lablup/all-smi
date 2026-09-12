@@ -15,7 +15,7 @@
 use crate::device::GpuReader;
 use crate::device::common::execute_command_default;
 use crate::device::common::parsers::{
-    parse_device_id, parse_memory_mb_to_bytes, parse_power, parse_temperature, parse_utilization,
+    parse_device_id, parse_power, parse_temperature, parse_utilization,
 };
 use crate::device::readers::common_cache::{DetailBuilder, DeviceStaticInfo};
 use crate::device::types::{GpuInfo, ProcessInfo};
@@ -93,7 +93,9 @@ struct RblnDevice {
     memory: RblnMemoryInfo,
     util: String,
     board_info: String,
-    #[allow(dead_code)]
+    /// Physical slot/location index reported by the driver. Surfaced as the
+    /// `Location` detail so the Prometheus exporter can label the device with
+    /// the real value instead of a constant.
     location: u32,
 }
 
@@ -163,6 +165,7 @@ impl RebellionsNpuReader {
                     .insert("Firmware Version", &device.fw_ver)
                     .insert("Device Path", &device.device)
                     .insert("Board Info", &device.board_info)
+                    .insert("Location", device.location.to_string())
                     .insert_pci_info(
                         Some(&device.pci.bus_id),
                         None, // Rebellions doesn't provide PCIe generation separately
@@ -372,6 +375,7 @@ fn create_gpu_info_from_device(
             .insert("Firmware Version", &device.fw_ver)
             .insert("Device Path", &device.device)
             .insert("Board Info", &device.board_info)
+            .insert("Location", device.location.to_string())
             .insert_pci_info(Some(&device.pci.bus_id), None, Some(&device.pci.link_width))
             .insert("PCI Link Speed", &device.pci.link_speed)
             .insert("PCI NUMA Node", &device.pci.numa_node)
@@ -438,7 +442,7 @@ fn create_process_info_from_context(ctx: RblnContext) -> ProcessInfo {
         eprintln!("Failed to parse device ID: {}", ctx.npu);
         0
     });
-    let used_memory = parse_memory_mb_to_bytes(&ctx.memory).unwrap_or_else(|| {
+    let used_memory = parse_rbln_memory_bytes(&ctx.memory).unwrap_or_else(|| {
         eprintln!(
             "Failed to parse memory for process {}: {}",
             ctx.pid, ctx.memory
@@ -494,13 +498,40 @@ fn parse_util_safe(util_str: &str) -> f64 {
     })
 }
 
+/// Parse a memory value reported by `rbln-stat` / `rbln-smi` into bytes.
+///
+/// The tool reports a bare byte count with no unit suffix: a 16 GB ATOM Plus
+/// card reads `"total": "16877879296"` (15.72 GiB). Routing that through the
+/// shared `parse_memory_mb_to_bytes` helper multiplied it by 1 MiB a second
+/// time and reported 15.72 PiB per card — large enough to be obviously wrong
+/// on inspection, small enough not to overflow, so it rendered silently.
+///
+/// An explicit `MB` / `MiB` suffix is still honoured so that an SDK release
+/// which starts labelling the unit is not read as a byte count.
+fn parse_rbln_memory_bytes(mem_str: &str) -> Option<u64> {
+    let value = mem_str.trim();
+
+    if let Some(megabytes) = value
+        .strip_suffix("MiB")
+        .or_else(|| value.strip_suffix("MB"))
+    {
+        return megabytes
+            .trim()
+            .parse::<u64>()
+            .ok()
+            .and_then(|mb| mb.checked_mul(1024 * 1024));
+    }
+
+    value.parse::<u64>().ok()
+}
+
 fn parse_memory(mem: &RblnMemoryInfo) -> (u64, u64) {
-    let used = parse_memory_mb_to_bytes(&mem.used).unwrap_or_else(|| {
+    let used = parse_rbln_memory_bytes(&mem.used).unwrap_or_else(|| {
         eprintln!("Failed to parse used memory: {}", mem.used);
         0
     });
 
-    let total = parse_memory_mb_to_bytes(&mem.total).unwrap_or_else(|| {
+    let total = parse_rbln_memory_bytes(&mem.total).unwrap_or_else(|| {
         eprintln!("Failed to parse total memory: {}", mem.total);
         0
     });
@@ -514,4 +545,284 @@ fn extract_process_name(cmd: &str) -> String {
         .and_then(|path| path.split('/').next_back())
         .unwrap_or("unknown")
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Verbatim `rbln-stat --json` output from a live 8x RBLN-CA22 (ATOM Plus)
+    /// node running KMD 3.0.0, trimmed to the first two devices. Key names,
+    /// value spellings and JSON types are exactly as the tool emits them:
+    /// `npu` and `location` are numbers, every measurement is a string,
+    /// `memory` is a bare byte count and `card_power` is in microwatts.
+    const ATOM_PLUS_JSON: &str = r#"{
+      "KMD_version": "3.0.0",
+      "devices": [
+        {
+          "npu": 0,
+          "name": "RBLN-CA22",
+          "sid": "0000000022513338",
+          "uuid": "4126c167-c7a6-4d0a-80dd-ffbf3641d1b0",
+          "device": "rbln0",
+          "status": "normal",
+          "fw_ver": "3.0.0",
+          "pci": {
+            "dev": "0x1220",
+            "bus_id": "0000:03:00.0",
+            "numa_node": "0",
+            "link_speed": "32.0GT/s",
+            "link_width": "16"
+          },
+          "temperature": "31C",
+          "card_power": "17521800uW",
+          "pstate": "P14",
+          "memory": {
+            "used": "0",
+            "total": "16877879296"
+          },
+          "util": "0.0",
+          "board_info": "0005000c",
+          "location": 5
+        },
+        {
+          "npu": 1,
+          "name": "RBLN-CA22",
+          "sid": "0000000022513339",
+          "uuid": "a58a772b-1a27-4df3-823d-bd1d26627f74",
+          "device": "rbln1",
+          "status": "normal",
+          "fw_ver": "3.0.0",
+          "pci": {
+            "dev": "0x1220",
+            "bus_id": "0000:04:00.0",
+            "numa_node": "0",
+            "link_speed": "32.0GT/s",
+            "link_width": "16"
+          },
+          "temperature": "33C",
+          "card_power": "18307255uW",
+          "pstate": "P14",
+          "memory": {
+            "used": "0",
+            "total": "16877879296"
+          },
+          "util": "0.0",
+          "board_info": "0005000c",
+          "location": 5
+        }
+      ],
+      "contexts": []
+    }"#;
+
+    /// `rbln-stat -g -j` on the same node: identical apart from a per-device
+    /// `group_id` the reader has no field for. Deserialization must keep
+    /// ignoring unknown keys.
+    const ATOM_PLUS_GROUPED_JSON: &str = r#"{
+      "KMD_version": "3.0.0",
+      "devices": [
+        {
+          "npu": 0,
+          "name": "RBLN-CA22",
+          "sid": "0000000022513338",
+          "uuid": "4126c167-c7a6-4d0a-80dd-ffbf3641d1b0",
+          "device": "rbln0",
+          "status": "normal",
+          "fw_ver": "3.0.0",
+          "group_id": "1",
+          "pci": {
+            "dev": "0x1220",
+            "bus_id": "0000:03:00.0",
+            "numa_node": "0",
+            "link_speed": "32.0GT/s",
+            "link_width": "16"
+          },
+          "temperature": "31C",
+          "card_power": "17521800uW",
+          "pstate": "P14",
+          "memory": {
+            "used": "0",
+            "total": "16877879296"
+          },
+          "util": "0.0",
+          "board_info": "0005000c",
+          "location": 5
+        }
+      ],
+      "contexts": []
+    }"#;
+
+    /// Total HBM of one RBLN-CA22, in bytes (15.72 GiB).
+    const ATOM_PLUS_TOTAL_MEMORY_BYTES: u64 = 16_877_879_296;
+
+    fn parse_response(json: &str) -> RblnResponse {
+        serde_json::from_str(json).expect("rbln-stat output must deserialize")
+    }
+
+    fn gpu_info_at(json: &str, index: usize) -> GpuInfo {
+        let response = parse_response(json);
+        let kmd_version = response.kmd_version.clone();
+        let device = response
+            .devices
+            .into_iter()
+            .nth(index)
+            .expect("device index in range");
+
+        create_gpu_info_from_device(
+            device,
+            None,
+            &kmd_version,
+            "2025-09-12 11:18:00",
+            "atom-plus-01",
+        )
+        .expect("device must convert to GpuInfo")
+    }
+
+    #[test]
+    fn real_output_deserializes() {
+        let response = parse_response(ATOM_PLUS_JSON);
+        assert_eq!(response.kmd_version, "3.0.0");
+        assert_eq!(response.devices.len(), 2);
+        assert_eq!(response.devices[0].name, "RBLN-CA22");
+        assert_eq!(response.devices[0].device, "rbln0");
+        assert!(response.contexts.is_empty());
+    }
+
+    #[test]
+    fn grouped_output_deserializes_despite_the_extra_group_id() {
+        let response = parse_response(ATOM_PLUS_GROUPED_JSON);
+        assert_eq!(response.devices.len(), 1);
+        assert_eq!(
+            response.devices[0].uuid,
+            "4126c167-c7a6-4d0a-80dd-ffbf3641d1b0"
+        );
+    }
+
+    /// Regression: `memory.total` is a bare byte count, but it used to go
+    /// through `parse_memory_mb_to_bytes`, which multiplied it by 1 MiB a
+    /// second time and reported 15.72 PiB per card.
+    #[test]
+    fn memory_is_read_as_bytes_not_mebibytes() {
+        let info = gpu_info_at(ATOM_PLUS_JSON, 0);
+
+        assert_eq!(info.total_memory, ATOM_PLUS_TOTAL_MEMORY_BYTES);
+        assert_eq!(info.used_memory, 0);
+        assert!(
+            info.total_memory < 1 << 40,
+            "a 16 GB card must not report {} bytes (>= 1 TiB)",
+            info.total_memory
+        );
+    }
+
+    /// Regression: `card_power` is in microwatts. `parse_power` left the `u`
+    /// behind, the parse failed, and the fallback reported 0.0 W for every
+    /// Rebellions NPU ever polled.
+    #[test]
+    fn card_power_microwatts_are_read_as_watts() {
+        let first = gpu_info_at(ATOM_PLUS_JSON, 0);
+        assert!(
+            (first.power_consumption - 17.5218).abs() < 1e-9,
+            "expected ~17.52 W, got {}",
+            first.power_consumption
+        );
+        assert!(
+            first.power_consumption > 1.0,
+            "an idling ATOM Plus draws ~17.5 W, never 0.0 W"
+        );
+
+        let second = gpu_info_at(ATOM_PLUS_JSON, 1);
+        assert!(
+            (second.power_consumption - 18.307255).abs() < 1e-9,
+            "expected ~18.31 W, got {}",
+            second.power_consumption
+        );
+    }
+
+    #[test]
+    fn temperature_and_utilization_are_read() {
+        let first = gpu_info_at(ATOM_PLUS_JSON, 0);
+        assert_eq!(first.temperature, 31);
+        assert_eq!(first.utilization, 0.0);
+        assert_eq!(first.device_type, "NPU");
+        assert_eq!(first.name, "RBLN-CA22");
+
+        let second = gpu_info_at(ATOM_PLUS_JSON, 1);
+        assert_eq!(second.temperature, 33);
+    }
+
+    /// The detail keys the Prometheus exporter reads. These are a contract
+    /// between `readers::rebellions` and `api::metrics::npu::rebellions`;
+    /// renaming one without the other silently empties the metrics.
+    #[test]
+    fn detail_carries_the_keys_the_exporter_reads() {
+        let info = gpu_info_at(ATOM_PLUS_JSON, 0);
+
+        assert_eq!(
+            info.detail.get("Firmware Version").map(String::as_str),
+            Some("3.0.0")
+        );
+        assert_eq!(
+            info.detail.get("KMD Version").map(String::as_str),
+            Some("3.0.0")
+        );
+        assert_eq!(
+            info.detail.get("Serial ID").map(String::as_str),
+            Some("0000000022513338")
+        );
+        assert_eq!(
+            info.detail.get("Status").map(String::as_str),
+            Some("normal")
+        );
+        assert_eq!(
+            info.detail.get("Performance State").map(String::as_str),
+            Some("P14")
+        );
+        assert_eq!(info.detail.get("Location").map(String::as_str), Some("5"));
+        assert_eq!(
+            info.detail.get("lib_name").map(String::as_str),
+            Some("RBLN-SDK")
+        );
+    }
+
+    /// The cached path (second poll onwards) must carry the same static
+    /// details as the uncached one.
+    #[test]
+    fn cached_static_info_matches_the_uncached_path() {
+        let reader = RebellionsNpuReader::new();
+        let response = parse_response(ATOM_PLUS_JSON);
+        reader.ensure_static_cache_initialized(&response);
+
+        let cached = reader
+            .get_device_static_info("4126c167-c7a6-4d0a-80dd-ffbf3641d1b0")
+            .expect("device must be cached by uuid");
+
+        assert_eq!(cached.name, "RBLN-CA22");
+        assert_eq!(
+            cached.detail.get("Serial ID").map(String::as_str),
+            Some("0000000022513338")
+        );
+        assert_eq!(cached.detail.get("Location").map(String::as_str), Some("5"));
+        assert_eq!(reader.get_kmd_version().as_deref(), Some("3.0.0"));
+    }
+
+    #[test]
+    fn memory_parser_accepts_bare_bytes_and_explicit_suffixes() {
+        assert_eq!(
+            parse_rbln_memory_bytes("16877879296"),
+            Some(ATOM_PLUS_TOTAL_MEMORY_BYTES)
+        );
+        assert_eq!(parse_rbln_memory_bytes(" 0 "), Some(0));
+        // Honoured in case a future SDK starts labelling the unit.
+        assert_eq!(parse_rbln_memory_bytes("1024MiB"), Some(1024 * 1024 * 1024));
+        assert_eq!(parse_rbln_memory_bytes("1024MB"), Some(1024 * 1024 * 1024));
+        assert_eq!(parse_rbln_memory_bytes("not a number"), None);
+        // No panic on a value that would overflow when scaled.
+        assert_eq!(parse_rbln_memory_bytes("18446744073709551615MB"), None);
+    }
+
+    #[test]
+    fn process_name_is_the_executable_basename() {
+        assert_eq!(extract_process_name("/usr/bin/python3 train.py"), "python3");
+        assert_eq!(extract_process_name("rbln-serve"), "rbln-serve");
+    }
 }

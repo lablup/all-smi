@@ -345,6 +345,22 @@ pub fn has_rebellions() -> bool {
     *CACHE.get_or_init(detect_rebellions)
 }
 
+/// Rebellions' PCI vendor ID.
+///
+/// Confirmed against a live ATOM Plus node: `lspci -nn` prints
+/// `Processing accelerators [1200]: Rebellions Inc. RBLN-CA22 (PF) [1eff:1220]`
+/// and every PCI alias in the `rebellions` KMD is `v00001EFF`. The code
+/// previously looked for `1f3f`, which belongs to no Rebellions device.
+const REBELLIONS_PCI_VENDOR_ID: &str = "1eff:";
+
+/// Does this `lspci -nn` output name a Rebellions device?
+///
+/// The vendor-name check is kept as a second signal, for hosts whose `pci.ids`
+/// is too old to resolve `1eff` to "Rebellions Inc.".
+fn lspci_names_rebellions(lspci_output: &str) -> bool {
+    lspci_output.contains(REBELLIONS_PCI_VENDOR_ID) || lspci_output.contains("Rebellions")
+}
+
 fn detect_rebellions() -> bool {
     // First check if device files exist (rbln0, rbln1, etc.)
     if std::path::Path::new("/dev/rbln0").exists() {
@@ -360,14 +376,13 @@ fn detect_rebellions() -> bool {
             return true;
         }
     } else {
-        // On Linux, try lspci to check for Rebellions devices
-        if let Ok(output) = execute_command_default("lspci", &[])
+        // On Linux, try lspci to check for Rebellions devices. `-nn` so that
+        // the numeric vendor ID is printed alongside the name.
+        if let Ok(output) = execute_command_default("lspci", &["-nn"])
             && output.status == 0
+            && lspci_names_rebellions(&output.stdout)
         {
-            // Look for Rebellions devices - vendor ID 1f3f
-            if output.stdout.contains("1f3f:") || output.stdout.contains("Rebellions") {
-                return true;
-            }
+            return true;
         }
     }
 
@@ -617,6 +632,35 @@ pub fn get_container_pid_namespace() -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Verbatim `lspci -nn` line from a live 8x RBLN-CA22 (ATOM Plus) node.
+    const REBELLIONS_LSPCI_LINE: &str = "03:00.0 Processing accelerators [1200]: Rebellions Inc. RBLN-CA22 (PF) [1eff:1220] (rev 03)";
+
+    /// Regression: detection looked for vendor ID `1f3f`, which is not
+    /// Rebellions. It only appeared to work because the same line also carries
+    /// the vendor *name*, so a host with an old `pci.ids` — where the line
+    /// reads `Device [1eff:1220]` — would not have been detected at all.
+    #[test]
+    fn rebellions_is_detected_by_its_real_pci_vendor_id() {
+        assert!(lspci_names_rebellions(REBELLIONS_LSPCI_LINE));
+
+        // Same device on a host whose pci.ids cannot name the vendor.
+        let unnamed = REBELLIONS_LSPCI_LINE.replace("Rebellions Inc. RBLN-CA22 (PF)", "Device");
+        assert!(
+            lspci_names_rebellions(&unnamed),
+            "vendor ID alone must be enough: {unnamed}"
+        );
+
+        // The wrong constant must not be what matches.
+        assert!(!lspci_names_rebellions(
+            "03:00.0 Processing accelerators [1200]: Device [1f3f:1220] (rev 03)"
+        ));
+
+        // Unrelated accelerators are not Rebellions.
+        assert!(!lspci_names_rebellions(
+            "03:00.0 Processing accelerators [1200]: Habana Labs Ltd. HL-325L [1da3:1060]"
+        ));
+    }
 
     /// Architecture detection must never abort the process (it used to
     /// `.expect()` on the `uname` probe) and must be stable across calls
