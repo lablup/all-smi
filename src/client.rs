@@ -88,6 +88,8 @@ pub enum DeviceType {
     TenstorrentNpu,
     /// Google TPU
     GoogleTpu,
+    /// AWS Neuron NPU (Trainium / Inferentia)
+    AwsNeuronNpu,
 }
 
 impl std::fmt::Display for DeviceType {
@@ -102,6 +104,7 @@ impl std::fmt::Display for DeviceType {
             DeviceType::RebellionsNpu => write!(f, "Rebellions NPU"),
             DeviceType::TenstorrentNpu => write!(f, "Tenstorrent NPU"),
             DeviceType::GoogleTpu => write!(f, "Google TPU"),
+            DeviceType::AwsNeuronNpu => write!(f, "AWS Neuron NPU"),
         }
     }
 }

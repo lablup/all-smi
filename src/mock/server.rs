@@ -211,6 +211,7 @@ pub async fn start_servers(args: Args) -> Result<()> {
                 crate::mock::constants::DEFAULT_TENSTORRENT_NAME.to_string()
             }
             PlatformType::Furiosa => crate::mock::constants::DEFAULT_FURIOSA_NAME.to_string(),
+            PlatformType::Neuron => crate::mock::constants::DEFAULT_NEURON_NAME.to_string(),
             PlatformType::AmdGpu => crate::mock::constants::DEFAULT_AMD_GPU_NAME.to_string(),
             PlatformType::Intel => crate::mock::constants::DEFAULT_INTEL_GPU_NAME.to_string(),
             _ => args.gpu_name.clone(),

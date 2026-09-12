@@ -340,6 +340,39 @@ fn detect_tenstorrent() -> bool {
     false
 }
 
+/// Check whether at least one AWS Neuron device (Trainium / Inferentia)
+/// is present.
+#[cfg(target_os = "linux")]
+pub fn has_neuron() -> bool {
+    static CACHE: OnceLock<bool> = OnceLock::new();
+    *CACHE.get_or_init(detect_neuron)
+}
+
+#[cfg(target_os = "linux")]
+fn detect_neuron() -> bool {
+    // The driver always creates /dev/neuron0 for the first device. It is
+    // mode 0666 (world rw) with no group gate, so presence alone is a
+    // sufficient positive signal for any user.
+    if std::path::Path::new("/dev/neuron0").exists() {
+        return true;
+    }
+
+    // Fall back to PCI IDs: the Neuron tools live under
+    // /opt/aws/neuron/bin, which is on PATH only via the DLAMI profile
+    // scripts, so probing a CLI here would report a false negative under
+    // sudo, systemd, or a container entrypoint.
+    //
+    // 1d0f:7164 is "Amazon.com, Inc. NeuronDevice (Trainium)".
+    if let Ok(output) = execute_command_default("lspci", &["-nn"])
+        && output.status == 0
+        && output.stdout.contains("1d0f:7164")
+    {
+        return true;
+    }
+
+    false
+}
+
 pub fn has_rebellions() -> bool {
     static CACHE: OnceLock<bool> = OnceLock::new();
     *CACHE.get_or_init(detect_rebellions)
@@ -677,6 +710,9 @@ pub mod introspection {
         pub tenstorrent: bool,
         pub rebellions: bool,
         pub furiosa: bool,
+        /// `true` when an AWS Neuron device (Trainium / Inferentia) is
+        /// detected. Linux-only; always `false` elsewhere.
+        pub neuron: bool,
         /// `true` when an Intel **client** GPU (Arc / Iris / Xe /
         /// integrated graphics) is detected. Reported on both Linux
         /// (i915 / xe drivers) and Windows (WMI). Distinct from
@@ -697,6 +733,7 @@ pub mod introspection {
             tenstorrent: detect_tenstorrent(),
             rebellions: super::has_rebellions(),
             furiosa: super::has_furiosa(),
+            neuron: detect_neuron(),
             intel_gpu: super::has_intel_gpu(),
         }
     }
@@ -732,6 +769,17 @@ pub mod introspection {
 
     #[cfg(not(target_os = "linux"))]
     fn detect_tenstorrent() -> bool {
+        false
+    }
+
+    // Same exact-complement rule as `detect_amd` above.
+    #[cfg(target_os = "linux")]
+    fn detect_neuron() -> bool {
+        super::has_neuron()
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn detect_neuron() -> bool {
         false
     }
 

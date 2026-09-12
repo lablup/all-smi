@@ -20,7 +20,7 @@ all-smi \- Command-line utility for monitoring GPU hardware
 .B all-smi
 is a comprehensive hardware monitoring tool that provides real-time information about GPU/NPU utilization,
 memory usage, temperature, power consumption, chassis-level metrics, and other system information. It supports various hardware platforms
-including NVIDIA GPUs, AMD GPUs, Apple Silicon, NVIDIA Jetson, Intel Arc/Iris Xe client GPUs, Google Cloud TPUs, Tenstorrent NPUs, Rebellions NPUs, and Furiosa NPUs.
+including NVIDIA GPUs, AMD GPUs, Apple Silicon, NVIDIA Jetson, Intel Arc/Iris Xe client GPUs, Google Cloud TPUs, Tenstorrent NPUs, Rebellions NPUs, Furiosa NPUs, and AWS Neuron (Trainium/Inferentia) devices.
 Chassis monitoring provides node-level power consumption tracking (CPU+GPU+ANE), thermal pressure monitoring (Apple Silicon),
 and BMC sensor integration for inlet/outlet temperatures and fan speeds on server systems.
 
@@ -496,6 +496,9 @@ Support for TPU v2-v7/Ironwood architectures, HBM memory tracking, and integrati
 .TP
 .B Tenstorrent NPUs
 Support for Wormhole and Blackhole architectures with multiple temperature sensors and clock domains
+.TP
+.B AWS Neuron
+Support for Trainium and Inferentia devices: one row per NeuronCore, device HBM and PCI topology from neuron-ls, per-core memory from the neuron driver sysfs tree, and best-effort per-core utilization from neuron-monitor while a Neuron runtime is attached
 .TP
 .B Rebellions NPUs
 Support for ATOM, ATOM+, and ATOM Max variants with PCIe Gen4 interface

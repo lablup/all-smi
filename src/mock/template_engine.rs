@@ -19,8 +19,8 @@ use crate::mock::metrics::{CpuMetrics, GpuMetrics, MemoryMetrics, PlatformType};
 use crate::mock::templates::{
     amd_gpu::AmdGpuMockGenerator, apple_silicon::AppleSiliconMockGenerator,
     furiosa::FuriosaMockGenerator, gaudi::GaudiMockGenerator, intel_gpu::IntelGpuMockGenerator,
-    jetson::JetsonMockGenerator, nvidia::NvidiaMockGenerator, rebellions::RebellionsMockGenerator,
-    tenstorrent::TenstorrentMockGenerator,
+    jetson::JetsonMockGenerator, neuron::NeuronMockGenerator, nvidia::NvidiaMockGenerator,
+    rebellions::RebellionsMockGenerator, tenstorrent::TenstorrentMockGenerator,
 };
 use all_smi::traits::mock_generator::{MockConfig, MockGenerator, MockPlatform};
 
@@ -82,6 +82,15 @@ pub fn build_response_template(
                 instance_name.to_string(),
             );
             let mut template = generator.build_tenstorrent_template(gpus);
+
+            // Add disk metrics
+            crate::mock::templates::disk::add_disk_metrics(&mut template, instance_name);
+            template
+        }
+        PlatformType::Neuron => {
+            let generator =
+                NeuronMockGenerator::new(Some(gpu_name.to_string()), instance_name.to_string());
+            let mut template = generator.build_neuron_template(gpus);
 
             // Add disk metrics
             crate::mock::templates::disk::add_disk_metrics(&mut template, instance_name);
@@ -172,6 +181,10 @@ pub fn render_response(
             let generator = TenstorrentMockGenerator::new(None, "".to_string());
             generator.render_tenstorrent_response(template, gpus)
         }
+        PlatformType::Neuron => {
+            let generator = NeuronMockGenerator::new(None, "".to_string());
+            generator.render_neuron_response(template, gpus)
+        }
         PlatformType::Rebellions => {
             let generator = RebellionsMockGenerator::new(None, "".to_string());
             generator.render_rebellions_response(template, gpus)
@@ -252,6 +265,7 @@ fn create_generator(
         PlatformType::Tenstorrent => {
             Box::new(TenstorrentMockGenerator::new(Some(gpu_name), instance_name))
         }
+        PlatformType::Neuron => Box::new(NeuronMockGenerator::new(Some(gpu_name), instance_name)),
         PlatformType::Rebellions => {
             Box::new(RebellionsMockGenerator::new(Some(gpu_name), instance_name))
         }
@@ -270,6 +284,7 @@ fn platform_type_to_mock_platform(platform: &PlatformType) -> MockPlatform {
         PlatformType::Apple => MockPlatform::AppleSilicon,
         PlatformType::Jetson => MockPlatform::Jetson,
         PlatformType::Tenstorrent => MockPlatform::Custom("Tenstorrent".to_string()),
+        PlatformType::Neuron => MockPlatform::Custom("AWS Neuron".to_string()),
         PlatformType::Rebellions => MockPlatform::Custom("Rebellions".to_string()),
         PlatformType::Furiosa => MockPlatform::Custom("Furiosa".to_string()),
         PlatformType::Gaudi => MockPlatform::Custom("Intel Gaudi".to_string()),
