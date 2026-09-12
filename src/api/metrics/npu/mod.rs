@@ -17,6 +17,8 @@ pub mod exporter_trait;
 pub mod furiosa;
 pub mod gaudi;
 pub mod google_tpu;
+#[cfg(target_os = "linux")]
+pub mod neuron;
 pub mod rebellions;
 #[cfg(target_os = "linux")]
 pub mod tenstorrent;
@@ -28,6 +30,12 @@ use std::sync::OnceLock;
 
 /// Static pool of vendor exporters to avoid repeated allocations
 static EXPORTER_POOL: OnceLock<Vec<Box<dyn NpuExporter + Send + Sync>>> = OnceLock::new();
+
+/// Position of the AWS Neuron exporter in [`EXPORTER_POOL`] on Linux.
+/// The pool is `[Tenstorrent, Gaudi, Rebellions, Furiosa, Google TPU,
+/// AWS Neuron]` there; `exporter_pool_indices_are_pinned` locks it in.
+#[cfg(target_os = "linux")]
+const NEURON_IDX: usize = 5;
 
 /// Main NPU metric exporter that coordinates between different vendor-specific exporters
 pub struct NpuMetricExporter<'a> {
@@ -48,6 +56,14 @@ impl<'a> NpuMetricExporter<'a> {
             ];
             #[cfg(target_os = "linux")]
             exporters.insert(0, Box::new(tenstorrent::TenstorrentExporter::new()));
+            // APPEND ONLY. `find_exporter` addresses this pool by
+            // hardcoded index, so inserting mid-list silently re-routes
+            // another vendor's metrics. AWS Neuron is Linux-only, so it
+            // cannot live in the cross-platform `vec!` above and is
+            // pushed after the Tenstorrent insert instead — landing at
+            // index 5, which `NEURON_IDX` below pins.
+            #[cfg(target_os = "linux")]
+            exporters.push(Box::new(neuron::NeuronExporter::new()));
             exporters
         });
 
@@ -70,8 +86,16 @@ impl<'a> NpuMetricExporter<'a> {
                 return Some(exporters[0].as_ref());
             }
 
+            // AWS Neuron rows are named "AWS Trainium1" /
+            // "AWS Neuron ..." by the reader; no other vendor's name
+            // contains these substrings.
+            #[cfg(target_os = "linux")]
+            if name.contains("Trainium") || name.contains("Inferentia") || name.contains("Neuron") {
+                return Some(exporters[NEURON_IDX].as_ref());
+            }
+
             // Index mapping based on platform
-            // Linux: [Tenstorrent, Gaudi, Rebellions, Furiosa, Google TPU]
+            // Linux: [Tenstorrent, Gaudi, Rebellions, Furiosa, Google TPU, AWS Neuron]
             // Other: [Gaudi, Rebellions, Furiosa, Google TPU]
             #[cfg(target_os = "linux")]
             let (gaudi_idx, rebellions_idx, furiosa_idx, tpu_idx) = (1, 2, 3, 4);
@@ -213,6 +237,10 @@ mod tests {
             .map(|exporter| exporter.vendor_name())
     }
 
+    fn vendor_for_name(name: &str) -> Option<&'static str> {
+        vendor_for(&npu_named(name, &[]))
+    }
+
     /// Regression: the fast path matched `name.contains("Rebellions")`, but a
     /// real card reports `RBLN-CA22`, so no device reached the Rebellions
     /// exporter and no `all_smi_rebellions_*` series was ever scraped.
@@ -251,6 +279,37 @@ mod tests {
             vendor_for(&npu_named("Tenstorrent Wormhole", &[])),
             Some("Tenstorrent")
         );
+    }
+
+    /// `find_exporter` addresses [`EXPORTER_POOL`] by hardcoded index, so
+    /// appending a vendor must not re-route any existing one.
+    #[test]
+    fn exporter_pool_indices_are_pinned() {
+        assert_eq!(vendor_for_name("Intel Gaudi 3"), Some("Intel Gaudi"));
+        assert_eq!(vendor_for_name("Rebellions ATOM"), Some("Rebellions"));
+        assert_eq!(vendor_for_name("Furiosa RNGD"), Some("Furiosa"));
+        assert_eq!(vendor_for_name("Google TPU v5e"), Some("Google TPU"));
+
+        #[cfg(target_os = "linux")]
+        {
+            assert_eq!(
+                vendor_for_name("Tenstorrent Wormhole n150s"),
+                Some("Tenstorrent")
+            );
+            let pool = EXPORTER_POOL.get().expect("pool initialized");
+            assert_eq!(pool.len(), 6);
+            assert_eq!(pool[NEURON_IDX].vendor_name(), "AWS Neuron");
+        }
+    }
+
+    /// A Neuron row routes to the Neuron exporter, whatever the reader
+    /// managed to resolve the device name to.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn neuron_rows_route_to_the_neuron_exporter() {
+        assert_eq!(vendor_for_name("AWS Trainium1"), Some("AWS Neuron"));
+        assert_eq!(vendor_for_name("AWS Inferentia2"), Some("AWS Neuron"));
+        assert_eq!(vendor_for_name("AWS Neuron Device"), Some("AWS Neuron"));
     }
 
     #[test]
