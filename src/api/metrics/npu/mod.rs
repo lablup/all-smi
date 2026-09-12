@@ -80,7 +80,7 @@ impl<'a> NpuMetricExporter<'a> {
 
             if name.contains("Gaudi") || name.contains("HL-") {
                 return Some(exporters[gaudi_idx].as_ref());
-            } else if name.contains("Rebellions") {
+            } else if rebellions::is_rebellions_device(info) {
                 return Some(exporters[rebellions_idx].as_ref());
             } else if name.contains("Furiosa") || name.contains("RNGD") || name.contains("Warboy") {
                 return Some(exporters[furiosa_idx].as_ref());
@@ -161,5 +161,123 @@ impl<'a> MetricExporter for NpuMetricExporter<'a> {
         }
 
         builder.build()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn npu_named(name: &str, detail: &[(&str, &str)]) -> GpuInfo {
+        GpuInfo {
+            uuid: "4126c167-c7a6-4d0a-80dd-ffbf3641d1b0".to_string(),
+            time: "2025-09-12 11:18:00".to_string(),
+            name: name.to_string(),
+            device_type: "NPU".to_string(),
+            host_id: "node01".to_string(),
+            hostname: "node01".to_string(),
+            instance: "node01".to_string(),
+            utilization: 0.0,
+            ane_utilization: 0.0,
+            dla_utilization: None,
+            tensorcore_utilization: None,
+            temperature: 31,
+            used_memory: 0,
+            total_memory: 16_877_879_296,
+            frequency: 0,
+            power_consumption: 17.5218,
+            gpu_core_count: None,
+            temperature_threshold_slowdown: None,
+            temperature_threshold_shutdown: None,
+            temperature_threshold_max_operating: None,
+            temperature_threshold_acoustic: None,
+            performance_state: None,
+            fan_speed_rpm: None,
+            numa_node_id: None,
+            gsp_firmware_mode: None,
+            gsp_firmware_version: None,
+            nvlink_remote_devices: Vec::new(),
+            gpm_metrics: None,
+            detail: detail
+                .iter()
+                .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+                .collect::<HashMap<_, _>>(),
+        }
+    }
+
+    fn vendor_for(info: &GpuInfo) -> Option<&'static str> {
+        let devices: [GpuInfo; 0] = [];
+        NpuMetricExporter::new(&devices)
+            .find_exporter(info)
+            .map(|exporter| exporter.vendor_name())
+    }
+
+    /// Regression: the fast path matched `name.contains("Rebellions")`, but a
+    /// real card reports `RBLN-CA22`, so no device reached the Rebellions
+    /// exporter and no `all_smi_rebellions_*` series was ever scraped.
+    #[test]
+    fn a_real_rebellions_card_routes_to_the_rebellions_exporter() {
+        let tagged = npu_named("RBLN-CA22", &[("lib_name", "RBLN-SDK")]);
+        assert_eq!(vendor_for(&tagged), Some("Rebellions"));
+
+        // Untagged (remote node / mock server), and a hypothetical later SKU.
+        assert_eq!(vendor_for(&npu_named("RBLN-CA22", &[])), Some("Rebellions"));
+        assert_eq!(vendor_for(&npu_named("RBLN-CA25", &[])), Some("Rebellions"));
+        assert_eq!(
+            vendor_for(&npu_named("Rebellions ATOM", &[])),
+            Some("Rebellions")
+        );
+    }
+
+    /// The exporter pool is indexed by hardcoded positions, so a change to the
+    /// `vec!` order silently mis-routes vendors. Pin every position.
+    #[test]
+    fn the_other_vendors_still_route_to_their_own_exporters() {
+        assert_eq!(vendor_for(&npu_named("HL-325L", &[])), Some("Intel Gaudi"));
+        assert_eq!(
+            vendor_for(&npu_named("Intel Gaudi 3", &[])),
+            Some("Intel Gaudi")
+        );
+        assert_eq!(
+            vendor_for(&npu_named("FuriosaAI RNGD", &[])),
+            Some("Furiosa")
+        );
+        assert_eq!(vendor_for(&npu_named("Warboy", &[])), Some("Furiosa"));
+        assert_eq!(vendor_for(&npu_named("TPU v5e", &[])), Some("Google TPU"));
+
+        #[cfg(target_os = "linux")]
+        assert_eq!(
+            vendor_for(&npu_named("Tenstorrent Wormhole", &[])),
+            Some("Tenstorrent")
+        );
+    }
+
+    #[test]
+    fn an_unknown_accelerator_routes_nowhere() {
+        assert_eq!(vendor_for(&npu_named("Some Unknown NPU", &[])), None);
+    }
+
+    /// End to end: a scrape of a real Rebellions node carries both the generic
+    /// NPU series and the vendor-specific ones.
+    #[test]
+    fn a_rebellions_scrape_contains_vendor_metrics() {
+        let devices = [npu_named(
+            "RBLN-CA22",
+            &[
+                ("lib_name", "RBLN-SDK"),
+                ("Serial ID", "0000000022513338"),
+                ("Firmware Version", "3.0.0"),
+                ("KMD Version", "3.0.0"),
+                ("Status", "normal"),
+                ("Performance State", "P14"),
+                ("Location", "5"),
+            ],
+        )];
+        let output = NpuMetricExporter::new(&devices).export_metrics();
+
+        assert!(output.contains("all_smi_rebellions_device_info"));
+        assert!(output.contains("all_smi_rebellions_firmware_info"));
+        assert!(output.contains("all_smi_rebellions_status"));
     }
 }
