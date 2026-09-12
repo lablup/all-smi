@@ -567,6 +567,48 @@ pub fn generate_cpu_metrics(platform: &PlatformType) -> CpuMetrics {
                 per_core_utilization,
             }
         }
+        PlatformType::Neuron => {
+            // AWS Neuron instance. Anchored on the captured trn1.2xlarge
+            // host: Intel Xeon Platinum 8375C @ 2.90GHz, single socket,
+            // 8 vCPUs. Larger trn1 sizes scale the same CPU up.
+            let model = "Intel Xeon Platinum 8375C".to_string();
+
+            let socket_count = 1;
+            let cores_per_socket = rng.random_range(4..32);
+            let total_cores = socket_count * cores_per_socket;
+            let total_threads = total_cores * 2;
+
+            let per_core_utilization: Vec<f32> = (0..total_cores)
+                .map(|_| rng.random_range(10.0..70.0))
+                .collect();
+
+            let overall_util =
+                per_core_utilization.iter().sum::<f32>() / per_core_utilization.len() as f32;
+
+            let socket_utilizations: Vec<f32> = (0..socket_count)
+                .map(|_| overall_util + rng.random_range(-3.0..3.0))
+                .collect();
+
+            CpuMetrics {
+                model,
+                utilization: overall_util,
+                socket_count,
+                core_count: total_cores,
+                thread_count: total_threads,
+                frequency_mhz: rng.random_range(2900..3500),
+                temperature_celsius: Some(rng.random_range(50..70)),
+                power_consumption_watts: Some(rng.random_range(120.0..280.0)),
+                socket_utilizations,
+                p_core_count: None,
+                e_core_count: None,
+                gpu_core_count: None,
+                p_core_utilization: None,
+                e_core_utilization: None,
+                p_cluster_frequency_mhz: None,
+                e_cluster_frequency_mhz: None,
+                per_core_utilization,
+            }
+        }
         PlatformType::AmdGpu => {
             // AMD GPU server (typically AMD CPU)
             let models = ["AMD EPYC 7763", "AMD EPYC 9554", "AMD EPYC 7713P"];

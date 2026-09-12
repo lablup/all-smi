@@ -26,6 +26,8 @@ pub enum PlatformType {
     Rebellions,
     Furiosa,
     Gaudi,
+    /// AWS Neuron (Trainium / Inferentia).
+    Neuron,
 }
 
 impl PlatformType {
@@ -41,6 +43,7 @@ impl PlatformType {
             "rebellions" | "rbln" => PlatformType::Rebellions,
             "furiosa" => PlatformType::Furiosa,
             "gaudi" | "habana" => PlatformType::Gaudi,
+            "neuron" | "trainium" | "inferentia" => PlatformType::Neuron,
             _ => {
                 eprintln!("Unknown platform '{platform_str}', defaulting to nvidia");
                 PlatformType::Nvidia

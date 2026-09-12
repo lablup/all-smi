@@ -66,6 +66,9 @@ mod tests {
         );
         assert_eq!(PlatformType::from_str("rbln"), PlatformType::Rebellions);
         assert_eq!(PlatformType::from_str("furiosa"), PlatformType::Furiosa);
+        assert_eq!(PlatformType::from_str("neuron"), PlatformType::Neuron);
+        assert_eq!(PlatformType::from_str("trainium"), PlatformType::Neuron);
+        assert_eq!(PlatformType::from_str("inferentia"), PlatformType::Neuron);
         assert_eq!(PlatformType::from_str("gaudi"), PlatformType::Gaudi);
         assert_eq!(PlatformType::from_str("habana"), PlatformType::Gaudi);
         assert_eq!(PlatformType::from_str("unknown"), PlatformType::Nvidia); // Default
