@@ -18,7 +18,8 @@
 //!
 //! `all-smi` provides a unified API for querying hardware metrics across multiple
 //! platforms and device types including NVIDIA GPUs, AMD GPUs, Apple Silicon,
-//! Intel Gaudi NPUs, Google TPUs, Tenstorrent, Rebellions, and Furiosa NPUs.
+//! Intel Gaudi NPUs, Google TPUs, Tenstorrent, Rebellions, Furiosa NPUs, and
+//! AWS Neuron (Trainium/Inferentia).
 //!
 //! ## Quick Start
 //!
@@ -68,7 +69,7 @@
 //!
 //! | Platform | GPUs | NPUs | CPU | Memory |
 //! |----------|------|------|-----|--------|
-//! | Linux | NVIDIA, AMD | Gaudi, TPU, Tenstorrent, Rebellions, Furiosa | Yes | Yes |
+//! | Linux | NVIDIA, AMD | Gaudi, TPU, Tenstorrent, Rebellions, Furiosa, AWS Neuron | Yes | Yes |
 //! | macOS (Apple Silicon) | Apple Silicon | - | Yes | Yes |
 //! | macOS (Intel) | - | - | Yes | Yes |
 //! | Windows | NVIDIA, AMD | - | Yes | Yes |
@@ -80,7 +81,7 @@
 //! ## Features
 //!
 //! - **GPU Monitoring**: Utilization, memory, temperature, power, frequency
-//! - **NPU Monitoring**: Intel Gaudi, Google TPU, Tenstorrent, Rebellions, Furiosa
+//! - **NPU Monitoring**: Intel Gaudi, Google TPU, Tenstorrent, Rebellions, Furiosa, AWS Neuron
 //! - **CPU Monitoring**: Utilization, frequency, temperature, P/E cores (Apple Silicon)
 //! - **Memory Monitoring**: System RAM, swap, buffers, cache
 //! - **Process Monitoring**: GPU processes with memory usage
