@@ -499,22 +499,21 @@ Note: Tenstorrent NPUs use the same basic metric names as GPUs for compatibility
 ### Rebellions NPU Metrics
 
 #### Basic NPU Metrics
-| Metric                                | Description                | Unit    | Labels                                    |
-|---------------------------------------|----------------------------|---------|-------------------------------------------|
-| `all_smi_gpu_utilization`             | NPU utilization percentage | percent | `gpu_index`, `gpu_name`                   |
-| `all_smi_gpu_memory_used_bytes`       | NPU memory used            | bytes   | `gpu_index`, `gpu_name`                   |
-| `all_smi_gpu_memory_total_bytes`      | NPU memory total           | bytes   | `gpu_index`, `gpu_name`                   |
-| `all_smi_gpu_temperature_celsius`     | NPU temperature            | celsius | `gpu_index`, `gpu_name`                   |
-| `all_smi_gpu_power_consumption_watts` | NPU power consumption      | watts   | `gpu_index`, `gpu_name`                   |
-| `all_smi_gpu_frequency_mhz`           | NPU clock frequency        | MHz     | `gpu_index`, `gpu_name`                   |
-| `all_smi_gpu_info`                    | NPU device information     | info    | `gpu_index`, `gpu_name`, `driver_version` |
+| Metric                                | Description                | Unit    | Labels                                                    |
+|---------------------------------------|----------------------------|---------|-----------------------------------------------------------|
+| `all_smi_gpu_utilization`             | NPU utilization percentage | percent | `gpu`, `instance`, `gpu_uuid`, `gpu_index`             |
+| `all_smi_gpu_memory_used_bytes`       | NPU memory used            | bytes   | `gpu`, `instance`, `gpu_uuid`, `gpu_index`             |
+| `all_smi_gpu_memory_total_bytes`      | NPU memory total           | bytes   | `gpu`, `instance`, `gpu_uuid`, `gpu_index`             |
+| `all_smi_gpu_temperature_celsius`     | NPU temperature            | celsius | `gpu`, `instance`, `gpu_uuid`, `gpu_index`             |
+| `all_smi_gpu_power_consumption_watts` | NPU power consumption      | watts   | `gpu`, `instance`, `gpu_uuid`, `gpu_index`             |
+| `all_smi_gpu_info`                    | NPU device information     | gauge   | Base labels plus `type` and available detail fields         |
 
 #### Rebellions-Specific Metrics
 | Metric                                    | Description                          | Unit  | Labels                                                               |
 |-------------------------------------------|--------------------------------------|-------|----------------------------------------------------------------------|
 | `all_smi_rebellions_device_info`       | Device model, board serial and slot     | gauge | `npu`, `instance`, `npu_uuid`, `npu_index`, `model`, `sid`, `location` |
 | `all_smi_rebellions_firmware_info`     | NPU firmware version                    | gauge | `npu`, `instance`, `npu_uuid`, `npu_index`, `firmware`                 |
-| `all_smi_rebellions_kmd_info`          | Kernel Mode Driver version              | gauge | `instance`, `version`                                                  |
+| `all_smi_rebellions_kmd_info`          | Kernel Mode Driver version              | gauge | `npu`, `instance`, `npu_uuid`, `npu_index`, `version`                    |
 | `all_smi_rebellions_pstate_info`       | Current performance state (P0-P15)      | gauge | `npu`, `instance`, `npu_uuid`, `npu_index`, `pstate`                   |
 | `all_smi_rebellions_status`            | Device operational status               | gauge | `npu`, `instance`, `npu_uuid`, `npu_index`, `status`                   |
 
@@ -877,16 +876,13 @@ rate(all_smi_tenstorrent_arc0_health[5m]) == 0
 
 ### Rebellions NPU Specific
 ```promql
-# NPUs in low performance state
-all_smi_rebellions_performance_state > 0
+# NPUs in lower performance states (P6-P15)
+all_smi_rebellions_pstate_info{pstate=~"P([6-9]|1[0-5])"} == 1
 
 # Devices with non-operational status
-all_smi_rebellions_device_status != 1
+all_smi_rebellions_status == 0
 
-# Power efficiency (TOPS per watt)
-all_smi_rebellions_compute_tops / all_smi_gpu_power_consumption_watts
-
-# Memory bandwidth saturation check
+# Device memory saturation
 (all_smi_gpu_memory_used_bytes / all_smi_gpu_memory_total_bytes) > 0.9
 ```
 
@@ -1052,12 +1048,12 @@ groups:
           summary: "Tenstorrent NPU {{ $labels.instance }} is throttling"
           
       - alert: RebellionsNPULowPerformance
-        expr: all_smi_rebellions_performance_state > 5
+        expr: all_smi_rebellions_pstate_info{pstate=~"P([6-9]|1[0-5])"} == 1
         for: 10m
         labels:
           severity: warning
         annotations:
-          summary: "Rebellions NPU {{ $labels.instance }} stuck in low performance state P{{ $value }}"
+          summary: "Rebellions NPU {{ $labels.instance }} stuck in low performance state {{ $labels.pstate }}"
           
       - alert: FuriosaNPUCoreFailure
         expr: all_smi_furiosa_core_status == 0
@@ -1150,7 +1146,7 @@ Higher update rates provide more real-time data but increase system load. For pr
    - Performance state monitoring (P0-P15) for power management
    - Device status and KMD version tracking
    - Support for ATOM, ATOM+, and ATOM Max variants
-   - PCIe Gen4 x16 interface metrics
+   - Board serial and die-position labels for grouping ATOM Max dies by physical card
 9. Furiosa NPU metrics include:
    - Per-core PE utilization monitoring
    - Core availability status tracking

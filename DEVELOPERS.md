@@ -507,7 +507,6 @@ The CI builds for these platforms:
 - Uses `luwen` library for telemetry
 - Supports Grayskull, Wormhole, Blackhole architectures
 - Located in `src/device/readers/tenstorrent.rs`
-- Requires `protobuf-compiler` on Linux for building
 
 **Rebellions NPUs:**
 - Uses `rbln-stat` command
