@@ -342,6 +342,21 @@ fn detect_tenstorrent() -> bool {
 
 /// Check whether at least one AWS Neuron device (Trainium / Inferentia)
 /// is present.
+///
+/// Device IDs follow the AWS Neuron driver and AWS AI chips operator:
+/// Inferentia1 occupies the 7064-7067 range, with later Inferentia and
+/// Trainium generations using 7164, 7264, and 7364.
+#[cfg(target_os = "linux")]
+const NEURON_PCI_IDS: &[&str] = &[
+    "1d0f:7064",
+    "1d0f:7065",
+    "1d0f:7066",
+    "1d0f:7067",
+    "1d0f:7164",
+    "1d0f:7264",
+    "1d0f:7364",
+];
+
 #[cfg(target_os = "linux")]
 pub fn has_neuron() -> bool {
     static CACHE: OnceLock<bool> = OnceLock::new();
@@ -350,9 +365,9 @@ pub fn has_neuron() -> bool {
 
 #[cfg(target_os = "linux")]
 fn detect_neuron() -> bool {
-    // The driver always creates /dev/neuron0 for the first device. It is
-    // mode 0666 (world rw) with no group gate, so presence alone is a
-    // sufficient positive signal for any user.
+    // The driver creates /dev/neuron0 for the first device. Presence is
+    // enough to identify the hardware even when the current user still
+    // needs membership in the device node's owning group.
     if std::path::Path::new("/dev/neuron0").exists() {
         return true;
     }
@@ -361,16 +376,20 @@ fn detect_neuron() -> bool {
     // /opt/aws/neuron/bin, which is on PATH only via the DLAMI profile
     // scripts, so probing a CLI here would report a false negative under
     // sudo, systemd, or a container entrypoint.
-    //
-    // 1d0f:7164 is "Amazon.com, Inc. NeuronDevice (Trainium)".
     if let Ok(output) = execute_command_default("lspci", &["-nn"])
         && output.status == 0
-        && output.stdout.contains("1d0f:7164")
+        && lspci_names_neuron(&output.stdout)
     {
         return true;
     }
 
     false
+}
+
+#[cfg(target_os = "linux")]
+fn lspci_names_neuron(lspci_output: &str) -> bool {
+    let normalized = lspci_output.to_ascii_lowercase();
+    NEURON_PCI_IDS.iter().any(|id| normalized.contains(id))
 }
 
 pub fn has_rebellions() -> bool {
@@ -692,6 +711,28 @@ mod tests {
         // Unrelated accelerators are not Rebellions.
         assert!(!lspci_names_rebellions(
             "03:00.0 Processing accelerators [1200]: Habana Labs Ltd. HL-325L [1da3:1060]"
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn neuron_detection_accepts_every_supported_pci_generation() {
+        for id in NEURON_PCI_IDS {
+            assert!(
+                lspci_names_neuron(&format!(
+                    "00:1e.0 Processing accelerators [1200]: Amazon.com, Inc. Device [{id}]"
+                )),
+                "missing AWS Neuron PCI ID {id}"
+            );
+        }
+        assert!(lspci_names_neuron(
+            "00:1e.0 Processing accelerators [1200]: Amazon Device [1D0F:7164]"
+        ));
+        assert!(!lspci_names_neuron(
+            "00:05.0 Ethernet controller [0200]: Amazon.com, Inc. Elastic Network Adapter [1d0f:ec20]"
+        ));
+        assert!(!lspci_names_neuron(
+            "00:04.0 Non-Volatile memory controller [0108]: Amazon.com, Inc. NVMe EBS Controller [1d0f:8061]"
         ));
     }
 

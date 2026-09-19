@@ -90,7 +90,7 @@ impl<'a> NpuMetricExporter<'a> {
             // "AWS Neuron ..." by the reader; no other vendor's name
             // contains these substrings.
             #[cfg(target_os = "linux")]
-            if name.contains("Trainium") || name.contains("Inferentia") || name.contains("Neuron") {
+            if neuron::is_neuron_device(info) {
                 return Some(exporters[NEURON_IDX].as_ref());
             }
 
@@ -310,6 +310,11 @@ mod tests {
         assert_eq!(vendor_for_name("AWS Trainium1"), Some("AWS Neuron"));
         assert_eq!(vendor_for_name("AWS Inferentia2"), Some("AWS Neuron"));
         assert_eq!(vendor_for_name("AWS Neuron Device"), Some("AWS Neuron"));
+        assert_eq!(
+            vendor_for(&npu_named("AWS Accelerator", &[("lib_name", "Neuron")])),
+            Some("AWS Neuron")
+        );
+        assert_eq!(vendor_for_name("Neuronal Accelerator"), None);
     }
 
     #[test]

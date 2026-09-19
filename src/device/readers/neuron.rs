@@ -48,9 +48,8 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc;
-use std::time::Duration;
+use std::sync::{Mutex, mpsc};
+use std::time::{Duration, Instant};
 
 use chrono::Local;
 use serde::Deserialize;
@@ -86,9 +85,19 @@ const MONITOR_FIRST_RECORD_TIMEOUT: Duration = Duration::from_secs(2);
 /// runtimes attached stays orders of magnitude below this.
 const MONITOR_RECORD_CAP_BYTES: u64 = 4 * 1024 * 1024;
 
-/// Set once the `neuron-monitor` one-shot has failed, so a host where it
-/// is missing or wedged does not pay the timeout on every refresh tick.
-static MONITOR_UNAVAILABLE: AtomicBool = AtomicBool::new(false);
+/// Maximum plausible NeuronCore count accepted from `neuron-ls`.
+///
+/// Current hardware stays well below this value. The generous ceiling
+/// keeps future devices working while preventing corrupt tool output from
+/// driving an effectively unbounded allocation and sysfs walk.
+const MAX_NEURON_CORES_PER_DEVICE: u32 = 256;
+
+/// Delay before retrying `neuron-monitor` after a transient failure.
+const MONITOR_RETRY_INTERVAL: Duration = Duration::from_secs(30);
+
+/// A failed monitor probe is suppressed briefly, not permanently: the
+/// daemon and runtime may become available after this process starts.
+static MONITOR_RETRY_AFTER: Mutex<Option<Instant>> = Mutex::new(None);
 
 /// One element of the `neuron-ls --json-output` top-level array.
 ///
@@ -297,19 +306,55 @@ fn parse_neuron_ls_devices(stdout: &str) -> Vec<NeuronLsDevice> {
     if trimmed.is_empty() {
         return Vec::new();
     }
-    match serde_json::from_str::<Vec<NeuronLsDevice>>(trimmed) {
-        Ok(devices) => devices.into_iter().take(MAX_DEVICES).collect(),
+    let values = match serde_json::from_str::<Vec<Value>>(trimmed) {
+        Ok(values) => values,
         Err(error) => {
             eprintln!("Failed to parse neuron-ls JSON output: {error}");
-            Vec::new()
+            return Vec::new();
         }
-    }
+    };
+    values
+        .into_iter()
+        .take(MAX_DEVICES)
+        .filter_map(|value| match serde_json::from_value(value) {
+            Ok(device) => Some(device),
+            Err(error) => {
+                eprintln!("Skipping malformed neuron-ls device: {error}");
+                None
+            }
+        })
+        .collect()
 }
 
-/// Global flat NeuronCore index, per AWS's own device-view frontend:
-/// `nc_idx = nd_idx * neuroncore_per_device_count + nc_idx_counter`.
-fn flat_core_index(device_index: u32, cores_per_device: u32, core_position: u32) -> u32 {
-    device_index * cores_per_device + core_position
+/// Compatibility fallback for old `neuron-ls` output that omits
+/// `neuroncore_ids`, matching AWS's device-view calculation.
+fn calculated_flat_core_index(
+    device_index: u32,
+    cores_per_device: u32,
+    core_position: u32,
+) -> Option<u32> {
+    device_index
+        .checked_mul(cores_per_device)?
+        .checked_add(core_position)
+}
+
+/// Resolve the authoritative global NeuronCore ID for one local position.
+///
+/// Current `neuron-ls` output supplies `neuroncore_ids` explicitly.
+/// Prefer it so logical-core configuration and future non-uniform topology
+/// cannot drift from the IDs used by `neuron-monitor`.
+fn device_core_index(
+    device: &NeuronLsDevice,
+    cores_per_device: u32,
+    core_position: u32,
+) -> Option<u32> {
+    device
+        .neuroncore_ids
+        .get(core_position as usize)
+        .copied()
+        .or_else(|| {
+            calculated_flat_core_index(device.neuron_device, cores_per_device, core_position)
+        })
 }
 
 /// Stable-ish device identity.
@@ -406,11 +451,10 @@ fn read_core_arch_type(device_index: u32, core_position: u32) -> Option<String> 
 ///
 /// There is no one-shot flag, so the child is terminated as soon as the
 /// record is in hand rather than a background streaming subsystem being
-/// introduced for it. A single failure disarms the probe for the rest of
-/// the process so a host without the tool does not pay the timeout every
-/// tick.
+/// introduced for it. Failures start a short backoff so a wedged tool does
+/// not stall every refresh tick while transient failures can still recover.
 fn neuron_monitor_first_record() -> Option<String> {
-    if MONITOR_UNAVAILABLE.load(Ordering::Relaxed) || !Path::new(NEURON_MONITOR_BIN).exists() {
+    if !Path::new(NEURON_MONITOR_BIN).exists() || monitor_backoff_active(Instant::now()) {
         return None;
     }
 
@@ -422,7 +466,7 @@ fn neuron_monitor_first_record() -> Option<String> {
     {
         Ok(child) => child,
         Err(_) => {
-            MONITOR_UNAVAILABLE.store(true, Ordering::Relaxed);
+            record_monitor_failure(Instant::now());
             return None;
         }
     };
@@ -435,10 +479,39 @@ fn neuron_monitor_first_record() -> Option<String> {
     let _ = child.kill();
     let _ = child.wait();
 
-    if line.is_none() {
-        MONITOR_UNAVAILABLE.store(true, Ordering::Relaxed);
+    match line {
+        Some(line) => {
+            clear_monitor_backoff();
+            Some(line)
+        }
+        None => {
+            record_monitor_failure(Instant::now());
+            None
+        }
     }
-    line
+}
+
+fn retry_deadline_is_active(retry_after: Option<Instant>, now: Instant) -> bool {
+    retry_after.is_some_and(|deadline| now < deadline)
+}
+
+fn monitor_backoff_active(now: Instant) -> bool {
+    MONITOR_RETRY_AFTER
+        .lock()
+        .map(|retry_after| retry_deadline_is_active(*retry_after, now))
+        .unwrap_or(false)
+}
+
+fn record_monitor_failure(now: Instant) {
+    if let Ok(mut retry_after) = MONITOR_RETRY_AFTER.lock() {
+        *retry_after = now.checked_add(MONITOR_RETRY_INTERVAL);
+    }
+}
+
+fn clear_monitor_backoff() {
+    if let Ok(mut retry_after) = MONITOR_RETRY_AFTER.lock() {
+        *retry_after = None;
+    }
 }
 
 /// Read one line off a child's stdout with a deadline.
@@ -460,7 +533,14 @@ fn read_first_line<R: Read + Send + 'static>(stdout: R) -> Option<String> {
 }
 
 fn collect_monitor_snapshot() -> Option<MonitorSnapshot> {
-    parse_monitor_record(&neuron_monitor_first_record()?)
+    let line = neuron_monitor_first_record()?;
+    match parse_monitor_record(&line) {
+        Some(snapshot) => Some(snapshot),
+        None => {
+            record_monitor_failure(Instant::now());
+            None
+        }
+    }
 }
 
 /// Turn one `neuron-monitor` record into a utilization map.
@@ -486,7 +566,10 @@ fn parse_monitor_record(line: &str) -> Option<MonitorSnapshot> {
             continue;
         }
         for (key, usage) in &counters.neuroncores_in_use {
-            if let Ok(index) = key.parse::<u32>() {
+            if let Ok(index) = key.parse::<u32>()
+                && usage.neuroncore_utilization.is_finite()
+                && (0.0..=100.0).contains(&usage.neuroncore_utilization)
+            {
                 utilization.insert(index, usage.neuroncore_utilization);
             }
         }
@@ -512,11 +595,18 @@ fn core_rows(
     // sums rows, so charging the full device size to each core would
     // multiply the host's memory by the core count.
     let per_core_memory = device.memory_size / u64::from(core_count);
+    let memory_remainder = device.memory_size % u64::from(core_count);
 
     (0..core_count)
-        .map(|position| {
-            let flat = flat_core_index(device.neuron_device, core_count, position);
-            build_core_row(device, ctx, monitor, position, flat, per_core_memory)
+        .filter_map(|position| {
+            let flat = device_core_index(device, core_count, position)?;
+            let memory = per_core_memory
+                + if u64::from(position) < memory_remainder {
+                    1
+                } else {
+                    0
+                };
+            Some(build_core_row(device, ctx, monitor, position, flat, memory))
         })
         .collect()
 }
@@ -524,11 +614,12 @@ fn core_rows(
 /// Cores on this device: `nc_count` when the tool reports one, else the
 /// length of `neuroncore_ids`.
 fn effective_core_count(device: &NeuronLsDevice) -> u32 {
-    if device.nc_count > 0 {
+    let reported = if device.nc_count > 0 {
         device.nc_count
     } else {
-        u32::try_from(device.neuroncore_ids.len()).unwrap_or(0)
-    }
+        u32::try_from(device.neuroncore_ids.len()).unwrap_or(u32::MAX)
+    };
+    reported.min(MAX_NEURON_CORES_PER_DEVICE)
 }
 
 fn build_core_row(
@@ -690,6 +781,14 @@ fn non_empty(value: &str) -> Option<String> {
 fn device_processes(devices: &[NeuronLsDevice]) -> Vec<ProcessInfo> {
     let mut processes = Vec::new();
     for device in devices {
+        if device.neuron_processes.is_empty() {
+            continue;
+        }
+        let serial = read_sysfs_device_info(device.neuron_device).serial_number;
+        let Some((device_id, device_uuid)) = process_device_identity(device, serial.as_deref())
+        else {
+            continue;
+        };
         for entry in &device.neuron_processes {
             let Some(pid) = entry.pid else {
                 continue;
@@ -701,8 +800,8 @@ fn device_processes(devices: &[NeuronLsDevice]) -> Vec<ProcessInfo> {
                 .filter(|name| !name.is_empty())
                 .unwrap_or_else(|| basename(&command));
             processes.push(ProcessInfo {
-                device_id: device.neuron_device as usize,
-                device_uuid: compose_uuid(None, &device.bdf, device.neuron_device),
+                device_id,
+                device_uuid: device_uuid.clone(),
                 pid,
                 process_name,
                 used_memory: 0,
@@ -725,6 +824,27 @@ fn device_processes(devices: &[NeuronLsDevice]) -> Vec<ProcessInfo> {
         }
     }
     processes
+}
+
+/// Map device-scoped process data to the first NeuronCore row.
+///
+/// `neuron-ls` does not identify a core for each process, so core zero is
+/// the only deterministic correlation target. It must use the same sysfs
+/// serial preference as [`build_core_row`] or process and device UUIDs
+/// diverge on real hardware.
+fn process_device_identity(
+    device: &NeuronLsDevice,
+    serial: Option<&str>,
+) -> Option<(usize, String)> {
+    let core_count = effective_core_count(device);
+    if core_count == 0 {
+        return None;
+    }
+    let flat_core = device_core_index(device, core_count, 0)?;
+    Some((
+        flat_core as usize,
+        compose_uuid(serial, &device.bdf, flat_core),
+    ))
 }
 
 fn basename(command: &str) -> String {
@@ -831,6 +951,19 @@ mod tests {
     }
 
     #[test]
+    fn malformed_device_does_not_hide_valid_inventory() {
+        let mixed = r#"[
+            {"neuron_device":0,"bdf":"0000:00:1e.0","nc_count":2,"memory_size":8,"neuroncore_ids":[0,1]},
+            {"neuron_device":"future-format"},
+            {"neuron_device":1,"bdf":"0000:00:1f.0","nc_count":2,"memory_size":8,"neuroncore_ids":[2,3]}
+        ]"#;
+        let devices = parse_neuron_ls_devices(mixed);
+        assert_eq!(devices.len(), 2);
+        assert_eq!(devices[0].neuron_device, 0);
+        assert_eq!(devices[1].neuron_device, 1);
+    }
+
+    #[test]
     fn core_rows_split_device_memory_and_mark_absent_metrics() {
         let devices = parse_neuron_ls_devices(NEURON_LS_TRN1_2XLARGE);
         let ctx = DeviceContext {
@@ -916,14 +1049,46 @@ mod tests {
     }
 
     #[test]
-    fn flat_core_index_is_global_not_device_local() {
+    fn invalid_monitor_utilization_is_omitted() {
+        let invalid = r#"{"neuron_runtime_data":[{"report":{"neuroncore_counters":{"neuroncores_in_use":{"0":{"neuroncore_utilization":101.0},"1":{"neuroncore_utilization":-0.1}}}}}]}"#;
+        let snapshot = parse_monitor_record(invalid).expect("record parses");
+        assert!(snapshot.utilization.is_empty());
+    }
+
+    #[test]
+    fn monitor_backoff_expires() {
+        let now = Instant::now();
+        assert!(!retry_deadline_is_active(None, now));
+        assert!(retry_deadline_is_active(
+            now.checked_add(Duration::from_secs(1)),
+            now
+        ));
+        assert!(!retry_deadline_is_active(Some(now), now));
+    }
+
+    #[test]
+    fn calculated_core_index_is_global_not_device_local() {
         // AWS's device-view frontend computes
         // `nd_idx * neuroncore_per_device_count + nc_idx_counter`, so on
         // a 16-device trn1.32xlarge device 3 core 1 is key "7".
-        assert_eq!(flat_core_index(0, 2, 0), 0);
-        assert_eq!(flat_core_index(0, 2, 1), 1);
-        assert_eq!(flat_core_index(3, 2, 1), 7);
-        assert_eq!(flat_core_index(15, 2, 1), 31);
+        assert_eq!(calculated_flat_core_index(0, 2, 0), Some(0));
+        assert_eq!(calculated_flat_core_index(0, 2, 1), Some(1));
+        assert_eq!(calculated_flat_core_index(3, 2, 1), Some(7));
+        assert_eq!(calculated_flat_core_index(15, 2, 1), Some(31));
+        assert_eq!(calculated_flat_core_index(u32::MAX, 2, 0), None);
+    }
+
+    #[test]
+    fn explicit_neuroncore_ids_override_calculated_indices() {
+        let mut device = parse_neuron_ls_devices(NEURON_LS_TRN1_2XLARGE).remove(0);
+        device.neuron_device = 3;
+        device.neuroncore_ids = vec![42, 43];
+        assert_eq!(device_core_index(&device, 2, 0), Some(42));
+        assert_eq!(device_core_index(&device, 2, 1), Some(43));
+
+        device.neuroncore_ids.clear();
+        assert_eq!(device_core_index(&device, 2, 0), Some(6));
+        assert_eq!(device_core_index(&device, 2, 1), Some(7));
     }
 
     #[test]
@@ -941,6 +1106,25 @@ mod tests {
             hostname: "host".to_string(),
         };
         assert!(core_rows(&device, &ctx, None).is_empty());
+
+        device.nc_count = u32::MAX;
+        assert_eq!(effective_core_count(&device), MAX_NEURON_CORES_PER_DEVICE);
+    }
+
+    #[test]
+    fn core_rows_preserve_memory_remainder() {
+        let mut device = parse_neuron_ls_devices(NEURON_LS_TRN1_2XLARGE).remove(0);
+        device.memory_size = 5;
+        let ctx = DeviceContext {
+            sysfs: SysfsDeviceInfo::default(),
+            driver_version: None,
+            time: String::new(),
+            hostname: "host".to_string(),
+        };
+        let rows = core_rows(&device, &ctx, None);
+        assert_eq!(rows.iter().map(|row| row.total_memory).sum::<u64>(), 5);
+        assert_eq!(rows[0].total_memory, 3);
+        assert_eq!(rows[1].total_memory, 2);
     }
 
     #[test]
@@ -966,6 +1150,23 @@ mod tests {
         assert_eq!(processes.len(), 1);
         assert_eq!(processes[0].pid, 4242);
         assert_eq!(processes[0].process_name, "python3");
+        assert_eq!(processes[0].device_id, 0);
+        assert_eq!(processes[0].device_uuid, "neuron-0000:00:1e.0-nc0");
         assert!(processes[0].uses_gpu);
+
+        let device = parse_neuron_ls_devices(with_procs).remove(0);
+        assert_eq!(
+            process_device_identity(&device, Some("serial-123")),
+            Some((0, "neuron-serial-123-nc0".to_string()))
+        );
+
+        let mut no_cores = device;
+        no_cores.nc_count = 0;
+        no_cores.neuroncore_ids.clear();
+        assert_eq!(process_device_identity(&no_cores, None), None);
+        assert!(
+            device_processes(std::slice::from_ref(&no_cores)).is_empty(),
+            "a process must not reference a device row that cannot be emitted"
+        );
     }
 }

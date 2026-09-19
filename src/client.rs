@@ -789,6 +789,7 @@ mod tests {
         assert_eq!(DeviceType::NvidiaGpu.to_string(), "NVIDIA GPU");
         assert_eq!(DeviceType::AppleSiliconGpu.to_string(), "Apple Silicon GPU");
         assert_eq!(DeviceType::IntelGaudi.to_string(), "Intel Gaudi");
+        assert_eq!(DeviceType::AwsNeuronNpu.to_string(), "AWS Neuron NPU");
     }
 
     #[test]

@@ -33,6 +33,23 @@ pub struct NeuronExporter {
     common: CommonNpuExporter,
 }
 
+pub(crate) fn is_neuron_device(info: &GpuInfo) -> bool {
+    if info
+        .detail
+        .get("lib_name")
+        .is_some_and(|name| name.eq_ignore_ascii_case("Neuron"))
+    {
+        return true;
+    }
+
+    info.name
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .any(|token| {
+            let token = token.to_ascii_uppercase();
+            token == "NEURON" || token.starts_with("TRAINIUM") || token.starts_with("INFERENTIA")
+        })
+}
+
 impl NeuronExporter {
     pub fn new() -> Self {
         Self {
@@ -167,9 +184,7 @@ impl Default for NeuronExporter {
 
 impl NpuExporter for NeuronExporter {
     fn can_handle(&self, info: &GpuInfo) -> bool {
-        info.name.contains("Trainium")
-            || info.name.contains("Inferentia")
-            || info.name.contains("Neuron")
+        is_neuron_device(info)
     }
 
     fn export_vendor_metrics(

@@ -20,6 +20,7 @@
 //! there is no per-vendor health metric anywhere, so the PATH trap
 //! described below has nowhere else to be reported.
 
+use crate::doctor::exec::try_exec;
 use crate::doctor::types::{Check, CheckCtx, CheckResult, Severity};
 
 static CHECKS: &[&Check] = &[&DEV_NODE, &DRIVER_MODULE, &SYSFS, &TOOLS];
@@ -71,9 +72,10 @@ static TOOLS: Check = Check {
 fn check_dev_node(_ctx: &CheckCtx) -> CheckResult {
     #[cfg(target_os = "linux")]
     {
-        // The driver creates one /dev/neuronN per device, mode 0666
-        // (world rw) with no group gate, so there is nothing to join and
-        // every tool works fully as an unprivileged user.
+        // The driver creates one /dev/neuronN per device. Current AWS
+        // guidance permits group-restricted mode 0660, so presence proves
+        // hardware detection but command access is verified separately by
+        // the tools check below.
         let nodes: Vec<String> = (0..crate::device::readers::common_cache::MAX_DEVICES)
             .map(|index| format!("/dev/neuron{index}"))
             .take_while(|path| std::path::Path::new(path).exists())
@@ -142,30 +144,61 @@ fn check_sysfs(_ctx: &CheckCtx) -> CheckResult {
     }
 }
 
-fn check_tools(_ctx: &CheckCtx) -> CheckResult {
+fn check_tools(ctx: &CheckCtx) -> CheckResult {
     #[cfg(target_os = "linux")]
     {
-        let present: Vec<&str> = [NEURON_LS_BIN, NEURON_MONITOR_BIN]
-            .into_iter()
-            .filter(|path| std::path::Path::new(path).exists())
-            .collect();
-        if present.is_empty() {
-            if std::path::Path::new("/dev/neuron0").exists() {
+        let device_present = std::path::Path::new("/dev/neuron0").exists();
+        let ls_present = std::path::Path::new(NEURON_LS_BIN).exists();
+        let monitor_present = std::path::Path::new(NEURON_MONITOR_BIN).exists();
+
+        if !ls_present {
+            if device_present {
                 return CheckResult::Warn(
-                    "Neuron device present but /opt/aws/neuron/bin tools are missing".to_string(),
+                    "Neuron device present but required neuron-ls is missing".to_string(),
                     Some("install aws-neuronx-tools".to_string()),
                 );
             }
-            return CheckResult::Skip("aws-neuronx-tools not installed".to_string());
+            return CheckResult::Skip(
+                "neuron-ls not installed and no Neuron device found".to_string(),
+            );
         }
+
+        if device_present {
+            let Some(output) = try_exec(NEURON_LS_BIN, &["--json-output"], ctx.command_timeout)
+            else {
+                return CheckResult::Warn(
+                    "neuron-ls exists but could not be launched".to_string(),
+                    Some("verify executable permissions for aws-neuronx-tools".to_string()),
+                );
+            };
+            let valid_inventory = output.success()
+                && serde_json::from_str::<serde_json::Value>(output.stdout.trim())
+                    .is_ok_and(|value| value.is_array());
+            if !valid_inventory {
+                return CheckResult::Warn(
+                    "neuron-ls could not read a valid device inventory".to_string(),
+                    Some(
+                        "verify Neuron device-node permissions and the aws-neuronx-dkms driver"
+                            .to_string(),
+                    ),
+                );
+            }
+        }
+
+        if !monitor_present {
+            return CheckResult::Warn(
+                "neuron-ls is available but neuron-monitor is missing".to_string(),
+                Some("install aws-neuronx-tools to enable utilization metrics".to_string()),
+            );
+        }
+
         CheckResult::Pass(format!(
-            "{} binary(ies): {}",
-            present.len(),
-            present.join(", ")
+            "{NEURON_LS_BIN} and {NEURON_MONITOR_BIN} available"
         ))
     }
     #[cfg(not(target_os = "linux"))]
     {
+        let _ = ctx;
         CheckResult::Skip("AWS Neuron is Linux-only".to_string())
     }
 }
