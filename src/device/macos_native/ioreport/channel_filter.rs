@@ -17,13 +17,14 @@
 //! `IOReportCopyChannelsInGroup` describes every channel in a group, and a
 //! subscription samples whatever it was opened with. On an M5 Max that is 364
 //! Energy Model channels, of which five feed a rail, next to 18 CPU and one
-//! GPU performance-state channel. Each group's description is cut down to the
-//! channels something reads before the groups are merged, using the same
-//! predicates the parsers use, so nothing that was read before is dropped:
+//! GPU performance-state channel; an M1 Ultra has 321, of which eight are
+//! kept. Each group's description is cut down to the channels something reads
+//! before the groups are merged, using the same predicates the parsers use,
+//! so nothing that was read before is dropped:
 //!
 //! | group | kept | predicate |
 //! |---|---|---|
-//! | `Energy Model` | 5 of 364 | [`classify_energy_channel`] |
+//! | `Energy Model` | 5 of 364 (M5 Max), 8 of 321 (M1 Ultra) | [`classify_energy_channel`] |
 //! | `CPU Stats` / `CPU Core Performance States` | 18 of 18 | [`classify_cpu_channel`] |
 //! | `GPU Stats` / `GPU Performance States` | 1 of 1 | `GPUPH` |
 //!
@@ -166,6 +167,43 @@ mod tests {
         assert_eq!(
             kept,
             ["ANE0", "CPU Energy", "DRAM0", "GPU Energy", "GPU0"],
+            "the filter must keep every rail channel and only those"
+        );
+    }
+
+    /// The same on the recorded M1 Ultra inventory: both dies' CPU roll-ups,
+    /// ANE, and DRAM, `GPU Energy`, and its `GPU0_0` fallback, out of 321.
+    #[test]
+    fn energy_filter_keeps_exactly_the_rails_of_the_m1_ultra_inventory() {
+        let inventory = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/ioreport/m1_ultra_energy_model.tsv"
+        ));
+        let names: Vec<&str> = inventory
+            .lines()
+            .filter(|line| !line.starts_with('#') && !line.trim().is_empty())
+            .filter_map(|line| line.split('\t').next())
+            .collect();
+        assert_eq!(names.len(), 321);
+
+        let mut kept: Vec<&str> = names
+            .iter()
+            .copied()
+            .filter(|name| keep_energy_channel(name))
+            .collect();
+        kept.sort_unstable();
+        assert_eq!(
+            kept,
+            [
+                "ANE0_0",
+                "ANE0_1",
+                "DIE_0_CPU Energy",
+                "DIE_1_CPU Energy",
+                "DRAM0_0",
+                "DRAM0_1",
+                "GPU Energy",
+                "GPU0_0",
+            ],
             "the filter must keep every rail channel and only those"
         );
     }

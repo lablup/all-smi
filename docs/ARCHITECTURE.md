@@ -192,7 +192,7 @@ pub trait MetricsExporter: Send + Sync {
 
 #### Apple Silicon (`src/device/readers/apple_silicon_native.rs`)
 - Uses the native IOReport API (`src/device/macos_native/ioreport.rs`) for energy counters and CPU/GPU residency. The subscription holds only the channels something reads (24 of 383 on an M5 Max, `src/device/macos_native/ioreport/channel_filter.rs`); the one `IOReportCreateSamples` call per collection is still the floor of its cost, because the providers work per sample rather than per channel
-- Power per rail comes from exact-named `Energy Model` channels (`src/device/macos_native/energy.rs`), each timed by its own driver publication timestamp rather than the poll window, because the M5 Max publishes its mJ counters in batches about 2.1 s apart
+- Power per rail comes from exact-named `Energy Model` channels (`src/device/macos_native/energy.rs`), each timed by its own driver publication timestamp rather than the poll window, because the mJ counters are published in batches: about 2.1 s apart on an M5 Max, twice per ~2.1 s at uneven intervals on an M1 Ultra, whose rails are the per-die `DIE_<n>_CPU Energy`, `ANE0_<n>`, and `DRAM0_<n>` channels (inventories under `tests/fixtures/ioreport/`)
 - Reads temperature and system power from the SMC (`src/device/macos_native/smc.rs`) over one connection kept between collections (`SmcSampler`): key info is looked up once per key, keys the SMC lacks included, temperatures are read every collection and system power and fans every 5 s, and a connection that fails is reopened on the next collection
 - No sudo and no external `powermetrics` process
 - Provides unified memory metrics

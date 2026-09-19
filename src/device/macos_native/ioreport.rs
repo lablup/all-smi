@@ -48,9 +48,30 @@
 //! That is 2.95x the roll-up. `GPU0` (mJ) and `GPU Energy` (nJ) carry the
 //! same energy, so matching both counted the GPU twice. Channels are matched
 //! by exact name in [`classify_energy_channel`]: `GPU Energy`; names ending in
-//! `CPU Energy` (`DIE_<n>_CPU Energy` on multi-die packages); `GPU<n>` only
-//! when a sample has no `GPU Energy`; and the top-level `ANE`/`DRAM` shapes
-//! (`ANE`, `ANE0`, `ANE0_1`). Nothing else is summed.
+//! `CPU Energy` (`DIE_<n>_CPU Energy` on multi-die packages); `GPU<n>` or
+//! `GPU<n>_<m>` only when a sample has no `GPU Energy`; and the top-level
+//! `ANE`/`DRAM` shapes (`ANE`, `ANE0`, `ANE0_1`). Nothing else is summed.
+//!
+//! An M1 Ultra (Mac13,2, macOS 27) holds 321 channels
+//! (`tests/fixtures/ioreport/m1_ultra_energy_model.tsv`) and no package
+//! `CPU Energy`: its CPU rail is `DIE_0_CPU Energy` plus `DIE_1_CPU Energy`.
+//! Only CPU channels carry the `DIE_<n>_` prefix. The other blocks name the
+//! die with a suffix (`ANE0_0`/`ANE0_1`, `DRAM0_0`/`DRAM0_1`), which the
+//! top-level shapes already sum per die, so `DIE_<n>_` GPU, ANE, and DRAM
+//! names stay unmatched (the decision and the inventory behind it are in the
+//! `energy` module docs). Eight channels classify. The other 313 include 260
+//! `DTL` channels (130 names, each listed twice), the per-die clusters,
+//! `GPU SRAM0_0`, and ten uJ `apciec<n> Energy` and `PCIe Port <n> Energy`
+//! channels.
+//!
+//! `GPU0_0` is the whole GPU, not die 0. Over a common window of about 29 s
+//! it read 0.963 (all-smi idle) and 0.938 (four `yes` loads) of
+//! `GPU Energy`, and `GPU0_0` plus `GPU SRAM0_0` read 0.996 and 0.967 of it;
+//! over each channel's own first-to-last publication window `GPU0_0` read
+//! 0.965 and 0.992. The GPU drew 38 to 81 mW in those runs, so a few mW at a
+//! window edge moves the ratio by several percent. `GPU Energy` includes the
+//! GPU SRAM that `GPU0_0` leaves out, so the `GPU<n>_<m>` fallback, which
+//! counts only when a sample has no `GPU Energy`, would read about 3 % low.
 //!
 //! ## Energy Model: power from publication timestamps
 //!
@@ -64,16 +85,36 @@
 //! so a 1 s poll reads 1.05x or 0.70x, and at the 3 s API default every window
 //! holds one or two batches and the reading beats between 0.7x and 1.4x.
 //!
+//! An M1 Ultra (macOS 27) also publishes its mJ channels together, but twice
+//! per ~2.1 s at uneven intervals whose split drifts: 0.75 to 0.91 s
+//! alternating with 1.19 to 1.32 s over one 32 s run, and moving from
+//! 1.69 + 0.46 s to 0.97 + 1.14 s over another, each pair summing to 2.06 to
+//! 2.19 s. Each publication's energy matches its own span (in the idle run
+//! the 0.8 s spans read 3.74 to 3.80 W and the 1.3 s spans 3.75 to 4.00 W), so
+//! the spans are real and timing by them reads as steadily as on the M5 Max.
+//!
 //! Two more measured behaviors constrain the design:
-//! - `GPU Energy` (nJ) is stamped at sample time (0.1 to 0.4 ms old) and moves
-//!   on every sample under load. At idle it reads exactly 0 nJ per window, so
-//!   a zero there is 0 W, not a missing publication.
+//! - `GPU Energy` (nJ) is stamped at sample time on an M5 Max (0.1 to 0.4 ms
+//!   old) and moves on every sample under load. At idle it reads exactly
+//!   0 nJ per window, so a zero there is 0 W, not a missing publication. On
+//!   an M1 Ultra it publishes every 109 to 139 ms, mostly within 1 ms of the
+//!   sample, and an idle GPU also publishes whole windows of exactly 0 nJ
+//!   (22 of 60 ticks in each recorded run), which are 0 W. A sample can land
+//!   before the next publication, though: the idle run saw the stamp move
+//!   only 6 to 12 ms with no energy, stamped 105 to 116 ms before the sample,
+//!   and exploratory runs that sampled about every 200 ms with the GPU
+//!   drawing about 8 W saw it not move at all. Neither is 0 W. The tracker
+//!   tells them apart by the span, not the value: it holds the previous
+//!   reading, and the next span (218 to 246 ms in the idle run) carries the
+//!   energy of both.
 //! - Publications split. A batch is sometimes followed 9 to 26 ms later by a
 //!   small second publication with its own timestamp (`CPU Energy`: 4969 mJ
 //!   over 2043.0 ms, then 65 mJ over 14.8 ms), and one channel can land a
 //!   sample after the others (`DRAM0` once published 25 ms after
 //!   `CPU Energy`, with its own 2158.5 ms span). A single "the roll-up moved"
-//!   clock cannot time both, so timing is per channel.
+//!   clock cannot time both, so timing is per channel. On an M1 Ultra the
+//!   tails came 12 to 29 ms after the publication (445 mJ over 26.3 ms under
+//!   load, folded into the next span).
 //!
 //! So power comes from the driver's own publication times. Each channel's
 //! `RawElements` data holds xnu's `IOReportElement`
@@ -119,6 +160,14 @@ use std::time::Instant;
 
 #[path = "ioreport/channel_filter.rs"]
 mod channel_filter;
+
+#[cfg(test)]
+#[path = "ioreport/diagnostics.rs"]
+mod diagnostics;
+
+#[cfg(test)]
+#[path = "ioreport/energy_comparison.rs"]
+mod energy_comparison;
 
 /// Static CFStringRef constants for IOReport channel groups and dictionary keys.
 /// These are created once, retained with CFRetain, and kept for the lifetime
@@ -1188,7 +1237,7 @@ impl IOReport {
     /// ~2.1 s and rarely inside a 100 ms window; an exact reading when a
     /// publication did land in it; and never the ~20x spike that dividing a
     /// whole 2.1 s batch by a 100 ms window used to produce. Channels stamped
-    /// at sample time, such as `GPU Energy`, read normally.
+    /// at sample time, such as `GPU Energy` on an M5 Max, read normally.
     pub fn get_sample(&mut self, duration_ms: u64) -> Result<IOReportIterator, &'static str> {
         let sample1 = self.take_sample()?;
 
@@ -1720,110 +1769,6 @@ mod tests {
         assert_eq!(scale_mach_ticks(u64::MAX, 125, 3), u64::MAX);
         // A zero denom is read as 1 rather than dividing by zero.
         assert_eq!(scale_mach_ticks(42, 1, 0), 42);
-    }
-
-    /// Hardware diagnostic for the Energy Model (issue #410). Prints this
-    /// machine's full channel inventory in the fixture format (enumerated from
-    /// the group itself, since the subscription is filtered), then for six seconds
-    /// at 100 ms every tracked channel's counter delta (`dv`), publication
-    /// span (`dts`), and publication age, read from raw samples, next to the
-    /// rail readings the tracker produced from them.
-    ///
-    /// Use it to record another chip family next to
-    /// `tests/fixtures/ioreport/m5_max_energy_model.tsv` and to check that its
-    /// publication cadence matches what the tracker assumes:
-    ///
-    /// ```text
-    /// cargo test --lib ioreport_energy_diagnostics -- --ignored --nocapture
-    /// ```
-    #[test]
-    #[ignore = "hardware diagnostic; run by hand with --ignored --nocapture"]
-    #[cfg(target_os = "macos")]
-    fn ioreport_energy_diagnostics() {
-        use std::collections::HashMap;
-
-        let Ok(mut report) = IOReport::new() else {
-            println!("IOReport is unavailable on this host; nothing to report");
-            return;
-        };
-
-        let (numer, denom) = mach_timebase();
-        println!("# mach timebase {numer}/{denom}");
-        // The whole group, not the subscription: the subscription holds only
-        // the tracked channels, and the inventory exists to record the rest.
-        // SAFETY: the group name is the process-lifetime static CFString and a
-        // null subgroup means "all"; the result is a +1 dictionary (or null),
-        // released once below after `get_io_channels` has read it.
-        let description = unsafe {
-            IOReportCopyChannelsInGroup(get_cfstring_refs().energy_model, ptr::null(), 0, 0, 0)
-        };
-        println!("# Energy Model inventory (name<TAB>unit)");
-        let mut inventory = 0;
-        for item in get_io_channels(description) {
-            if let Some(name) = energy_channel_name(item) {
-                println!("{name}\t{}", channel_unit(item));
-                inventory += 1;
-            }
-        }
-        println!("# {inventory} channels");
-        if !description.is_null() {
-            unsafe { CFRelease(description as *const c_void) };
-        }
-
-        println!("# per tracked channel: dv = counter delta, dts = publication span");
-        let mut previous: HashMap<String, (i64, Option<u64>)> = HashMap::new();
-        let start = Instant::now();
-        for tick in 0..60 {
-            std::thread::sleep(std::time::Duration::from_millis(100));
-            let Ok(sample) = report.take_sample() else {
-                continue;
-            };
-            let now_ns = mach_now_ns();
-            let observations = energy_observations(sample);
-            // SAFETY: `sample` is the +1 reference `take_sample` returns for
-            // this iteration, released exactly once here; `energy_observations`
-            // has already copied out everything it needs, so `sample` is not
-            // used afterwards.
-            unsafe { CFRelease(sample as *const c_void) };
-
-            let ms = |ns: u64| format!("{:.1}ms", ns as f64 / 1e6);
-            let fields: Vec<String> = observations
-                .iter()
-                .map(|obs| {
-                    let (prev_value, prev_ts) = previous
-                        .get(&obs.channel)
-                        .copied()
-                        .unwrap_or((obs.value, obs.timestamp_ns));
-                    let dts = match (obs.timestamp_ns, prev_ts) {
-                        (Some(ts), Some(prev)) => ms(ts.saturating_sub(prev)),
-                        _ => "none".to_string(),
-                    };
-                    let age = obs
-                        .timestamp_ns
-                        .map_or("none".to_string(), |ts| ms(now_ns.saturating_sub(ts)));
-                    format!(
-                        "{} dv={}{} dts={dts} age={age}",
-                        obs.channel,
-                        obs.value.saturating_sub(prev_value),
-                        obs.unit
-                    )
-                })
-                .collect();
-            for obs in observations {
-                previous.insert(obs.channel, (obs.value, obs.timestamp_ns));
-            }
-
-            let rails = report.energy_readings();
-            println!(
-                "{tick:03} t={:.3}s {} || cpu={:.2}W gpu={:.2}W ane={:.2}W dram={:.2}W",
-                start.elapsed().as_secs_f64(),
-                fields.join(" | "),
-                rails.cpu,
-                rails.gpu,
-                rails.ane,
-                rails.dram
-            );
-        }
     }
 
     #[test]

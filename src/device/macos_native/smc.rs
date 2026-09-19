@@ -43,7 +43,7 @@ use std::time::{Duration, Instant};
 /// This is a runaway guard, not a sampling budget: it is sized so no shipping
 /// Mac reaches it, which keeps the reported average over the complete sensor
 /// set rather than over an arbitrary prefix of the key table. Measured counts:
-/// 23 on an M5 Max, single digits on Intel.
+/// 23 on an M5 Max, 86 on an M1 Ultra, single digits on Intel.
 const MAX_CPU_TEMP_KEYS: usize = 256;
 
 /// Upper bound on discovered GPU temperature keys (`Tg*` on Apple Silicon,
@@ -56,6 +56,28 @@ const MAX_CPU_TEMP_KEYS: usize = 256;
 /// happened to list first. Sized to leave headroom above the largest known
 /// part (an Ultra is roughly two Max dies) so truncation stays theoretical.
 const MAX_GPU_TEMP_KEYS: usize = 512;
+
+/// CPU temperature keys read before discovery is consulted. When any of them
+/// reads in [`PLAUSIBLE_TEMP_C`], their average is the CPU temperature and the
+/// discovered keys are not read at all.
+///
+/// Which of them exist differs by chip: an M1 Ultra (Mac13,2, macOS 27.0) has
+/// the six `Tp` keys and lacks `TC0P` and `TC0D`, so its CPU temperature is
+/// the average of those six although discovery finds 86 CPU sensors; an M5
+/// Max has none of the eight, so its CPU temperature comes from discovery.
+const CPU_STATIC_TEMP_KEYS: [&str; 8] = [
+    "Tp01", "Tp02", "Tp05", "Tp06", "Tp09", "Tp0A", "TC0P", "TC0D",
+];
+
+/// GPU temperature keys read before discovery is consulted, with the same
+/// precedence as [`CPU_STATIC_TEMP_KEYS`]. On an M1 Ultra and an M5 Max only
+/// `Tg0j` exists, so the GPU temperature is that one sensor (the M1 Ultra has
+/// 16 discoverable GPU sensors, the M5 Max 84).
+const GPU_STATIC_TEMP_KEYS: [&str; 4] = ["Tg0f", "Tg0j", "TG0P", "TG0D"];
+
+/// Range, in degrees Celsius, a temperature reading must fall in to be
+/// averaged. Anything outside it is a missing or differently-typed key.
+const PLAUSIBLE_TEMP_C: std::ops::RangeInclusive<f64> = 10.0..=120.0;
 
 /// Maximum number of fans to probe. No Mac ships with more than a handful.
 const MAX_FANS: u32 = 8;
@@ -799,13 +821,9 @@ impl SMC {
         let mut temps: Vec<f64> = Vec::new();
 
         // Try common CPU temperature keys first
-        let static_keys = [
-            "Tp01", "Tp02", "Tp05", "Tp06", "Tp09", "Tp0A", "TC0P", "TC0D",
-        ];
-
-        for key in static_keys {
+        for key in CPU_STATIC_TEMP_KEYS {
             if let Ok(value) = self.read_value(key)
-                && (10.0..=120.0).contains(&value)
+                && PLAUSIBLE_TEMP_C.contains(&value)
             {
                 temps.push(value);
             }
@@ -820,7 +838,7 @@ impl SMC {
 
             for key in &discovered.cpu_keys {
                 if let Ok(value) = self.read_value(key)
-                    && (10.0..=120.0).contains(&value)
+                    && PLAUSIBLE_TEMP_C.contains(&value)
                 {
                     temps.push(value);
                 }
@@ -842,11 +860,9 @@ impl SMC {
         let mut temps: Vec<f64> = Vec::new();
 
         // Try common GPU temperature keys first
-        let static_keys = ["Tg0f", "Tg0j", "TG0P", "TG0D"];
-
-        for key in static_keys {
+        for key in GPU_STATIC_TEMP_KEYS {
             if let Ok(value) = self.read_value(key)
-                && (10.0..=120.0).contains(&value)
+                && PLAUSIBLE_TEMP_C.contains(&value)
             {
                 temps.push(value);
             }
@@ -861,7 +877,7 @@ impl SMC {
 
             for key in &discovered.gpu_keys {
                 if let Ok(value) = self.read_value(key)
-                    && (10.0..=120.0).contains(&value)
+                    && PLAUSIBLE_TEMP_C.contains(&value)
                 {
                     temps.push(value);
                 }
@@ -1145,6 +1161,10 @@ impl SmcSampler {
         metrics
     }
 }
+
+#[cfg(test)]
+#[path = "smc/temperature_report.rs"]
+pub(super) mod temperature_report;
 
 #[cfg(test)]
 mod tests {
