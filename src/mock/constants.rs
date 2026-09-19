@@ -25,6 +25,10 @@ pub const DEFAULT_AMD_DRIVER_VERSION: &str = "30.10.1";
 pub const DEFAULT_AMD_ROCM_VERSION: &str = "7.0.2";
 pub const DEFAULT_TENSTORRENT_NAME: &str = "Tenstorrent Grayskull e75 120W";
 pub const DEFAULT_FURIOSA_NAME: &str = "Furiosa RNGD";
+/// Default device name for the AWS Neuron mock. Anchored on the
+/// `trn1` generation, whose `neuron-ls` reports `device_name` as
+/// `Trainium1`; the reader prefixes the vendor.
+pub const DEFAULT_NEURON_NAME: &str = "AWS Trainium1";
 /// Default device name for the Intel client GPU mock (issue #244).
 /// We anchor on the Arc B580 (Battlemage, 12GB) — current-generation
 /// discrete Arc, around 190W TDP. Override via `--gpu-name`.

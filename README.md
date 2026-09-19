@@ -7,7 +7,7 @@
 [![dependency status](https://deps.rs/repo/github/lablup/all-smi/status.svg)](https://deps.rs/repo/github/lablup/all-smi)
 
 
-`all-smi` is a command-line utility for monitoring GPU and NPU hardware across multiple systems. It provides a real-time view of accelerator utilization, memory usage, temperature, power consumption, and other metrics. The tool is designed to be a cross-platform alternative to `nvidia-smi`, with support for NVIDIA GPUs, AMD GPUs, NVIDIA Jetson platforms, Apple Silicon GPUs, Intel Arc/Iris Xe/Xe client GPUs, Intel Gaudi NPUs, Google Cloud TPUs, Tenstorrent NPUs, Rebellions NPUs, and Furiosa NPUs.
+`all-smi` is a command-line utility for monitoring GPU and NPU hardware across multiple systems. It provides a real-time view of accelerator utilization, memory usage, temperature, power consumption, and other metrics. The tool is designed to be a cross-platform alternative to `nvidia-smi`, with support for NVIDIA GPUs, AMD GPUs, NVIDIA Jetson platforms, Apple Silicon GPUs, Intel Arc/Iris Xe/Xe client GPUs, Intel Gaudi NPUs, Google Cloud TPUs, Tenstorrent NPUs, Rebellions NPUs, Furiosa NPUs, and AWS Neuron (Trainium/Inferentia) devices.
 
 The application presents a terminal-based user interface with cluster overview, interactive sorting, and both local and remote monitoring capabilities. It also provides an API mode for Prometheus metrics integration.
 
@@ -546,7 +546,7 @@ netsh advfirewall firewall delete rule name="all-smi"
 The `all-smi doctor` subcommand runs a read-only suite of environment checks and
 prints a PASS/WARN/FAIL report covering platform, privileges, container
 runtime, every supported hardware backend (NVIDIA, AMD, Apple, Gaudi, TPU,
-Tenstorrent, Rebellions, Furiosa, Intel Level Zero, Windows), the relevant
+Tenstorrent, Rebellions, Furiosa, AWS Neuron, Intel Level Zero, Windows), the relevant
 environment variables, and optional remote endpoint connectivity. Each check
 has a hard 3-second timeout.
 
@@ -626,6 +626,7 @@ Stable check IDs (greppable across versions):
 | `tenstorrent.*` | `tenstorrent.luwen`, `tenstorrent.kmd`, `tenstorrent.module` |
 | `rebellions.*` | `rebellions.rblnstat`, `rebellions.driver` |
 | `furiosa.*` | `furiosa.feature`, `furiosa.smi` |
+| `neuron.*` | `neuron.dev_node`, `neuron.driver`, `neuron.sysfs`, `neuron.tools` |
 | `windows.*` | `windows.wmi`, `windows.amd_ryzen_master`, `windows.intel_wmi`, `windows.libre_hardware_monitor` |
 | `env.*` | `env.all_smi`, `env.cuda`, `env.rocr`, `env.tpu`, `env.hl` |
 | `network.*` | `network.dns`, `network.tcp`, `network.http` |
@@ -652,6 +653,7 @@ Stable check IDs (greppable across versions):
   - Tenstorrent NPUs: Real-time telemetry via luwen library, board-specific TDP calculations
   - Rebellions NPUs: Performance state monitoring, KMD version tracking, device status
   - Furiosa NPUs: Per-core PE utilization, power governor modes, firmware version tracking
+  - AWS Neuron (Trainium/Inferentia): one row per NeuronCore, device HBM from `neuron-ls`, per-core memory from the driver's sysfs tree, best-effort per-core utilization from `neuron-monitor` while a Neuron runtime is attached. Trainium exposes no temperature, power, or clock reading, so those stay absent rather than being reported as zero
   
 ### CPU Monitoring
 - **Comprehensive CPU Metrics:**
@@ -786,6 +788,7 @@ Stable check IDs (greppable across versions):
   - Tenstorrent NPUs (Wormhole, Blackhole) via luwen library
   - Rebellions NPUs (ATOM, ATOM+, ATOM Max) via rbln-stat
   - Furiosa NPUs (RNGD) via furiosa-smi
+  - AWS Neuron devices (Trainium, Inferentia) via `neuron-ls` / `neuron-monitor` and the `neuron` driver's sysfs tree
 - **macOS:**
   - Apple Silicon (M1/M2/M3/M4) GPUs monitoring
   - Native APIs: IOReport, SMC for no-sudo operation
@@ -1087,7 +1090,7 @@ threshold}` JSON with a 2-second timeout, fire-and-forget.
   - Simulates realistic GPU clusters with 8 GPUs per node
   - Configurable port ranges for multiple instances
   - Failure simulation for resilience testing
-  - Platform-specific metric generation (NVIDIA, AMD, Apple Silicon, Jetson, Intel client GPU, Intel Gaudi, Google TPU, Tenstorrent, Rebellions, Furiosa)
+  - Platform-specific metric generation (NVIDIA, AMD, Apple Silicon, Jetson, Intel client GPU, Intel Gaudi, Google TPU, Tenstorrent, Rebellions, Furiosa, AWS Neuron)
   - Background metric updates with realistic variations
   - Set `ALL_SMI_MOCK_VGPU=1` to simulate NVIDIA vGPU SR-IOV data without real vGPU hardware
   - Set `ALL_SMI_MOCK_MIG=1` to simulate NVIDIA MIG (Multi-Instance GPU) data without MIG hardware
@@ -1129,6 +1132,7 @@ curl --unix-socket /tmp/all-smi.sock http://localhost/metrics
 
 Metrics are available at `http://localhost:9090/metrics` (TCP) or via Unix socket and include comprehensive hardware monitoring for:
 - **GPUs:** Utilization, memory, temperature, power, frequency (NVIDIA, AMD, Apple Silicon, Intel Arc/Iris Xe client GPU, Intel Gaudi, Google TPU, Tenstorrent)
+- **AWS Neuron:** Per-NeuronCore memory and identity; utilization only while a Neuron runtime is attached
 - **NVIDIA hardware details:** NUMA node ID, GSP firmware mode and version, NvLink remote endpoint type per active link, GPM SM occupancy and memory bandwidth utilization (all omitted when the driver does not support the underlying API)
 - **NVIDIA vGPUs:** Per-vGPU utilization, framebuffer memory, scheduler state, and SR-IOV host mode (emitted only on vGPU-enabled hosts)
 - **NVIDIA MIG:** Per-GPU MIG mode status and per-MIG-instance utilization, framebuffer memory used/total (emitted only on MIG-enabled hosts)

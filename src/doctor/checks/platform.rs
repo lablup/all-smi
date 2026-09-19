@@ -207,6 +207,9 @@ fn check_hardware(_ctx: &CheckCtx) -> CheckResult {
     if snap.furiosa {
         kinds.push("FuriosaAI");
     }
+    if snap.neuron {
+        kinds.push("AWS Neuron");
+    }
     if kinds.is_empty() {
         CheckResult::Pass("no accelerators detected".to_string())
     } else {

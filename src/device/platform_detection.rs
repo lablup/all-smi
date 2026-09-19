@@ -340,6 +340,58 @@ fn detect_tenstorrent() -> bool {
     false
 }
 
+/// Check whether at least one AWS Neuron device (Trainium / Inferentia)
+/// is present.
+///
+/// Device IDs follow the AWS Neuron driver and AWS AI chips operator:
+/// Inferentia1 occupies the 7064-7067 range, with later Inferentia and
+/// Trainium generations using 7164, 7264, and 7364.
+#[cfg(target_os = "linux")]
+const NEURON_PCI_IDS: &[&str] = &[
+    "1d0f:7064",
+    "1d0f:7065",
+    "1d0f:7066",
+    "1d0f:7067",
+    "1d0f:7164",
+    "1d0f:7264",
+    "1d0f:7364",
+];
+
+#[cfg(target_os = "linux")]
+pub fn has_neuron() -> bool {
+    static CACHE: OnceLock<bool> = OnceLock::new();
+    *CACHE.get_or_init(detect_neuron)
+}
+
+#[cfg(target_os = "linux")]
+fn detect_neuron() -> bool {
+    // The driver creates /dev/neuron0 for the first device. Presence is
+    // enough to identify the hardware even when the current user still
+    // needs membership in the device node's owning group.
+    if std::path::Path::new("/dev/neuron0").exists() {
+        return true;
+    }
+
+    // Fall back to PCI IDs: the Neuron tools live under
+    // /opt/aws/neuron/bin, which is on PATH only via the DLAMI profile
+    // scripts, so probing a CLI here would report a false negative under
+    // sudo, systemd, or a container entrypoint.
+    if let Ok(output) = execute_command_default("lspci", &["-nn"])
+        && output.status == 0
+        && lspci_names_neuron(&output.stdout)
+    {
+        return true;
+    }
+
+    false
+}
+
+#[cfg(target_os = "linux")]
+fn lspci_names_neuron(lspci_output: &str) -> bool {
+    let normalized = lspci_output.to_ascii_lowercase();
+    NEURON_PCI_IDS.iter().any(|id| normalized.contains(id))
+}
+
 pub fn has_rebellions() -> bool {
     static CACHE: OnceLock<bool> = OnceLock::new();
     *CACHE.get_or_init(detect_rebellions)
@@ -662,6 +714,28 @@ mod tests {
         ));
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn neuron_detection_accepts_every_supported_pci_generation() {
+        for id in NEURON_PCI_IDS {
+            assert!(
+                lspci_names_neuron(&format!(
+                    "00:1e.0 Processing accelerators [1200]: Amazon.com, Inc. Device [{id}]"
+                )),
+                "missing AWS Neuron PCI ID {id}"
+            );
+        }
+        assert!(lspci_names_neuron(
+            "00:1e.0 Processing accelerators [1200]: Amazon Device [1D0F:7164]"
+        ));
+        assert!(!lspci_names_neuron(
+            "00:05.0 Ethernet controller [0200]: Amazon.com, Inc. Elastic Network Adapter [1d0f:ec20]"
+        ));
+        assert!(!lspci_names_neuron(
+            "00:04.0 Non-Volatile memory controller [0108]: Amazon.com, Inc. NVMe EBS Controller [1d0f:8061]"
+        ));
+    }
+
     /// Architecture detection must never abort the process (it used to
     /// `.expect()` on the `uname` probe) and must be stable across calls
     /// because the result is cached in a `OnceLock`.
@@ -721,6 +795,9 @@ pub mod introspection {
         pub tenstorrent: bool,
         pub rebellions: bool,
         pub furiosa: bool,
+        /// `true` when an AWS Neuron device (Trainium / Inferentia) is
+        /// detected. Linux-only; always `false` elsewhere.
+        pub neuron: bool,
         /// `true` when an Intel **client** GPU (Arc / Iris / Xe /
         /// integrated graphics) is detected. Reported on both Linux
         /// (i915 / xe drivers) and Windows (WMI). Distinct from
@@ -741,6 +818,7 @@ pub mod introspection {
             tenstorrent: detect_tenstorrent(),
             rebellions: super::has_rebellions(),
             furiosa: super::has_furiosa(),
+            neuron: detect_neuron(),
             intel_gpu: super::has_intel_gpu(),
         }
     }
@@ -776,6 +854,17 @@ pub mod introspection {
 
     #[cfg(not(target_os = "linux"))]
     fn detect_tenstorrent() -> bool {
+        false
+    }
+
+    // Same exact-complement rule as `detect_amd` above.
+    #[cfg(target_os = "linux")]
+    fn detect_neuron() -> bool {
+        super::has_neuron()
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn detect_neuron() -> bool {
         false
     }
 

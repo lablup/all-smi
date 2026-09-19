@@ -88,6 +88,8 @@ pub enum DeviceType {
     TenstorrentNpu,
     /// Google TPU
     GoogleTpu,
+    /// AWS Neuron NPU (Trainium / Inferentia)
+    AwsNeuronNpu,
 }
 
 impl std::fmt::Display for DeviceType {
@@ -102,6 +104,7 @@ impl std::fmt::Display for DeviceType {
             DeviceType::RebellionsNpu => write!(f, "Rebellions NPU"),
             DeviceType::TenstorrentNpu => write!(f, "Tenstorrent NPU"),
             DeviceType::GoogleTpu => write!(f, "Google TPU"),
+            DeviceType::AwsNeuronNpu => write!(f, "AWS Neuron NPU"),
         }
     }
 }
@@ -786,6 +789,7 @@ mod tests {
         assert_eq!(DeviceType::NvidiaGpu.to_string(), "NVIDIA GPU");
         assert_eq!(DeviceType::AppleSiliconGpu.to_string(), "Apple Silicon GPU");
         assert_eq!(DeviceType::IntelGaudi.to_string(), "Intel Gaudi");
+        assert_eq!(DeviceType::AwsNeuronNpu.to_string(), "AWS Neuron NPU");
     }
 
     #[test]
