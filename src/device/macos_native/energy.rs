@@ -39,16 +39,20 @@
 //! package channel sits next to it, and a per-die sum must never be added to
 //! a package total.
 //!
-//! [`sum_rails`] enforces that where the matching rules could meet both. A
-//! sample with the package `CPU Energy` takes the CPU rail from it alone and
-//! ignores `DIE_<n>_CPU Energy`; without `GPU Energy`, the GPU falls back to
-//! the `GPU<n>` channels, which on an M5 Max match `GPU Energy`, and to
-//! `GPU<n>_<m>` only when the sample has no `GPU<n>`. No recorded chip
-//! exercises either guard: the M5 Max has only the package channels and the
-//! M1 Ultra only the per-die ones. They are for the multi-die chips nobody has
-//! recorded yet, such as the M2 Ultra and M3 Ultra. ANE and DRAM have no such
-//! guard, because no recorded inventory has both `ANE<n>` and `ANE<n>_<m>`
-//! (or the DRAM equivalents) to say which one is the total.
+//! [`sum_rails`] enforces that on every rail where the matching rules could
+//! meet both: only the least specific family present in a sample feeds the
+//! rail. A sample with the package `CPU Energy` takes the CPU rail from it
+//! alone and ignores `DIE_<n>_CPU Energy`. Without `GPU Energy`, the GPU
+//! falls back to the `GPU<n>` channels, which on an M5 Max match
+//! `GPU Energy`, and to `GPU<n>_<m>` only when the sample has no `GPU<n>`.
+//! ANE and DRAM take bare `ANE` / `DRAM` when present, otherwise `ANE<n>` /
+//! `DRAM<n>`, and `ANE<n>_<m>` / `DRAM<n>_<m>` only when neither is there. No
+//! recorded chip exercises the guard. Besides `GPU Energy`, each recorded
+//! inventory has one family per rail (the M5 Max `CPU Energy`, `GPU0`,
+//! `ANE0`, and `DRAM0`; the M1 Ultra `DIE_<n>_CPU Energy`, `GPU0_0`,
+//! `ANE0_<m>`, and `DRAM0_<m>`), so both read as before. It is for the
+//! multi-die chips nobody has recorded yet, such as the M2 Ultra and M3
+//! Ultra.
 //!
 //! [`EnergyTracker`] keys channels by name. The M1 Ultra lists 130 `DTL`
 //! names (`ECPUDTL*`, `PCPUDTL*`, `PCPU1DTL*`) twice each, with no prefix to
@@ -107,10 +111,11 @@ pub enum EnergyRail {
     /// 3 % low.
     GpuFallback,
     /// `ANE`, `ANE<n>`, or `ANE<n>_<m>` (`ANE0_0` and `ANE0_1`, one per die,
-    /// on an M1 Ultra).
+    /// on an M1 Ultra). A sample with more than one of these shapes counts
+    /// only the least specific one present.
     Ane,
     /// `DRAM`, `DRAM<n>`, or `DRAM<n>_<m>` (`DRAM0_0` and `DRAM0_1` on an M1
-    /// Ultra).
+    /// Ultra), with the same precedence as [`EnergyRail::Ane`].
     Dram,
 }
 
@@ -192,43 +197,73 @@ impl EnergyReadings {
 /// alone.
 const PACKAGE_CPU_ENERGY: &str = "CPU Energy";
 
+/// Watts of one rail's channels, kept apart by how specific their names are,
+/// so that only the least specific family present in a sample feeds the
+/// rail. Index 0 is the package name (`CPU Energy`, `ANE`, `DRAM`), 1 the
+/// numbered block (`GPU<n>`, `ANE<n>`, `DRAM<n>`; `DIE_<n>_CPU Energy` for
+/// the CPU), and 2 the per-die suffix (`GPU<n>_<m>`, `ANE<n>_<m>`,
+/// `DRAM<n>_<m>`).
+#[derive(Default)]
+struct Families([Option<f64>; 3]);
+
+impl Families {
+    fn add(&mut self, family: usize, watts: f64) {
+        *self.0[family].get_or_insert(0.0) += watts;
+    }
+
+    /// The least specific family present, or 0 W when there is none.
+    fn total(&self) -> f64 {
+        self.0.iter().flatten().next().copied().unwrap_or(0.0)
+    }
+}
+
+/// Which family a name that already matched `prefix`, `prefix<n>`, or
+/// `prefix<n>_<m>` belongs to (see [`Families`]).
+fn family(name: &str, prefix: &str) -> usize {
+    match name.strip_prefix(prefix) {
+        Some("") => 0,
+        Some(rest) if rest.contains('_') => 2,
+        _ => 1,
+    }
+}
+
 /// Sum per-channel watts into rails.
 ///
 /// Channels that do not classify are ignored. Where a package channel and
 /// per-die ones could both match, only one of them feeds the rail, so a
 /// per-die sum is never added to a package total. Which one depends on the
-/// whole set, so these rails are resolved after every channel has been seen:
+/// whole set, so every rail is resolved after every channel has been seen:
 /// - CPU: the package `CPU Energy` when the set has it, and the
 ///   `DIE_<n>_CPU Energy` channels summed otherwise.
 /// - GPU: `GPU Energy` when the set has it; otherwise the `GPU<n>` channels,
 ///   and the `GPU<n>_<m>` channels only when there is no `GPU<n>` either.
+/// - ANE and DRAM: bare `ANE` / `DRAM` when the set has it; otherwise the
+///   `ANE<n>` / `DRAM<n>` channels, and the `ANE<n>_<m>` / `DRAM<n>_<m>`
+///   channels only when there is neither.
 pub fn sum_rails<'a>(channels: impl IntoIterator<Item = (&'a str, f64)>) -> EnergyReadings {
-    let mut readings = EnergyReadings::default();
-    let mut package_cpu: Option<f64> = None;
-    let mut per_die_cpu = 0.0;
+    let mut cpu = Families::default();
     let mut gpu_energy: Option<f64> = None;
-    let mut gpu_n: Option<f64> = None;
-    let mut gpu_n_m = 0.0;
+    let mut gpu_fallback = Families::default();
+    let mut ane = Families::default();
+    let mut dram = Families::default();
 
     for (name, watts) in channels {
         match classify_energy_channel(name) {
-            Some(EnergyRail::Cpu) if name == PACKAGE_CPU_ENERGY => {
-                *package_cpu.get_or_insert(0.0) += watts;
-            }
-            Some(EnergyRail::Cpu) => per_die_cpu += watts,
+            Some(EnergyRail::Cpu) => cpu.add(usize::from(name != PACKAGE_CPU_ENERGY), watts),
             Some(EnergyRail::Gpu) => *gpu_energy.get_or_insert(0.0) += watts,
-            // `GPU<n>_<m>` is the only fallback shape with an underscore.
-            Some(EnergyRail::GpuFallback) if name.contains('_') => gpu_n_m += watts,
-            Some(EnergyRail::GpuFallback) => *gpu_n.get_or_insert(0.0) += watts,
-            Some(EnergyRail::Ane) => readings.ane += watts,
-            Some(EnergyRail::Dram) => readings.dram += watts,
+            Some(EnergyRail::GpuFallback) => gpu_fallback.add(family(name, "GPU"), watts),
+            Some(EnergyRail::Ane) => ane.add(family(name, "ANE"), watts),
+            Some(EnergyRail::Dram) => dram.add(family(name, "DRAM"), watts),
             None => {}
         }
     }
 
-    readings.cpu = package_cpu.unwrap_or(per_die_cpu);
-    readings.gpu = gpu_energy.or(gpu_n).unwrap_or(gpu_n_m);
-    readings
+    EnergyReadings {
+        cpu: cpu.total(),
+        gpu: gpu_energy.unwrap_or_else(|| gpu_fallback.total()),
+        ane: ane.total(),
+        dram: dram.total(),
+    }
 }
 
 /// One energy channel as read from a raw (non-delta) IOReport sample.
