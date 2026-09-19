@@ -17,6 +17,32 @@ use super::exporter_trait::{CommonNpuMetrics, NpuExporter};
 use crate::api::metrics::MetricBuilder;
 use crate::device::GpuInfo;
 
+/// Value the Rebellions reader stamps into `detail["lib_name"]` for every
+/// device it produces, regardless of SKU.
+const RBLN_LIB_NAME: &str = "RBLN-SDK";
+
+/// Does this device belong to the Rebellions exporter?
+///
+/// Routing prefers the vendor tag the reader writes into `detail["lib_name"]`,
+/// which does not depend on how a particular card spells its marketing name.
+/// The name check is the fallback for devices that arrive without that tag
+/// (remote nodes parsed from Prometheus text, the mock server) and matches the
+/// `RBLN` product prefix rather than one SKU: real hardware reports
+/// `name = "RBLN-CA22"`, never the literal "Rebellions", so the old
+/// `contains("Rebellions")` test routed no real device at all.
+pub fn is_rebellions_device(info: &GpuInfo) -> bool {
+    if info
+        .detail
+        .get("lib_name")
+        .is_some_and(|lib| lib == RBLN_LIB_NAME)
+    {
+        return true;
+    }
+
+    let name = info.name.trim().to_ascii_uppercase();
+    name.starts_with("RBLN") || name.contains("REBELLIONS")
+}
+
 /// Rebellions NPU-specific metric exporter
 pub struct RebellionsExporter {
     common: CommonNpuExporter,
@@ -30,8 +56,11 @@ impl RebellionsExporter {
     }
 
     fn export_firmware_info(&self, builder: &mut MetricBuilder, info: &GpuInfo, index: usize) {
-        // Rebellions firmware info
-        if let Some(fw_version) = info.detail.get("firmware_version") {
+        // Rebellions firmware info. Detail keys are the Title Case ones the
+        // Rebellions reader actually writes (see `DetailBuilder` usage there);
+        // the snake_case keys this used to look up are never present, so the
+        // metrics were empty even once routing reached this exporter.
+        if let Some(fw_version) = info.detail.get("Firmware Version") {
             let fw_labels = [
                 ("npu", info.name.as_str()),
                 ("instance", info.instance.as_str()),
@@ -49,9 +78,12 @@ impl RebellionsExporter {
         }
 
         // KMD version
-        if let Some(kmd_version) = info.detail.get("kmd_version") {
+        if let Some(kmd_version) = info.detail.get("KMD Version") {
             let kmd_labels = [
+                ("npu", info.name.as_str()),
                 ("instance", info.instance.as_str()),
+                ("npu_uuid", info.uuid.as_str()),
+                ("npu_index", &index.to_string()),
                 ("version", kmd_version.as_str()),
             ];
             builder
@@ -62,9 +94,7 @@ impl RebellionsExporter {
     }
 
     fn export_device_info(&self, builder: &mut MetricBuilder, info: &GpuInfo, index: usize) {
-        if let Some(_device_name) = info.detail.get("device_name")
-            && let Some(sid) = info.detail.get("serial_id")
-        {
+        if let Some(sid) = info.detail.get("Serial ID") {
             let model_type = if info.name.contains("ATOM Max") {
                 "ATOM-Max"
             } else if info.name.contains("ATOM+") {
@@ -73,6 +103,13 @@ impl RebellionsExporter {
                 "ATOM"
             };
 
+            // Real slot index from the driver; "unknown" rather than a made-up
+            // constant when the device did not report one.
+            let location = info
+                .detail
+                .get("Location")
+                .map_or("unknown", |value| value.as_str());
+
             let device_labels = [
                 ("npu", info.name.as_str()),
                 ("instance", info.instance.as_str()),
@@ -80,7 +117,7 @@ impl RebellionsExporter {
                 ("npu_index", &index.to_string()),
                 ("model", model_type),
                 ("sid", sid.as_str()),
-                ("location", "5"), // Default location from mock server
+                ("location", location),
             ];
             builder
                 .help(
@@ -93,7 +130,7 @@ impl RebellionsExporter {
     }
 
     fn export_performance_state(&self, builder: &mut MetricBuilder, info: &GpuInfo, index: usize) {
-        if let Some(pstate) = info.detail.get("performance_state") {
+        if let Some(pstate) = info.detail.get("Performance State") {
             let pstate_labels = [
                 ("npu", info.name.as_str()),
                 ("instance", info.instance.as_str()),
@@ -120,7 +157,7 @@ impl RebellionsExporter {
             index,
             "all_smi_rebellions_status",
             "Device operational status",
-            "status",
+            "Status",
             status_values::NORMAL,
         );
     }
@@ -134,7 +171,7 @@ impl Default for RebellionsExporter {
 
 impl NpuExporter for RebellionsExporter {
     fn can_handle(&self, info: &GpuInfo) -> bool {
-        info.name.contains("Rebellions")
+        is_rebellions_device(info)
     }
 
     fn export_vendor_metrics(
@@ -201,5 +238,153 @@ impl CommonNpuMetrics for RebellionsExporter {
 
     fn export_power_metrics(&self, builder: &mut MetricBuilder, info: &GpuInfo, index: usize) {
         self.common.export_power_metrics(builder, info, index);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    /// A `GpuInfo` shaped exactly as `readers::rebellions` produces it for a
+    /// live RBLN-CA22 (ATOM Plus) card: the name is the SKU, never the vendor
+    /// string, and the detail keys are the reader's Title Case ones.
+    fn atom_plus_device() -> GpuInfo {
+        let detail = [
+            ("Serial ID", "0000000022513338"),
+            ("Firmware Version", "3.0.0"),
+            ("KMD Version", "3.0.0"),
+            ("Device Path", "rbln0"),
+            ("Board Info", "0005000c"),
+            ("Location", "5"),
+            ("Status", "normal"),
+            ("Performance State", "P14"),
+            ("lib_name", "RBLN-SDK"),
+            ("lib_version", "3.0.0"),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.to_string(), value.to_string()))
+        .collect::<HashMap<_, _>>();
+
+        GpuInfo {
+            uuid: "4126c167-c7a6-4d0a-80dd-ffbf3641d1b0".to_string(),
+            time: "2025-09-12 11:18:00".to_string(),
+            name: "RBLN-CA22".to_string(),
+            device_type: "NPU".to_string(),
+            host_id: "atom-plus-01".to_string(),
+            hostname: "atom-plus-01".to_string(),
+            instance: "atom-plus-01".to_string(),
+            utilization: 0.0,
+            ane_utilization: 0.0,
+            dla_utilization: None,
+            tensorcore_utilization: None,
+            temperature: 31,
+            used_memory: 0,
+            total_memory: 16_877_879_296,
+            frequency: 0,
+            power_consumption: 17.5218,
+            gpu_core_count: None,
+            temperature_threshold_slowdown: None,
+            temperature_threshold_shutdown: None,
+            temperature_threshold_max_operating: None,
+            temperature_threshold_acoustic: None,
+            performance_state: None,
+            fan_speed_rpm: None,
+            numa_node_id: None,
+            gsp_firmware_mode: None,
+            gsp_firmware_version: None,
+            nvlink_remote_devices: Vec::new(),
+            gpm_metrics: None,
+            detail,
+        }
+    }
+
+    fn named(name: &str) -> GpuInfo {
+        GpuInfo {
+            name: name.to_string(),
+            detail: HashMap::new(),
+            ..atom_plus_device()
+        }
+    }
+
+    /// Regression: `can_handle` tested `name.contains("Rebellions")`, but no
+    /// Rebellions card ever reports that name — the real one is "RBLN-CA22".
+    #[test]
+    fn real_hardware_is_recognised() {
+        assert!(RebellionsExporter::new().can_handle(&atom_plus_device()));
+        assert!(is_rebellions_device(&atom_plus_device()));
+
+        // Name alone is enough when the reader's vendor tag is absent
+        // (remote nodes, mock server), for any RBLN-prefixed SKU.
+        assert!(is_rebellions_device(&named("RBLN-CA22")));
+        assert!(is_rebellions_device(&named("RBLN-CA25")));
+        assert!(is_rebellions_device(&named("Rebellions ATOM")));
+        assert!(is_rebellions_device(&named("rbln-ca22")));
+    }
+
+    #[test]
+    fn other_vendors_are_not_claimed() {
+        for name in ["HL-325L", "Intel Gaudi 3", "FuriosaAI RNGD", "TPU v5e"] {
+            assert!(
+                !is_rebellions_device(&named(name)),
+                "{name} must not route to the Rebellions exporter"
+            );
+        }
+        assert!(!is_rebellions_device(&named("prototype-rbln-compatible")));
+    }
+
+    /// Regression: the exporter looked up snake_case detail keys the reader
+    /// never writes, so even a correctly routed device emitted nothing.
+    #[test]
+    fn vendor_metrics_are_emitted_for_a_real_device() {
+        let mut builder = MetricBuilder::new();
+        RebellionsExporter::new().export_vendor_metrics(&mut builder, &atom_plus_device(), 0, "0");
+        let output = builder.build();
+
+        for metric in [
+            "all_smi_rebellions_firmware_info",
+            "all_smi_rebellions_kmd_info",
+            "all_smi_rebellions_device_info",
+            "all_smi_rebellions_pstate_info",
+            "all_smi_rebellions_status",
+        ] {
+            assert!(output.contains(metric), "missing {metric} in:\n{output}");
+        }
+
+        assert!(output.contains("firmware=\"3.0.0\""));
+        assert!(output.contains("pstate=\"P14\""));
+        assert!(output.contains("sid=\"0000000022513338\""));
+        // Reported by the driver, not the constant the label used to carry.
+        assert!(output.contains("location=\"5\""));
+        assert!(output.contains("status=\"normal\""));
+    }
+
+    #[test]
+    fn kmd_metric_has_a_unique_label_set_per_device() {
+        let first = atom_plus_device();
+        let mut second = atom_plus_device();
+        second.uuid = "a58a772b-1a27-4df3-823d-bd1d26627f74".to_string();
+
+        let exporter = RebellionsExporter::new();
+        let mut builder = MetricBuilder::new();
+        exporter.export_vendor_metrics(&mut builder, &first, 0, "0");
+        exporter.export_vendor_metrics(&mut builder, &second, 1, "1");
+        let output = builder.build();
+        let samples: Vec<_> = output
+            .lines()
+            .filter(|line| line.starts_with("all_smi_rebellions_kmd_info{"))
+            .collect();
+
+        assert_eq!(samples.len(), 2);
+        assert_ne!(samples[0], samples[1]);
+        assert!(samples[0].contains("npu_index=\"0\""));
+        assert!(samples[1].contains("npu_index=\"1\""));
+    }
+
+    #[test]
+    fn nothing_is_emitted_for_a_foreign_device() {
+        let mut builder = MetricBuilder::new();
+        RebellionsExporter::new().export_vendor_metrics(&mut builder, &named("HL-325L"), 0, "0");
+        assert!(builder.build().is_empty());
     }
 }
