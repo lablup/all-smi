@@ -101,7 +101,7 @@ struct RblnResponse {
     #[serde(rename = "KMD_version")]
     kmd_version: String,
     devices: Vec<RblnDevice>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_contexts_lossy")]
     contexts: Vec<RblnContext>,
 }
 
@@ -124,6 +124,25 @@ struct RblnContext {
     /// are bare byte counts.
     #[serde(alias = "memory")]
     memalloc: String,
+}
+
+/// Deserialize process contexts independently so one malformed or newly
+/// shaped context cannot hide every otherwise valid device in the response.
+fn deserialize_contexts_lossy<'de, D>(deserializer: D) -> Result<Vec<RblnContext>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let contexts = Vec::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(contexts
+        .into_iter()
+        .filter_map(|context| match serde_json::from_value(context) {
+            Ok(context) => Some(context),
+            Err(error) => {
+                eprintln!("Skipping malformed Rebellions process context: {error}");
+                None
+            }
+        })
+        .collect())
 }
 
 /// Type alias for the cached command information
@@ -242,11 +261,11 @@ impl RebellionsNpuReader {
 
         // Check if commands are available in PATH
         for cmd in &["rbln-stat", "rbln-smi"] {
-            if execute_command_default("which", &[cmd])
-                .map(|output| output.stdout.contains(cmd))
-                .unwrap_or(false)
+            if let Ok(output) = execute_command_default("which", &[cmd])
+                && output.status == 0
+                && let Some(path) = absolute_command_path(&output.stdout)
             {
-                let result = (cmd.to_string(), PathBuf::from(cmd));
+                let result = (cmd.to_string(), path);
 
                 // Cache the result
                 if let Ok(mut cache) = RBLN_COMMAND_CACHE.lock() {
@@ -552,7 +571,11 @@ fn parse_rbln_memory_bytes(mem_str: &str) -> Option<u64> {
             let scaled = number.trim().parse::<f64>().ok()? * (*multiplier as f64);
             // `as u64` saturates rather than wrapping, so reject out-of-range
             // values explicitly instead of silently clamping to u64::MAX.
-            if !scaled.is_finite() || scaled < 0.0 || scaled > u64::MAX as f64 {
+            // `u64::MAX as f64` rounds up to 2^64, so an equality check against
+            // that value is also out of range even though `u64::MAX` itself is
+            // valid. Bare integer inputs bypass f64 and retain exact support
+            // for the full u64 range.
+            if !scaled.is_finite() || scaled < 0.0 || scaled >= 2_f64.powi(64) {
                 return None;
             }
             return Some(scaled as u64);
@@ -582,6 +605,17 @@ fn extract_process_name(cmd: &str) -> String {
         .and_then(|path| path.split('/').next_back())
         .unwrap_or("unknown")
         .to_string()
+}
+
+fn absolute_command_path(which_stdout: &str) -> Option<PathBuf> {
+    let path = PathBuf::from(
+        which_stdout
+            .lines()
+            .find(|line| !line.trim().is_empty())?
+            .trim(),
+    );
+    let path_str = path.to_str()?;
+    (path.is_absolute() && !path_str.contains("..")).then_some(path)
 }
 
 #[cfg(test)]
@@ -726,6 +760,22 @@ mod tests {
     }
 
     #[test]
+    fn malformed_context_does_not_hide_devices_or_valid_processes() {
+        let json = ATOM_PLUS_JSON.replace("\"contexts\": []", r#""contexts": [{"ctx_id":"ok","npu":0,"process":"worker","pid":"42","memalloc":"1MiB"},{"ctx_id":"bad","npu":{"unexpected":true},"process":"worker","pid":"43","memalloc":"1MiB"}]"#);
+        let response = parse_response(&json);
+        assert_eq!(
+            response.devices.len(),
+            2,
+            "device rows must remain available"
+        );
+        assert_eq!(
+            response.contexts.len(),
+            1,
+            "only the malformed context is skipped"
+        );
+    }
+
+    #[test]
     fn grouped_output_deserializes_despite_the_extra_group_id() {
         let response = parse_response(ATOM_PLUS_GROUPED_JSON);
         assert_eq!(response.devices.len(), 1);
@@ -855,12 +905,28 @@ mod tests {
         assert_eq!(parse_rbln_memory_bytes("not a number"), None);
         // No panic on a value that would overflow when scaled.
         assert_eq!(parse_rbln_memory_bytes("18446744073709551615MB"), None);
+        assert_eq!(parse_rbln_memory_bytes("18446744073709551616B"), None);
+        assert_eq!(
+            parse_rbln_memory_bytes("18446744073709551615"),
+            Some(u64::MAX)
+        );
     }
 
     #[test]
     fn process_name_is_the_executable_basename() {
         assert_eq!(extract_process_name("/usr/bin/python3 train.py"), "python3");
         assert_eq!(extract_process_name("rbln-serve"), "rbln-serve");
+    }
+
+    #[test]
+    fn command_discovery_keeps_only_safe_absolute_paths() {
+        assert_eq!(
+            absolute_command_path("/opt/rebellions/bin/rbln-stat\n"),
+            Some(PathBuf::from("/opt/rebellions/bin/rbln-stat"))
+        );
+        assert_eq!(absolute_command_path("rbln-stat\n"), None);
+        assert_eq!(absolute_command_path("/opt/../tmp/rbln-stat\n"), None);
+        assert_eq!(absolute_command_path("\n"), None);
     }
 }
 

@@ -39,8 +39,8 @@ pub fn is_rebellions_device(info: &GpuInfo) -> bool {
         return true;
     }
 
-    let name = &info.name;
-    name.contains("RBLN") || name.contains("rbln") || name.contains("Rebellions")
+    let name = info.name.trim().to_ascii_uppercase();
+    name.starts_with("RBLN") || name.contains("REBELLIONS")
 }
 
 /// Rebellions NPU-specific metric exporter
@@ -80,7 +80,10 @@ impl RebellionsExporter {
         // KMD version
         if let Some(kmd_version) = info.detail.get("KMD Version") {
             let kmd_labels = [
+                ("npu", info.name.as_str()),
                 ("instance", info.instance.as_str()),
+                ("npu_uuid", info.uuid.as_str()),
+                ("npu_index", &index.to_string()),
                 ("version", kmd_version.as_str()),
             ];
             builder
@@ -316,6 +319,7 @@ mod tests {
         assert!(is_rebellions_device(&named("RBLN-CA22")));
         assert!(is_rebellions_device(&named("RBLN-CA25")));
         assert!(is_rebellions_device(&named("Rebellions ATOM")));
+        assert!(is_rebellions_device(&named("rbln-ca22")));
     }
 
     #[test]
@@ -326,6 +330,7 @@ mod tests {
                 "{name} must not route to the Rebellions exporter"
             );
         }
+        assert!(!is_rebellions_device(&named("prototype-rbln-compatible")));
     }
 
     /// Regression: the exporter looked up snake_case detail keys the reader
@@ -352,6 +357,28 @@ mod tests {
         // Reported by the driver, not the constant the label used to carry.
         assert!(output.contains("location=\"5\""));
         assert!(output.contains("status=\"normal\""));
+    }
+
+    #[test]
+    fn kmd_metric_has_a_unique_label_set_per_device() {
+        let first = atom_plus_device();
+        let mut second = atom_plus_device();
+        second.uuid = "a58a772b-1a27-4df3-823d-bd1d26627f74".to_string();
+
+        let exporter = RebellionsExporter::new();
+        let mut builder = MetricBuilder::new();
+        exporter.export_vendor_metrics(&mut builder, &first, 0, "0");
+        exporter.export_vendor_metrics(&mut builder, &second, 1, "1");
+        let output = builder.build();
+        let samples: Vec<_> = output
+            .lines()
+            .filter(|line| line.starts_with("all_smi_rebellions_kmd_info{"))
+            .collect();
+
+        assert_eq!(samples.len(), 2);
+        assert_ne!(samples[0], samples[1]);
+        assert!(samples[0].contains("npu_index=\"0\""));
+        assert!(samples[1].contains("npu_index=\"1\""));
     }
 
     #[test]
