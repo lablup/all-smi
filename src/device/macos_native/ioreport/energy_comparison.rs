@@ -17,7 +17,7 @@
 //! `Energy Model` subscription. Split out of that file to keep both within the
 //! size budget; see its module docs for what the comparison is for.
 
-use super::super::energy::{EnergyRail, joules_per_count};
+use super::super::energy::{EnergyRail, joules_per_count, sum_rails};
 use super::{EnergyObservation, classify_energy_channel, strip_die_prefix};
 use std::collections::BTreeMap;
 
@@ -187,7 +187,7 @@ pub(super) fn print_energy_comparison(
     let window_secs = (w1 - w0) as f64 / 1e9;
     println!("# common window: {window_secs:.3} s (joules and watts per channel over it)");
 
-    let mut rails: BTreeMap<&'static str, f64> = BTreeMap::new();
+    let mut classified: Vec<(&str, f64)> = Vec::new();
     let mut unclassified: Vec<String> = Vec::new();
     let mut gpu_energy_watts = None;
     let mut others: Vec<(&String, f64)> = Vec::new();
@@ -200,7 +200,7 @@ pub(super) fn print_energy_comparison(
         println!("{name}\t{joules:.3} J\t{watts:.3} W");
         match rail_label(name) {
             "none" => unclassified.push(format!("{name}={watts:.3}W")),
-            rail => *rails.entry(rail).or_default() += watts,
+            _ => classified.push((name.as_str(), watts)),
         }
         if name.as_str() == "GPU Energy" {
             gpu_energy_watts = Some(watts);
@@ -208,13 +208,12 @@ pub(super) fn print_energy_comparison(
             others.push((name, watts));
         }
     }
-    let rails: Vec<String> = rails
-        .iter()
-        .map(|(rail, watts)| format!("{rail}={watts:.3}W"))
-        .collect();
+    // Exactly what the tracker would report for these channels, fallbacks
+    // and package-over-die choices included.
+    let rails = sum_rails(classified);
     println!(
-        "# summed by rule over the common window: {}",
-        rails.join(" ")
+        "# summed by rule over the common window: cpu={:.3}W gpu={:.3}W ane={:.3}W dram={:.3}W",
+        rails.cpu, rails.gpu, rails.ane, rails.dram
     );
     println!(
         "# candidates no rule sums: {}",

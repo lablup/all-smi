@@ -50,7 +50,9 @@
 //! by exact name in [`classify_energy_channel`]: `GPU Energy`; names ending in
 //! `CPU Energy` (`DIE_<n>_CPU Energy` on multi-die packages); `GPU<n>` or
 //! `GPU<n>_<m>` only when a sample has no `GPU Energy`; and the top-level
-//! `ANE`/`DRAM` shapes (`ANE`, `ANE0`, `ANE0_1`). Nothing else is summed.
+//! `ANE`/`DRAM` shapes (`ANE`, `ANE0`, `ANE0_1`). Nothing else is summed, and
+//! where a package channel and per-die ones could both match, `sum_rails`
+//! counts one of them (see the `energy` module docs).
 //!
 //! An M1 Ultra (Mac13,2, macOS 27) holds 321 channels
 //! (`tests/fixtures/ioreport/m1_ultra_energy_model.tsv`) and no package
@@ -88,10 +90,13 @@
 //! An M1 Ultra (macOS 27) also publishes its mJ channels together, but twice
 //! per ~2.1 s at uneven intervals whose split drifts: 0.75 to 0.91 s
 //! alternating with 1.19 to 1.32 s over one 32 s run, and moving from
-//! 1.69 + 0.46 s to 0.97 + 1.14 s over another, each pair summing to 2.06 to
-//! 2.19 s. Each publication's energy matches its own span (in the idle run
-//! the 0.8 s spans read 3.74 to 3.80 W and the 1.3 s spans 3.75 to 4.00 W), so
-//! the spans are real and timing by them reads as steadily as on the M5 Max.
+//! 1.69 + 0.46 s to 0.97 + 1.14 s over another. Setting the split tails
+//! aside, every publication came 2.03 to 2.13 s after the one two before it
+//! in the idle run and 2.02 to 2.20 s under load. Each publication's energy
+//! follows its own span: `DRAM0_0` read 1.75 to 1.83 W over every printed
+//! span of the idle run (815 to 1295 ms) and 2.00 to 2.20 W under load (416
+//! to 1690 ms), so the spans are real and timing by them reads as steadily as
+//! on the M5 Max.
 //!
 //! Two more measured behaviors constrain the design:
 //! - `GPU Energy` (nJ) is stamped at sample time on an M5 Max (0.1 to 0.4 ms

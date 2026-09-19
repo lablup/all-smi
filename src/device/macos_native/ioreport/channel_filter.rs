@@ -54,7 +54,9 @@ use std::ffi::c_void;
 pub(super) type KeepChannel = fn(&str) -> bool;
 
 /// Energy Model channels that feed a rail. Everything the energy tracker sums
-/// passes, including `GPU<n>`, which it needs to know whether to fall back.
+/// passes, including the `GPU<n>` and `GPU<n>_<m>` fallbacks and per-die
+/// channels that a package channel may override, because the tracker decides
+/// which of them count only once it has seen the whole sample.
 pub(super) fn keep_energy_channel(name: &str) -> bool {
     classify_energy_channel(name).is_some()
 }
