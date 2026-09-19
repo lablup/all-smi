@@ -434,6 +434,69 @@ async fn join_or_log_default_falls_back_on_panicking_task() {
     );
 }
 
+fn gpu_with_power(uuid: &str, power_consumption: f64) -> GpuInfo {
+    GpuInfo {
+        uuid: uuid.to_string(),
+        time: String::new(),
+        name: "RBLN-CA25".to_string(),
+        device_type: "NPU".to_string(),
+        host_id: "h".to_string(),
+        hostname: "h".to_string(),
+        instance: "h".to_string(),
+        utilization: 0.0,
+        ane_utilization: 0.0,
+        dla_utilization: None,
+        tensorcore_utilization: None,
+        temperature: 40,
+        used_memory: 0,
+        total_memory: 0,
+        frequency: 0,
+        power_consumption,
+        gpu_core_count: None,
+        temperature_threshold_slowdown: None,
+        temperature_threshold_shutdown: None,
+        temperature_threshold_max_operating: None,
+        temperature_threshold_acoustic: None,
+        performance_state: None,
+        fan_speed_rpm: None,
+        numa_node_id: None,
+        gsp_firmware_mode: None,
+        gsp_firmware_version: None,
+        nvlink_remote_devices: Vec::new(),
+        gpm_metrics: None,
+        detail: HashMap::new(),
+    }
+}
+
+/// Issue #418: local-view chassis power is the sum of the GPU power
+/// readings that exist. On an ATOM Max card three of four dies carry no
+/// reading (`-1.0`), and the raw sum used to subtract a watt for each.
+#[test]
+fn inject_gpu_power_skips_unavailable_rows() {
+    use crate::device::types::GPU_METRIC_UNAVAILABLE;
+
+    let gpus = vec![
+        gpu_with_power("die-0", 300.0),
+        gpu_with_power("die-1", GPU_METRIC_UNAVAILABLE),
+        gpu_with_power("die-2", GPU_METRIC_UNAVAILABLE),
+    ];
+    let chassis = inject_gpu_power(vec![ChassisInfo::default()], &gpus);
+    assert_eq!(chassis[0].total_power_watts, Some(300.0));
+
+    // Nothing reported: stay unset instead of injecting a negative total.
+    let silent = vec![gpu_with_power("die-1", GPU_METRIC_UNAVAILABLE)];
+    let chassis = inject_gpu_power(vec![ChassisInfo::default()], &silent);
+    assert_eq!(chassis[0].total_power_watts, None);
+
+    // A chassis that already measured its own power keeps it.
+    let measured = ChassisInfo {
+        total_power_watts: Some(1200.0),
+        ..ChassisInfo::default()
+    };
+    let chassis = inject_gpu_power(vec![measured], &gpus);
+    assert_eq!(chassis[0].total_power_watts, Some(1200.0));
+}
+
 /// Finding: a panic while holding `process_cache`'s write lock (mirroring a
 /// panicking reader mid-cycle) used to poison the lock permanently, so every
 /// later cycle panicked in turn on `.write().unwrap()` and produced silent,

@@ -16,7 +16,8 @@ use crate::device::GpuReader;
 use crate::device::common::execute_command_default;
 use crate::device::common::parsers::{parse_power, parse_temperature, parse_utilization};
 use crate::device::readers::common_cache::{DetailBuilder, DeviceStaticInfo};
-use crate::device::types::{GpuInfo, ProcessInfo};
+use crate::device::readers::detail_keys::CARD_POWER_WATTS_DETAIL_KEY;
+use crate::device::types::{GPU_METRIC_UNAVAILABLE, GpuInfo, ProcessInfo};
 use crate::utils::get_hostname;
 use chrono::Local;
 use once_cell::sync::Lazy;
@@ -78,6 +79,11 @@ struct RblnDevice {
     #[serde(deserialize_with = "deserialize_string_or_u32")]
     npu: u32,
     name: String,
+    /// Board serial, shared by every die of one physical card. Groups dies
+    /// into cards for power accounting (see [`card_power_roles`]). Defaulted
+    /// so a device that omits it is read as a card of its own instead of
+    /// failing the whole response and hiding every NPU on the host.
+    #[serde(default)]
     sid: String,
     uuid: String,
     device: String,
@@ -335,14 +341,19 @@ impl RebellionsNpuReader {
             .get_kmd_version()
             .unwrap_or_else(|| response.kmd_version.clone());
 
+        // Decided over the whole poll, since a die's role depends on its
+        // siblings.
+        let roles = card_power_roles(&response.devices);
+
         response
             .devices
             .into_iter()
-            .filter_map(|device| {
+            .zip(roles)
+            .filter_map(|(device, role)| {
                 // Try to get cached static info, fall back to current device data if not available
                 let static_info = self.get_device_static_info(&device.uuid);
 
-                create_gpu_info_from_device(device, static_info, &kmd_version, time, hostname)
+                create_gpu_info_from_device(device, static_info, &kmd_version, role, time, hostname)
             })
             .collect()
     }
@@ -403,10 +414,96 @@ impl GpuReader for RebellionsNpuReader {
 
 // Helper functions
 
+/// How one die's row accounts for the power of the card it sits on.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct CardPowerRole {
+    /// The row carries the card's power in `power_consumption`. Exactly one
+    /// die per card does; the others read `GPU_METRIC_UNAVAILABLE`, so every
+    /// sum over `power_consumption` counts the card once.
+    reports_card_power: bool,
+    /// The card's power in watts as counted on its reporting die, published
+    /// under [`CARD_POWER_WATTS_DETAIL_KEY`] on every die of a card with
+    /// more than one die. `None` on a single-die card, whose
+    /// `power_consumption` already shows it, and when the reporting die's
+    /// `card_power` does not parse.
+    shared_card_watts: Option<f64>,
+}
+
+impl CardPowerRole {
+    /// A die that is a whole card on its own (every ATOM Plus device).
+    const SINGLE_DIE_CARD: Self = Self {
+        reports_card_power: true,
+        shared_card_watts: None,
+    };
+}
+
+/// Decide, for every device of one poll, which die reports its card's power.
+///
+/// `rbln-stat` enumerates dies, not cards, and every die repeats its card's
+/// `card_power`. ATOM Plus has one die per card, so one row per die is also
+/// one row per card; ATOM Max has four, and summing every row counted each
+/// card four times.
+///
+/// Dies are grouped into cards by `sid`, the board serial: the only key that
+/// yields one group per physical card on both ATOM Plus and ATOM Max.
+/// `group_id` puts every ATOM Plus device into a single group, `location` is
+/// a die position within a board, and `npu` repeats once per card on ATOM
+/// Max. A device whose `sid` is empty has no siblings to match and is treated
+/// as its own card.
+///
+/// Within a card the reporting die is the one with the lowest kernel device
+/// index parsed from `device` (`"rbln12"` is 12). A die whose name does not
+/// parse sorts after every die that does, and ties fall back to the order
+/// `rbln-stat` listed them in. The rule keys on the device rather than on its
+/// list position because `rbln-stat` does not list devices in index order
+/// (the ATOM Plus capture reads rbln0, rbln2, rbln3, ...), and the reporter
+/// must not hop between dies from one poll to the next: its
+/// `all_smi_gpu_power_consumption_watts` series and its energy-counter key
+/// are per device uuid, and both have to stay continuous.
+fn card_power_roles(devices: &[RblnDevice]) -> Vec<CardPowerRole> {
+    let mut roles = vec![CardPowerRole::SINGLE_DIE_CARD; devices.len()];
+
+    let mut cards: HashMap<&str, Vec<usize>> = HashMap::new();
+    for (position, device) in devices.iter().enumerate() {
+        let sid = device.sid.trim();
+        if !sid.is_empty() {
+            cards.entry(sid).or_default().push(position);
+        }
+    }
+
+    for dies in cards.values().filter(|dies| dies.len() > 1) {
+        // `Option` orders `None` first, the opposite of the rule, so the
+        // key puts "did not parse" in front explicitly.
+        let Some(&reporter) = dies.iter().min_by_key(|&&position| {
+            let index = kernel_device_index(&devices[position].device);
+            (index.is_none(), index.unwrap_or(0), position)
+        }) else {
+            continue;
+        };
+        let card_watts = parse_power(&devices[reporter].card_power)
+            .filter(|watts| watts.is_finite() && *watts >= 0.0);
+        for &position in dies {
+            roles[position] = CardPowerRole {
+                reports_card_power: position == reporter,
+                shared_card_watts: card_watts,
+            };
+        }
+    }
+
+    roles
+}
+
+/// Kernel device index of an `rbln<N>` device name, or `None` for any other
+/// spelling.
+fn kernel_device_index(device: &str) -> Option<u32> {
+    device.trim().strip_prefix("rbln")?.parse().ok()
+}
+
 fn create_gpu_info_from_device(
     device: RblnDevice,
     static_info: Option<&DeviceStaticInfo>,
     kmd_version: &str,
+    role: CardPowerRole,
     time: &str,
     hostname: &str,
 ) -> Option<GpuInfo> {
@@ -439,6 +536,14 @@ fn create_gpu_info_from_device(
     // Dynamic values
     detail.insert("Status".to_string(), device.status.clone());
     detail.insert("Performance State".to_string(), device.pstate.clone());
+    // The card value shown on every die of a multi-die card. Dynamic, so it
+    // is inserted here on every poll and never lands in the static cache.
+    if let Some(watts) = role.shared_card_watts {
+        detail.insert(
+            CARD_POWER_WATTS_DETAIL_KEY.to_string(),
+            format!("{watts:.2}"),
+        );
+    }
 
     // Add unified AI acceleration library labels
     detail.insert("lib_name".to_string(), "RBLN-SDK".to_string());
@@ -446,7 +551,12 @@ fn create_gpu_info_from_device(
 
     // Parse dynamic metrics
     let temperature = parse_temp_safe(&device.temperature);
-    let power = parse_power_safe(&device.card_power);
+    // `card_power` is per card; only the card's reporting die counts it.
+    let power = if role.reports_card_power {
+        parse_power_safe(&device.card_power)
+    } else {
+        GPU_METRIC_UNAVAILABLE
+    };
     let utilization = parse_util_safe(&device.util);
     let (used_memory, total_memory) = parse_memory(&device.memory);
 
@@ -759,6 +869,7 @@ mod tests {
             device,
             None,
             &kmd_version,
+            CardPowerRole::SINGLE_DIE_CARD,
             "2025-09-12 11:18:00",
             "atom-plus-01",
         )
@@ -945,6 +1056,10 @@ mod tests {
         assert_eq!(absolute_command_path("\n"), None);
     }
 }
+
+#[cfg(all(test, feature = "cli"))]
+#[path = "rebellions_atom_max_tests.rs"]
+mod atom_max_tests;
 
 #[cfg(test)]
 mod loaded_node_tests {

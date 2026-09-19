@@ -45,6 +45,17 @@ pub fn total_power_watts(gpus: &[GpuInfo]) -> f64 {
         .sum()
 }
 
+/// Mean power in watts across the GPUs that reported a power reading, or
+/// `None` when none did.
+///
+/// Divides by the reporting rows, not by every row. A board that exposes
+/// several devices reports its power on one of them (an ATOM Max card is
+/// four dies and one power reading), so dividing by the device count would
+/// understate the per-board figure by the dies-per-board factor.
+pub fn mean_power_watts(gpus: &[GpuInfo]) -> Option<f64> {
+    mean(gpus.iter().filter_map(GpuInfo::power_consumption_reading))
+}
+
 /// Mean utilization across the GPUs that reported one, or `None` when none
 /// did.
 pub fn mean_utilization(gpus: &[GpuInfo]) -> Option<f64> {
@@ -176,7 +187,31 @@ mod tests {
     fn empty_input_is_handled() {
         assert_eq!(mean_utilization(&[]), None);
         assert_eq!(total_power_watts(&[]), 0.0);
+        assert_eq!(mean_power_watts(&[]), None);
         assert_eq!(temperature_std_dev(&[]), None);
+    }
+
+    /// Issue #418: on an ATOM Max card only one of four dies carries the
+    /// card's power. The mean is per reporting row, so it stays the
+    /// per-card figure instead of a quarter of it.
+    #[test]
+    fn mean_power_is_over_reporting_rows_only() {
+        let card = |power| gpu(0.0, 40, power);
+        let gpus = vec![
+            card(40.0),
+            card(GPU_METRIC_UNAVAILABLE),
+            card(GPU_METRIC_UNAVAILABLE),
+            card(GPU_METRIC_UNAVAILABLE),
+            card(44.0),
+            card(GPU_METRIC_UNAVAILABLE),
+        ];
+        assert_eq!(total_power_watts(&gpus), 84.0);
+        assert_eq!(mean_power_watts(&gpus), Some(42.0));
+
+        // A genuine zero is a reading and counts toward the mean.
+        assert_eq!(mean_power_watts(&[card(0.0), card(10.0)]), Some(5.0));
+        // Nobody reported: no mean, not 0 W.
+        assert_eq!(mean_power_watts(&[unavailable(), unavailable()]), None);
     }
 
     #[test]

@@ -1,0 +1,838 @@
+{
+  "KMD_version": "3.0.0",
+  "devices": [
+    {
+      "npu": 0,
+      "name": "RBLN-CA25",
+      "sid": "0000000025800101",
+      "uuid": "872d09f2-11c9-5d96-b9f8-a67984464b8c",
+      "device": "rbln0",
+      "status": "normal",
+      "fw_ver": "3.0.0",
+      "pci": {
+        "dev": "0x1250",
+        "bus_id": "0000:03:00.0",
+        "numa_node": "0",
+        "link_speed": "32.0GT/s",
+        "link_width": "16"
+      },
+      "temperature": "31C",
+      "card_power": "41200000uW",
+      "pstate": "P14",
+      "memory": {
+        "used": "0",
+        "total": "16877879296"
+      },
+      "util": "0.0",
+      "board_info": "0005000c",
+      "location": 1
+    },
+    {
+      "npu": 1,
+      "name": "RBLN-CA25",
+      "sid": "0000000025800101",
+      "uuid": "b4ba3104-f0d3-556d-8bee-ac536221542b",
+      "device": "rbln1",
+      "status": "normal",
+      "fw_ver": "3.0.0",
+      "pci": {
+        "dev": "0x1250",
+        "bus_id": "0000:04:00.0",
+        "numa_node": "0",
+        "link_speed": "32.0GT/s",
+        "link_width": "16"
+      },
+      "temperature": "33C",
+      "card_power": "41200000uW",
+      "pstate": "P0",
+      "memory": {
+        "used": "75497472",
+        "total": "16877879296"
+      },
+      "util": "12.5",
+      "board_info": "0005000c",
+      "location": 2
+    },
+    {
+      "npu": 2,
+      "name": "RBLN-CA25",
+      "sid": "0000000025800101",
+      "uuid": "815ac9df-370a-5ef2-a78a-34fe8d11e2e7",
+      "device": "rbln2",
+      "status": "normal",
+      "fw_ver": "3.0.0",
+      "pci": {
+        "dev": "0x1250",
+        "bus_id": "0000:05:00.0",
+        "numa_node": "0",
+        "link_speed": "32.0GT/s",
+        "link_width": "16"
+      },
+      "temperature": "32C",
+      "card_power": "41200000uW",
+      "pstate": "P0",
+      "memory": {
+        "used": "3747610624",
+        "total": "16877879296"
+      },
+      "util": "37.8",
+      "board_info": "0005000c",
+      "location": 3
+    },
+    {
+      "npu": 3,
+      "name": "RBLN-CA25",
+      "sid": "0000000025800101",
+      "uuid": "46ce3f86-2bbc-52aa-88eb-6156e2764ff7",
+      "device": "rbln3",
+      "status": "normal",
+      "fw_ver": "3.0.0",
+      "pci": {
+        "dev": "0x1250",
+        "bus_id": "0000:06:00.0",
+        "numa_node": "0",
+        "link_speed": "32.0GT/s",
+        "link_width": "16"
+      },
+      "temperature": "34C",
+      "card_power": "41200000uW",
+      "pstate": "P14",
+      "memory": {
+        "used": "3816816640",
+        "total": "16877879296"
+      },
+      "util": "4.2",
+      "board_info": "0005000c",
+      "location": 4
+    },
+    {
+      "npu": 0,
+      "name": "RBLN-CA25",
+      "sid": "0000000025800102",
+      "uuid": "f56e6fc3-1b1f-5ecd-ae80-195079eec9e2",
+      "device": "rbln4",
+      "status": "normal",
+      "fw_ver": "3.0.0",
+      "pci": {
+        "dev": "0x1250",
+        "bus_id": "0000:13:00.0",
+        "numa_node": "0",
+        "link_speed": "32.0GT/s",
+        "link_width": "16"
+      },
+      "temperature": "33C",
+      "card_power": "42800000uW",
+      "pstate": "P14",
+      "memory": {
+        "used": "3816816640",
+        "total": "16877879296"
+      },
+      "util": "0.0",
+      "board_info": "0005000c",
+      "location": 1
+    },
+    {
+      "npu": 1,
+      "name": "RBLN-CA25",
+      "sid": "0000000025800102",
+      "uuid": "c29ac0d9-2b91-5720-ba60-cda53291c08f",
+      "device": "rbln5",
+      "status": "normal",
+      "fw_ver": "3.0.0",
+      "pci": {
+        "dev": "0x1250",
+        "bus_id": "0000:14:00.0",
+        "numa_node": "0",
+        "link_speed": "32.0GT/s",
+        "link_width": "16"
+      },
+      "temperature": "32C",
+      "card_power": "42800000uW",
+      "pstate": "P0",
+      "memory": {
+        "used": "1545601024",
+        "total": "16877879296"
+      },
+      "util": "12.5",
+      "board_info": "0005000c",
+      "location": 2
+    },
+    {
+      "npu": 2,
+      "name": "RBLN-CA25",
+      "sid": "0000000025800102",
+      "uuid": "54662bf0-4451-515a-83a1-85270bb673c9",
+      "device": "rbln6",
+      "status": "normal",
+      "fw_ver": "3.0.0",
+      "pci": {
+        "dev": "0x1250",
+        "bus_id": "0000:15:00.0",
+        "numa_node": "0",
+        "link_speed": "32.0GT/s",
+        "link_width": "16"
+      },
+      "temperature": "34C",
+      "card_power": "42800000uW",
+      "pstate": "P0",
+      "memory": {
+        "used": "0",
+        "total": "16877879296"
+      },
+      "util": "37.8",
+      "board_info": "0005000c",
+      "location": 3
+    },
+    {
+      "npu": 3,
+      "name": "RBLN-CA25",
+      "sid": "0000000025800102",
+      "uuid": "662df727-ecb6-5100-9f65-924ea16af4c8",
+      "device": "rbln7",
+      "status": "normal",
+      "fw_ver": "3.0.0",
+      "pci": {
+        "dev": "0x1250",
+        "bus_id": "0000:16:00.0",
+        "numa_node": "0",
+        "link_speed": "32.0GT/s",
+        "link_width": "16"
+      },
+      "temperature": "30C",
+      "card_power": "42800000uW",
+      "pstate": "P14",
+      "memory": {
+        "used": "60817408",
+        "total": "16877879296"
+      },
+      "util": "4.2",
+      "board_info": "0005000c",
+      "location": 4
+    },
+    {
+      "npu": 0,
+      "name": "RBLN-CA25",
+      "sid": "0000000025800103",
+      "uuid": "adc25cfe-e528-5500-a066-80d3338ce049",
+      "device": "rbln8",
+      "status": "normal",
+      "fw_ver": "3.0.0",
+      "pci": {
+        "dev": "0x1250",
+        "bus_id": "0000:23:00.0",
+        "numa_node": "0",
+        "link_speed": "32.0GT/s",
+        "link_width": "16"
+      },
+      "temperature": "32C",
+      "card_power": "43100000uW",
+      "pstate": "P14",
+      "memory": {
+        "used": "60817408",
+        "total": "16877879296"
+      },
+      "util": "0.0",
+      "board_info": "0005000c",
+      "location": 1
+    },
+    {
+      "npu": 1,
+      "name": "RBLN-CA25",
+      "sid": "0000000025800103",
+      "uuid": "220674d1-202b-5586-951a-40057c0994f6",
+      "device": "rbln9",
+      "status": "normal",
+      "fw_ver": "3.0.0",
+      "pci": {
+        "dev": "0x1250",
+        "bus_id": "0000:24:00.0",
+        "numa_node": "0",
+        "link_speed": "32.0GT/s",
+        "link_width": "16"
+      },
+      "temperature": "34C",
+      "card_power": "43100000uW",
+      "pstate": "P0",
+      "memory": {
+        "used": "3747610624",
+        "total": "16877879296"
+      },
+      "util": "12.5",
+      "board_info": "0005000c",
+      "location": 2
+    },
+    {
+      "npu": 2,
+      "name": "RBLN-CA25",
+      "sid": "0000000025800103",
+      "uuid": "f8095547-b336-5b95-a428-54cd1608a8ed",
+      "device": "rbln10",
+      "status": "normal",
+      "fw_ver": "3.0.0",
+      "pci": {
+        "dev": "0x1250",
+        "bus_id": "0000:25:00.0",
+        "numa_node": "0",
+        "link_speed": "32.0GT/s",
+        "link_width": "16"
+      },
+      "temperature": "30C",
+      "card_power": "43100000uW",
+      "pstate": "P0",
+      "memory": {
+        "used": "0",
+        "total": "16877879296"
+      },
+      "util": "37.8",
+      "board_info": "0005000c",
+      "location": 3
+    },
+    {
+      "npu": 3,
+      "name": "RBLN-CA25",
+      "sid": "0000000025800103",
+      "uuid": "2b4628a9-9bd2-590a-8907-b34490b5931c",
+      "device": "rbln11",
+      "status": "normal",
+      "fw_ver": "3.0.0",
+      "pci": {
+        "dev": "0x1250",
+        "bus_id": "0000:26:00.0",
+        "numa_node": "0",
+        "link_speed": "32.0GT/s",
+        "link_width": "16"
+      },
+      "temperature": "35C",
+      "card_power": "43100000uW",
+      "pstate": "P14",
+      "memory": {
+        "used": "75497472",
+        "total": "16877879296"
+      },
+      "util": "4.2",
+      "board_info": "0005000c",
+      "location": 4
+    },
+    {
+      "npu": 0,
+      "name": "RBLN-CA25",
+      "sid": "0000000025800104",
+      "uuid": "d9c7a5a1-de60-518c-9264-2eb2c77fae2a",
+      "device": "rbln12",
+      "status": "normal",
+      "fw_ver": "3.0.0",
+      "pci": {
+        "dev": "0x1250",
+        "bus_id": "0000:33:00.0",
+        "numa_node": "0",
+        "link_speed": "32.0GT/s",
+        "link_width": "16"
+      },
+      "temperature": "34C",
+      "card_power": "42000000uW",
+      "pstate": "P14",
+      "memory": {
+        "used": "75497472",
+        "total": "16877879296"
+      },
+      "util": "0.0",
+      "board_info": "0005000c",
+      "location": 1
+    },
+    {
+      "npu": 1,
+      "name": "RBLN-CA25",
+      "sid": "0000000025800104",
+      "uuid": "2f409f21-741b-541c-9b8d-f359b320f3f1",
+      "device": "rbln13",
+      "status": "normal",
+      "fw_ver": "3.0.0",
+      "pci": {
+        "dev": "0x1250",
+        "bus_id": "0000:34:00.0",
+        "numa_node": "0",
+        "link_speed": "32.0GT/s",
+        "link_width": "16"
+      },
+      "temperature": "30C",
+      "card_power": "42000000uW",
+      "pstate": "P0",
+      "memory": {
+        "used": "3747610624",
+        "total": "16877879296"
+      },
+      "util": "12.5",
+      "board_info": "0005000c",
+      "location": 2
+    },
+    {
+      "npu": 2,
+      "name": "RBLN-CA25",
+      "sid": "0000000025800104",
+      "uuid": "443e138f-b96d-56f0-8dff-e2940fb6fd43",
+      "device": "rbln14",
+      "status": "normal",
+      "fw_ver": "3.0.0",
+      "pci": {
+        "dev": "0x1250",
+        "bus_id": "0000:35:00.0",
+        "numa_node": "0",
+        "link_speed": "32.0GT/s",
+        "link_width": "16"
+      },
+      "temperature": "35C",
+      "card_power": "42000000uW",
+      "pstate": "P0",
+      "memory": {
+        "used": "3816816640",
+        "total": "16877879296"
+      },
+      "util": "37.8",
+      "board_info": "0005000c",
+      "location": 3
+    },
+    {
+      "npu": 3,
+      "name": "RBLN-CA25",
+      "sid": "0000000025800104",
+      "uuid": "4b719cd8-4724-56ee-b15a-9acf3852a8da",
+      "device": "rbln15",
+      "status": "normal",
+      "fw_ver": "3.0.0",
+      "pci": {
+        "dev": "0x1250",
+        "bus_id": "0000:36:00.0",
+        "numa_node": "0",
+        "link_speed": "32.0GT/s",
+        "link_width": "16"
+      },
+      "temperature": "33C",
+      "card_power": "42000000uW",
+      "pstate": "P14",
+      "memory": {
+        "used": "1545601024",
+        "total": "16877879296"
+      },
+      "util": "4.2",
+      "board_info": "0005000c",
+      "location": 4
+    },
+    {
+      "npu": 0,
+      "name": "RBLN-CA25",
+      "sid": "0000000025800105",
+      "uuid": "1759047d-7a92-5969-84be-c0fa99889d4c",
+      "device": "rbln16",
+      "status": "normal",
+      "fw_ver": "3.0.0",
+      "pci": {
+        "dev": "0x1250",
+        "bus_id": "0000:83:00.0",
+        "numa_node": "1",
+        "link_speed": "32.0GT/s",
+        "link_width": "16"
+      },
+      "temperature": "30C",
+      "card_power": "43500000uW",
+      "pstate": "P14",
+      "memory": {
+        "used": "1545601024",
+        "total": "16877879296"
+      },
+      "util": "0.0",
+      "board_info": "0005000c",
+      "location": 1
+    },
+    {
+      "npu": 1,
+      "name": "RBLN-CA25",
+      "sid": "0000000025800105",
+      "uuid": "9e2d7cbb-836a-5668-a7c8-71e0cf06cbeb",
+      "device": "rbln17",
+      "status": "normal",
+      "fw_ver": "3.0.0",
+      "pci": {
+        "dev": "0x1250",
+        "bus_id": "0000:84:00.0",
+        "numa_node": "1",
+        "link_speed": "32.0GT/s",
+        "link_width": "16"
+      },
+      "temperature": "35C",
+      "card_power": "43500000uW",
+      "pstate": "P0",
+      "memory": {
+        "used": "0",
+        "total": "16877879296"
+      },
+      "util": "12.5",
+      "board_info": "0005000c",
+      "location": 2
+    },
+    {
+      "npu": 2,
+      "name": "RBLN-CA25",
+      "sid": "0000000025800105",
+      "uuid": "465d518e-ba92-5f64-a246-ab57f95b4bbc",
+      "device": "rbln18",
+      "status": "normal",
+      "fw_ver": "3.0.0",
+      "pci": {
+        "dev": "0x1250",
+        "bus_id": "0000:85:00.0",
+        "numa_node": "1",
+        "link_speed": "32.0GT/s",
+        "link_width": "16"
+      },
+      "temperature": "33C",
+      "card_power": "43500000uW",
+      "pstate": "P0",
+      "memory": {
+        "used": "60817408",
+        "total": "16877879296"
+      },
+      "util": "37.8",
+      "board_info": "0005000c",
+      "location": 3
+    },
+    {
+      "npu": 3,
+      "name": "RBLN-CA25",
+      "sid": "0000000025800105",
+      "uuid": "0f363ad3-8e71-5c2b-b862-560de97e02e1",
+      "device": "rbln19",
+      "status": "normal",
+      "fw_ver": "3.0.0",
+      "pci": {
+        "dev": "0x1250",
+        "bus_id": "0000:86:00.0",
+        "numa_node": "1",
+        "link_speed": "32.0GT/s",
+        "link_width": "16"
+      },
+      "temperature": "32C",
+      "card_power": "43500000uW",
+      "pstate": "P14",
+      "memory": {
+        "used": "3747610624",
+        "total": "16877879296"
+      },
+      "util": "4.2",
+      "board_info": "0005000c",
+      "location": 4
+    },
+    {
+      "npu": 0,
+      "name": "RBLN-CA25",
+      "sid": "0000000025800106",
+      "uuid": "41813419-b0f8-5815-9a03-16c555a24f33",
+      "device": "rbln20",
+      "status": "normal",
+      "fw_ver": "3.0.0",
+      "pci": {
+        "dev": "0x1250",
+        "bus_id": "0000:93:00.0",
+        "numa_node": "1",
+        "link_speed": "32.0GT/s",
+        "link_width": "16"
+      },
+      "temperature": "35C",
+      "card_power": "41900000uW",
+      "pstate": "P14",
+      "memory": {
+        "used": "3747610624",
+        "total": "16877879296"
+      },
+      "util": "0.0",
+      "board_info": "0005000c",
+      "location": 1
+    },
+    {
+      "npu": 1,
+      "name": "RBLN-CA25",
+      "sid": "0000000025800106",
+      "uuid": "f317991a-d141-5d1c-9c06-56514ee5d586",
+      "device": "rbln21",
+      "status": "normal",
+      "fw_ver": "3.0.0",
+      "pci": {
+        "dev": "0x1250",
+        "bus_id": "0000:94:00.0",
+        "numa_node": "1",
+        "link_speed": "32.0GT/s",
+        "link_width": "16"
+      },
+      "temperature": "33C",
+      "card_power": "41900000uW",
+      "pstate": "P0",
+      "memory": {
+        "used": "0",
+        "total": "16877879296"
+      },
+      "util": "12.5",
+      "board_info": "0005000c",
+      "location": 2
+    },
+    {
+      "npu": 2,
+      "name": "RBLN-CA25",
+      "sid": "0000000025800106",
+      "uuid": "96c1570f-3f08-59d8-9102-ed33e508111a",
+      "device": "rbln22",
+      "status": "normal",
+      "fw_ver": "3.0.0",
+      "pci": {
+        "dev": "0x1250",
+        "bus_id": "0000:95:00.0",
+        "numa_node": "1",
+        "link_speed": "32.0GT/s",
+        "link_width": "16"
+      },
+      "temperature": "32C",
+      "card_power": "41900000uW",
+      "pstate": "P0",
+      "memory": {
+        "used": "75497472",
+        "total": "16877879296"
+      },
+      "util": "37.8",
+      "board_info": "0005000c",
+      "location": 3
+    },
+    {
+      "npu": 3,
+      "name": "RBLN-CA25",
+      "sid": "0000000025800106",
+      "uuid": "5714c658-b0d1-5725-b106-37bb39b761e7",
+      "device": "rbln23",
+      "status": "normal",
+      "fw_ver": "3.0.0",
+      "pci": {
+        "dev": "0x1250",
+        "bus_id": "0000:96:00.0",
+        "numa_node": "1",
+        "link_speed": "32.0GT/s",
+        "link_width": "16"
+      },
+      "temperature": "31C",
+      "card_power": "41900000uW",
+      "pstate": "P14",
+      "memory": {
+        "used": "3747610624",
+        "total": "16877879296"
+      },
+      "util": "4.2",
+      "board_info": "0005000c",
+      "location": 4
+    },
+    {
+      "npu": 0,
+      "name": "RBLN-CA25",
+      "sid": "0000000025800107",
+      "uuid": "12721a64-7e8a-581f-bcc6-77583bd9b057",
+      "device": "rbln24",
+      "status": "normal",
+      "fw_ver": "3.0.0",
+      "pci": {
+        "dev": "0x1250",
+        "bus_id": "0000:a3:00.0",
+        "numa_node": "1",
+        "link_speed": "32.0GT/s",
+        "link_width": "16"
+      },
+      "temperature": "33C",
+      "card_power": "42700000uW",
+      "pstate": "P14",
+      "memory": {
+        "used": "3747610624",
+        "total": "16877879296"
+      },
+      "util": "0.0",
+      "board_info": "0005000c",
+      "location": 1
+    },
+    {
+      "npu": 1,
+      "name": "RBLN-CA25",
+      "sid": "0000000025800107",
+      "uuid": "537d2c81-3894-5723-ae12-79d37d922f84",
+      "device": "rbln25",
+      "status": "normal",
+      "fw_ver": "3.0.0",
+      "pci": {
+        "dev": "0x1250",
+        "bus_id": "0000:a4:00.0",
+        "numa_node": "1",
+        "link_speed": "32.0GT/s",
+        "link_width": "16"
+      },
+      "temperature": "32C",
+      "card_power": "42700000uW",
+      "pstate": "P0",
+      "memory": {
+        "used": "3816816640",
+        "total": "16877879296"
+      },
+      "util": "12.5",
+      "board_info": "0005000c",
+      "location": 2
+    },
+    {
+      "npu": 2,
+      "name": "RBLN-CA25",
+      "sid": "0000000025800107",
+      "uuid": "4c61e6f3-fc8a-547c-8afe-b284155c0fab",
+      "device": "rbln26",
+      "status": "normal",
+      "fw_ver": "3.0.0",
+      "pci": {
+        "dev": "0x1250",
+        "bus_id": "0000:a5:00.0",
+        "numa_node": "1",
+        "link_speed": "32.0GT/s",
+        "link_width": "16"
+      },
+      "temperature": "31C",
+      "card_power": "42700000uW",
+      "pstate": "P0",
+      "memory": {
+        "used": "1545601024",
+        "total": "16877879296"
+      },
+      "util": "37.8",
+      "board_info": "0005000c",
+      "location": 3
+    },
+    {
+      "npu": 3,
+      "name": "RBLN-CA25",
+      "sid": "0000000025800107",
+      "uuid": "1913b15a-3c93-50dc-84ca-e2340a899ec2",
+      "device": "rbln27",
+      "status": "normal",
+      "fw_ver": "3.0.0",
+      "pci": {
+        "dev": "0x1250",
+        "bus_id": "0000:a6:00.0",
+        "numa_node": "1",
+        "link_speed": "32.0GT/s",
+        "link_width": "16"
+      },
+      "temperature": "33C",
+      "card_power": "42700000uW",
+      "pstate": "P14",
+      "memory": {
+        "used": "0",
+        "total": "16877879296"
+      },
+      "util": "4.2",
+      "board_info": "0005000c",
+      "location": 4
+    },
+    {
+      "npu": 0,
+      "name": "RBLN-CA25",
+      "sid": "0000000025800108",
+      "uuid": "e69b3ad3-a93c-5f08-b08b-7e9b09577af4",
+      "device": "rbln28",
+      "status": "normal",
+      "fw_ver": "3.0.0",
+      "pci": {
+        "dev": "0x1250",
+        "bus_id": "0000:b3:00.0",
+        "numa_node": "1",
+        "link_speed": "32.0GT/s",
+        "link_width": "16"
+      },
+      "temperature": "32C",
+      "card_power": "44300000uW",
+      "pstate": "P14",
+      "memory": {
+        "used": "0",
+        "total": "16877879296"
+      },
+      "util": "0.0",
+      "board_info": "0005000c",
+      "location": 1
+    },
+    {
+      "npu": 1,
+      "name": "RBLN-CA25",
+      "sid": "0000000025800108",
+      "uuid": "c7c51f64-6149-53b6-a2de-9e0622a8e536",
+      "device": "rbln29",
+      "status": "normal",
+      "fw_ver": "3.0.0",
+      "pci": {
+        "dev": "0x1250",
+        "bus_id": "0000:b4:00.0",
+        "numa_node": "1",
+        "link_speed": "32.0GT/s",
+        "link_width": "16"
+      },
+      "temperature": "31C",
+      "card_power": "44300000uW",
+      "pstate": "P0",
+      "memory": {
+        "used": "60817408",
+        "total": "16877879296"
+      },
+      "util": "12.5",
+      "board_info": "0005000c",
+      "location": 2
+    },
+    {
+      "npu": 2,
+      "name": "RBLN-CA25",
+      "sid": "0000000025800108",
+      "uuid": "245c8be1-4f7b-5706-a189-6f917b673838",
+      "device": "rbln30",
+      "status": "normal",
+      "fw_ver": "3.0.0",
+      "pci": {
+        "dev": "0x1250",
+        "bus_id": "0000:b5:00.0",
+        "numa_node": "1",
+        "link_speed": "32.0GT/s",
+        "link_width": "16"
+      },
+      "temperature": "33C",
+      "card_power": "44300000uW",
+      "pstate": "P0",
+      "memory": {
+        "used": "3747610624",
+        "total": "16877879296"
+      },
+      "util": "37.8",
+      "board_info": "0005000c",
+      "location": 3
+    },
+    {
+      "npu": 3,
+      "name": "RBLN-CA25",
+      "sid": "0000000025800108",
+      "uuid": "068e4846-4bd2-5be6-a6c8-78d06a884da7",
+      "device": "rbln31",
+      "status": "normal",
+      "fw_ver": "3.0.0",
+      "pci": {
+        "dev": "0x1250",
+        "bus_id": "0000:b6:00.0",
+        "numa_node": "1",
+        "link_speed": "32.0GT/s",
+        "link_width": "16"
+      },
+      "temperature": "32C",
+      "card_power": "44300000uW",
+      "pstate": "P14",
+      "memory": {
+        "used": "0",
+        "total": "16877879296"
+      },
+      "util": "4.2",
+      "board_info": "0005000c",
+      "location": 4
+    }
+  ],
+  "contexts": []
+}

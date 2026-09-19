@@ -522,6 +522,16 @@ physical card carries four dies, and `rbln-stat` enumerates dies rather than car
 group by the `sid` label to recover cards. Both ATOM+ (`RBLN-CA22`) and ATOM Max
 (`RBLN-CA25`) report a PCIe 32.0 GT/s x16 link, i.e. Gen5 x16.
 
+Power on ATOM Max: `rbln-stat` reports one power figure per card and repeats it on
+every die. `all_smi_gpu_power_consumption_watts` is therefore emitted once per card,
+on the die with the lowest kernel index (`rblnN`) among the dies sharing a `sid`; the
+other three dies of the card have no power series, so
+`sum by (instance) (all_smi_gpu_power_consumption_watts)` is the real NPU draw.
+The per-card value is also carried on every die of a multi-die card as the
+`card_power_watts` label of `all_smi_gpu_info` (watts, two decimals), for display
+only; do not sum it. ATOM+ is one die per card, so every ATOM+ device reports its
+own power and carries no `card_power_watts` label.
+
 ### Furiosa NPU Metrics
 
 #### Basic NPU Metrics
@@ -1147,6 +1157,8 @@ Higher update rates provide more real-time data but increase system load. For pr
    - Device status and KMD version tracking
    - Support for ATOM, ATOM+, and ATOM Max variants
    - Board serial and die-position labels for grouping ATOM Max dies by physical card
+   - ATOM Max card power counted once per card (one power series per `sid`), with the
+     card value on every die as the `card_power_watts` label of `all_smi_gpu_info`
 9. Furiosa NPU metrics include:
    - Per-core PE utilization monitoring
    - Core availability status tracking
