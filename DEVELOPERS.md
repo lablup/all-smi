@@ -24,7 +24,7 @@ This guide provides comprehensive information for developers and contributors wo
 - **Rust**: 1.88 or later (install via [rustup](https://rustup.rs/))
 - **Cargo**: Comes with Rust installation
 - **Git**: For version control
-- **protoc**: Protocol buffer compiler (only required for Linux builds with Tenstorrent support)
+- **protoc**: Protocol buffer compiler (only required for Linux builds, which compile the Google TPU gRPC client)
 
 #### Platform-Specific Requirements
 
@@ -180,7 +180,7 @@ cargo build --release --target aarch64-unknown-linux-gnu
 If you encounter build errors:
 
 1. **OpenSSL Issues (musl/aarch64)**: The project automatically uses vendored OpenSSL for these targets
-2. **Protobuf Errors**: Ensure protoc is installed and in PATH (Linux only, required for Tenstorrent NPU support)
+2. **Protobuf Errors**: Ensure protoc is installed and in PATH (Linux only, required for the Google TPU gRPC client)
 3. **Dependency Resolution**: Run `cargo clean` and rebuild
 
 ## Development Workflow
@@ -484,13 +484,13 @@ The CI builds for these platforms:
 
 - Uses `nvml-wrapper` for direct NVML access
 - Falls back to `nvidia-smi` parsing when NVML unavailable
-- Located in `src/gpu/nvidia.rs`
+- Located in `src/device/readers/nvidia.rs`
 
 ### Apple Silicon Support
 
 - Uses `powermetrics` for hardware metrics (requires sudo)
 - Metal framework integration for GPU info
-- Located in `src/gpu/apple_silicon.rs`
+- Located in `src/device/readers/apple_silicon_native.rs`
 
 ### NPU Support
 
@@ -506,24 +506,23 @@ The CI builds for these platforms:
 **Tenstorrent NPUs (Linux only):**
 - Uses `luwen` library for telemetry
 - Supports Grayskull, Wormhole, Blackhole architectures
-- Located in `src/gpu/tenstorrent.rs`
-- Requires `protobuf-compiler` on Linux for building
+- Located in `src/device/readers/tenstorrent.rs`
 
 **Rebellions NPUs:**
 - Uses `rbln-stat` command
 - Supports ATOM, ATOM+, ATOM Max
-- Located in `src/gpu/rebellions.rs`
+- Located in `src/device/readers/rebellions.rs`
 
 **Furiosa NPUs:**
 - Uses `furiosa-smi-rs` crate (optional dependency)
 - Supports RNGD architecture
-- Located in `src/gpu/furiosa.rs`
+- Located in `src/device/readers/furiosa.rs`
 
 ### NVIDIA Jetson Support
 
 - Special handling for Tegra-based systems
 - DLA (Deep Learning Accelerator) monitoring
-- Located in `src/gpu/nvidia_jetson.rs`
+- Located in `src/device/readers/nvidia_jetson.rs`
 
 ## Contributing Guidelines
 
