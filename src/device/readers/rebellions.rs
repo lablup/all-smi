@@ -309,24 +309,40 @@ impl RebellionsNpuReader {
             Err(_) => return Vec::new(),
         };
 
+        let time = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+        let hostname = get_hostname();
+
+        self.gpu_info_from_response(response, &time, &hostname)
+    }
+
+    /// Convert one parsed `rbln-stat --json` response into one `GpuInfo` per
+    /// device entry.
+    ///
+    /// This is the whole conversion step of a poll with the command execution
+    /// taken out, so tests drive the exact path production takes: the static
+    /// cache is initialised from the first response it sees, and every later
+    /// response reads its static details from that cache.
+    fn gpu_info_from_response(
+        &self,
+        response: RblnResponse,
+        time: &str,
+        hostname: &str,
+    ) -> Vec<GpuInfo> {
         // Initialize static cache on first call
         self.ensure_static_cache_initialized(&response);
 
-        let time = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
-        let hostname = get_hostname();
+        let kmd_version = self
+            .get_kmd_version()
+            .unwrap_or_else(|| response.kmd_version.clone());
 
         response
             .devices
             .into_iter()
             .filter_map(|device| {
-                let uuid = &device.uuid;
                 // Try to get cached static info, fall back to current device data if not available
-                let static_info = self.get_device_static_info(uuid);
-                let kmd_version = self
-                    .get_kmd_version()
-                    .unwrap_or_else(|| response.kmd_version.clone());
+                let static_info = self.get_device_static_info(&device.uuid);
 
-                create_gpu_info_from_device(device, static_info, &kmd_version, &time, &hostname)
+                create_gpu_info_from_device(device, static_info, &kmd_version, time, hostname)
             })
             .collect()
     }
