@@ -744,6 +744,51 @@ jobs:
   # The system domain is deliberately never touched: no
   # /Library/LaunchDaemons, no `sudo launchctl bootstrap system`.
   # ───────────────────────────────────────────────────────────────
+  # macOS unit tests (issue #414).
+  #
+  # `test` runs on Linux only, so the macOS-only modules (the native
+  # IOReport/SMC manager, the macOS `DiskCache` path, the macOS process
+  # priority reader) never compiled or ran in CI before. This runs their
+  # unit tests on every push and PR, in parallel with `test` (no `needs`).
+  # The runner is a VM without IOReport or a reachable SMC; tests that
+  # need real hardware detect that and skip, so a failure here is a real
+  # regression in what the VM can still check.
+  macos-unit-tests:
+    name: macOS Unit Tests
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup protoc
+        uses: ./.github/actions/setup-protoc
+        with:
+          version: ${{ env.PROTOC_VERSION }}
+          platform: osx-aarch_64
+
+      # Its own key: `launchd-service` saves the same paths under the plain
+      # `-cargo-` key, and only the first job to finish gets to save it.
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-unit-tests-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-unit-tests-
+            ${{ runner.os }}-cargo-
+
+      - name: Native macOS metrics manager
+        run: cargo test --lib device::macos_native
+
+      - name: Storage cache
+        run: cargo test --lib storage
+
+      - name: Process list
+        run: cargo test --lib device::process_list
+
   launchd-service:
     name: launchd Service Smoke Test
     runs-on: macos-14

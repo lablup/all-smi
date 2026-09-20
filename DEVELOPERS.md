@@ -452,12 +452,14 @@ make docker-test-container-view
 
 The project uses GitHub Actions for CI:
 
-1. **Test Suite**: Runs on every push and PR
+1. **Test Suite**: Runs on every push and PR (Linux)
    - Unit tests
    - Format checking (`cargo fmt`)
    - Linting (`cargo clippy`)
 
-2. **Build Check**: Verifies release build
+2. **macOS Unit Tests**: Runs on every push and PR on a `macos-14` runner, in parallel with the test suite. It runs the unit tests of the macOS-only modules the Linux suite cannot compile: `cargo test --lib device::macos_native`, `cargo test --lib storage`, and `cargo test --lib device::process_list`. The runner is a VM without IOReport or a reachable SMC, so tests that need real hardware detect that and skip.
+
+3. **Build Check**: Verifies release build
 
 ### Release Process
 
