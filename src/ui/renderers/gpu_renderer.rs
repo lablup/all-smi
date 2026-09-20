@@ -20,6 +20,7 @@ use crossterm::{queue, style::Color, style::Print};
 use crate::device::GpuInfo;
 use crate::device::MigGpuInfo;
 use crate::device::VgpuHostInfo;
+use crate::device::readers::detail_keys;
 use crate::device::types::{NvLinkRemoteType, ThermalProximity, ThermalProximityConfig};
 use crate::ui::renderers::utils::SUB_ITEM_INDENT;
 use crate::ui::text::print_colored_text;
@@ -332,7 +333,15 @@ pub fn print_gpu_info<W: Write>(
     // For Apple Silicon, info.power_consumption contains GPU power only
     let is_apple_silicon = info.name.contains("Apple") || info.name.contains("Metal");
     let power_display = match info.power_consumption_reading() {
-        None => "N/A".to_string(),
+        // A device on a multi-device board (an ATOM Max die) whose board
+        // power is counted on a sibling device. Show the shared board value
+        // in parentheses so every device of the board reads its board's
+        // draw, while the parentheses mark it as not this row's own reading
+        // and not part of any total.
+        None => match detail_keys::card_power_watts(&info.detail) {
+            Some(card_watts) => format!("({card_watts:.0}W)"),
+            None => "N/A".to_string(),
+        },
         Some(power) if is_apple_silicon => {
             // Apple Silicon GPU uses very little power, show 2 decimal places
             // Use fixed width formatting to prevent trailing characters
@@ -908,6 +917,51 @@ mod tests {
         assert!(rendered.contains("Pwr:     N/A"), "{rendered}");
         assert!(!rendered.contains("Util:  0.0%"), "{rendered}");
         assert!(!rendered.contains("Pwr:      0W"), "{rendered}");
+    }
+
+    fn atom_max_die(power_consumption: f64, card_power: Option<&str>) -> GpuInfo {
+        let mut gpu = make_gpu(38);
+        gpu.name = "RBLN-CA25".to_string();
+        gpu.device_type = "NPU".to_string();
+        gpu.power_consumption = power_consumption;
+        if let Some(value) = card_power {
+            gpu.detail.insert(
+                detail_keys::CARD_POWER_WATTS_DETAIL_KEY.to_string(),
+                value.to_string(),
+            );
+        }
+        gpu
+    }
+
+    /// Issue #418: an ATOM Max die whose card power is counted on a sibling
+    /// die shows the card value in parentheses instead of N/A.
+    #[test]
+    fn die_without_own_power_shows_its_card_value_in_parentheses() {
+        let die = atom_max_die(crate::device::types::GPU_METRIC_UNAVAILABLE, Some("43.10"));
+        let rendered = render_row(&die);
+        assert!(rendered.contains("Pwr:   (43W)"), "{rendered}");
+        assert!(!rendered.contains("Pwr:     N/A"), "{rendered}");
+    }
+
+    /// The reporting die renders its own reading as usual; the card key
+    /// changes nothing there.
+    #[test]
+    fn reporting_die_shows_its_reading_without_parentheses() {
+        let die = atom_max_die(43.1, Some("43.10"));
+        let rendered = render_row(&die);
+        assert!(rendered.contains("Pwr:     43W"), "{rendered}");
+        assert!(!rendered.contains("(43W)"), "{rendered}");
+    }
+
+    /// A card value that is not a finite, non-negative number is ignored,
+    /// so the cell stays N/A rather than showing a sentinel or garbage.
+    #[test]
+    fn invalid_card_value_still_renders_na() {
+        for value in ["-1", "NaN", "inf", "abc", ""] {
+            let die = atom_max_die(crate::device::types::GPU_METRIC_UNAVAILABLE, Some(value));
+            let rendered = render_row(&die);
+            assert!(rendered.contains("Pwr:     N/A"), "{value}: {rendered}");
+        }
     }
 
     /// The complement: a genuine zero reading renders as a zero, so N/A

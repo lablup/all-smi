@@ -47,12 +47,7 @@ impl MetricsAggregator {
         let avg_utilization = super::gpu_readings::mean_utilization(gpu_info);
         let avg_temperature = super::gpu_readings::mean_temperature(gpu_info);
         let temp_std_dev = super::gpu_readings::temperature_std_dev(gpu_info);
-
-        let reporting_power = gpu_info
-            .iter()
-            .filter(|gpu| gpu.power_consumption_reading().is_some())
-            .count();
-        let avg_power = (reporting_power > 0).then(|| total_power_watts / reporting_power as f64);
+        let avg_power = super::gpu_readings::mean_power_watts(gpu_info);
 
         GpuClusterMetrics {
             total_gpus,
@@ -319,6 +314,20 @@ mod tests {
         assert_eq!(metrics.total_power_watts, 500.0);
         assert_eq!(metrics.avg_utilization, Some(75.0));
         assert_eq!(metrics.avg_temperature, Some(80.0));
+        assert_eq!(metrics.avg_power, Some(250.0));
+    }
+
+    /// A row with no power reading (a non-reporting ATOM Max die) is left out
+    /// of both the total and the mean's denominator.
+    #[test]
+    fn test_avg_power_ignores_rows_without_a_reading() {
+        let mut silent = create_test_gpu();
+        silent.power_consumption = crate::device::types::GPU_METRIC_UNAVAILABLE;
+        let gpus = vec![create_test_gpu(), silent.clone(), silent];
+        let metrics = MetricsAggregator::aggregate_gpu_metrics(&gpus);
+
+        assert_eq!(metrics.total_gpus, 3);
+        assert_eq!(metrics.total_power_watts, 250.0);
         assert_eq!(metrics.avg_power, Some(250.0));
     }
 

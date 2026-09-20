@@ -187,10 +187,18 @@ pub fn draw_system_view<W: Write>(stdout: &mut W, state: &AppState, cols: u16) {
         ("Temp. Stdev", display)
     };
 
-    let avg_power = if total_gpus > 0 {
-        total_power_watts / total_gpus as f64
+    // Average over the devices that reported power, not over every device:
+    // a multi-die board (ATOM Max) reports its power on one die, and the
+    // others read absent. Apple Silicon keeps its previous meaning, the
+    // combined CPU+GPU+ANE figure of its single GPU row.
+    let avg_power = if is_apple_silicon {
+        (total_gpus > 0).then(|| total_power_watts / total_gpus as f64)
     } else {
-        0.0
+        gpu_readings::mean_power_watts(&state.gpu_info)
+    };
+    let avg_power_display = match avg_power {
+        Some(watts) => format!("{watts:.1}W"),
+        None => "N/A".to_string(),
     };
 
     // Calculate used GPU memory in GB
@@ -267,7 +275,7 @@ pub fn draw_system_view<W: Write>(stdout: &mut W, state: &AppState, cols: u16) {
                     Color::Blue,
                 ),
                 (temp_secondary_label, temp_secondary_display, Color::Magenta),
-                ("Avg. Power", format!("{avg_power:.1}W"), Color::Red),
+                ("Avg. Power", avg_power_display, Color::Red),
             ],
             box_width,
         );
@@ -441,6 +449,39 @@ mod tests {
         let mut buf: Vec<u8> = Vec::new();
         draw_system_view(&mut buf, &state, 80);
         assert!(!buf.is_empty());
+    }
+
+    fn render_system_view(state: &AppState) -> String {
+        let mut buf: Vec<u8> = Vec::new();
+        draw_system_view(&mut buf, state, 80);
+        String::from_utf8_lossy(&buf).into_owned()
+    }
+
+    /// Issue #418: Avg. Power divides by the devices that reported power. An
+    /// ATOM Max card reports on one die of four; dividing by every device
+    /// showed a quarter of the per-card draw.
+    #[test]
+    fn avg_power_is_over_reporting_devices() {
+        let mut state = make_remote_state(4);
+        for gpu in state.gpu_info.iter_mut().skip(1).step_by(2) {
+            gpu.power_consumption = crate::device::types::GPU_METRIC_UNAVAILABLE;
+        }
+        let rendered = render_system_view(&state);
+        assert!(rendered.contains("200.0W"), "{rendered}");
+        assert!(!rendered.contains("100.0W"), "{rendered}");
+    }
+
+    /// With no device reporting power, the average is N/A rather than 0 W,
+    /// the way GPU Util already renders.
+    #[test]
+    fn avg_power_is_na_when_nothing_reported() {
+        let mut state = make_remote_state(2);
+        for gpu in &mut state.gpu_info {
+            gpu.power_consumption = crate::device::types::GPU_METRIC_UNAVAILABLE;
+        }
+        let rendered = render_system_view(&state);
+        assert!(rendered.contains("N/A"), "{rendered}");
+        assert!(!rendered.contains("0.0W"), "{rendered}");
     }
 
     #[test]

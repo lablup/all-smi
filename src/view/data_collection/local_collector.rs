@@ -60,12 +60,17 @@ const MAX_DISPLAY_PROCESSES: usize = 500;
 const FULL_REFRESH_INTERVAL: u32 = 5;
 
 /// Inject aggregated GPU power into chassis info when not already set.
+///
+/// Sums only the devices that reported power. A device with no reading
+/// carries the `-1.0` sentinel, and a multi-die board (ATOM Max) reports its
+/// power on one die with the rest absent, so a raw sum would subtract one
+/// watt per silent device.
 fn inject_gpu_power(chassis_info: Vec<ChassisInfo>, gpu_info: &[GpuInfo]) -> Vec<ChassisInfo> {
     chassis_info
         .into_iter()
         .map(|mut ci| {
             if ci.total_power_watts.is_none() {
-                let total: f64 = gpu_info.iter().map(|g| g.power_consumption).sum();
+                let total = crate::metrics::gpu_readings::total_power_watts(gpu_info);
                 if total > 0.0 {
                     ci.total_power_watts = Some(total);
                 }

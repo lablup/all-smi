@@ -28,6 +28,42 @@
 
 use std::collections::HashMap;
 
+/// Power of the physical board a device sits on, in watts, as a bare number
+/// (`"42.80"`).
+///
+/// Carried on every device of a board that exposes several devices, such as
+/// the four dies of a Rebellions ATOM Max card, whose tool reports one power
+/// figure per board and repeats it on every die. The board's power is counted
+/// exactly once, in `power_consumption` of one of its devices; the others
+/// read unavailable, so summing `power_consumption` over a host gives the
+/// real draw. This key keeps the board value visible on the rows that no
+/// longer show power. A board with a single device does not carry it: that
+/// device's `power_consumption` already is the board value.
+///
+/// snake_case on purpose. Every detail key becomes a label on
+/// `all_smi_gpu_info` through `sanitize_label_name`, and a snake_case key
+/// survives that unchanged, so the key a local reader writes and the key the
+/// remote parser stores are the same string (the same pattern as
+/// `power_limit_max`). It must not be `power` or `power_draw`: the generic
+/// NPU exporter turns those into `all_smi_npu_power_watts` and
+/// `all_smi_npu_power_draw_watts` series on every device that carries them,
+/// which would count the board once per device again.
+pub const CARD_POWER_WATTS_DETAIL_KEY: &str = "card_power_watts";
+
+/// The board power carried under [`CARD_POWER_WATTS_DETAIL_KEY`], or `None`
+/// when the key is absent or does not hold a finite, non-negative number.
+///
+/// The value can arrive from a remote node's `all_smi_gpu_info` labels, so
+/// it is validated here rather than trusted.
+pub fn card_power_watts(detail: &HashMap<String, String>) -> Option<f64> {
+    detail
+        .get(CARD_POWER_WATTS_DETAIL_KEY)?
+        .trim()
+        .parse::<f64>()
+        .ok()
+        .filter(|watts| watts.is_finite() && *watts >= 0.0)
+}
+
 /// Record that `source` contributed to this GPU's metrics.
 ///
 /// `Metrics Source` is a human-readable composition of the layers that
@@ -188,5 +224,18 @@ mod tests {
             missing_metric_sources(&detail, &["Power", "Fan"]),
             vec!["Power", "Fan"]
         );
+    }
+
+    #[test]
+    fn card_power_accepts_only_finite_non_negative_watts() {
+        let with = |value: &str| {
+            HashMap::from([(CARD_POWER_WATTS_DETAIL_KEY.to_string(), value.to_string())])
+        };
+        assert_eq!(card_power_watts(&with("42.80")), Some(42.8));
+        assert_eq!(card_power_watts(&with(" 0 ")), Some(0.0));
+        for rejected in ["-1", "-0.5", "NaN", "inf", "abc", ""] {
+            assert_eq!(card_power_watts(&with(rejected)), None, "{rejected:?}");
+        }
+        assert_eq!(card_power_watts(&HashMap::new()), None);
     }
 }

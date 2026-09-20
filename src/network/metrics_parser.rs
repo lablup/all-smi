@@ -550,7 +550,12 @@ impl MetricsParser {
                         // Apple Silicon: why the live series are missing.
                         // Carried on the identity series so a remote viewer
                         // sees the reason and not just the absence (#325).
-                        "native_metrics"
+                        "native_metrics",
+                        // Board power on every device of a multi-device
+                        // board (ATOM Max dies). Only one device of the
+                        // board carries a power series, so the viewer
+                        // needs this to show the others' board value.
+                        crate::device::readers::detail_keys::CARD_POWER_WATTS_DETAIL_KEY
                     ]
                 );
 
@@ -1739,6 +1744,32 @@ all_smi_gpu_power_consumption_watts{gpu="Apple M2 Max GPU", instance="mac-1", gp
         let gpu = &parsed.gpu_info[0];
         assert_eq!(gpu.utilization_reading(), Some(0.0));
         assert_eq!(gpu.power_consumption_reading(), Some(0.0));
+    }
+
+    /// Issue #418: a non-reporting ATOM Max die has no power series but
+    /// carries its board's power on `all_smi_gpu_info`. The viewer keeps the
+    /// power absent and the board value in `detail` for display.
+    #[test]
+    fn test_card_power_label_survives_without_a_power_series() {
+        let parser = create_test_parser();
+        let re = create_test_regex();
+        let host = "127.0.0.1:10058";
+
+        let test_data = r#"
+all_smi_gpu_memory_total_bytes{gpu="RBLN-CA25", instance="atom-max-01", gpu_uuid="die-1", gpu_index="1"} 16877879296
+all_smi_gpu_info{gpu="RBLN-CA25", instance="atom-max-01", gpu_uuid="die-1", gpu_index="1", type="NPU", card_power_watts="42.80"} 1
+"#;
+
+        let parsed = parser.parse_metrics(test_data, host, &re);
+        assert_eq!(parsed.gpu_info.len(), 1);
+        let gpu = &parsed.gpu_info[0];
+        assert_eq!(gpu.power_consumption_reading(), None);
+        assert_eq!(
+            gpu.detail
+                .get(crate::device::readers::detail_keys::CARD_POWER_WATTS_DETAIL_KEY)
+                .map(String::as_str),
+            Some("42.80")
+        );
     }
 
     #[test]
