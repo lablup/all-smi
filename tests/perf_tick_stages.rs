@@ -22,7 +22,11 @@
 //! a colder core, so the order changes what each one appears to cost. Prints markdown tables:
 //! the first tick, the steady state (first tick excluded), the
 //! `collect_once` breakdown on Apple Silicon, and the process CPU the
-//! collection alone used while ticking.
+//! collection alone used while ticking. Since issue #414 the breakdown also
+//! averages `IOReportCreateSamples` and the SMC over the ticks that actually
+//! sampled or read, next to the per-tick rows that count reused ticks as
+//! zero, and the first-tick table shows the CPU warm-up and the manager's
+//! first window overlapping reader construction instead of running after it.
 //!
 //! ```text
 //! cargo test --release --test perf_tick_stages -- --ignored --nocapture
@@ -119,6 +123,11 @@ struct Stages {
     smc: Stage,
     native_other: Stage,
     native_total: Stage,
+    /// `IOReportCreateSamples` on the ticks that took a sample (issue #414:
+    /// the per-tick row above averages the reused ticks in as zero).
+    ioreport_sample_taken: Stage,
+    /// SMC on the ticks that read the temperature sensors.
+    smc_read: Stage,
 }
 
 #[test]
@@ -130,8 +139,9 @@ fn perf_tick_stages() {
         .unwrap_or(11);
 
     let setup = Instant::now();
-    let gpu_readers = get_gpu_readers();
+    // CPU readers first, as the collectors build them (issue #414).
     let cpu_readers = get_cpu_readers();
+    let gpu_readers = get_gpu_readers();
     let memory_readers = get_memory_readers();
     let chassis_reader = create_chassis_reader();
     println!("reader construction: {}", ms(setup.elapsed()));
@@ -293,6 +303,17 @@ fn perf_tick_stages() {
         stages.smc.row("SMC");
         stages.native_other.row("thermal + assembly");
         stages.native_total.row("collect_once total");
+        stages
+            .ioreport_sample_taken
+            .row("IOReportCreateSamples (sampled ticks only)");
+        stages.smc_read.row("SMC (temperature read ticks only)");
+        println!(
+            "\nIOReport sampled on {} of {} ticks; SMC temperatures read on {} of {} ticks",
+            stages.ioreport_sample_taken.0.len(),
+            stages.native_total.0.len(),
+            stages.smc_read.0.len(),
+            stages.native_total.0.len()
+        );
     }
 
     if !steady_wall.is_zero() {
@@ -320,6 +341,12 @@ fn record_native_timings(stages: &mut Stages) {
     stages.smc.push(timings.smc);
     stages.native_other.push(timings.other);
     stages.native_total.push(timings.total);
+    if timings.ioreport_sampled {
+        stages.ioreport_sample_taken.push(timings.ioreport_sample);
+    }
+    if timings.smc_temperatures_read {
+        stages.smc_read.push(timings.smc);
+    }
 }
 
 #[cfg(not(target_os = "macos"))]

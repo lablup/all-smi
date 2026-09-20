@@ -55,8 +55,12 @@ pub async fn run_collection_loop(
     interval_secs: u64,
     processes_enabled: bool,
 ) {
-    let gpu_readers = get_gpu_readers();
+    // CPU readers first: the macOS reader takes its first utilization sample
+    // at construction and its first tick waits only for what is left of the
+    // warm-up interval, so building the other readers after it overlaps that
+    // wait (issue #414).
     let cpu_readers = get_cpu_readers();
+    let gpu_readers = get_gpu_readers();
     let memory_readers = get_memory_readers();
     let chassis_reader = create_chassis_reader();
     // Shared with the view collector and `LocalStorageReader`: the mount

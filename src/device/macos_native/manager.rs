@@ -88,6 +88,63 @@
 //!   re-zeroed on the viewing side.
 //! * **Aggregation** (`metrics::gpu_readings`): absent fields are excluded
 //!   from means and sums rather than folded in as zero.
+//!
+//! ## Collection cadence (issue #414)
+//!
+//! `IOReportCreateSamples` is the floor of every collection: the providers
+//! do their work per sample, whatever the subscription holds (15.2 ms per
+//! call on an M1 Ultra, 9.07 ms on an M5 Max). So [`NativeMetricsManager::collect_once`]
+//! takes a new IOReport sample only when at least [`IOREPORT_SAMPLE_INTERVAL`]
+//! has passed since the previous one, independent of the poll interval, and
+//! reuses the previous [`IOReportMetrics`] on the collections in between.
+//! The threshold sits below 2 s so that tick jitter at `--interval 1` cannot
+//! stretch the cadence to every third tick: at 1 s polls every second tick
+//! samples, and at 2 s and above every tick does, as before.
+//!
+//! What a reused collection shows:
+//!
+//! * **Power** is unchanged in kind. Every sample also feeds the
+//!   subscription's energy tracker, which times each Energy Model channel by
+//!   the driver's own publication timestamps and holds the last reading
+//!   between publications (issue #410), so a reading is at most one sample
+//!   interval old rather than derived from a short window. How often the
+//!   counters publish is chip-specific: about every 2.1 s on an M5 Max, but
+//!   on an M1 Ultra the CPU/ANE/DRAM mJ channels publish twice per ~2.1 s at
+//!   uneven spans (0.42 to 1.69 s) and `GPU Energy` every 109 to 139 ms
+//!   (issue #415). The tracker divides each counter delta by its own
+//!   publication span, so the sample cadence does not change the value.
+//! * **Frequency and residency** are the previous window repeated. The
+//!   residency channels are cumulative counters, so a sample every other
+//!   tick yields one 2 s time average per two 1 s ticks. The TUI history
+//!   graphs (`update_gpu_history` in `view::data_collection::aggregator`)
+//!   are one column per tick and share their time axis with the CPU and
+//!   memory graphs, so a reused collection is pushed like any other rather
+//!   than skipped: at `--interval 1` each utilization and frequency column
+//!   is a 2 s mean shown twice, which is the true resolution of the data.
+//!   This is unlike the 5 s cache window removed in #413, which repeated one
+//!   short window ten times. Temperature, memory and power columns keep
+//!   their own cadence.
+//! * The first collection of a session still samples immediately, paying
+//!   its blocking baseline window; the next uncached collection takes a
+//!   fresh delta against the baseline that window retained (the gate starts
+//!   counting from the first full-interval sample, not from the warm-up
+//!   window), and only then does the cadence apply.
+//! * A failed sample on a due collection keeps the previous metrics and
+//!   leaves the gate untouched, so the next collection retries; the failed
+//!   call did not consume the baseline, so that delta simply covers a
+//!   longer window.
+//! * [`CACHE_DURATION_MS`](NativeMetricsManager::CACHE_DURATION_MS) still
+//!   serves every reader within one tick; the reuse gate sits behind it, so
+//!   SMC and thermal state are still collected on every uncached call.
+//!
+//! SMC temperatures follow the same pattern inside
+//! [`SmcSampler`](super::smc::SmcSampler): read every
+//! [`TEMPERATURE_READ_INTERVAL`](super::smc::SmcSampler::TEMPERATURE_READ_INTERVAL)
+//! and repeated in between.
+//!
+//! [`CollectionTimings`] records which of the two ran on a collection, so
+//! `tests/perf_tick_stages.rs` can average the sampled ticks alone next to
+//! the per-tick average.
 
 use super::ioreport::{IOReport, IOReportMetrics};
 use super::metrics::NativeMetricsData;
@@ -119,6 +176,33 @@ static NATIVE_METRICS_MANAGER: Lazy<Mutex<ManagerSlot>> =
 
 /// Track if first data has been received
 static FIRST_DATA_RECEIVED: AtomicBool = AtomicBool::new(false);
+
+/// How long the previous IOReport residency sample is reused before a new
+/// one is taken (module docs, "Collection cadence").
+///
+/// Below 2 s by a margin so that the jitter of 1 s ticks cannot stretch the
+/// cadence to every third tick, and above 1 s by a margin so that at
+/// `--interval 1` a sample is never taken on consecutive ticks.
+pub const IOREPORT_SAMPLE_INTERVAL: Duration = Duration::from_millis(1750);
+
+/// Whether a collection at `now` takes a new IOReport sample.
+///
+/// `sampled_at` is when the previous full-interval sample was taken, or
+/// `None` before the first one (the warm-up window does not count; see the
+/// module docs).
+fn ioreport_sample_due(sampled_at: Option<Instant>, now: Instant) -> bool {
+    sampled_at.is_none_or(|at| now.saturating_duration_since(at) >= IOREPORT_SAMPLE_INTERVAL)
+}
+
+/// The IOReport sample the manager keeps between collections.
+#[derive(Default)]
+struct IOReportWindow {
+    /// When the previous full-interval sample was taken; `None` until one
+    /// has been.
+    sampled_at: Option<Instant>,
+    /// Metrics from the most recent sample, reused while no sample is due.
+    metrics: Option<IOReportMetrics>,
+}
 
 /// Configuration for the native metrics manager
 #[derive(Debug, Clone)]
@@ -161,6 +245,12 @@ pub struct CollectionTimings {
     pub other: Duration,
     /// The whole collection.
     pub total: Duration,
+    /// Whether `IOReportCreateSamples` ran. When it did not, the collection
+    /// reused the previous window and `ioreport_sample` is zero.
+    pub ioreport_sampled: bool,
+    /// Whether the SMC temperature sensors were read, as opposed to the
+    /// previous readings being repeated.
+    pub smc_temperatures_read: bool,
 }
 
 /// Manages native metrics collection for Apple Silicon
@@ -168,6 +258,9 @@ pub struct NativeMetricsManager {
     config: NativeMetricsConfig,
     #[allow(dead_code)]
     ioreport: Mutex<Option<IOReport>>,
+    /// The previous IOReport sample and when it was taken. Only touched under
+    /// `collection_lock`.
+    ioreport_window: Mutex<IOReportWindow>,
     /// The SMC connection and slow-changing readings kept between collections.
     smc: Mutex<SmcSampler>,
     /// Stage timings of the most recent uncached collection.
@@ -209,6 +302,7 @@ impl NativeMetricsManager {
         Ok(Self {
             config,
             ioreport: Mutex::new(Some(ioreport)),
+            ioreport_window: Mutex::new(IOReportWindow::default()),
             smc: Mutex::new(SmcSampler::default()),
             last_timings: Mutex::new(None),
             latest_data: RwLock::new(None),
@@ -434,47 +528,34 @@ impl NativeMetricsManager {
             return Ok(data);
         }
 
-        // OPTIMIZATION: Reuse the existing IOReport instance instead of creating a new one
-        // Creating IOReport::new() is expensive (involves IOKit setup)
-        let mut ioreport_guard = self.ioreport.lock().map_err(|_| "IOReport lock poisoned")?;
-        let ioreport = ioreport_guard.as_mut().ok_or("IOReport not initialized")?;
-
         let started = Instant::now();
 
-        // Residency deltas against the sample retained by the previous
-        // collection. The residency channels are cumulative counters, so this
-        // covers the whole interval since that collection rather than a short
-        // synthetic window, and it needs neither a `sleep` nor repeated samples
-        // to average: the long delta already *is* the interval's time average.
-        //
-        // Only the very first collection of a session has no baseline. It pays
-        // one blocking `sample_interval_ms` window so the caller gets data
-        // immediately instead of waiting a full poll for the second call.
-        let residency = match ioreport.get_sample_since_last()? {
-            Some(iterator) => iterator,
-            // The call above already retained a baseline, so the next
-            // collection deltas against it and this branch runs once per
-            // session. The short window measured here overlaps the start of
-            // that first interval, which is harmless.
-            None => ioreport.get_sample(self.config.sample_interval_ms)?,
+        // A new IOReport window only when one is due; otherwise the previous
+        // one is reused whole, power included (module docs, "Collection
+        // cadence").
+        let (avg_metrics, ioreport_sample, ioreport_sampled) = {
+            let mut window = self
+                .ioreport_window
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if ioreport_sample_due(window.sampled_at, started) {
+                self.sample_ioreport(&mut window, started)?
+            } else {
+                let metrics = window
+                    .metrics
+                    .clone()
+                    .ok_or("no IOReport window to reuse")?;
+                (metrics, Duration::ZERO, false)
+            }
         };
-        let sampled = Instant::now();
-        let ioreport_sample = ioreport.last_sample_duration();
-
-        // Power is not taken from that delta. Every sample above also fed the
-        // subscription's energy tracker, which times each Energy Model channel
-        // by its own publication timestamps and holds the last reading between
-        // publications, so a poll that lands between two ~2.1 s batches no
-        // longer reads 0 W (issue #410).
-        let avg_metrics = IOReportMetrics::from_sample(residency, ioreport.energy_readings());
         let parsed = Instant::now();
 
         // SMC over the connection kept from the previous collection.
-        let smc_metrics = self
-            .smc
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .collect();
+        let (smc_metrics, smc_temperatures_read) = {
+            let mut sampler = self.smc.lock().unwrap_or_else(PoisonError::into_inner);
+            let metrics = sampler.collect();
+            (metrics, sampler.last_read().temperatures_read())
+        };
         let smc_done = Instant::now();
 
         // Get thermal state
@@ -487,11 +568,12 @@ impl NativeMetricsManager {
         if let Ok(mut guard) = self.last_timings.lock() {
             *guard = Some(CollectionTimings {
                 ioreport_sample,
-                ioreport_parse: (sampled - started).saturating_sub(ioreport_sample)
-                    + (parsed - sampled),
+                ioreport_parse: (parsed - started).saturating_sub(ioreport_sample),
                 smc: smc_done - parsed,
                 other: finished - smc_done,
                 total: finished - started,
+                ioreport_sampled,
+                smc_temperatures_read,
             });
         }
 
@@ -505,6 +587,68 @@ impl NativeMetricsManager {
         }
 
         Ok(data)
+    }
+
+    /// Take a new IOReport sample for a collection that started at `now`,
+    /// updating `window`.
+    ///
+    /// Returns the metrics to report, how long `IOReportCreateSamples` took,
+    /// and whether it ran.
+    fn sample_ioreport(
+        &self,
+        window: &mut IOReportWindow,
+        now: Instant,
+    ) -> Result<(IOReportMetrics, Duration, bool), Box<dyn std::error::Error>> {
+        // OPTIMIZATION: Reuse the existing IOReport instance instead of creating a new one
+        // Creating IOReport::new() is expensive (involves IOKit setup)
+        let mut ioreport_guard = self.ioreport.lock().map_err(|_| "IOReport lock poisoned")?;
+        let ioreport = ioreport_guard.as_mut().ok_or("IOReport not initialized")?;
+
+        // Residency deltas against the sample retained by the previous
+        // collection. The residency channels are cumulative counters, so this
+        // covers the whole interval since that collection rather than a short
+        // synthetic window, and it needs neither a `sleep` nor repeated samples
+        // to average: the long delta already *is* the interval's time average.
+        //
+        // Power is not taken from that delta. Every sample here also feeds the
+        // subscription's energy tracker, which times each Energy Model channel
+        // by its own publication timestamps and holds the last reading between
+        // publications, so a poll that lands between two publications no
+        // longer reads 0 W (issue #410).
+        let residency = match ioreport.get_sample_since_last() {
+            Ok(Some(iterator)) => iterator,
+            Ok(None) => match window.metrics.clone() {
+                // A window too short to rate (the previous sample was under
+                // `MIN_DELTA_WINDOW` ago): the baseline is kept for the next
+                // collection and this one repeats the previous metrics.
+                Some(previous) => return Ok((previous, ioreport.last_sample_duration(), true)),
+                // The very first collection of a session has no baseline. It
+                // pays one blocking `sample_interval_ms` window so the caller
+                // gets data immediately instead of waiting a full poll for the
+                // second call. The call above already retained a baseline, so
+                // the next collection deltas against it: `sampled_at` stays
+                // `None` so that collection is not gated behind this short
+                // window.
+                None => {
+                    let iterator = ioreport.get_sample(self.config.sample_interval_ms)?;
+                    let metrics =
+                        IOReportMetrics::from_sample(iterator, ioreport.energy_readings());
+                    window.metrics = Some(metrics.clone());
+                    return Ok((metrics, ioreport.last_sample_duration(), true));
+                }
+            },
+            // A failed sample keeps the previous window and leaves the gate
+            // untouched, so the next collection retries. Only a session with
+            // no window yet has nothing to fall back on.
+            Err(err) => match window.metrics.clone() {
+                Some(previous) => return Ok((previous, ioreport.last_sample_duration(), true)),
+                None => return Err(err.into()),
+            },
+        };
+        let metrics = IOReportMetrics::from_sample(residency, ioreport.energy_readings());
+        window.sampled_at = Some(now);
+        window.metrics = Some(metrics.clone());
+        Ok((metrics, ioreport.last_sample_duration(), true))
     }
 
     /// Stage timings of the most recent collection that was not served from
@@ -606,13 +750,33 @@ fn ensure_manager(
         return Ok(());
     }
 
-    let manager = NativeMetricsManager::new(interval_ms)?;
+    let manager = Arc::new(NativeMetricsManager::new(interval_ms)?);
+    slot.manager = Some(Arc::clone(&manager));
 
-    // Pre-collect first data sample to warm up the cache
-    // This ensures all subsequent calls from readers use cached data
-    let _ = manager.collect_once();
-
-    slot.manager = Some(Arc::new(manager));
+    // Pre-collect the first sample to warm up the cache, off this thread.
+    // The first collection of a session pays a blocking baseline window
+    // (`NativeMetricsConfig::sample_interval_ms`); `main` creates the manager
+    // before the collectors build their readers, so running it here in line
+    // put that window in series with everything else that happens before the
+    // first tick, including the CPU reader's own warm-up sleep (issue #414).
+    // The first reader to call `collect_once` waits for this collection on
+    // `collection_lock` and is then served from the cache.
+    //
+    // The thread holds its own `Arc`, and nothing joins it: if it ends up
+    // holding the last reference, `Drop` runs on it, and a join from
+    // `shutdown` would then wait on itself. It calls `collect_once` on that
+    // handle directly rather than through `get_native_metrics_manager`,
+    // whose lock this function's caller is holding.
+    let warm_up = Arc::clone(&manager);
+    let spawned = thread::Builder::new()
+        .name("all-smi-native-warmup".to_string())
+        .spawn(move || {
+            let _ = warm_up.collect_once();
+        });
+    if spawned.is_err() {
+        // No thread to run it on: warm up here, as before.
+        let _ = manager.collect_once();
+    }
     Ok(())
 }
 
@@ -666,6 +830,49 @@ mod tests {
         assert_eq!(config.sample_interval_ms, 100);
         assert_eq!(config.sample_count, 4);
         assert!(config.enable_smc);
+    }
+
+    /// The gate is what keeps `IOReportCreateSamples` to every other tick at
+    /// `--interval 1` and to every tick at 2 s and above.
+    #[test]
+    fn ioreport_sample_is_due_every_other_second_tick_and_every_slower_tick() {
+        let start = Instant::now();
+        let at = |secs: f64| start + Duration::from_secs_f64(secs);
+
+        assert!(
+            ioreport_sample_due(None, start),
+            "first sample is immediate"
+        );
+        // 1 s ticks: sampled on the tick two seconds after the previous
+        // sample, even when jitter lands it a little early or late.
+        assert!(!ioreport_sample_due(Some(start), at(1.0)));
+        assert!(!ioreport_sample_due(Some(start), at(1.05)));
+        assert!(ioreport_sample_due(Some(start), at(1.95)));
+        assert!(ioreport_sample_due(Some(start), at(2.05)));
+        // 2 s and slower ticks sample every tick.
+        assert!(ioreport_sample_due(Some(start), at(2.0)));
+        assert!(ioreport_sample_due(Some(start), at(3.0)));
+        // Below the poll interval nothing is due, and a clock that has not
+        // advanced is not a reason to sample.
+        assert!(!ioreport_sample_due(Some(start), start));
+        assert!(!ioreport_sample_due(Some(at(1.0)), start));
+    }
+
+    /// The gate's threshold must stay strictly between one and two whole
+    /// seconds, the two poll intervals it is designed around.
+    #[test]
+    fn ioreport_sample_interval_sits_between_one_and_two_seconds() {
+        assert!(IOREPORT_SAMPLE_INTERVAL > Duration::from_secs(1));
+        assert!(IOREPORT_SAMPLE_INTERVAL < Duration::from_secs(2));
+    }
+
+    /// A reused collection reports no sample cost and says so.
+    #[test]
+    fn collection_timings_default_to_no_sample() {
+        let timings = CollectionTimings::default();
+        assert_eq!(timings.ioreport_sample, Duration::ZERO);
+        assert!(!timings.ioreport_sampled);
+        assert!(!timings.smc_temperatures_read);
     }
 
     #[test]

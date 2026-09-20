@@ -233,21 +233,16 @@ impl LocalCollector {
             return;
         }
 
-        // Add startup status. Pushed unconditionally, like the CPU and memory
+        // Add startup status. Pushed unconditionally, like the GPU and memory
         // lines below: `collect_parallel_first_iteration` counts on exactly
         // three preamble lines being present (the `3 + index` offset at the
         // status handler), so silently skipping this push on lock contention
         // would shift every later status update to the wrong line.
-        {
-            let mut state = app_state.lock().await;
-            state
-                .startup_status_lines
-                .push("✓ Initializing GPU readers...".to_string());
-        }
-
-        let gpu_readers = get_gpu_readers();
-
-        // Add startup status
+        //
+        // The CPU readers come first: the macOS reader takes its first
+        // utilization sample at construction and its first tick waits only
+        // for what is left of the warm-up interval, so building the other
+        // readers after it overlaps that wait (issue #414).
         {
             let mut state = app_state.lock().await;
             state
@@ -256,6 +251,16 @@ impl LocalCollector {
         }
 
         let cpu_readers = get_cpu_readers();
+
+        // Add startup status
+        {
+            let mut state = app_state.lock().await;
+            state
+                .startup_status_lines
+                .push("✓ Initializing GPU readers...".to_string());
+        }
+
+        let gpu_readers = get_gpu_readers();
 
         // Add startup status
         {
