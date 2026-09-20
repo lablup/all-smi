@@ -27,6 +27,7 @@ use crate::utils::command::new_command;
 use crate::utils::system::get_hostname;
 use chrono::Local;
 use std::sync::{Mutex, RwLock};
+use std::time::{Duration, Instant};
 use sysinfo::System;
 
 /// (cpu_model, s_core_count, p_core_count, e_core_count, gpu_core_count)
@@ -38,6 +39,11 @@ pub struct MacOsCpuReader {
     system: RwLock<System>,
     // Track if we've done the first refresh
     first_refresh_done: RwLock<bool>,
+    /// When the first `refresh_cpu_usage` sample was taken, in `new`. The
+    /// first `ensure_cpu_refreshed` sleeps only what is left of the warm-up
+    /// interval after this instant, so the wait overlaps whatever else runs
+    /// between construction and the first tick (issue #414).
+    first_sample_at: Instant,
     // Cached hardware info for Apple Silicon
     cached_cpu_model: Mutex<Option<String>>,
     cached_s_core_count: Mutex<Option<u32>>,
@@ -62,12 +68,18 @@ impl Default for MacOsCpuReader {
 impl MacOsCpuReader {
     pub fn new() -> Self {
         let is_apple_silicon = Self::detect_apple_silicon();
-        let system = System::new();
+        // Take the first CPU usage sample now: utilization is a delta between
+        // two samples, and starting the clock at construction lets the first
+        // tick pay only the remainder of `CPU_WARM_UP` instead of all of it.
+        let mut system = System::new();
+        system.refresh_cpu_usage();
+        let first_sample_at = Instant::now();
 
         Self {
             is_apple_silicon,
             system: RwLock::new(system),
             first_refresh_done: RwLock::new(false),
+            first_sample_at,
             cached_cpu_model: Mutex::new(None),
             cached_s_core_count: Mutex::new(None),
             cached_p_core_count: Mutex::new(None),
@@ -778,13 +790,22 @@ impl MacOsCpuReader {
         }
     }
 
+    /// The least time between the first two `refresh_cpu_usage` samples for
+    /// the first utilization reading to be meaningful.
+    const CPU_WARM_UP: Duration = Duration::from_millis(100);
+
     /// OPTIMIZATION: Refresh CPU usage once per collection cycle
     /// This avoids multiple refresh_cpu_usage() calls which was causing high CPU usage
     fn ensure_cpu_refreshed(&self) {
-        // Check if we need to do first refresh with initialization delay
+        // The first sample was taken in `new`; on the first call, wait out
+        // whatever is left of the warm-up interval since then. When more than
+        // that has passed already, as it has whenever other readers were
+        // built in between, there is nothing to wait for.
         if !*self.first_refresh_done.read().unwrap() {
-            self.system.write().unwrap().refresh_cpu_usage();
-            std::thread::sleep(std::time::Duration::from_millis(100));
+            let remaining = Self::CPU_WARM_UP.saturating_sub(self.first_sample_at.elapsed());
+            if !remaining.is_zero() {
+                std::thread::sleep(remaining);
+            }
             *self.first_refresh_done.write().unwrap() = true;
         }
 

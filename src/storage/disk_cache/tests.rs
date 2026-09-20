@@ -12,6 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use super::capacity::{CapacityResult, CapacityWorker, refresh_capacities};
+use super::volume::anchored_available;
+#[cfg(target_os = "macos")]
+use super::volume::statfs_free_bytes;
 use super::*;
 
 const GB: u64 = 1_000_000_000;
@@ -329,8 +333,388 @@ fn local_volumes_are_anchored_on_macos() {
         assert_eq!(anchor.available, volume.available_bytes);
     }
 
-    listing.refresh_capacity();
+    let requests = listing.capacity_requests();
+    let disks = listing
+        .disks
+        .as_mut()
+        .expect("a fresh listing holds its disks");
+    let capacities = refresh_capacities(disks, &requests);
+    assert_eq!(
+        capacities.len(),
+        requests.len(),
+        "every local volume refreshed"
+    );
+    listing.apply_capacities(&capacities);
     for volume in &listing.volumes {
         assert!(volume.available_bytes <= volume.total_bytes);
     }
+}
+
+/// A worker's refresh reads the same totals the list reported and an
+/// available space that tracks it, on every platform.
+#[test]
+fn a_capacity_refresh_matches_the_list() {
+    let mut listing = Listing::enumerate();
+    let before: Vec<(u64, u64)> = listing
+        .volumes
+        .iter()
+        .map(|volume| (volume.total_bytes, volume.available_bytes))
+        .collect();
+    let requests = listing.capacity_requests();
+    assert!(
+        requests
+            .iter()
+            .all(|request| listing.volumes[request.volume].index == request.disk)
+    );
+
+    let disks = listing
+        .disks
+        .as_mut()
+        .expect("a fresh listing holds its disks");
+    let capacities = refresh_capacities(disks, &requests);
+    listing.apply_capacities(&capacities);
+    for (volume, (total, available)) in listing.volumes.iter().zip(before) {
+        assert_eq!(volume.total_bytes, total, "{}", volume.mount_point);
+        let slack = (total / 100).max(2 * GB);
+        assert!(
+            volume.available_bytes.abs_diff(available) <= slack,
+            "{}: {} against {available}",
+            volume.mount_point,
+            volume.available_bytes
+        );
+    }
+}
+
+/// Between list refreshes each tick refreshes capacity through the worker,
+/// which hands the `Disks` back with its result.
+#[test]
+fn ticks_refresh_capacity_through_the_worker() {
+    let mut cache = DiskCache::new();
+    let _ = cache.storage_info("h");
+    let _ = cache.storage_info("h");
+    let worker = cache
+        .capacity
+        .as_ref()
+        .expect("the first tick started the worker");
+    assert!(!worker.in_flight, "the refresh finished within the budget");
+    let listing = cache.listing.as_ref().expect("a list");
+    assert!(
+        listing.disks.is_some(),
+        "the disks came back with the result"
+    );
+}
+
+/// The worker for the fake-injection tests below: its job sender goes
+/// nowhere and its results come from `results`.
+fn fake_worker(
+    results: mpsc::Receiver<CapacityResult>,
+) -> (CapacityWorker, mpsc::Receiver<capacity::CapacityJob>) {
+    let (jobs, job_receiver) = mpsc::channel();
+    (
+        CapacityWorker {
+            jobs,
+            results,
+            in_flight: true,
+            overran: false,
+            last_wait: Duration::ZERO,
+            thread: None,
+        },
+        job_receiver,
+    )
+}
+
+/// A capacity read that never returns, as on a volume that stopped
+/// answering, leaves the tick on the previous values after at most the
+/// budget, for a loop cache and a blocking one alike.
+#[test]
+fn a_hung_capacity_refresh_returns_the_previous_values_within_the_budget() {
+    for mut cache in [DiskCache::new(), DiskCache::with_blocking_first_list()] {
+        let before = cache.storage_info("h");
+        let (_never_answers, results) = mpsc::channel::<CapacityResult>();
+        let (worker, _jobs) = fake_worker(results);
+        cache.capacity = Some(worker);
+        let _held_by_the_hung_job = cache
+            .listing
+            .as_mut()
+            .and_then(|listing| listing.disks.take());
+
+        let started = Instant::now();
+        let during = cache.storage_info("h");
+        let elapsed = started.elapsed();
+
+        // The wait itself is the budget. A hosted runner has been seen to
+        // hand a 50 ms `recv_timeout` back after 160 ms, so the wall-clock
+        // bound here only tells a bounded wait from a hang; what the tick
+        // was prepared to wait is asserted exactly below.
+        assert!(
+            elapsed < CAPACITY_REFRESH_BUDGET + Duration::from_secs(1),
+            "storage_info took {elapsed:?} against a {CAPACITY_REFRESH_BUDGET:?} budget"
+        );
+        assert!(
+            elapsed >= CAPACITY_REFRESH_BUDGET,
+            "the tick waited out the budget"
+        );
+        let worker = cache.capacity.as_ref().expect("the worker is kept");
+        assert!(
+            worker.last_wait <= CAPACITY_REFRESH_BUDGET
+                && worker.last_wait > CAPACITY_REFRESH_BUDGET / 2,
+            "the first tick waits up to the budget, not {:?}",
+            worker.last_wait
+        );
+        let rows = |rows: &[StorageInfo]| -> Vec<(String, u64, u64)> {
+            rows.iter()
+                .map(|row| {
+                    (
+                        row.mount_point.clone(),
+                        row.total_bytes,
+                        row.available_bytes,
+                    )
+                })
+                .collect()
+        };
+        assert_eq!(
+            rows(&during),
+            rows(&before),
+            "the previous values were reported"
+        );
+        let worker = cache.capacity.as_ref().expect("the worker is kept");
+        assert!(worker.in_flight, "no second refresh was started");
+
+        // Later ticks only check for the result: the budget is paid once.
+        for _ in 0..3 {
+            let started = Instant::now();
+            let later = cache.storage_info("h");
+            let elapsed = started.elapsed();
+            assert!(
+                elapsed < CAPACITY_REFRESH_BUDGET + Duration::from_secs(1),
+                "a later tick took {elapsed:?} on the same hung refresh"
+            );
+            assert_eq!(rows(&later), rows(&before));
+            let worker = cache.capacity.as_ref().expect("the worker is kept");
+            assert_eq!(
+                worker.last_wait,
+                Duration::ZERO,
+                "a later tick does not wait on the overrun job"
+            );
+            assert!(worker.in_flight && worker.overran);
+        }
+    }
+}
+
+/// Dropping the cache ends its worker thread: the job sender goes with the
+/// cache, the worker's `recv` fails, and the loop exits.
+#[test]
+fn dropping_the_cache_ends_its_worker_thread() {
+    let mut cache = DiskCache::new();
+    let _ = cache.storage_info("h");
+    let thread = cache
+        .capacity
+        .as_mut()
+        .and_then(|worker| worker.thread.take())
+        .expect("the first tick started the worker");
+    assert!(
+        !thread.is_finished(),
+        "the worker waits for jobs while the cache lives"
+    );
+
+    drop(cache);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !thread.is_finished() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        thread.is_finished(),
+        "the worker did not exit after its cache was dropped"
+    );
+    thread.join().expect("the worker exited cleanly");
+}
+
+/// A refresh that finishes after the budget is applied by the first tick
+/// after it lands, which starts no refresh of its own.
+#[test]
+fn a_late_capacity_result_is_applied_on_the_next_tick() {
+    let mut cache = DiskCache::new();
+    let before = cache.storage_info("h");
+    let listing = cache.listing.as_mut().expect("a list");
+    if listing.volumes.is_empty() {
+        return;
+    }
+    let disks = listing.disks.take().expect("the listing holds its disks");
+    let generation = listing.generation;
+    let total = listing.volumes[0].total_bytes;
+
+    let (answer, results) = mpsc::channel::<CapacityResult>();
+    let (worker, _jobs) = fake_worker(results);
+    cache.capacity = Some(worker);
+    let late = std::thread::spawn(move || {
+        std::thread::sleep(CAPACITY_REFRESH_BUDGET * 4);
+        let _ = answer.send(CapacityResult {
+            generation,
+            disks,
+            took: CAPACITY_REFRESH_BUDGET * 4,
+            capacities: vec![(0, total, 12_345)],
+        });
+    });
+
+    let during = cache.storage_info("h");
+    assert_eq!(during[0].available_bytes, before[0].available_bytes);
+
+    late.join().expect("the late refresh thread");
+    let after = cache.storage_info("h");
+    assert_eq!(
+        after[0].available_bytes, 12_345,
+        "the late result was applied"
+    );
+    assert_eq!(after[0].total_bytes, total);
+    let worker = cache.capacity.as_ref().expect("the worker is kept");
+    assert!(
+        !worker.in_flight,
+        "the tick that took a late result started no job"
+    );
+    assert!(
+        worker.overran,
+        "a refresh that took longer than the budget keeps later ticks from waiting"
+    );
+    let listing = cache.listing.as_ref().expect("a list");
+    assert!(listing.disks.is_some(), "the disks came back");
+}
+
+/// After an overrun, ticks keep not waiting while refreshes take longer
+/// than the budget, and go back to waiting once one completes within it.
+#[test]
+fn ticks_wait_again_only_once_a_refresh_completes_within_the_budget() {
+    let mut cache = DiskCache::new();
+    let _ = cache.storage_info("h");
+    let listing = cache.listing.as_mut().expect("a list");
+    if listing.volumes.is_empty() {
+        return;
+    }
+    let generation = listing.generation;
+    let total = listing.volumes[0].total_bytes;
+
+    for (took, expect_overran) in [
+        (CAPACITY_REFRESH_BUDGET * 2, true),
+        (CAPACITY_REFRESH_BUDGET, false),
+    ] {
+        let disks = cache
+            .listing
+            .as_mut()
+            .and_then(|listing| listing.disks.take())
+            .expect("the listing holds its disks");
+        let (answer, results) = mpsc::channel::<CapacityResult>();
+        let (mut worker, _jobs) = fake_worker(results);
+        worker.overran = true;
+        cache.capacity = Some(worker);
+        answer
+            .send(CapacityResult {
+                generation,
+                disks,
+                took,
+                capacities: vec![(0, total, 4_321)],
+            })
+            .expect("receiver alive");
+
+        let rows = cache.storage_info("h");
+        assert_eq!(rows[0].available_bytes, 4_321, "the result was applied");
+        let worker = cache.capacity.as_ref().expect("the worker is kept");
+        assert_eq!(
+            worker.last_wait,
+            Duration::ZERO,
+            "a tick after an overrun does not wait"
+        );
+        assert_eq!(worker.overran, expect_overran, "refresh took {took:?}");
+    }
+}
+
+/// A result from before the list was replaced is discarded: its values
+/// belong to rows that no longer exist.
+#[test]
+fn a_capacity_result_for_a_replaced_list_is_discarded() {
+    let mut cache = DiskCache::new();
+    let before = cache.storage_info("h");
+    let listing = cache.listing.as_mut().expect("a list");
+    if listing.volumes.is_empty() {
+        return;
+    }
+    let disks = listing.disks.take().expect("the listing holds its disks");
+    let stale_generation = listing.generation.wrapping_sub(1);
+    let total = listing.volumes[0].total_bytes;
+
+    let (answer, results) = mpsc::channel::<CapacityResult>();
+    let (worker, _jobs) = fake_worker(results);
+    cache.capacity = Some(worker);
+    answer
+        .send(CapacityResult {
+            generation: stale_generation,
+            disks,
+            took: CAPACITY_REFRESH_BUDGET * 4,
+            capacities: vec![(0, total, 12_345)],
+        })
+        .expect("receiver alive");
+
+    let after = cache.storage_info("h");
+    assert_eq!(after[0].available_bytes, before[0].available_bytes);
+    let listing = cache.listing.as_ref().expect("a list");
+    assert!(
+        listing.disks.is_none(),
+        "the stale disks were dropped with the result"
+    );
+}
+
+/// A new list gets a new generation, so in-flight results for the old one
+/// can be told apart.
+#[test]
+fn each_installed_list_gets_its_own_generation() {
+    let mut cache = DiskCache::new();
+    let _ = cache.storage_info("h");
+    let first = cache.listing.as_ref().expect("a list").generation;
+    cache.install_listing(Listing::enumerate());
+    let second = cache.listing.as_ref().expect("a list").generation;
+    assert_ne!(first, second);
+}
+
+/// On Linux a volume whose mount point moved to another filesystem since
+/// the list was built keeps its previous values rather than reporting the
+/// filesystem now under that directory.
+#[test]
+#[cfg(target_os = "linux")]
+fn a_mount_point_on_another_device_keeps_its_previous_values() {
+    use super::capacity::{mount_device, mount_identity_matches};
+
+    let root = std::path::Path::new("/");
+    let device = mount_device(root).expect("stat works on /");
+    assert!(mount_identity_matches(Some(device), root));
+    assert!(!mount_identity_matches(Some(device ^ 1), root));
+    assert!(
+        mount_identity_matches(None, root),
+        "with no recorded device the mount is refreshed as before"
+    );
+
+    let mut listing = Listing::enumerate();
+    // Only volumes whose device was recorded can be told apart from their
+    // parent; one whose `stat` failed at list time is refreshed as before.
+    let mut requests = listing.capacity_requests();
+    requests.retain(|request| request.device.is_some());
+    if requests.is_empty() {
+        return;
+    }
+    let disks = listing
+        .disks
+        .as_mut()
+        .expect("a fresh listing holds its disks");
+    let refreshed = refresh_capacities(disks, &requests);
+    assert_eq!(
+        refreshed.len(),
+        requests.len(),
+        "every local volume refreshed"
+    );
+
+    for request in &mut requests {
+        request.device = request.device.map(|device| device ^ 1);
+    }
+    let kept = refresh_capacities(disks, &requests);
+    assert!(
+        kept.is_empty(),
+        "no volume on a changed device was refreshed"
+    );
 }

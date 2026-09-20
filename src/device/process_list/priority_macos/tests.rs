@@ -85,9 +85,20 @@ fn nice_matches_getpriority_for_this_process() {
     assert!((0..=127).contains(&priority), "priority {priority}");
 }
 
-/// A child started under `nice -n 7` reads nice 7.
+/// A child started under `nice -n 7` reads its parent's nice plus 7.
+///
+/// `nice -n` is relative to the caller, and the caller is not always at
+/// nice 0: a hosted CI runner starts jobs at nice -10, where the child reads
+/// -3. The expectation is computed from this process's own value, capped at
+/// `PRIO_MAX`, so the assertion is the same on a workstation (0 + 7).
 #[test]
 fn reads_the_nice_value_of_a_reniced_child() {
+    let Some(own_nice) = direct_nice(std::process::id()) else {
+        return;
+    };
+    // `PRIO_MAX` (20) is the top of the nice range; libc does not export it.
+    let expected = (own_nice + 7).min(20);
+
     let Ok(mut child) = new_command("/usr/bin/nice")
         .args(["-n", "7", "/bin/sleep", "10"])
         .spawn()
@@ -100,14 +111,17 @@ fn reads_the_nice_value_of_a_reniced_child() {
     // poll until the child has got that far.
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut seen = lookup(pid);
-    while seen.1 != 7 && Instant::now() < deadline {
+    while seen.1 != expected && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(20));
         seen = lookup(pid);
     }
 
     let _ = child.kill();
     let _ = child.wait();
-    assert_eq!(seen.1, 7, "child read as {seen:?}");
+    assert_eq!(
+        seen.1, expected,
+        "child read as {seen:?} with the parent at nice {own_nice}"
+    );
 }
 
 /// A PID that no longer exists falls back to the unknown pair instead of
