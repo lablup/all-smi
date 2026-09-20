@@ -159,8 +159,11 @@ fn full_tick_cpu_percent_is_not_inflated() {
         one_tick > 10.0,
         "yes should be visibly busy, read {one_tick}"
     );
+    // A single-threaded `yes` cannot legitimately exceed one core; the
+    // defect reads about five. The ratio guards against a reference second
+    // in which `yes` was starved.
     assert!(
-        five_tick < 2.0 * one_tick,
+        five_tick < 200.0 && five_tick < 3.0 * one_tick,
         "the full-tick reading {five_tick} is inflated against a one-second reading of {one_tick}"
     );
 }
@@ -207,11 +210,12 @@ fn sampler_matches_sysinfo_for_the_same_instant() {
         let Some(Sampled::Live(sample)) = samples.get(&pid) else {
             panic!("pid {pid} should be live and inspectable");
         };
-        assert_eq!(
-            sample.state,
-            convert_process_state(process.status()),
-            "pid {pid}"
-        );
+        // Thread 0 of this test binary flips between running and waiting
+        // between the two reads; the sleeping child's does not, so only its
+        // state is compared exactly.
+        if pid == child_pid {
+            assert_eq!(sample.state, convert_process_state(process.status()));
+        }
         assert_eq!(sample.start_time, process.start_time(), "pid {pid}");
         assert!(
             sample.run_time.abs_diff(process.run_time()) <= 1,

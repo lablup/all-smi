@@ -153,9 +153,12 @@ impl ProcessSampler {
 
     /// Sample every PID in `pids`, updating its baseline.
     ///
-    /// Each PID costs three `proc_pidinfo` calls, about 2.6 us together on
-    /// an M1 Ultra, so a tracked set of 500 samples in about 1.3 ms and the
-    /// whole table in about 2.6 ms.
+    /// Each inspectable PID costs three `proc_pidinfo` calls and an
+    /// uninspectable one a single failed call, about 2.6 us per PID when
+    /// measured on its own on an M1 Ultra. Inside a tick (`perf_tick_stages`,
+    /// 986 processes) the pass over the tracked 500, which are the
+    /// inspectable ones, averaged 4.1 ms, and the pass over the whole table
+    /// 4.0 ms, against 16.3 ms for the sysinfo refresh it replaces.
     pub fn sample<I: IntoIterator<Item = u32>>(&mut self, pids: I) -> HashMap<u32, Sampled> {
         let now_secs = epoch_secs();
         pids.into_iter()

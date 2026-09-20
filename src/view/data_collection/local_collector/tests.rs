@@ -643,8 +643,10 @@ async fn full_tick_does_not_inflate_untracked_processes() {
         one_tick > 10.0,
         "yes should be visibly busy, read {one_tick}"
     );
+    // One core is the ceiling for a single-threaded `yes`; the defect reads
+    // about five. The ratio guards against a starved reference second.
     assert!(
-        five_tick < 2.0 * one_tick,
+        five_tick < 200.0 && five_tick < 3.0 * one_tick,
         "full-tick reading {five_tick} is inflated against a one-second reading of {one_tick}"
     );
 }
