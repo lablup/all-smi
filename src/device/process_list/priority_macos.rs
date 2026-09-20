@@ -14,7 +14,8 @@
 
 //! Scheduler priority and nice value of a macOS process, read in-process.
 //!
-//! Two libc calls per process and nothing else. This module deliberately has
+//! Two libc calls per process and nothing else (the `proc_pidinfo` read is
+//! shared with the process sampler, see `pidinfo_macos`). This module deliberately has
 //! no way to start a program: the process list used to run `ps` once for
 //! every PID it had not seen before, about 1,070 spawns on the first tick of
 //! an M5 Max and one per new PID on every full refresh after that. A test in
@@ -74,26 +75,9 @@ fn nice(pid: u32) -> Option<i32> {
 
 /// The task's base scheduler priority, `None` when the kernel will not say.
 fn base_priority(pid: u32) -> Option<i32> {
-    let pid = libc::c_int::try_from(pid).ok()?;
-    let size = std::mem::size_of::<libc::proc_taskinfo>();
-    let mut info = std::mem::MaybeUninit::<libc::proc_taskinfo>::zeroed();
-    // SAFETY: `info` is a writable buffer of exactly `size` bytes and
-    // `proc_pidinfo` writes at most the buffer size it is given.
-    let written = unsafe {
-        libc::proc_pidinfo(
-            pid,
-            libc::PROC_PIDTASKINFO,
-            0,
-            info.as_mut_ptr().cast(),
-            size as libc::c_int,
-        )
-    };
-    if usize::try_from(written).ok()? != size {
-        return None;
-    }
-    // SAFETY: the buffer started zeroed and the kernel filled all of it
-    // (checked above); every field is a plain integer.
-    Some(unsafe { info.assume_init() }.pti_priority)
+    super::pidinfo_macos::read::<libc::proc_taskinfo>(pid)
+        .ok()
+        .map(|info| info.pti_priority)
 }
 
 #[cfg(test)]

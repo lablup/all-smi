@@ -40,6 +40,26 @@ async fn initialized_collector() -> LocalCollector {
     collector
 }
 
+/// A full-refresh process pass through the same function the collector
+/// runs on the blocking pool, so a test that replicates a tick measures and
+/// compares the real path (on macOS, the native sampler; issue #427).
+fn full_process_pass(collector: &LocalCollector, gpu_pids: &HashSet<u32>) -> Vec<ProcessInfo> {
+    #[cfg(target_os = "macos")]
+    {
+        process_pass(
+            &collector.process_cache,
+            &collector.process_sampler,
+            &[],
+            true,
+            gpu_pids,
+        )
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        process_pass(&collector.process_cache, &[], true, gpu_pids)
+    }
+}
+
 fn summarize(label: &str, samples: &[Duration]) -> Duration {
     let mut sorted = samples.to_vec();
     sorted.sort();
@@ -165,20 +185,8 @@ async fn measure_collection_arms() {
             storage.push(t.elapsed());
         }
         {
-            let cache = Arc::clone(&collector.process_cache);
             let t = std::time::Instant::now();
-            let _ = with_global_system(|system| {
-                use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, UpdateKind};
-                let refresh_kind = ProcessRefreshKind::nothing()
-                    .with_cpu()
-                    .with_memory()
-                    .with_user(UpdateKind::OnlyIfNotSet);
-                system.refresh_processes_specifics(ProcessesToUpdate::All, true, refresh_kind);
-                system.refresh_memory();
-                let gpu_pids: HashSet<u32> = HashSet::new();
-                let mut cache = cache.write().unwrap();
-                update_process_cache(system, &gpu_pids, &mut cache)
-            });
+            let _ = full_process_pass(&collector, &HashSet::new());
             processes.push(t.elapsed());
         }
 
@@ -271,18 +279,7 @@ async fn collect_reference(collector: &LocalCollector) -> CollectionData {
         .flat_map(|reader| reader.get_memory_info())
         .collect();
 
-    let process_cache = Arc::clone(&collector.process_cache);
-    let all_processes = with_global_system(|system| {
-        use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, UpdateKind};
-        let refresh_kind = ProcessRefreshKind::nothing()
-            .with_cpu()
-            .with_memory()
-            .with_user(UpdateKind::OnlyIfNotSet);
-        system.refresh_processes_specifics(ProcessesToUpdate::All, true, refresh_kind);
-        system.refresh_memory();
-        let mut cache = process_cache.write().unwrap();
-        update_process_cache(system, &gpu_pids, &mut cache)
-    });
+    let all_processes = full_process_pass(collector, &gpu_pids);
     let mut all_processes = merge_gpu_processes(all_processes, gpu_processes);
     all_processes.sort_by(|a, b| {
         b.cpu_percent
@@ -580,5 +577,74 @@ async fn first_iteration_collection_reports_startup_status() {
         ],
         "startup status lines landed in the wrong slots: {:?}",
         state.startup_status_lines
+    );
+}
+
+/// Issue #427, defect 2, through the real steady-state path: a busy process
+/// kept out of the tracked set for four selective ticks must not read about
+/// five times its share on the full tick that follows. The collector
+/// recomputes the tracked set every tick from the top-N rows, where a
+/// process burning a core always lands, so the test overrides it after every
+/// tick to keep the child out.
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn full_tick_does_not_inflate_untracked_processes() {
+    let _serialize = TEST_LOCK.lock().await;
+    let Ok(mut busy) = crate::utils::command::new_command("/usr/bin/yes")
+        .stdout(std::process::Stdio::null())
+        .spawn()
+    else {
+        return;
+    };
+    let pid = busy.id();
+    let collector = initialized_collector().await;
+    let reading = |data: &CollectionData| {
+        data.process_info
+            .iter()
+            .find(|p| p.pid == pid)
+            .map(|p| p.cpu_percent)
+    };
+
+    // Cycle 0 is the full tick that discovers the child; cycles 1 to 4 are
+    // selective and must not track it; cycle 5 is the full tick under test.
+    collector.refresh_cycle.store(0, Ordering::Relaxed);
+    let _ = collector.collect_steady_state().await;
+    let mut five_tick = None;
+    let mut one_tick = None;
+    for cycle in 1..=6 {
+        let without_child: Vec<sysinfo::Pid> = collector
+            .tracked_pids
+            .read()
+            .await
+            .iter()
+            .copied()
+            .filter(|tracked| tracked.as_u32() != pid)
+            .collect();
+        *collector.tracked_pids.write().await = without_child;
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let data = collector.collect_steady_state().await;
+        match cycle {
+            5 => five_tick = reading(&data),
+            6 => one_tick = reading(&data),
+            _ => {}
+        }
+    }
+    let _ = busy.kill();
+    let _ = busy.wait();
+
+    let (five_tick, one_tick) = (
+        five_tick.expect("row on tick 5"),
+        one_tick.expect("row on tick 6"),
+    );
+    println!(
+        "yes through collect_steady_state: five-tick {five_tick:.2} %, one-tick {one_tick:.2} %"
+    );
+    assert!(
+        one_tick > 10.0,
+        "yes should be visibly busy, read {one_tick}"
+    );
+    assert!(
+        five_tick < 2.0 * one_tick,
+        "full-tick reading {five_tick} is inflated against a one-second reading of {one_tick}"
     );
 }

@@ -650,7 +650,7 @@ The trait defines a unified interface for all data collection strategies, enabli
 - Implements lazy initialization pattern
 - Features:
   - Direct hardware access via platform APIs
-  - Process information collection (on macOS, priority and nice come from `proc_pidinfo` and `getpriority` in-process; nothing is spawned per PID)
+  - Process information collection (on macOS, per-tick CPU percent, memory, state and run time come from a native `proc_pidinfo` sampler in `src/device/process_list/sampler_macos.rs`, and sysinfo refreshes processes only on every fifth tick, where it discovers new processes and supplies their static metadata; priority and nice come from `proc_pidinfo` and `getpriority` in-process; nothing is spawned per PID)
   - Storage metrics gathering through the shared disk cache
   - System information aggregation
 
