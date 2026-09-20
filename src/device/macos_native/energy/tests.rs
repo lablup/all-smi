@@ -35,13 +35,13 @@ const M5_MAX_PUBLICATION_SPANS_MS: [f64; 19] = [
     2160.7, 2162.5, 2168.7, 2175.4, 2176.3, 2182.6, 2228.1,
 ];
 
-const MS: u64 = 1_000_000;
+pub(super) const MS: u64 = 1_000_000;
 
-fn ms(value: f64) -> u64 {
+pub(super) fn ms(value: f64) -> u64 {
     (value * 1e6).round() as u64
 }
 
-fn inventory(tsv: &str) -> Vec<(&str, &str)> {
+pub(super) fn inventory(tsv: &str) -> Vec<(&str, &str)> {
     tsv.lines()
         .filter(|line| !line.is_empty() && !line.starts_with('#'))
         .map(|line| {
@@ -51,7 +51,12 @@ fn inventory(tsv: &str) -> Vec<(&str, &str)> {
         .collect()
 }
 
-fn obs(channel: &str, unit: &str, value: i64, timestamp_ns: Option<u64>) -> EnergyObservation {
+pub(super) fn obs(
+    channel: &str,
+    unit: &str,
+    value: i64,
+    timestamp_ns: Option<u64>,
+) -> EnergyObservation {
     EnergyObservation {
         channel: channel.to_string(),
         unit: unit.to_string(),
@@ -65,11 +70,11 @@ fn cpu(value: i64, ts: u64) -> EnergyObservation {
 }
 
 /// Counter value for `watts` sustained over `secs`, in `unit`.
-fn counts(watts: f64, unit: &str, secs: f64) -> i64 {
+pub(super) fn counts(watts: f64, unit: &str, secs: f64) -> i64 {
     (watts * secs / joules_per_count(unit)).round() as i64
 }
 
-fn assert_watts(actual: f64, expected: f64) {
+pub(super) fn assert_watts(actual: f64, expected: f64) {
     assert!(
         (actual - expected).abs() < 1e-6,
         "expected {expected} W, got {actual} W"
@@ -541,7 +546,7 @@ fn publications(watts: f64) -> Vec<(u64, i64)> {
 
 /// Poll the driver's published state every `poll_ms`. Returns the tracker's
 /// reading after each poll, and what energy over the poll window gives.
-fn poll(publications: &[(u64, i64)], poll_ms: u64) -> (Vec<f64>, Vec<f64>) {
+pub(super) fn poll(publications: &[(u64, i64)], poll_ms: u64) -> (Vec<f64>, Vec<f64>) {
     let mut tracker = EnergyTracker::default();
     let mut readings = vec![];
     let mut windowed = vec![];
@@ -567,7 +572,7 @@ fn poll(publications: &[(u64, i64)], poll_ms: u64) -> (Vec<f64>, Vec<f64>) {
 }
 
 /// After the first span closes, every reading must be the load itself.
-fn assert_steady(readings: &[f64], watts: f64, min_checked: usize) {
+pub(super) fn assert_steady(readings: &[f64], watts: f64, min_checked: usize) {
     let first = readings
         .iter()
         .position(|w| *w > 0.0)
