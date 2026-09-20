@@ -416,6 +416,7 @@ fn fake_worker(
             results,
             in_flight: true,
             overran: false,
+            last_wait: Duration::ZERO,
             thread: None,
         },
         job_receiver,
@@ -441,15 +442,24 @@ fn a_hung_capacity_refresh_returns_the_previous_values_within_the_budget() {
         let during = cache.storage_info("h");
         let elapsed = started.elapsed();
 
-        // The wait itself is exactly the budget; the slack is for scheduling
-        // on a loaded runner, not for a longer wait.
+        // The wait itself is the budget. A hosted runner has been seen to
+        // hand a 50 ms `recv_timeout` back after 160 ms, so the wall-clock
+        // bound here only tells a bounded wait from a hang; what the tick
+        // was prepared to wait is asserted exactly below.
         assert!(
-            elapsed < CAPACITY_REFRESH_BUDGET * 3,
+            elapsed < CAPACITY_REFRESH_BUDGET + Duration::from_secs(1),
             "storage_info took {elapsed:?} against a {CAPACITY_REFRESH_BUDGET:?} budget"
         );
         assert!(
             elapsed >= CAPACITY_REFRESH_BUDGET,
             "the tick waited out the budget"
+        );
+        let worker = cache.capacity.as_ref().expect("the worker is kept");
+        assert!(
+            worker.last_wait <= CAPACITY_REFRESH_BUDGET
+                && worker.last_wait > CAPACITY_REFRESH_BUDGET / 2,
+            "the first tick waits up to the budget, not {:?}",
+            worker.last_wait
         );
         let rows = |rows: &[StorageInfo]| -> Vec<(String, u64, u64)> {
             rows.iter()
@@ -476,13 +486,18 @@ fn a_hung_capacity_refresh_returns_the_previous_values_within_the_budget() {
             let later = cache.storage_info("h");
             let elapsed = started.elapsed();
             assert!(
-                elapsed < CAPACITY_REFRESH_BUDGET / 2,
-                "a later tick waited {elapsed:?} on the same hung refresh"
+                elapsed < CAPACITY_REFRESH_BUDGET + Duration::from_secs(1),
+                "a later tick took {elapsed:?} on the same hung refresh"
             );
             assert_eq!(rows(&later), rows(&before));
+            let worker = cache.capacity.as_ref().expect("the worker is kept");
+            assert_eq!(
+                worker.last_wait,
+                Duration::ZERO,
+                "a later tick does not wait on the overrun job"
+            );
+            assert!(worker.in_flight && worker.overran);
         }
-        let worker = cache.capacity.as_ref().expect("the worker is kept");
-        assert!(worker.in_flight && worker.overran);
     }
 }
 

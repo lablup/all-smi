@@ -183,6 +183,11 @@ pub(super) struct CapacityWorker {
     /// Whether a tick has already waited the budget out for the in-flight
     /// job; later ticks then only check for its result (module docs).
     pub(super) overran: bool,
+    /// How long the most recent tick was prepared to wait for the worker:
+    /// up to the budget, or zero once the job has overrun. Diagnostic; the
+    /// tests read it because wall-clock time on a loaded runner cannot tell
+    /// a zero wait from a preempted one.
+    pub(super) last_wait: std::time::Duration,
     /// The thread, kept so a test can observe it exit; never joined.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(super) thread: Option<JoinHandle<()>>,
@@ -215,6 +220,7 @@ impl CapacityWorker {
             results,
             in_flight: false,
             overran: false,
+            last_wait: std::time::Duration::ZERO,
             thread: Some(thread),
         })
     }

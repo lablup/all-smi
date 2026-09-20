@@ -377,6 +377,7 @@ impl DiskCache {
         } else {
             deadline.saturating_duration_since(Instant::now())
         };
+        worker.last_wait = wait;
         match worker.results.recv_timeout(wait) {
             Ok(result) => {
                 worker.in_flight = false;
