@@ -41,10 +41,15 @@
 //!
 //! ## Budget after an overrun
 //!
-//! A tick that finds the in-flight refresh already past its budget (an
-//! earlier tick waited the budget out) does not wait again: it only checks
-//! whether the result has arrived. So a volume that hangs for good costs one
-//! budget's wait once, and effectively nothing per tick after that.
+//! Once a tick has waited the budget out, later ticks do not wait for the
+//! worker at all: each only checks whether a result has arrived, and sends
+//! the next job once the previous one has finished. That stays in force
+//! until a refresh completes within the budget again (the worker reports
+//! how long each one took), so a volume that hangs for good costs one
+//! budget's wait once and nothing per tick after that, and a volume whose
+//! refresh takes just over the budget also costs nothing per tick, showing
+//! values one tick old, instead of alternating a full wait and a free tick.
+//! A refresh that is fast again clears the state and ticks wait as before.
 //!
 //! ## Worker lifetime
 //!
@@ -107,6 +112,9 @@ pub(super) struct CapacityJob {
 pub(super) struct CapacityResult {
     pub(super) generation: u64,
     pub(super) disks: Disks,
+    /// How long the refresh itself took, measured by the worker; what
+    /// decides whether ticks go back to waiting (module docs).
+    pub(super) took: std::time::Duration,
     /// `(volume position, total bytes, available bytes)` for each volume the
     /// refresh could read. Volumes it could not are left out and keep their
     /// previous values.
@@ -180,8 +188,8 @@ pub(super) struct CapacityWorker {
     pub(super) results: Receiver<CapacityResult>,
     /// Whether a job has been sent whose result has not been received.
     pub(super) in_flight: bool,
-    /// Whether a tick has already waited the budget out for the in-flight
-    /// job; later ticks then only check for its result (module docs).
+    /// Whether a refresh has overrun the budget and none has completed
+    /// within it since; ticks then only check for results (module docs).
     pub(super) overran: bool,
     /// How long the most recent tick was prepared to wait for the worker:
     /// up to the budget, or zero once the job has overrun. Diagnostic; the
@@ -203,10 +211,12 @@ impl CapacityWorker {
             .spawn(move || {
                 // Ends when the cache that owns the job sender is dropped.
                 while let Ok(mut job) = job_receiver.recv() {
+                    let started = std::time::Instant::now();
                     let capacities = refresh_capacities(&mut job.disks, &job.requests);
                     let result = CapacityResult {
                         generation: job.generation,
                         disks: job.disks,
+                        took: started.elapsed(),
                         capacities,
                     };
                     if result_sender.send(result).is_err() {

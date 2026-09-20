@@ -551,6 +551,7 @@ fn a_late_capacity_result_is_applied_on_the_next_tick() {
         let _ = answer.send(CapacityResult {
             generation,
             disks,
+            took: CAPACITY_REFRESH_BUDGET * 4,
             capacities: vec![(0, total, 12_345)],
         });
     });
@@ -570,8 +571,59 @@ fn a_late_capacity_result_is_applied_on_the_next_tick() {
         !worker.in_flight,
         "the tick that took a late result started no job"
     );
+    assert!(
+        worker.overran,
+        "a refresh that took longer than the budget keeps later ticks from waiting"
+    );
     let listing = cache.listing.as_ref().expect("a list");
     assert!(listing.disks.is_some(), "the disks came back");
+}
+
+/// After an overrun, ticks keep not waiting while refreshes take longer
+/// than the budget, and go back to waiting once one completes within it.
+#[test]
+fn ticks_wait_again_only_once_a_refresh_completes_within_the_budget() {
+    let mut cache = DiskCache::new();
+    let _ = cache.storage_info("h");
+    let listing = cache.listing.as_mut().expect("a list");
+    if listing.volumes.is_empty() {
+        return;
+    }
+    let generation = listing.generation;
+    let total = listing.volumes[0].total_bytes;
+
+    for (took, expect_overran) in [
+        (CAPACITY_REFRESH_BUDGET * 2, true),
+        (CAPACITY_REFRESH_BUDGET, false),
+    ] {
+        let disks = cache
+            .listing
+            .as_mut()
+            .and_then(|listing| listing.disks.take())
+            .expect("the listing holds its disks");
+        let (answer, results) = mpsc::channel::<CapacityResult>();
+        let (mut worker, _jobs) = fake_worker(results);
+        worker.overran = true;
+        cache.capacity = Some(worker);
+        answer
+            .send(CapacityResult {
+                generation,
+                disks,
+                took,
+                capacities: vec![(0, total, 4_321)],
+            })
+            .expect("receiver alive");
+
+        let rows = cache.storage_info("h");
+        assert_eq!(rows[0].available_bytes, 4_321, "the result was applied");
+        let worker = cache.capacity.as_ref().expect("the worker is kept");
+        assert_eq!(
+            worker.last_wait,
+            Duration::ZERO,
+            "a tick after an overrun does not wait"
+        );
+        assert_eq!(worker.overran, expect_overran, "refresh took {took:?}");
+    }
 }
 
 /// A result from before the list was replaced is discarded: its values
@@ -595,6 +647,7 @@ fn a_capacity_result_for_a_replaced_list_is_discarded() {
         .send(CapacityResult {
             generation: stale_generation,
             disks,
+            took: CAPACITY_REFRESH_BUDGET * 4,
             capacities: vec![(0, total, 12_345)],
         })
         .expect("receiver alive");

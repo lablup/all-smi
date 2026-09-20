@@ -136,8 +136,9 @@
 //!   error propagates and the readers fall back to their documented absence
 //!   encoding (see the degradation policy above): a subscription that dies
 //!   mid-session must not keep reporting its last live residency and power
-//!   as if the GPU were still being read. A tick that produced no new
-//!   sample, for either reason, reports a zero sample cost.
+//!   as if the GPU were still being read. Such a collection reports the
+//!   cost of the call it made and `ioreport_sampled = false`; only a
+//!   collection that made no IOReport call at all reports a zero cost.
 //! * [`CACHE_DURATION_MS`](NativeMetricsManager::CACHE_DURATION_MS) still
 //!   serves every reader within one tick; the reuse gate sits behind it, so
 //!   SMC and thermal state are still collected on every uncached call.
@@ -252,6 +253,10 @@ impl Default for NativeMetricsConfig {
 pub struct CollectionTimings {
     /// `IOReportCreateSamples` for the residency sample. This is the
     /// provider's own cost, paid per sample whatever the subscription holds.
+    /// What the collection actually paid: zero on a collection that made no
+    /// IOReport call (a reused window), the call's duration when one was
+    /// made even if it produced no new window (a failed or too-short
+    /// sample).
     pub ioreport_sample: Duration,
     /// Everything else IOReport: reading the energy channels out of the raw
     /// sample, the residency delta, and turning it into cluster metrics. On
@@ -264,8 +269,9 @@ pub struct CollectionTimings {
     pub other: Duration,
     /// The whole collection.
     pub total: Duration,
-    /// Whether `IOReportCreateSamples` ran. When it did not, the collection
-    /// reused the previous window and `ioreport_sample` is zero.
+    /// Whether the collection produced a new IOReport window. Not the same
+    /// as "an IOReport call was made": a failed or too-short sample pays for
+    /// a call (`ioreport_sample` is nonzero) yet repeats the previous window.
     pub ioreport_sampled: bool,
     /// Whether the SMC temperature sensors were read, as opposed to the
     /// previous readings being repeated.
@@ -532,11 +538,16 @@ impl NativeMetricsManager {
             return Ok(data);
         }
 
-        // Acquire collection lock to prevent concurrent collections
+        // Acquire collection lock to prevent concurrent collections. It
+        // guards no data (`Mutex<()>`), only the critical section, so a
+        // panic while it was held, such as one on the detached warm-up
+        // thread, leaves nothing to corrupt; treating the poison as fatal
+        // would instead make every later collection in the process fail
+        // silently.
         let _lock = self
             .collection_lock
             .lock()
-            .map_err(|_| "Collection lock poisoned")?;
+            .unwrap_or_else(PoisonError::into_inner);
 
         // Second check: re-check cache after acquiring lock (another thread may have collected)
         if let (Ok(time_guard), Ok(data_guard)) =
@@ -639,9 +650,10 @@ impl NativeMetricsManager {
             Ok(None) => match window.metrics.clone() {
                 // A window too short to rate (the previous sample was under
                 // `MIN_DELTA_WINDOW` ago): the baseline is kept for the next
-                // collection and this one repeats the previous metrics. No
-                // new sample was produced, so no sample cost is reported.
-                Some(previous) => return Ok((previous, Duration::ZERO, false)),
+                // collection and this one repeats the previous metrics. The
+                // call was still made and paid for, so its duration is
+                // reported; no new window was produced.
+                Some(previous) => return Ok((previous, ioreport.last_sample_duration(), false)),
                 // The very first collection of a session has no baseline. It
                 // pays one blocking `sample_interval_ms` window so the caller
                 // gets data immediately instead of waiting a full poll for the
@@ -667,9 +679,12 @@ impl NativeMetricsManager {
             // last live values, so past the limit the error propagates and
             // the readers mark the fields absent. A session with no window
             // yet has nothing to fall back on either.
+            // The failed call still ran `IOReportCreateSamples` (its
+            // duration is recorded before the result is checked), so that
+            // cost is reported; no new window was produced.
             Err(err) => match window.metrics.clone() {
                 Some(previous) if ioreport_window_reusable(window.produced_at, now) => {
-                    return Ok((previous, Duration::ZERO, false));
+                    return Ok((previous, ioreport.last_sample_duration(), false));
                 }
                 _ => return Err(err.into()),
             },
@@ -718,7 +733,11 @@ unsafe impl Sync for NativeMetricsManager {}
 /// Initialize the global native metrics manager
 ///
 /// This should be called once at startup for macOS Apple Silicon systems.
-/// Also pre-collects first data sample to warm up the cache for faster startup.
+/// It also starts the first collection, which warms up the cache, on a
+/// background thread and returns before that collection finishes; the first
+/// reader to call [`NativeMetricsManager::collect_once`] waits for it (see
+/// `ensure_manager`). The manager is registered before it returns, so
+/// [`get_native_metrics_manager`] never sees a gap.
 ///
 /// # Arguments
 /// * `interval_ms` - Sample interval in milliseconds (minimum 50ms)

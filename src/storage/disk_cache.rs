@@ -327,7 +327,8 @@ impl DiskCache {
     ///
     /// One job per tick at most: a tick that finds the previous job still
     /// running only checks whether it has finished, and a tick that receives
-    /// a late result does not start another.
+    /// a late result does not start another. After an overrun no tick waits
+    /// until a refresh has completed within the budget again.
     fn refresh_capacity(&mut self) {
         let Some(listing) = self.listing.as_mut() else {
             return;
@@ -370,8 +371,9 @@ impl DiskCache {
             worker.in_flight = true;
         }
 
-        // A job that already outlived one budget is only checked for, not
-        // waited on again, so a hung volume costs the wait once.
+        // After an overrun, ticks only check for results until a refresh
+        // completes within the budget again (`capacity` module docs), so a
+        // hung or slow volume costs the wait once.
         let wait = if worker.overran {
             Duration::ZERO
         } else {
@@ -381,7 +383,9 @@ impl DiskCache {
         match worker.results.recv_timeout(wait) {
             Ok(result) => {
                 worker.in_flight = false;
-                worker.overran = false;
+                if result.took <= CAPACITY_REFRESH_BUDGET {
+                    worker.overran = false;
+                }
                 Self::take_capacity_result(listing, result);
             }
             Err(RecvTimeoutError::Timeout) => {

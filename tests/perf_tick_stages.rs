@@ -348,6 +348,10 @@ fn record_native_timings(stages: &mut Stages) {
     stages.smc.push(timings.smc);
     stages.native_other.push(timings.other);
     stages.native_total.push(timings.total);
+    // `ioreport_sampled` means a new window was produced. A failed or
+    // too-short sample still pays for `IOReportCreateSamples` and reports
+    // that in `ioreport_sample` (so it counts in the per-tick row above)
+    // but is not a sampled tick here.
     if timings.ioreport_sampled {
         stages.ioreport_sample_taken.push(timings.ioreport_sample);
     }
