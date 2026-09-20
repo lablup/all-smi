@@ -73,6 +73,18 @@
 //! share can block indefinitely, and a value up to 30 s old is acceptable for
 //! them. (sysinfo already leaves non-local volumes out of the list on macOS,
 //! and CIFS/NFS out of it on Linux, but other network filesystems get in.)
+//!
+//! ## The per-tick refresh is bounded (issue #414)
+//!
+//! Any other volume that stops answering would still have stalled the tick,
+//! so the per-tick capacity refresh runs on one worker thread and a tick
+//! waits at most [`CAPACITY_REFRESH_BUDGET`] for it, reporting the previous
+//! values when it does not finish in time. See [`capacity`] for the
+//! protocol, and for the Linux mount-identity check that keeps a volume
+//! unmounted between list refreshes from reporting its parent's capacity.
+
+mod capacity;
+mod volume;
 
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, TryRecvError};
 use std::time::{Duration, Instant};
@@ -81,6 +93,10 @@ use sysinfo::{DiskRefreshKind, Disks};
 
 use crate::storage::info::StorageInfo;
 use crate::utils::filter_docker_aware_disks;
+
+pub use capacity::CAPACITY_REFRESH_BUDGET;
+use capacity::{CapacityJob, CapacityRequest, CapacityResult, CapacityWorker, refresh_capacities};
+use volume::{Anchor, anchor_for, device_for, is_network_file_system};
 
 /// How often the mount table is enumerated again.
 pub const LIST_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
@@ -91,67 +107,6 @@ pub const LIST_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 /// background enumeration finishes, instead of stalling the caller.
 /// [`DiskCache::with_blocking_first_list`] does not use this bound.
 const INITIAL_LIST_WAIT: Duration = Duration::from_secs(2);
-
-/// Filesystem types whose capacity is not re-read between list refreshes.
-const NETWORK_FILE_SYSTEMS: &[&str] = &[
-    // macOS
-    "smbfs",
-    "afpfs",
-    "webdav",
-    "nfs",
-    // Linux
-    "nfs4",
-    "cifs",
-    "smb3",
-    "9p",
-    "ceph",
-    "glusterfs",
-    "fuse.glusterfs",
-    "fuse.sshfs",
-    "lustre",
-    // Cluster filesystems common on GPU cluster nodes
-    "gpfs",
-    "beegfs",
-    "wekafs",
-    "panfs",
-    "pvfs2",
-    "afs",
-    // Cloud-backed FUSE filesystems
-    "fuse.ceph-fuse",
-    "fuse.juicefs",
-    "fuse.rclone",
-    "fuse.s3fs",
-    "fuse.gcsfuse",
-];
-
-fn is_network_file_system(file_system: &str) -> bool {
-    NETWORK_FILE_SYSTEMS.contains(&file_system)
-}
-
-/// What one list refresh recorded about a macOS volume's available space.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Anchor {
-    /// Available space the fresh list reported (purgeable space counted as
-    /// free).
-    available: u64,
-    /// `statfs` free space right after the list was built.
-    free: u64,
-}
-
-/// Available space now, from `anchor` and `statfs` free space now.
-///
-/// Moves the anchored value by exactly the change in `statfs` free space
-/// since the anchor, saturating at zero and clamped to `total`.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-fn anchored_available(anchor: Anchor, free_now: u64, total: u64) -> u64 {
-    let available = if free_now >= anchor.free {
-        anchor.available.saturating_add(free_now - anchor.free)
-    } else {
-        anchor.available.saturating_sub(anchor.free - free_now)
-    };
-    available.min(total)
-}
 
 /// One row the storage panel shows, in display order.
 struct Volume {
@@ -165,12 +120,20 @@ struct Volume {
     /// until the next list refresh.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     anchor: Option<Anchor>,
+    /// On Linux, the device the mount point was on at list time (see
+    /// [`capacity`]); `None` elsewhere or when it could not be read.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    device: Option<u64>,
 }
 
 /// One enumeration of the mount table and the rows it produces.
 struct Listing {
-    disks: Disks,
+    /// `None` while the capacity worker holds them for a refresh.
+    disks: Option<Disks>,
     volumes: Vec<Volume>,
+    /// Assigned when the listing is installed in a cache; a capacity result
+    /// carrying another generation belongs to a replaced list.
+    generation: u64,
 }
 
 impl Listing {
@@ -182,28 +145,36 @@ impl Listing {
         let disks =
             Disks::new_with_refreshed_list_specifics(DiskRefreshKind::nothing().with_storage());
         let volumes = shown_volumes(&disks);
-        Self { disks, volumes }
+        Self {
+            disks: Some(disks),
+            volumes,
+            generation: 0,
+        }
     }
 
-    /// Bring the capacity of every shown volume up to date.
-    fn refresh_capacity(&mut self) {
-        for volume in self.volumes.iter_mut().filter(|volume| !volume.network) {
-            let Some(disk) = self.disks.list_mut().get_mut(volume.index) else {
-                continue;
-            };
+    /// What the worker needs for each volume whose capacity is refreshed on
+    /// the tick.
+    fn capacity_requests(&self) -> Vec<CapacityRequest> {
+        self.volumes
+            .iter()
+            .enumerate()
+            .filter(|(_, volume)| !volume.network)
+            .map(|(position, volume)| CapacityRequest {
+                volume: position,
+                disk: volume.index,
+                total_bytes: volume.total_bytes,
+                anchor: volume.anchor,
+                device: volume.device,
+            })
+            .collect()
+    }
 
-            #[cfg(target_os = "macos")]
-            if let Some(anchor) = volume.anchor
-                && let Some(free_now) = statfs_free_bytes(disk.mount_point())
-            {
-                volume.available_bytes = anchored_available(anchor, free_now, volume.total_bytes);
-            }
-
-            #[cfg(not(target_os = "macos"))]
-            {
-                disk.refresh_specifics(DiskRefreshKind::nothing().with_storage());
-                volume.total_bytes = disk.total_space();
-                volume.available_bytes = disk.available_space();
+    /// Take the capacities of a finished refresh into the rows.
+    fn apply_capacities(&mut self, capacities: &[(usize, u64, u64)]) {
+        for &(position, total_bytes, available_bytes) in capacities {
+            if let Some(volume) = self.volumes.get_mut(position) {
+                volume.total_bytes = total_bytes;
+                volume.available_bytes = available_bytes;
             }
         }
     }
@@ -231,55 +202,10 @@ fn shown_volumes(disks: &Disks) -> Vec<Volume> {
                 total_bytes: disk.total_space(),
                 available_bytes: disk.available_space(),
                 anchor: if network { None } else { anchor_for(disk) },
+                device: if network { None } else { device_for(disk) },
             })
         })
         .collect()
-}
-
-#[cfg(target_os = "macos")]
-fn anchor_for(disk: &sysinfo::Disk) -> Option<Anchor> {
-    Some(Anchor {
-        available: disk.available_space(),
-        free: statfs_free_bytes(disk.mount_point())?,
-    })
-}
-
-#[cfg(not(target_os = "macos"))]
-fn anchor_for(_disk: &sysinfo::Disk) -> Option<Anchor> {
-    None
-}
-
-/// Free space `statfs` reports for the volume mounted at `mount_point`.
-///
-/// `None` when the call fails or when `mount_point` is no longer a mount
-/// point. A volume unmounted from a directory that stays behind would
-/// otherwise report the free space of the filesystem holding that directory,
-/// moving the anchored value by an unrelated amount until the next list
-/// drops the row.
-#[cfg(target_os = "macos")]
-fn statfs_free_bytes(mount_point: &std::path::Path) -> Option<u64> {
-    use std::os::unix::ffi::OsStrExt;
-
-    let path = std::ffi::CString::new(mount_point.as_os_str().as_bytes()).ok()?;
-    let mut stat = std::mem::MaybeUninit::<libc::statfs>::uninit();
-    // SAFETY: `path` is a NUL-terminated string that outlives the call, and
-    // `stat` is a writable `statfs` that the call fills when it succeeds.
-    if unsafe { libc::statfs(path.as_ptr(), stat.as_mut_ptr()) } != 0 {
-        return None;
-    }
-    // SAFETY: `statfs` returned 0, so it initialized `stat`.
-    let stat = unsafe { stat.assume_init() };
-    // `f_mntonname` is a fixed-size array the kernel NUL-terminates. Compare
-    // up to the first NUL, bounded by the array, without relying on it.
-    let mounted_on = stat
-        .f_mntonname
-        .iter()
-        .map(|&c| c as u8)
-        .take_while(|&byte| byte != 0);
-    if !mounted_on.eq(path.as_bytes().iter().copied()) {
-        return None;
-    }
-    Some(stat.f_bavail.saturating_mul(u64::from(stat.f_bsize)))
 }
 
 /// Start enumerating on a background thread. `None` when no thread could be
@@ -309,6 +235,10 @@ pub struct DiskCache {
     listing: Option<Listing>,
     /// A list refresh running on a background thread.
     pending: Option<Receiver<Listing>>,
+    /// The per-tick capacity refresh's worker, started on first use.
+    capacity: Option<CapacityWorker>,
+    /// The generation the next installed listing gets.
+    next_generation: u64,
     /// When the most recent enumeration started, moved to when its list
     /// arrived once it does, so the next enumeration is due
     /// [`LIST_REFRESH_INTERVAL`] after the last list arrived, however long
@@ -353,6 +283,8 @@ impl DiskCache {
         Self {
             listing: None,
             pending: None,
+            capacity: None,
+            next_generation: 0,
             enumerated_at: None,
             waited_for_first_list: false,
             first_list_wait,
@@ -362,10 +294,10 @@ impl DiskCache {
     /// Storage rows for this tick.
     pub fn storage_info(&mut self, hostname: &str) -> Vec<StorageInfo> {
         self.update_listing();
-        let Some(listing) = self.listing.as_mut() else {
+        self.refresh_capacity();
+        let Some(listing) = self.listing.as_ref() else {
             return Vec::new();
         };
-        listing.refresh_capacity();
 
         listing
             .volumes
@@ -382,13 +314,98 @@ impl DiskCache {
             .collect()
     }
 
+    /// Make `listing` the one shown, under a new generation.
+    fn install_listing(&mut self, mut listing: Listing) {
+        listing.generation = self.next_generation;
+        self.next_generation = self.next_generation.wrapping_add(1);
+        self.listing = Some(listing);
+        self.enumerated_at = Some(Instant::now());
+    }
+
+    /// Bring the shown volumes' capacity up to date, within
+    /// [`CAPACITY_REFRESH_BUDGET`] (module docs and [`capacity`]).
+    ///
+    /// One job per tick at most: a tick that finds the previous job still
+    /// running only checks whether it has finished, and a tick that receives
+    /// a late result does not start another.
+    fn refresh_capacity(&mut self) {
+        let Some(listing) = self.listing.as_mut() else {
+            return;
+        };
+        let deadline = Instant::now() + CAPACITY_REFRESH_BUDGET;
+
+        let worker = match self.capacity.as_mut() {
+            Some(worker) => worker,
+            None => match CapacityWorker::spawn() {
+                Some(worker) => self.capacity.insert(worker),
+                None => {
+                    // No thread to run it on: refresh here, unbounded, as
+                    // before the worker existed.
+                    let requests = listing.capacity_requests();
+                    if let Some(disks) = listing.disks.as_mut() {
+                        let capacities = refresh_capacities(disks, &requests);
+                        listing.apply_capacities(&capacities);
+                    }
+                    return;
+                }
+            },
+        };
+
+        if !worker.in_flight {
+            let Some(disks) = listing.disks.take() else {
+                // The `Disks` are with a job that never came back; the next
+                // list brings new ones.
+                return;
+            };
+            let job = CapacityJob {
+                generation: listing.generation,
+                disks,
+                requests: listing.capacity_requests(),
+            };
+            if worker.jobs.send(job).is_err() {
+                // The worker thread is gone; start a fresh one next tick.
+                self.capacity = None;
+                return;
+            }
+            worker.in_flight = true;
+        }
+
+        let wait = deadline.saturating_duration_since(Instant::now());
+        match worker.results.recv_timeout(wait) {
+            Ok(result) => {
+                worker.in_flight = false;
+                Self::take_capacity_result(listing, result);
+            }
+            Err(RecvTimeoutError::Timeout) => {
+                tracing::debug!(
+                    budget_ms = CAPACITY_REFRESH_BUDGET.as_millis() as u64,
+                    "storage capacity refresh exceeded its budget; reporting the previous values"
+                );
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                // The worker thread died with the job. The `Disks` it held
+                // are lost until the next list; a fresh worker serves it.
+                self.capacity = None;
+            }
+        }
+    }
+
+    /// Apply a finished refresh to `listing`, or discard it when it belongs
+    /// to a list that has since been replaced.
+    fn take_capacity_result(listing: &mut Listing, result: CapacityResult) {
+        if result.generation != listing.generation {
+            return;
+        }
+        listing.disks = Some(result.disks);
+        listing.apply_capacities(&result.capacities);
+    }
+
     /// Start a list refresh when one is due and swap in one that finished.
     fn update_listing(&mut self) {
         if self.listing.is_none() && self.first_list_wait.is_none() {
             // No bound on the first list: build it here, as a direct
             // enumeration would. Later lists come from the background.
-            self.listing = Some(Listing::enumerate());
-            self.enumerated_at = Some(Instant::now());
+            self.install_listing(Listing::enumerate());
             return;
         }
 
@@ -400,8 +417,7 @@ impl DiskCache {
             self.pending = spawn_enumeration();
             if self.pending.is_none() && self.listing.is_none() {
                 // No thread to run it on, and no list to show meanwhile.
-                self.listing = Some(Listing::enumerate());
-                self.enumerated_at = Some(Instant::now());
+                self.install_listing(Listing::enumerate());
             }
         }
 
@@ -423,9 +439,8 @@ impl DiskCache {
 
         match received {
             Ok(listing) => {
-                self.listing = Some(listing);
                 self.pending = None;
-                self.enumerated_at = Some(Instant::now());
+                self.install_listing(listing);
             }
             // Still enumerating: keep showing the previous list.
             Err(TryRecvError::Empty) => {}
