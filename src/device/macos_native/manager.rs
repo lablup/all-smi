@@ -638,8 +638,10 @@ impl NativeMetricsManager {
                 }
             },
             // A failed sample keeps the previous window and leaves the gate
-            // untouched, so the next collection retries. Only a session with
-            // no window yet has nothing to fall back on.
+            // untouched, so the next collection retries: against the old
+            // baseline when `IOReportCreateSamples` itself failed, or against
+            // the sample just taken when only the delta failed. Only a
+            // session with no window yet has nothing to fall back on.
             Err(err) => match window.metrics.clone() {
                 Some(previous) => return Ok((previous, ioreport.last_sample_duration(), true)),
                 None => return Err(err.into()),

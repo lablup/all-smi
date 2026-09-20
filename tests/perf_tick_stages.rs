@@ -144,7 +144,8 @@ fn perf_tick_stages() {
     let gpu_readers = get_gpu_readers();
     let memory_readers = get_memory_readers();
     let chassis_reader = create_chassis_reader();
-    println!("reader construction: {}", ms(setup.elapsed()));
+    let t_construction = setup.elapsed();
+    println!("reader construction: {}", ms(t_construction));
 
     let hostname = get_hostname();
     let mut disks = DiskCache::new();
@@ -249,6 +250,12 @@ fn perf_tick_stages() {
                 ("process refresh (full)", t_refresh),
                 ("update_process_cache", t_cache),
                 ("whole tick", t_tick),
+                // Since #414 the warm-up waits overlap reader construction,
+                // so the two only add up to time to first data together.
+                (
+                    "reader construction + whole tick (time to first data)",
+                    t_construction + t_tick,
+                ),
             ];
             continue;
         }

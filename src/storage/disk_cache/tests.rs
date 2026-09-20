@@ -579,7 +579,10 @@ fn a_mount_point_on_another_device_keeps_its_previous_values() {
     );
 
     let mut listing = Listing::enumerate();
+    // Only volumes whose device was recorded can be told apart from their
+    // parent; one whose `stat` failed at list time is refreshed as before.
     let mut requests = listing.capacity_requests();
+    requests.retain(|request| request.device.is_some());
     if requests.is_empty() {
         return;
     }

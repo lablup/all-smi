@@ -569,8 +569,8 @@ async fn first_iteration_collection_reports_startup_status() {
     assert_eq!(
         state.startup_status_lines,
         vec![
-            "✓ Initializing GPU readers...",
             "✓ Initializing CPU readers...",
+            "✓ Initializing GPU readers...",
             "✓ Initializing memory readers...",
             "✓ GPU information collected",
             "✓ CPU information collected",
