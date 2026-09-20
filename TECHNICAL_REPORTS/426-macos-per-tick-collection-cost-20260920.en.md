@@ -75,7 +75,7 @@ The issue asked for the `KERN_PROCARGS2` share to be measured first. On this hos
 | the three `proc_pidinfo` calls, tracked | 1.924 ms |
 | `proc_listallpids` | 0.089 ms |
 
-The `KERN_PROCARGS2` pair is about 77 percent of the selective refresh, which makes it the largest remaining per-tick cost in `local`, and the three `proc_pidinfo` calls that would replace it cost 1.924 ms, a factor of 14 less. The bypass was still rejected: `proc_pidinfo` cannot reproduce sysinfo's `cpu_usage`, which is task time over sysinfo's own private interval and per-process baselines, nor its `status` source, so displayed values would change on every selective tick, which the issue forbids. The remaining path is an upstream sysinfo guard that skips the call when `name`, `exe`, `cmd`, and `environ` are already known, followed by a version bump here. Issue #414 stays open at `status:ready` for that item alone.
+The `KERN_PROCARGS2` pair is about 77 percent of the selective refresh, which makes it the largest remaining per-tick cost in `local`, and the three `proc_pidinfo` calls that would replace the whole selective refresh cost 1.924 ms, a factor of 14 less. The bypass was still rejected: `proc_pidinfo` cannot reproduce sysinfo's `cpu_usage`, which is task time over sysinfo's own private interval and per-process baselines, nor its `status` source, so displayed values would change on every selective tick, which the issue forbids. The remaining path is an upstream sysinfo guard that skips the call when `name`, `exe`, `cmd`, and `environ` are already known, followed by a version bump here. Issue #414 stays open at `status:ready` for that item alone.
 
 ---
 
@@ -99,7 +99,7 @@ The capacity refresh moved into two new modules, `src/storage/disk_cache/capacit
 
 `macos-unit-tests` runs on `macos-14` with no `needs`, in parallel with the Linux `test` job, reusing the checkout, `setup-protoc` (`osx-aarch_64`), and cargo cache steps of `launchd-service` under its own cache key. It runs `cargo test --lib device::macos_native`, `cargo test --lib storage`, and `cargo test --lib device::process_list`; tests that need real IOReport or SMC hardware detect the VM and skip.
 
-The first run failed two assumptions that only a hosted runner exposes. `reads_the_nice_value_of_a_reniced_child` expected an absolute nice of 7 from `nice -n 7`, but nice is relative to the caller and a hosted macOS runner starts jobs at nice -10, so the child read -3; the test now derives its expectation from this process's own nice, capped at 20, which is still 7 on a workstation. `a_hung_capacity_refresh_returns_the_previous_values_within_the_budget` failed because the runner handed a 50 ms `recv_timeout` back after 160 ms; wall-clock time on a loaded VM cannot tell a zero wait from a preempted one, so `CapacityWorker` records how long the most recent tick was prepared to wait and the test asserts that instead, keeping the wall-clock bound only as a hang guard.
+The first run failed two assumptions that only a hosted runner exposes. `reads_the_nice_value_of_a_reniced_child` expected an absolute nice of 7 from `nice -n 7`, but nice is relative to the caller and a hosted macOS runner starts jobs at nice -10, so the child read -3; the test now derives its expectation from this process's own nice plus 7, capped at 20, which is still 7 on a workstation. `a_hung_capacity_refresh_returns_the_previous_values_within_the_budget` failed because the runner handed a 50 ms `recv_timeout` back after 160 ms; wall-clock time on a loaded VM cannot tell a zero wait from a preempted one, so `CapacityWorker` records how long the most recent tick was prepared to wait and the test asserts that instead, keeping the wall-clock bound only as a hang guard.
 
 ---
 
@@ -126,7 +126,7 @@ The process refresh row is unchanged code, and the spread on this host is 12.8 t
 
 Against the acceptance criteria: the IOReport per-second cost halves (10.07 to 5.05 ms, sampled on 15 of 30 ticks); the SMC temperature cost falls 2.12 to 1.10 ms, which is 48 percent and therefore just short of the issue's "at least half", because a spaced-out read costs 2.75 ms against the 2.12 ms of an every-tick read; the first tick no longer pays the two warm-up waits serially (31 percent less time to first data); the storage bound costs 0.08 ms per tick.
 
-The #415 power check was re-run at `--interval 1` after the cadence change (release binary, four `yes` loads, 20 samples, 18:38, load 2.86 to 3.93). CPU power read 10.54 to 10.90 W with no 0 W sample, against a tracker mean of 10.75 W over 269 ticks with no zero tick and 10.768 W from the two `DIE_<n>_CPU Energy` channels over the 29.337 s common window. Every one of the 20 samples appears twice, which is the 2 s power resolution of section 2.2 shown directly.
+The #415 power check was re-run at `--interval 1` after the cadence change (release binary, four `yes` loads, 20 samples, 18:38, load 2.86 to 3.93). CPU power read 10.54 to 10.90 W with no 0 W sample, against a tracker mean of 10.75 W over 269 ticks with no zero tick and 10.768 W from the two `DIE_<n>_CPU Energy` channels over the 29.337 s common window. The 20 samples form 10 pairs of identical values, which is the 2 s power resolution of section 2.2 shown directly.
 
 ---
 

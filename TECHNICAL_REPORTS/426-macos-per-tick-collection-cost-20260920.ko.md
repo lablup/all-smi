@@ -75,7 +75,7 @@ PR #426은 Apple Silicon에서 비싼 네이티브 읽기 두 가지를 매 틱 
 | `proc_pidinfo` 세 호출, 추적 대상 | 1.924 ms |
 | `proc_listallpids` | 0.089 ms |
 
-`KERN_PROCARGS2` 쌍이 선택 갱신의 약 77 %이고, 이는 `local`에 남은 가장 큰 틱당 비용이다. 이를 대체할 `proc_pidinfo` 세 호출은 1.924 ms로 14분의 1 수준이다. 그럼에도 우회 경로는 기각했다. `proc_pidinfo`로는 sysinfo의 `cpu_usage`(sysinfo 자체의 내부 구간과 프로세스별 기준선 위에서 계산한 태스크 시간)도, `status`의 출처도 재현할 수 없어서 선택 갱신 틱마다 표시 값이 달라지는데, 이는 이슈가 금지한 것이다. 남은 길은 `name`, `exe`, `cmd`, `environ`이 이미 알려져 있으면 그 호출을 건너뛰는 상위 sysinfo 가드이고, 그 뒤 여기서 버전을 올리는 것이다. 이슈 #414는 오직 이 항목 때문에 `status:ready`로 열려 있다.
+`KERN_PROCARGS2` 쌍이 선택 갱신의 약 77 %이고, 이는 `local`에 남은 가장 큰 틱당 비용이다. 선택 갱신 전체를 대체할 `proc_pidinfo` 세 호출은 1.924 ms로 14분의 1 수준이다. 그럼에도 우회 경로는 기각했다. `proc_pidinfo`로는 sysinfo의 `cpu_usage`(sysinfo 자체의 내부 구간과 프로세스별 기준선 위에서 계산한 태스크 시간)도, `status`의 출처도 재현할 수 없어서 선택 갱신 틱마다 표시 값이 달라지는데, 이는 이슈가 금지한 것이다. 남은 길은 `name`, `exe`, `cmd`, `environ`이 이미 알려져 있으면 그 호출을 건너뛰는 상위 sysinfo 가드이고, 그 뒤 여기서 버전을 올리는 것이다. 이슈 #414는 오직 이 항목 때문에 `status:ready`로 열려 있다.
 
 ---
 
@@ -99,7 +99,7 @@ PR #426은 Apple Silicon에서 비싼 네이티브 읽기 두 가지를 매 틱 
 
 `macos-unit-tests`는 `macos-14`에서 `needs` 없이, Linux `test` 잡과 병렬로 돈다. `launchd-service`의 체크아웃, `setup-protoc`(`osx-aarch_64`), cargo 캐시 단계를 자체 캐시 키로 재사용한다. 실행하는 것은 `cargo test --lib device::macos_native`, `cargo test --lib storage`, `cargo test --lib device::process_list`이고, 실제 IOReport나 SMC 하드웨어가 필요한 테스트는 VM임을 감지해 건너뛴다.
 
-첫 실행에서 호스팅 러너에서만 드러나는 가정 두 개가 깨졌다. `reads_the_nice_value_of_a_reniced_child`는 `nice -n 7`의 결과로 절대 nice 7을 기대했지만 nice는 호출자 기준 상대값이고 호스팅 macOS 러너는 잡을 nice -10에서 시작하므로 자식은 -3을 읽었다. 이제 테스트는 자기 프로세스의 nice에서 기대값을 유도하고 20에서 자른다. 워크스테이션에서는 여전히 7이다. `a_hung_capacity_refresh_returns_the_previous_values_within_the_budget`는 러너가 50 ms `recv_timeout`을 160 ms 만에 돌려주면서 실패했다. 부하가 걸린 VM의 벽시계 시간으로는 기다림이 0인 것과 선점된 것을 구분할 수 없으므로, `CapacityWorker`가 가장 최근 틱이 기다릴 작정이었던 시간을 기록하고 테스트는 그것을 검증한다. 벽시계 경계는 행 방지용으로만 남겼다.
+첫 실행에서 호스팅 러너에서만 드러나는 가정 두 개가 깨졌다. `reads_the_nice_value_of_a_reniced_child`는 `nice -n 7`의 결과로 절대 nice 7을 기대했지만 nice는 호출자 기준 상대값이고 호스팅 macOS 러너는 잡을 nice -10에서 시작하므로 자식은 -3을 읽었다. 이제 테스트는 자기 프로세스의 nice에 7을 더한 값을 기대값으로 삼고 20에서 자른다. 워크스테이션에서는 여전히 7이다. `a_hung_capacity_refresh_returns_the_previous_values_within_the_budget`는 러너가 50 ms `recv_timeout`을 160 ms 만에 돌려주면서 실패했다. 부하가 걸린 VM의 벽시계 시간으로는 기다림이 0인 것과 선점된 것을 구분할 수 없으므로, `CapacityWorker`가 가장 최근 틱이 기다릴 작정이었던 시간을 기록하고 테스트는 그것을 검증한다. 벽시계 경계는 행 방지용으로만 남겼다.
 
 ---
 
@@ -126,7 +126,7 @@ Mac13,2, macOS 27.0 26A428, 프로세스 960개, 컴파일러 미실행. 기준�
 
 수용 기준에 대해서는 이렇다. IOReport의 초당 비용은 절반이 되었다(10.07 ms에서 5.05 ms, 30틱 중 15틱에서 샘플). SMC 온도 비용은 2.12 ms에서 1.10 ms로 48 % 줄어 이슈가 요구한 "최소 절반"에 조금 못 미친다. 띄엄띄엄 읽는 한 번이 매 틱 읽을 때의 2.12 ms보다 비싼 2.75 ms이기 때문이다. 첫 틱은 더 이상 예열 대기 두 개를 직렬로 지불하지 않는다(첫 데이터까지 31 % 단축). 스토리지 상한은 틱당 0.08 ms다.
 
-주기 변경 뒤 #415 전력 점검을 `--interval 1`로 다시 돌렸다(릴리스 바이너리, `yes` 부하 4개, 샘플 20개, 18:38, 로드 2.86~3.93). CPU 전력은 0 W 샘플 없이 10.54~10.90 W로 읽혔고, 같은 구간에서 트래커는 269틱 동안 0 W 틱 없이 평균 10.75 W, 두 `DIE_<n>_CPU Energy` 채널은 공통 구간 29.337 s에서 10.768 W였다. 샘플 20개가 모두 두 번씩 나타나는데, 이것이 2.2절의 2 s 전력 해상도를 그대로 보여주는 자료다.
+주기 변경 뒤 #415 전력 점검을 `--interval 1`로 다시 돌렸다(릴리스 바이너리, `yes` 부하 4개, 샘플 20개, 18:38, 로드 2.86~3.93). CPU 전력은 0 W 샘플 없이 10.54~10.90 W로 읽혔고, 같은 구간에서 트래커는 269틱 동안 0 W 틱 없이 평균 10.75 W, 두 `DIE_<n>_CPU Energy` 채널은 공통 구간 29.337 s에서 10.768 W였다. 샘플 20개는 값이 같은 쌍 10개를 이루는데, 이것이 2.2절의 2 s 전력 해상도를 그대로 보여주는 자료다.
 
 ---
 
