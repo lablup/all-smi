@@ -65,9 +65,10 @@ impl PidInfo for libc::proc_bsdinfo {
 
 /// `PROC_PIDTHREADINFO` takes a thread id as its argument. This module always
 /// passes 0, exactly as sysinfo does, because the sampler exists to reproduce
-/// sysinfo's status column: thread id 0 resolves for about a quarter of the
-/// inspectable processes and fails with `ESRCH` for the rest (265 of 636 on
-/// an M1 Ultra), and sysinfo reads every such failure as "running".
+/// sysinfo's status column: thread id 0 resolves for about two fifths of the
+/// inspectable processes and fails with `ESRCH` for the rest (on an M1 Ultra,
+/// 265 of 636 resolved and 371 failed in one probe run, 284 of 639 and 355 in
+/// the next), and sysinfo reads every such failure as "running".
 impl PidInfo for libc::proc_threadinfo {
     const FLAVOR: libc::c_int = libc::PROC_PIDTHREADINFO;
 }

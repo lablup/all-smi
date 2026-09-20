@@ -49,9 +49,9 @@
 //!    then went idle keeps its last non-zero percentage for as long as it
 //!    stays idle: a child that burned 1.44 percent for one second read 1.44
 //!    for the next five idle seconds, and `photolibraryd` read 33.78 percent
-//!    for a second in which its counter did not move. In a typical second
-//!    28 to 49 of the 636 inspectable processes on an M1 Ultra carried such
-//!    a stale value.
+//!    for a second in which its counter did not move. In the same probe run
+//!    28, 29 and 46 of the 639 inspectable processes on an M1 Ultra carried
+//!    such a stale value in three consecutive one-second windows.
 //!
 //! This sampler keeps, per PID, the previous `pti_total_user +
 //! pti_total_system` and the `mach_absolute_time` at which it was read, and
