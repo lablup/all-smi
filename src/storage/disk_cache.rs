@@ -370,17 +370,27 @@ impl DiskCache {
             worker.in_flight = true;
         }
 
-        let wait = deadline.saturating_duration_since(Instant::now());
+        // A job that already outlived one budget is only checked for, not
+        // waited on again, so a hung volume costs the wait once.
+        let wait = if worker.overran {
+            Duration::ZERO
+        } else {
+            deadline.saturating_duration_since(Instant::now())
+        };
         match worker.results.recv_timeout(wait) {
             Ok(result) => {
                 worker.in_flight = false;
+                worker.overran = false;
                 Self::take_capacity_result(listing, result);
             }
             Err(RecvTimeoutError::Timeout) => {
-                tracing::debug!(
-                    budget_ms = CAPACITY_REFRESH_BUDGET.as_millis() as u64,
-                    "storage capacity refresh exceeded its budget; reporting the previous values"
-                );
+                if !worker.overran {
+                    tracing::debug!(
+                        budget_ms = CAPACITY_REFRESH_BUDGET.as_millis() as u64,
+                        "storage capacity refresh exceeded its budget; reporting the previous values"
+                    );
+                }
+                worker.overran = true;
             }
             Err(RecvTimeoutError::Disconnected) => {
                 // The worker thread died with the job. The `Disks` it held

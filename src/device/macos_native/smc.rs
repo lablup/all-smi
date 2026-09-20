@@ -1168,9 +1168,11 @@ impl SmcSampler {
     /// How long temperatures are reused before being read again.
     ///
     /// Between 2 and 3 s, and away from both whole seconds so the cadence is
-    /// the same on every tick whatever the tick jitter: at `--interval 1`
-    /// every third tick reads, at 2 s every second tick, at 3 s and above
-    /// every tick.
+    /// the same whatever the tick jitter. The 5 s full read also reads the
+    /// temperatures and restarts this interval, so at `--interval 1` the
+    /// sensors are read on ticks 0, 3, 5, 8, 10, ... (two reads per 5 s,
+    /// 40 % of ticks), at 2 s on two of every three ticks, and at 3 s and
+    /// above on every tick.
     pub const TEMPERATURE_READ_INTERVAL: Duration = Duration::from_millis(2500);
 
     /// Whether a collection at `now` reads the temperature sensors, given
@@ -1495,9 +1497,10 @@ mod tests {
         assert_eq!(fans(&opened), fans(&kept));
     }
 
-    /// At `--interval 1` the temperatures are read on every third tick, at
-    /// 2 s on every second, and at 3 s and above on every tick; the full read
-    /// keeps its 5 s cadence.
+    /// The temperature interval on its own is due 2.5 s after the last read,
+    /// so between full reads (which also read temperatures and restart it)
+    /// a 1 s tick reads every third tick and a 2 s tick every second; the
+    /// full read keeps its 5 s cadence.
     #[test]
     fn temperature_reads_are_due_on_a_fixed_tick_pattern() {
         let start = Instant::now();

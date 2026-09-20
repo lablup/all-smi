@@ -130,9 +130,14 @@
 //!   counting from the first full-interval sample, not from the warm-up
 //!   window), and only then does the cadence apply.
 //! * A failed sample on a due collection keeps the previous metrics and
-//!   leaves the gate untouched, so the next collection retries; the failed
-//!   call did not consume the baseline, so that delta simply covers a
-//!   longer window.
+//!   leaves the gate untouched, so the next collection retries, but only
+//!   while that window is younger than [`IOREPORT_REUSE_LIMIT`] (10 s, the
+//!   same order as the energy tracker's staleness limit). Past that the
+//!   error propagates and the readers fall back to their documented absence
+//!   encoding (see the degradation policy above): a subscription that dies
+//!   mid-session must not keep reporting its last live residency and power
+//!   as if the GPU were still being read. A tick that produced no new
+//!   sample, for either reason, reports a zero sample cost.
 //! * [`CACHE_DURATION_MS`](NativeMetricsManager::CACHE_DURATION_MS) still
 //!   serves every reader within one tick; the reuse gate sits behind it, so
 //!   SMC and thermal state are still collected on every uncached call.
@@ -194,6 +199,17 @@ fn ioreport_sample_due(sampled_at: Option<Instant>, now: Instant) -> bool {
     sampled_at.is_none_or(|at| now.saturating_duration_since(at) >= IOREPORT_SAMPLE_INTERVAL)
 }
 
+/// How long the previous IOReport window may stand in for a sample that
+/// failed (module docs, "Collection cadence"). Once the window is older than
+/// this, a failed sample propagates its error instead.
+pub const IOREPORT_REUSE_LIMIT: Duration = Duration::from_secs(10);
+
+/// Whether a window produced at `produced_at` may still be reported at `now`
+/// in place of a sample that failed.
+fn ioreport_window_reusable(produced_at: Option<Instant>, now: Instant) -> bool {
+    produced_at.is_some_and(|at| now.saturating_duration_since(at) < IOREPORT_REUSE_LIMIT)
+}
+
 /// The IOReport sample the manager keeps between collections.
 #[derive(Default)]
 struct IOReportWindow {
@@ -202,6 +218,9 @@ struct IOReportWindow {
     sampled_at: Option<Instant>,
     /// Metrics from the most recent sample, reused while no sample is due.
     metrics: Option<IOReportMetrics>,
+    /// When `metrics` were produced, including by the warm-up window; what
+    /// [`IOREPORT_REUSE_LIMIT`] is measured from.
+    produced_at: Option<Instant>,
 }
 
 /// Configuration for the native metrics manager
@@ -620,8 +639,9 @@ impl NativeMetricsManager {
             Ok(None) => match window.metrics.clone() {
                 // A window too short to rate (the previous sample was under
                 // `MIN_DELTA_WINDOW` ago): the baseline is kept for the next
-                // collection and this one repeats the previous metrics.
-                Some(previous) => return Ok((previous, ioreport.last_sample_duration(), true)),
+                // collection and this one repeats the previous metrics. No
+                // new sample was produced, so no sample cost is reported.
+                Some(previous) => return Ok((previous, Duration::ZERO, false)),
                 // The very first collection of a session has no baseline. It
                 // pays one blocking `sample_interval_ms` window so the caller
                 // gets data immediately instead of waiting a full poll for the
@@ -634,22 +654,30 @@ impl NativeMetricsManager {
                     let metrics =
                         IOReportMetrics::from_sample(iterator, ioreport.energy_readings());
                     window.metrics = Some(metrics.clone());
+                    window.produced_at = Some(now);
                     return Ok((metrics, ioreport.last_sample_duration(), true));
                 }
             },
             // A failed sample keeps the previous window and leaves the gate
             // untouched, so the next collection retries: against the old
             // baseline when `IOReportCreateSamples` itself failed, or against
-            // the sample just taken when only the delta failed. Only a
-            // session with no window yet has nothing to fall back on.
+            // the sample just taken when only the delta failed. That holds
+            // only while the window is younger than `IOREPORT_REUSE_LIMIT`;
+            // a subscription that keeps failing must not keep reporting its
+            // last live values, so past the limit the error propagates and
+            // the readers mark the fields absent. A session with no window
+            // yet has nothing to fall back on either.
             Err(err) => match window.metrics.clone() {
-                Some(previous) => return Ok((previous, ioreport.last_sample_duration(), true)),
-                None => return Err(err.into()),
+                Some(previous) if ioreport_window_reusable(window.produced_at, now) => {
+                    return Ok((previous, Duration::ZERO, false));
+                }
+                _ => return Err(err.into()),
             },
         };
         let metrics = IOReportMetrics::from_sample(residency, ioreport.energy_readings());
         window.sampled_at = Some(now);
         window.metrics = Some(metrics.clone());
+        window.produced_at = Some(now);
         Ok((metrics, ioreport.last_sample_duration(), true))
     }
 
@@ -866,6 +894,37 @@ mod tests {
     fn ioreport_sample_interval_sits_between_one_and_two_seconds() {
         assert!(IOREPORT_SAMPLE_INTERVAL > Duration::from_secs(1));
         assert!(IOREPORT_SAMPLE_INTERVAL < Duration::from_secs(2));
+    }
+
+    /// A failed sample may repeat the previous window only while that
+    /// window is younger than the reuse limit; after that the error must
+    /// reach the readers, and with no window at all there is nothing to
+    /// repeat.
+    #[test]
+    fn a_failed_sample_reuses_the_window_only_within_the_limit() {
+        let now = Instant::now();
+        let at = |secs: f64| now + Duration::from_secs_f64(secs);
+
+        assert!(!ioreport_window_reusable(None, now), "no window to reuse");
+        assert!(ioreport_window_reusable(Some(now), now));
+        assert!(ioreport_window_reusable(Some(now), at(1.0)));
+        assert!(ioreport_window_reusable(Some(now), at(9.9)));
+        assert!(
+            !ioreport_window_reusable(Some(now), at(10.0)),
+            "at the limit the error propagates"
+        );
+        assert!(!ioreport_window_reusable(Some(now), at(60.0)));
+        // A window from the future (clock skew across threads) is fresh.
+        assert!(ioreport_window_reusable(Some(at(1.0)), now));
+    }
+
+    /// The reuse limit stays well above the sample cadence, so an ordinary
+    /// reused tick is never mistaken for a stale one, and stays in the same
+    /// order as the energy tracker's own staleness limit.
+    #[test]
+    fn ioreport_reuse_limit_sits_above_the_sample_interval() {
+        assert!(IOREPORT_REUSE_LIMIT > IOREPORT_SAMPLE_INTERVAL * 4);
+        assert_eq!(IOREPORT_REUSE_LIMIT, Duration::from_secs(10));
     }
 
     /// A reused collection reports no sample cost and says so.

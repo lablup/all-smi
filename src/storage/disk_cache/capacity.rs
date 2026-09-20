@@ -38,8 +38,28 @@
 //! [`LIST_REFRESH_INTERVAL`](super::LIST_REFRESH_INTERVAL); when the device
 //! no longer matches the previous values are kept, the same outcome the
 //! macOS path gets from its `f_mntonname` check.
+//!
+//! ## Budget after an overrun
+//!
+//! A tick that finds the in-flight refresh already past its budget (an
+//! earlier tick waited the budget out) does not wait again: it only checks
+//! whether the result has arrived. So a volume that hangs for good costs one
+//! budget's wait once, and effectively nothing per tick after that.
+//!
+//! ## Worker lifetime
+//!
+//! The worker thread ends when the cache that owns the job sender is
+//! dropped: its `recv` fails and the loop exits. A worker blocked inside a
+//! hung `statfs`/`statvfs` cannot notice until that call returns, so it
+//! outlives its cache by however long the kernel takes to give the call
+//! back, then finds the result channel closed and exits. Nothing joins it,
+//! since a drop must not block on that call either. This matters for callers
+//! that build a cache per request, such as the API's stale-frame snapshot
+//! path, which gets a fresh `LocalStorageReader` and so a fresh worker each
+//! time.
 
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::thread::JoinHandle;
 
 use super::volume::Anchor;
 #[cfg(target_os = "macos")]
@@ -160,6 +180,12 @@ pub(super) struct CapacityWorker {
     pub(super) results: Receiver<CapacityResult>,
     /// Whether a job has been sent whose result has not been received.
     pub(super) in_flight: bool,
+    /// Whether a tick has already waited the budget out for the in-flight
+    /// job; later ticks then only check for its result (module docs).
+    pub(super) overran: bool,
+    /// The thread, kept so a test can observe it exit; never joined.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(super) thread: Option<JoinHandle<()>>,
 }
 
 impl CapacityWorker {
@@ -167,7 +193,7 @@ impl CapacityWorker {
     pub(super) fn spawn() -> Option<Self> {
         let (jobs, job_receiver) = mpsc::channel::<CapacityJob>();
         let (result_sender, results) = mpsc::channel::<CapacityResult>();
-        std::thread::Builder::new()
+        let thread = std::thread::Builder::new()
             .name("all-smi-disk-capacity".to_string())
             .spawn(move || {
                 // Ends when the cache that owns the job sender is dropped.
@@ -188,6 +214,8 @@ impl CapacityWorker {
             jobs,
             results,
             in_flight: false,
+            overran: false,
+            thread: Some(thread),
         })
     }
 }

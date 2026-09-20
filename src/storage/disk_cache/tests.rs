@@ -415,6 +415,8 @@ fn fake_worker(
             jobs,
             results,
             in_flight: true,
+            overran: false,
+            thread: None,
         },
         job_receiver,
     )
@@ -467,7 +469,49 @@ fn a_hung_capacity_refresh_returns_the_previous_values_within_the_budget() {
         );
         let worker = cache.capacity.as_ref().expect("the worker is kept");
         assert!(worker.in_flight, "no second refresh was started");
+
+        // Later ticks only check for the result: the budget is paid once.
+        for _ in 0..3 {
+            let started = Instant::now();
+            let later = cache.storage_info("h");
+            let elapsed = started.elapsed();
+            assert!(
+                elapsed < CAPACITY_REFRESH_BUDGET / 2,
+                "a later tick waited {elapsed:?} on the same hung refresh"
+            );
+            assert_eq!(rows(&later), rows(&before));
+        }
+        let worker = cache.capacity.as_ref().expect("the worker is kept");
+        assert!(worker.in_flight && worker.overran);
     }
+}
+
+/// Dropping the cache ends its worker thread: the job sender goes with the
+/// cache, the worker's `recv` fails, and the loop exits.
+#[test]
+fn dropping_the_cache_ends_its_worker_thread() {
+    let mut cache = DiskCache::new();
+    let _ = cache.storage_info("h");
+    let thread = cache
+        .capacity
+        .as_mut()
+        .and_then(|worker| worker.thread.take())
+        .expect("the first tick started the worker");
+    assert!(
+        !thread.is_finished(),
+        "the worker waits for jobs while the cache lives"
+    );
+
+    drop(cache);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !thread.is_finished() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        thread.is_finished(),
+        "the worker did not exit after its cache was dropped"
+    );
+    thread.join().expect("the worker exited cleanly");
 }
 
 /// A refresh that finishes after the budget is applied by the first tick
