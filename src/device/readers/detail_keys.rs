@@ -53,6 +53,61 @@ use std::sync::LazyLock;
 /// which would count the board once per device again.
 pub const CARD_POWER_WATTS_DETAIL_KEY: &str = "card_power_watts";
 
+/// Current PCIe link generation of a device, as a bare decimal number
+/// (`"4"`) with no `Gen` prefix and no formatting.
+///
+/// Written by the NVIDIA NVML reader and by the Linux AMD plugin's live
+/// link reading, both through [`insert_pcie_details`]. The value travels as
+/// the `all_smi_gpu_pcie_gen_current` gauge rather than as a label: it is a
+/// moving reading on AMD, whose links retrain with the power state, so it
+/// is listed in [`VOLATILE_DETAIL_KEYS`]. On NVIDIA the reading is the link
+/// state seen when the reader initialised (it lives in the startup-cached
+/// static detail map, the same contract `pcie_gen_max` and
+/// `power_limit_current` already carry). The value must be a bare number:
+/// the exporter parses the whole value with `parse::<f64>()`, so a
+/// formatted value such as `"Gen4"` silently omits the gauge.
+pub const PCIE_GEN_CURRENT_DETAIL_KEY: &str = "pcie_gen_current";
+
+/// Current PCIe link width of a device, as a bare decimal number (`"16"`)
+/// with no `x` prefix.
+///
+/// Same writer and same freshness contract as [`PCIE_GEN_CURRENT_DETAIL_KEY`],
+/// travelling as the `all_smi_gpu_pcie_width_current` gauge. The value must
+/// not carry the legacy `"x16"` spelling: `parse::<f64>()` rejects it and
+/// the gauge would be omitted even though the reading arrived.
+pub const PCIE_WIDTH_CURRENT_DETAIL_KEY: &str = "pcie_width_current";
+
+/// Current memory clock of a device, as a bare decimal number of MHz
+/// (`"1249"`).
+///
+/// Named to pair with the static `clock_memory_max`, whose gauge
+/// (`all_smi_gpu_clock_memory_max_mhz`) reports NVIDIA's maximum. This key
+/// holds the live reading, written by the Linux AMD plugin on every poll
+/// and travelling as the `all_smi_gpu_clock_memory_current_mhz` gauge, so
+/// it is listed in [`VOLATILE_DETAIL_KEYS`]. The value must be a bare
+/// number: the gauge is omitted for anything `parse::<f64>()` rejects.
+pub const CLOCK_MEMORY_CURRENT_DETAIL_KEY: &str = "clock_memory_current";
+
+/// Legacy `detail` key every reader used before `GpuInfo::fan_speed_rpm`
+/// existed, and still writes alongside it.
+///
+/// Written by the Linux AMD plugin, AMD ADL, the Intel sysfs reader and the
+/// Intel Level Zero backend, all from the same clamped tachometer value
+/// they assign to `GpuInfo::fan_speed_rpm`. It lives here rather than in
+/// `api::metrics::gpu` because the registry matches by key and cannot
+/// import from `api` without inverting the module dependency.
+///
+/// The reading travels as the `all_smi_gpu_fan_speed_rpm` gauge, which
+/// reads the typed field first and falls back to this string, so the key is
+/// listed in [`VOLATILE_DETAIL_KEYS`] and never reaches the
+/// `all_smi_gpu_info` label set. The string stays in `detail`: snapshots
+/// and the cross-reader overwrite guard in `intel_gpu_level_zero::apply_fan`
+/// still depend on it. The Level Zero exception is a duty-cycle-only
+/// percentage (`"40%"`, with `fan_speed_rpm` left `None`), which has no
+/// series of its own and stays in `detail` for the TUI and the snapshot
+/// writers.
+pub const FAN_SPEED_DETAIL_KEY: &str = "Fan Speed";
+
 /// Detail keys whose value is a continuously varying measurement, and which
 /// therefore must not become labels on `all_smi_gpu_info`.
 ///
@@ -70,7 +125,12 @@ pub const CARD_POWER_WATTS_DETAIL_KEY: &str = "card_power_watts";
 /// here when it holds a discrete state (`Status`, `Performance State`), a
 /// settable limit or mode (`power_limit_max`, `ecc_mode_current`), or a
 /// provenance string (`Metrics Source`, `Source: *`): those are identity, and
-/// a change in them is a change a dashboard wants to see. The carve-out is
+/// a change in them is a change a dashboard wants to see. The taxonomy has one
+/// edge: link generation and width are discrete, like `Performance State`,
+/// which the registry keeps as a label, but an AMD link changes on every
+/// idle-to-load transition, so [`PCIE_GEN_CURRENT_DETAIL_KEY`] and
+/// [`PCIE_WIDTH_CURRENT_DETAIL_KEY`] are registered as moving values. The
+/// carve-out is
 /// narrower than it looks, though: a Tenstorrent status register
 /// (`pcie_status`, `eth_status0`, `eth_status1`, `ddr_status`) is discrete in
 /// the sense that it holds a register word, but its raw hex dump is not
@@ -85,6 +145,19 @@ pub const CARD_POWER_WATTS_DETAIL_KEY: &str = "card_power_watts";
 /// names the series that carries it, or says why it needs none:
 ///
 /// * `card_power_watts` (Rebellions): `all_smi_gpu_card_power_watts`.
+/// * `pcie_gen_current`, `pcie_width_current` (NVIDIA, AMD): the matching
+///   `all_smi_gpu_pcie_gen_current` / `all_smi_gpu_pcie_width_current`
+///   gauges. Both readers write the pair through [`insert_pcie_details`],
+///   NVIDIA at reader initialisation and the Linux AMD plugin live.
+/// * `Fan Speed` (AMD, Intel): `all_smi_gpu_fan_speed_rpm`, which reads the
+///   typed `GpuInfo::fan_speed_rpm` field first and falls back to this
+///   string. The exception is the Level Zero duty cycle: a device reporting
+///   only a percentage has no fan series, and that reading stays in
+///   `detail` for the TUI and the snapshot writers (#434 covers giving it
+///   one). The entry also catches the snake_case `fan_speed` key the
+///   Tenstorrent reader writes, through the sanitizer, which already ships
+///   as its own `all_smi_tenstorrent_*` series.
+/// * `clock_memory_current` (AMD): `all_smi_gpu_clock_memory_current_mhz`.
 /// * `voltage`, `current`, `asic_temperature`, `vreg_temperature`,
 ///   `inlet_temperature`, `aiclk_mhz`, `arcclk_mhz`, `axiclk_mhz`
 ///   (Tenstorrent): the matching `all_smi_tenstorrent_*` gauges.
@@ -160,6 +233,10 @@ pub const VOLATILE_DETAIL_KEYS: &[&str] = &[
     "HLO Exec P95",
     "HLO Exec P99.9",
     "power_utilization_raw",
+    PCIE_GEN_CURRENT_DETAIL_KEY,
+    PCIE_WIDTH_CURRENT_DETAIL_KEY,
+    FAN_SPEED_DETAIL_KEY,
+    CLOCK_MEMORY_CURRENT_DETAIL_KEY,
 ];
 
 /// [`VOLATILE_DETAIL_KEYS`] as the label names they sanitize to, computed
@@ -214,6 +291,53 @@ pub fn card_power_watts(detail: &HashMap<String, String>) -> Option<f64> {
         .parse::<f64>()
         .ok()
         .filter(|watts| watts.is_finite() && *watts >= 0.0)
+}
+
+/// Write the four PCIe link readings into `detail` in the exporter's
+/// snake_case bare-number convention.
+///
+/// Writes `pcie_gen_current`, `pcie_width_current`, `pcie_gen_max` and
+/// `pcie_width_max` as bare decimal numbers (`"4"`, `"16"` — no `Gen` or
+/// `x` prefix, the same convention the NVIDIA reader already used for the
+/// two maximums), omits any key whose value is `None`, and writes no Title
+/// Case key. The current pair is what the `all_smi_gpu_pcie_gen_current` /
+/// `all_smi_gpu_pcie_width_current` gauges read out of `detail`, and the
+/// maximums stay identity labels, so the key spellings here and at the
+/// exporter must not drift; the gauge lookups use
+/// [`PCIE_GEN_CURRENT_DETAIL_KEY`] / [`PCIE_WIDTH_CURRENT_DETAIL_KEY`] so
+/// the contract is compiler-checked instead of string-matched.
+///
+/// This lives in `detail_keys.rs` rather than inside the NVIDIA reader
+/// because its callers sit behind disjoint `cfg` gates: the NVIDIA reader
+/// on every platform, and the Linux AMD plugin, which is a separate cdylib
+/// crate (`crates/all-smi-amd-plugin`) that depends on `all-smi` and cannot
+/// call a `pub(crate)` item. Taking plain `Option<u32>` is what makes the
+/// helper testable without an NVML or amdgpu device.
+pub fn insert_pcie_details(
+    detail: &mut HashMap<String, String>,
+    gen_current: Option<u32>,
+    width_current: Option<u32>,
+    gen_max: Option<u32>,
+    width_max: Option<u32>,
+) {
+    if let Some(link_gen) = gen_current {
+        detail.insert(
+            PCIE_GEN_CURRENT_DETAIL_KEY.to_string(),
+            link_gen.to_string(),
+        );
+    }
+    if let Some(link_width) = width_current {
+        detail.insert(
+            PCIE_WIDTH_CURRENT_DETAIL_KEY.to_string(),
+            link_width.to_string(),
+        );
+    }
+    if let Some(max_gen) = gen_max {
+        detail.insert("pcie_gen_max".to_string(), max_gen.to_string());
+    }
+    if let Some(max_width) = width_max {
+        detail.insert("pcie_width_max".to_string(), max_width.to_string());
+    }
 }
 
 /// Record that `source` contributed to this GPU's metrics.
@@ -453,5 +577,41 @@ mod tests {
             assert_eq!(card_power_watts(&with(rejected)), None, "{rejected:?}");
         }
         assert_eq!(card_power_watts(&HashMap::new()), None);
+    }
+
+    /// The writer must produce the exporter's snake_case bare-number
+    /// convention exactly: the four keys the gauges and the identity labels
+    /// read, with no leftover Title Case key.
+    #[test]
+    fn insert_pcie_details_writes_the_snake_case_bare_number_convention() {
+        let mut detail = HashMap::new();
+        insert_pcie_details(&mut detail, Some(4), Some(16), Some(5), Some(16));
+        assert_eq!(
+            detail,
+            HashMap::from([
+                (PCIE_GEN_CURRENT_DETAIL_KEY.to_string(), "4".to_string()),
+                (PCIE_WIDTH_CURRENT_DETAIL_KEY.to_string(), "16".to_string()),
+                ("pcie_gen_max".to_string(), "5".to_string()),
+                ("pcie_width_max".to_string(), "16".to_string()),
+            ])
+        );
+        assert!(!detail.contains_key("PCIe Generation"));
+        assert!(!detail.contains_key("PCIe Width"));
+    }
+
+    /// A `None` argument leaves its key absent rather than writing `"0"`:
+    /// absence is this exporter's "no data" convention, and a link that
+    /// reported nothing must not look like a Gen-0 link.
+    #[test]
+    fn insert_pcie_details_omits_none_arguments() {
+        let mut detail = HashMap::new();
+        insert_pcie_details(&mut detail, Some(4), None, None, Some(16));
+        assert_eq!(detail[PCIE_GEN_CURRENT_DETAIL_KEY], "4");
+        assert_eq!(detail["pcie_width_max"], "16");
+        assert_eq!(detail.len(), 2);
+
+        let mut empty = HashMap::new();
+        insert_pcie_details(&mut empty, None, None, None, None);
+        assert!(empty.is_empty());
     }
 }

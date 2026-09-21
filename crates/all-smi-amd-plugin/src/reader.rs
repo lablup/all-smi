@@ -44,6 +44,53 @@ fn clamp_fan_rpm(rpm: Option<u32>) -> Option<u32> {
     rpm.map(|value| value.min(MAX_GPU_FAN_RPM))
 }
 
+/// Write the plugin's three per-poll sensor readings into `detail` in the
+/// shared reader conventions, returning the clamped tachometer value for
+/// `GpuInfo::fan_speed_rpm`.
+///
+/// The link goes through [`all_smi::device::readers::detail_keys::insert_pcie_details`]
+/// as bare `pcie_gen_current` / `pcie_width_current` numbers (the two
+/// maxima are passed `None`, so AMD writes no `pcie_gen_max` or
+/// `pcie_width_max`); the tachometer is written as [`FAN_SPEED_DETAIL_KEY`]
+/// (which stays in `detail` for snapshots and the cross-reader overwrite
+/// guard in `intel_gpu_level_zero::apply_fan`) in the `"{fan} RPM"` format
+/// every `Fan Speed` writer shares; and the memory clock is written as the
+/// bare-`MHz` `clock_memory_current` the `all_smi_gpu_clock_memory_current_mhz`
+/// gauge reads. It writes no `Current Link` and no `Memory Clock` key: both
+/// churned the `all_smi_gpu_info` label set on every idle-to-load
+/// transition, and their readings now travel as dedicated series instead.
+///
+/// Device-free on purpose, like `clamp_fan_rpm` above: taking plain
+/// `Option` values is what makes it testable without an amdgpu device.
+fn insert_sensor_details(
+    detail: &mut HashMap<String, String>,
+    current_link: Option<(u8, u8)>,
+    fan_rpm: Option<u32>,
+    mclk: Option<u32>,
+) -> Option<u32> {
+    all_smi::device::readers::detail_keys::insert_pcie_details(
+        detail,
+        current_link.map(|(link_gen, _)| u32::from(link_gen)),
+        current_link.map(|(_, link_width)| u32::from(link_width)),
+        None,
+        None,
+    );
+    let fan_speed_rpm = clamp_fan_rpm(fan_rpm);
+    if let Some(fan) = fan_speed_rpm {
+        detail.insert(
+            all_smi::device::readers::detail_keys::FAN_SPEED_DETAIL_KEY.to_string(),
+            format!("{fan} RPM"),
+        );
+    }
+    if let Some(mclk) = mclk {
+        detail.insert(
+            all_smi::device::readers::detail_keys::CLOCK_MEMORY_CURRENT_DETAIL_KEY.to_string(),
+            mclk.to_string(),
+        );
+    }
+    fan_speed_rpm
+}
+
 /// Per-device state that needs to be cached
 ///
 /// # Thread Safety

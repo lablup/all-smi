@@ -1961,7 +1961,7 @@ all_smi_gpu_performance_state{gpu="NVIDIA A100", instance="node-1", uuid="GPU-T"
         // the detail key by sanitizing it. The two spellings must not
         // diverge: if `FAN_SPEED_DETAIL_KEY` is ever renamed, this fails
         // here instead of silently dropping every legacy node's reading.
-        use crate::api::metrics::gpu::FAN_SPEED_DETAIL_KEY;
+        use crate::device::readers::detail_keys::FAN_SPEED_DETAIL_KEY;
         use crate::parsing::common::sanitize_label_name;
 
         assert_eq!(

@@ -225,9 +225,13 @@ live in argv.
 | `all_smi_gpu_power_consumption_watts` | GPU power consumption      | watts   | `gpu_index`, `gpu_name`                   |
 | `all_smi_gpu_frequency_mhz`           | GPU frequency              | MHz     | `gpu_index`, `gpu_name`                   |
 | `all_smi_gpu_fan_speed_rpm`           | GPU fan speed              | RPM     | `gpu`, `instance`, `gpu_uuid`, `gpu_index` |
+| `all_smi_gpu_pcie_gen_current`        | Current PCIe generation    | -       | `gpu`, `instance`, `gpu_uuid`, `gpu_index` |
+| `all_smi_gpu_pcie_width_current`      | Current PCIe link width    | -       | `gpu`, `instance`, `gpu_uuid`, `gpu_index` |
 | `all_smi_gpu_info`                    | GPU device information     | info    | `gpu_index`, `gpu_name`, `driver_version` |
 
-`all_smi_gpu_fan_speed_rpm` is emitted only by devices that expose a fan tachometer: AMD via amdgpu on Linux and ADL on Windows, and Intel via hwmon `fan1_input` or Level Zero Sysman. Passively cooled datacenter cards and drivers that report only a duty-cycle percentage omit the series entirely, so absence means "no tachometer" rather than "fan stopped".
+`all_smi_gpu_fan_speed_rpm` is emitted only by devices that expose a fan tachometer: AMD via amdgpu on Linux and ADL on Windows, and Intel via hwmon `fan1_input` or Level Zero Sysman. Passively cooled datacenter cards and drivers that report only a duty-cycle percentage omit the series entirely, so absence means "no tachometer" rather than "fan stopped". The legacy `fan_speed` label on `all_smi_gpu_info` is gone: the reading ships only as this gauge.
+
+The two PCIe current gauges ship on NVIDIA NVML hosts and on Linux AMD hosts, but the two vendors report different freshness. On NVIDIA the reading is the link state seen when the reader initialised (it lives in the startup-cached static detail map, the same contract as `all_smi_gpu_clock_memory_max_mhz` and `power_limit_current`); on Linux AMD it is live and re-read on every poll, because AMD GPUs retrain the link with the power state. Both widths are bare lane counts (`16`), not `x16`.
 
 ### `all_smi_gpu_info` carries device identity only
 
@@ -250,6 +254,10 @@ Readings that used to ride on this label set, and the series that carries each o
 | `current_power`                                  | Intel Gaudi, Google TPU | `all_smi_gpu_power_consumption_watts`                |
 | `used_memory`                                    | Intel Gaudi, Google TPU | `all_smi_gpu_memory_used_bytes`                      |
 | `hlo_queue_size`, `hlo_exec_mean`, `hlo_exec_p50`, `hlo_exec_p90`, `hlo_exec_p95`, `hlo_exec_p99_9` | Google TPU | `all_smi_tpu_hlo_queue_size`, `all_smi_tpu_hlo_exec_mean_microseconds`, and the `p50`, `p90`, `p95` and `p999` variants |
+| `pcie_generation`, `pcie_width`                  | NVIDIA             | `all_smi_gpu_pcie_gen_current`, `all_smi_gpu_pcie_width_current` (new; the width is a bare lane count rather than `x16`, and the reading is the link state at reader initialisation) |
+| `current_link`                                   | AMD (Linux)        | `all_smi_gpu_pcie_gen_current`, `all_smi_gpu_pcie_width_current` (live) |
+| `memory_clock`                                   | AMD (Linux)        | `all_smi_gpu_clock_memory_current_mhz` (new)          |
+| `fan_speed`                                      | AMD, Intel         | `all_smi_gpu_fan_speed_rpm` (an Intel Level Zero duty-cycle-only reading has no series) |
 
 This is an intentional exposition change: a scraper or dashboard that read any of these off `all_smi_gpu_info` must move to the series named above. Two differences are worth knowing when migrating. `all_smi_cpu_temperature_celsius` and `all_smi_gpu_temperature_celsius` are whole degrees, while the old Apple Silicon labels carried one decimal, so a migrated panel loses that decimal. And `all_smi_cpu_temperature_celsius` carries the CPU label set (`cpu_model`, `instance`, `hostname`, `index`), not the GPU one, so a panel that joined on `gpu_uuid` joins on `instance` instead.
 
@@ -301,8 +309,6 @@ count by (lib_name, lib_version) (all_smi_gpu_info) > 1
 
 | Metric                                                    | Description                                                        | Unit    | Labels                               |
 |-----------------------------------------------------------|--------------------------------------------------------------------|---------|--------------------------------------|
-| `all_smi_gpu_pcie_gen_current`                            | Current PCIe generation                                            | -       | `gpu`, `instance`, `gpu_uuid`, `gpu_index`   |
-| `all_smi_gpu_pcie_width_current`                          | Current PCIe link width                                            | -       | `gpu`, `instance`, `gpu_uuid`, `gpu_index`   |
 | `all_smi_gpu_performance_state`                           | GPU performance state (P0=0 … P15=15; omitted when not reported)  | -       | `gpu`, `instance`, `gpu_uuid`, `gpu_index`   |
 | `all_smi_gpu_temperature_threshold_slowdown_celsius`      | Slowdown temperature threshold                                     | celsius | `gpu`, `instance`, `gpu_uuid`, `gpu_index`   |
 | `all_smi_gpu_temperature_threshold_shutdown_celsius`      | Shutdown temperature threshold                                     | celsius | `gpu`, `instance`, `gpu_uuid`, `gpu_index`   |
@@ -317,6 +323,7 @@ count by (lib_name, lib_version) (all_smi_gpu_info) > 1
 - Threshold metrics (`temperature_threshold_*`) and `performance_state` are NVIDIA-only. Each metric is emitted only when the driver exposes the value; hosts where the driver does not report a given threshold simply omit that metric line.
 - `performance_state` maps NVML `PerformanceState` variants: P0 (maximum performance) = 0 through P15 = 15. The `Unknown` sentinel is suppressed (`None`) rather than emitted.
 - The acoustic threshold is available on newer drivers and some GPU SKUs; older drivers leave it absent.
+- The two PCIe current gauges have moved to the all-platform GPU table, where they also cover Linux AMD hosts (see above for the freshness difference). The NVIDIA `all_smi_gpu_info` labels `pcie_generation` and `pcie_width` (the latter `"x16"`) are removed, not renamed; their readings travel as the two gauges instead, written from the same NVML reads under `detail.pcie_gen_current` and `detail.pcie_width_current`. NVIDIA's static `pcie_gen_max` and `pcie_width_max` remain `all_smi_gpu_info` labels, unchanged.
 
 ### NVIDIA Hardware Details Metrics
 
@@ -429,15 +436,18 @@ AMD GPUs (Radeon and Instinct series) provide comprehensive monitoring through R
 | `all_smi_amd_rocm_version`    | AMD ROCm version installed               | info    | `instance`, `version`                       |
 | `all_smi_gpu_memory_gtt_bytes`| GTT (GPU Translation Table) memory usage | bytes   | `gpu_index`, `gpu_name`                     |
 | `all_smi_gpu_memory_vram_bytes`| VRAM (Video RAM) usage                  | bytes   | `gpu_index`, `gpu_name`                     |
+| `all_smi_gpu_clock_memory_current_mhz` | Current memory clock            | MHz     | `gpu`, `instance`, `gpu_uuid`, `gpu_index`  |
 
 **Additional Details Available** (in `all_smi_gpu_info` labels):
 - **Driver Version**: AMDGPU kernel driver version (e.g., "30.10.1")
 - **ROCm Version**: ROCm software stack version (e.g., "7.0.2")
-- **PCIe Information**: Current link generation and width, max GPU/system link capabilities
+- **PCIe Information**: The negotiated link ships as the `all_smi_gpu_pcie_gen_current` and `all_smi_gpu_pcie_width_current` gauges, re-read live on every poll; the static max GPU/system link capabilities remain labels
 - **VBIOS**: Version and date information
 - **Power Management**: Current, minimum, and maximum power cap values
 - **ASIC Information**: Device ID, revision ID, ASIC name
-- **Memory Clock**: Current memory clock frequency
+- **Memory Clock**: Current memory clock frequency, shipped as the `all_smi_gpu_clock_memory_current_mhz` gauge
+
+The per-poll readings no longer ride on `all_smi_gpu_info` labels: `Current Link` (formatted `Gen<N> x<W>`) now ships as the two PCIe current gauges, `Memory Clock` as `all_smi_gpu_clock_memory_current_mhz`, and the tachometer reading only as `all_smi_gpu_fan_speed_rpm`. The rename is visible outside Prometheus too: snapshot JSON and CSV expose `detail` verbatim, so a query path such as `detail.Current Link` becomes `detail.pcie_gen_current` and `detail.pcie_width_current` (bare lane count), `detail.Memory Clock` becomes `detail.clock_memory_current` (bare MHz), and the values are numbers rather than unit-suffixed strings. The static `Max GPU Link`, `Max System Link`, `Min DPM Link` and `Max DPM Link` labels are unchanged.
 
 **Process Tracking**:
 - AMD GPU process detection uses `fdinfo` from `/proc/<pid>/fdinfo/` for accurate memory tracking

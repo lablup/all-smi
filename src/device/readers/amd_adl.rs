@@ -340,9 +340,11 @@ mod tests {
     fn detail_keys_follow_the_shared_reader_convention() {
         // Every reader that publishes these quantities uses the same
         // key with the unit carried in the *value*, not the key:
-        // `amd.rs` (Linux) writes `Fan Speed` = "1450 RPM" and
-        // `Memory Clock` = "1250 MHz", and `intel_gpu_linux` and the
-        // Level Zero reader match it.
+        // the Linux AMD plugin writes `Fan Speed` = "1450 RPM" (its memory
+        // clock now travels as the bare-`MHz` `clock_memory_current` key and
+        // the `all_smi_gpu_clock_memory_current_mhz` gauge instead of a
+        // `Memory Clock` string), and `intel_gpu_linux` and the Level Zero
+        // reader match the fan spelling.
         //
         // Two concrete costs of diverging, which is why this is locked
         // by a test rather than left to convention:
