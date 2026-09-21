@@ -17,6 +17,7 @@ use crate::device::GpuReader;
 use crate::device::hlsmi::parser::{GaudiDeviceMetrics, map_device_name};
 #[cfg(target_os = "linux")]
 use crate::device::readers::common_cache::{DetailBuilder, DeviceStaticInfo};
+use crate::device::readers::detail_keys::FREE_MEMORY_DETAIL_KEY;
 use crate::device::types::{GpuInfo, ProcessInfo};
 #[cfg(target_os = "linux")]
 use crate::utils::command::new_command;
@@ -245,7 +246,7 @@ fn create_gpu_info_from_device(
         format!("{} MiB", device.memory_used),
     );
     detail.insert(
-        "Free Memory".to_string(),
+        FREE_MEMORY_DETAIL_KEY.to_string(),
         format!("{} MiB", device.memory_free),
     );
 

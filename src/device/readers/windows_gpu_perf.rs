@@ -72,6 +72,9 @@ mod dxgi;
 #[cfg(target_os = "windows")]
 mod pdh;
 
+use crate::device::readers::detail_keys::{
+    VRAM_BUDGET_PROCESS_DETAIL_KEY, VRAM_USAGE_PROCESS_DETAIL_KEY,
+};
 use crate::device::types::{GpuInfo, ProcessInfo};
 use ids::{AdapterIdentity, AdapterLuid};
 use std::collections::HashMap;
@@ -461,16 +464,19 @@ pub fn apply_to_gpu_info(gpu: &mut GpuInfo, metrics: &AdapterMetrics) {
     // They are labelled as such and kept out of `used_memory`, which
     // must stay system-wide; reading either as a device-level number
     // would understate a busy GPU by whatever other processes hold.
+    // They travel as the matching `all_smi_gpu_process_vram_*` gauges
+    // rather than as `all_smi_gpu_info` labels, which their
+    // volatile-detail registrations remove.
     if let Some(budget) = metrics.process_budget {
         gpu.detail.insert(
-            "VRAM Budget (this process)".to_string(),
+            VRAM_BUDGET_PROCESS_DETAIL_KEY.to_string(),
             format!("{budget} bytes"),
         );
         touched_dxgi = true;
     }
     if let Some(usage) = metrics.process_current_usage {
         gpu.detail.insert(
-            "VRAM Usage (this process)".to_string(),
+            VRAM_USAGE_PROCESS_DETAIL_KEY.to_string(),
             format!("{usage} bytes"),
         );
         touched_dxgi = true;
@@ -1022,8 +1028,11 @@ mod tests {
 
         // Neither DXGI figure may leak into the device-level number.
         assert_eq!(gpu.used_memory, 0);
-        assert_eq!(gpu.detail["VRAM Budget (this process)"], "7000000000 bytes");
-        assert_eq!(gpu.detail["VRAM Usage (this process)"], "123456 bytes");
+        assert_eq!(
+            gpu.detail[VRAM_BUDGET_PROCESS_DETAIL_KEY],
+            "7000000000 bytes"
+        );
+        assert_eq!(gpu.detail[VRAM_USAGE_PROCESS_DETAIL_KEY], "123456 bytes");
         assert!(!gpu.detail.contains_key("Source: Memory Used"));
     }
 
