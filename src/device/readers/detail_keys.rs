@@ -74,7 +74,7 @@ pub const CARD_POWER_WATTS_DETAIL_KEY: &str = "card_power_watts";
 ///
 /// Registering a key removes its only route onto the wire unless the same
 /// reading is already published as a dedicated series, so every entry below
-/// names the series that carries it:
+/// names the series that carries it, or says why it needs none:
 ///
 /// * `card_power_watts` (Rebellions): `all_smi_gpu_card_power_watts`.
 /// * `voltage`, `current`, `asic_temperature`, `vreg_temperature`,
@@ -93,6 +93,13 @@ pub const CARD_POWER_WATTS_DETAIL_KEY: &str = "card_power_watts";
 ///   `all_smi_tpu_hlo_*` gauges. That exporter reads these very strings out
 ///   of `detail` and parses the leading number itself, so it keeps working
 ///   with the unit suffix the reader writes (`"125.5 µs"`).
+/// * `power_utilization_raw` (AWS Neuron): no series, and it needs none. It
+///   is the raw `stats/power/utilization` line rather than a reading, nothing
+///   parses it, and its second field is a sampling timestamp that advances on
+///   its own, so it started a new series on every scrape even on an idle
+///   device. Filtering removes labels only, so the entry stays in `detail`
+///   for the TUI and the snapshot writers, and issue #434 covers giving its
+///   three utilization floats a series if that is ever wanted.
 ///
 /// The Title Case entries are matched through `sanitize_label_name` (see
 /// [`is_volatile_detail_key`]); they are spelled here as their readers write
@@ -120,6 +127,7 @@ pub const VOLATILE_DETAIL_KEYS: &[&str] = &[
     "HLO Exec P90",
     "HLO Exec P95",
     "HLO Exec P99.9",
+    "power_utilization_raw",
 ];
 
 /// [`VOLATILE_DETAIL_KEYS`] as the label names they sanitize to, computed

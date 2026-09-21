@@ -202,13 +202,23 @@ struct MonitorHardwareInfo {
     logical_neuroncore_config: Option<u32>,
 }
 
-/// Static, per-device facts read out of sysfs once per enumeration.
+/// Per-device facts read out of sysfs, all of them in one pass.
+///
+/// The first four are static identity: they are the same string on every
+/// poll. `power_utilization_raw` is not. `read_sysfs_device_info` runs once
+/// per device per poll, so that field is re-read every time, and the line it
+/// holds carries both a sampling timestamp and the live utilization floats.
+/// Treating it as identity is what put it on the `all_smi_gpu_info` label set
+/// and gave every NeuronCore a fresh series per scrape, so it is registered
+/// in `detail_keys::VOLATILE_DETAIL_KEYS`.
 #[derive(Debug, Default, Clone)]
 struct SysfsDeviceInfo {
     serial_number: Option<String>,
     arch_type: Option<String>,
     device_name: Option<String>,
     instance_type: Option<String>,
+    /// Raw `stats/power/utilization` line, re-read on every poll. Moves on
+    /// its own; never an identity label.
     power_utilization_raw: Option<String>,
 }
 
@@ -1012,6 +1022,63 @@ mod tests {
         assert!(rows[0].performance_state.is_none());
         assert!(rows[0].gpm_metrics.is_none());
         assert!(rows[0].nvlink_remote_devices.is_empty());
+    }
+
+    /// Issue #425: `stats/power/utilization` is re-read on every poll and its
+    /// second field is a driver sampling timestamp, so while the raw line was
+    /// a label every NeuronCore started a fresh `all_smi_gpu_info` series on
+    /// each scrape, even with the device completely idle. This renders two
+    /// polls through the real exporter and pins the label set.
+    #[test]
+    fn the_raw_power_line_never_moves_the_neuron_identity_label_set() {
+        use crate::api::metrics::MetricExporter;
+        use crate::api::metrics::gpu::GpuMetricExporter;
+
+        const IDLE: &str = "POWER_STATUS_VALID,1789180860,0.00,0.00,0.00";
+        const BUSY: &str = "POWER_STATUS_VALID,1789180875,12.50,13.00,11.75";
+
+        let devices = parse_neuron_ls_devices(NEURON_LS_TRN1_2XLARGE);
+        let poll = |power_line: &str| {
+            let ctx = DeviceContext {
+                sysfs: SysfsDeviceInfo {
+                    serial_number: Some("9ff5434815c8bd80".to_string()),
+                    arch_type: Some("NDv2".to_string()),
+                    device_name: Some("Trainium1".to_string()),
+                    instance_type: Some("Trn1".to_string()),
+                    power_utilization_raw: Some(power_line.to_string()),
+                },
+                driver_version: Some("2.26.5.0".to_string()),
+                time: "2026-09-12 02:41:18".to_string(),
+                hostname: "ip-10-0-2-237".to_string(),
+            };
+            let rows = core_rows(&devices[0], &ctx, None);
+            let identity = GpuMetricExporter::new(&rows)
+                .export_metrics()
+                .lines()
+                .find(|line| line.starts_with("all_smi_gpu_info{"))
+                .expect("identity series missing")
+                .to_string();
+            (identity, rows)
+        };
+
+        let (idle_line, idle_rows) = poll(IDLE);
+        let (busy_line, _) = poll(BUSY);
+        assert_eq!(
+            idle_line, busy_line,
+            "the raw power line moved the identity label set between polls"
+        );
+        assert!(
+            !idle_line.contains("power_utilization_raw=\""),
+            "the raw power line reached the identity series: {idle_line}"
+        );
+        // Labels only: the TUI and the snapshot writers still read the value.
+        assert_eq!(
+            idle_rows[0]
+                .detail
+                .get("power_utilization_raw")
+                .map(String::as_str),
+            Some(IDLE)
+        );
     }
 
     #[test]
