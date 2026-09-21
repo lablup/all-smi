@@ -229,6 +229,31 @@ live in argv.
 
 `all_smi_gpu_fan_speed_rpm` is emitted only by devices that expose a fan tachometer: AMD via amdgpu on Linux and ADL on Windows, and Intel via hwmon `fan1_input` or Level Zero Sysman. Passively cooled datacenter cards and drivers that report only a duty-cycle percentage omit the series entirely, so absence means "no tachometer" rather than "fan stopped".
 
+### `all_smi_gpu_info` carries device identity only
+
+The label set of `all_smi_gpu_info` describes what a device *is*: name, instance, UUID, index, type, and the reader's static details (serial, firmware, driver and library versions, PCI address, and so on). A changing reading does not belong on it. Prometheus identifies a series by its full label set, so a label whose value moves between scrapes starts a new series on each scrape and leaves the previous one stale, making series and index cardinality grow with the number of scrapes instead of the number of devices. Readings have a dedicated series instead, which is also what makes `group_left` joins against `all_smi_gpu_info` stable over a range.
+
+A few readings on Google TPU, Intel Gaudi and the two Windows-only readers are not migrated yet and still appear as labels; issue #434 tracks them.
+
+Readings that used to ride on this label set, and the series that carries each of them now:
+
+| Former label                                     | Devices             | Read it from                                           |
+|--------------------------------------------------|---------------------|---------------------------------------------------------|
+| `card_power_watts`                               | Rebellions ATOM Max | `all_smi_gpu_card_power_watts` (new; see the Rebellions section, and do not sum it) |
+| `vdd_voltage`, `current`                         | Tenstorrent         | `all_smi_tenstorrent_voltage_volts`, `all_smi_tenstorrent_current_amperes` |
+| `asic_temperature`, `vr_temperature`, `inlet_temperature` | Tenstorrent | `all_smi_tenstorrent_asic_temperature_celsius`, `all_smi_tenstorrent_vreg_temperature_celsius`, `all_smi_tenstorrent_inlet_temperature_celsius` |
+| `ai_clock`, `arc_clock`, `axi_clock`             | Tenstorrent         | `all_smi_tenstorrent_aiclk_mhz`, `all_smi_tenstorrent_arcclk_mhz`, `all_smi_tenstorrent_axiclk_mhz` |
+| `combined_power_mw`                              | Apple Silicon       | `all_smi_combined_power_watts` (the same reading, in watts) |
+| `cpu_temperature`                                | Apple Silicon       | `all_smi_cpu_temperature_celsius`                       |
+| `gpu_temperature`                                | Apple Silicon       | `all_smi_gpu_temperature_celsius`                       |
+| `frequency`                                      | Furiosa             | `all_smi_gpu_frequency_mhz`                             |
+| `current_power`                                  | Intel Gaudi, Google TPU | `all_smi_gpu_power_consumption_watts`                |
+| `used_memory`                                    | Intel Gaudi, Google TPU | `all_smi_gpu_memory_used_bytes`                      |
+
+This is an intentional exposition change: a scraper or dashboard that read any of these off `all_smi_gpu_info` must move to the series named above. Two differences are worth knowing when migrating. `all_smi_cpu_temperature_celsius` and `all_smi_gpu_temperature_celsius` are whole degrees, while the old Apple Silicon labels carried one decimal, so a migrated panel loses that decimal. And `all_smi_cpu_temperature_celsius` carries the CPU label set (`cpu_model`, `instance`, `hostname`, `index`), not the GPU one, so a panel that joined on `gpu_uuid` joins on `instance` instead.
+
+The exposition also sorts these labels by name, so an unchanged device renders byte-identically from scrape to scrape and two scrapes can be compared with `diff`.
+
 ### Unified AI Acceleration Library Labels
 
 The `all_smi_gpu_info` metric includes standardized labels for AI acceleration libraries across all GPU/accelerator platforms. These unified labels allow platform-agnostic queries and dashboards:
@@ -431,7 +456,7 @@ AMD GPUs (Radeon and Instinct series) provide comprehensive monitoring through R
 | `all_smi_ane_power_watts`       | ANE power consumption  | watts | `gpu_index`, `gpu_name`          |
 | `all_smi_thermal_pressure_info` | Thermal pressure level | info  | `gpu_index`, `gpu_name`, `level` |
 
-Note: For Apple Silicon (M1/M2/M3/M4), `gpu_temperature_celsius` is not available; thermal pressure level is provided instead.
+Note: on Apple Silicon (M1/M2/M3/M4) `all_smi_gpu_temperature_celsius` reports the SMC die reading, falling back to the CPU die when the GPU thermistor keys are not exposed, and is omitted entirely when neither sensor answers; `all_smi_thermal_pressure_info` reports the OS thermal pressure level alongside it. The CPU die reading is also published on its own as `all_smi_cpu_temperature_celsius`.
 
 ### Tenstorrent NPU Metrics
 
@@ -496,6 +521,10 @@ Note: For Apple Silicon (M1/M2/M3/M4), `gpu_temperature_celsius` is not availabl
 
 Note: Tenstorrent NPUs use the same basic metric names as GPUs for compatibility with existing monitoring infrastructure. Additional Tenstorrent-specific metrics provide detailed hardware monitoring capabilities.
 
+The telemetry gauges above (`all_smi_tenstorrent_voltage_volts`, `all_smi_tenstorrent_current_amperes`, the ASIC, voltage-regulator and inlet temperatures, and the AI, ARC and AXI clocks) now actually appear in the exposition. They had been documented and declared for some time without ever being emitted: the exporter looked up snake_case keys holding bare numbers while the reader wrote Title Case keys holding unit-suffixed strings such as `"800MHz"`, so every lookup missed and the readings reached Prometheus only as churning `all_smi_gpu_info` labels. The reader now writes the keys the exporter reads, at the same precision and without the unit suffix.
+
+The rename is visible outside Prometheus too. Snapshot JSON and CSV expose `detail` verbatim, so a query path such as `detail.AI Clock` becomes `detail.aiclk_mhz`, and the value is now `800` rather than `"800MHz"`. The full mapping is `VDD Voltage` to `voltage`, `Current` to `current`, `ASIC Temperature` to `asic_temperature`, `VR Temperature` to `vreg_temperature`, `Inlet Temperature` to `inlet_temperature`, `AI Clock` to `aiclk_mhz`, `ARC Clock` to `arcclk_mhz`, and `AXI Clock` to `axiclk_mhz`.
+
 ### Rebellions NPU Metrics
 
 #### Basic NPU Metrics
@@ -516,6 +545,7 @@ Note: Tenstorrent NPUs use the same basic metric names as GPUs for compatibility
 | `all_smi_rebellions_kmd_info`          | Kernel Mode Driver version              | gauge | `npu`, `instance`, `npu_uuid`, `npu_index`, `version`                    |
 | `all_smi_rebellions_pstate_info`       | Current performance state (P0-P15)      | gauge | `npu`, `instance`, `npu_uuid`, `npu_index`, `pstate`                   |
 | `all_smi_rebellions_status`            | Device operational status               | gauge | `npu`, `instance`, `npu_uuid`, `npu_index`, `status`                   |
+| `all_smi_gpu_card_power_watts`         | Power of the card this die sits on, for display only. **Do not sum.** | gauge | `gpu`, `instance`, `gpu_uuid`, `gpu_index` |
 
 Note: Rebellions NPUs come as ATOM, ATOM+ and ATOM Max boards. On ATOM Max a single
 physical card carries four dies, and `rbln-stat` enumerates dies rather than cards --
@@ -527,10 +557,16 @@ every die. `all_smi_gpu_power_consumption_watts` is therefore emitted once per c
 on the die with the lowest kernel index (`rblnN`) among the dies sharing a `sid`; the
 other three dies of the card have no power series, so
 `sum by (instance) (all_smi_gpu_power_consumption_watts)` is the real NPU draw.
-The per-card value is also carried on every die of a multi-die card as the
-`card_power_watts` label of `all_smi_gpu_info` (watts, two decimals), for display
-only; do not sum it. ATOM+ is one die per card, so every ATOM+ device reports its
-own power and carries no `card_power_watts` label.
+
+The per-card value is also published on every die of a multi-die card as
+`all_smi_gpu_card_power_watts`, with the same labels as the power series, so each die's
+row can show the draw of the card it sits on. **Do not sum or average it**: all four dies
+of a card repeat one board reading, so `sum(all_smi_gpu_card_power_watts)` reports four
+times the node's real draw, which is exactly the overcount that the one-series-per-card
+rule above exists to prevent. Use it per device, or with `max by (sid)`, and sum
+`all_smi_gpu_power_consumption_watts` when you want a total. ATOM+ is one die per card,
+so every ATOM+ device reports its own power and publishes no
+`all_smi_gpu_card_power_watts` series.
 
 ### Furiosa NPU Metrics
 
@@ -1158,7 +1194,8 @@ Higher update rates provide more real-time data but increase system load. For pr
    - Support for ATOM, ATOM+, and ATOM Max variants
    - Board serial and die-position labels for grouping ATOM Max dies by physical card
    - ATOM Max card power counted once per card (one power series per `sid`), with the
-     card value on every die as the `card_power_watts` label of `all_smi_gpu_info`
+     card value on every die as `all_smi_gpu_card_power_watts`, which is for display
+     only and must not be summed
 9. Furiosa NPU metrics include:
    - Per-core PE utilization monitoring
    - Core availability status tracking
@@ -1198,3 +1235,4 @@ Higher update rates provide more real-time data but increase system load. For pr
     - Thermal thresholds (`all_smi_gpu_temperature_threshold_{slowdown,shutdown,max_operating,acoustic}_celsius`) and the canonical `all_smi_gpu_performance_state` gauge
     - Emitted only when the driver exposes the underlying NVML APIs; older drivers silently omit these metrics
     - Set `ALL_SMI_MOCK_HARDWARE_DETAILS=1` (with `--features mock` build) to have the mock emit the full extended hardware-detail set; when unset, the mock simulates an older driver
+15. `all_smi_gpu_info` carries device identity only. A changing reading does not belong on it, because a moving label starts a new Prometheus series on every scrape; each such reading has a dedicated series instead. The readings that used to ride on the label set, where to read each of them now, and the few not yet migrated (issue #434) are covered under "`all_smi_gpu_info` carries device identity only" above.
