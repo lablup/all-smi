@@ -1047,6 +1047,9 @@ mod tests {
 
     #[test]
     fn command_discovery_keeps_only_safe_absolute_paths() {
+        // A rooted path without a drive letter is not absolute on Windows, so
+        // `which` output for the Linux-only rbln tools is only accepted on Unix.
+        #[cfg(unix)]
         assert_eq!(
             absolute_command_path("/opt/rebellions/bin/rbln-stat\n"),
             Some(PathBuf::from("/opt/rebellions/bin/rbln-stat"))
