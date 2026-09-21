@@ -147,6 +147,13 @@ static VOLATILE_LABEL_NAMES: LazyLock<Vec<String>> = LazyLock::new(|| {
 /// Tenstorrent reader writes the snake_case keys its own exporter reads, and
 /// that agreement, not this function, is what keeps its clocks off the
 /// identity series.
+///
+/// It also matches whole keys only, so a key a reader builds at runtime
+/// cannot be registered by spelling. The Intel GPU readers write one
+/// `format!`-built entry per engine class and per clock domain
+/// (`"Engine: render"`, `"Frequency: gpu (L0)"`), which no fixed entry here
+/// can name; issue #434 covers giving those readings a series and deciding
+/// how the registry should express a key family.
 pub fn is_volatile_detail_key(key: &str) -> bool {
     if VOLATILE_DETAIL_KEYS.contains(&key) {
         return true;

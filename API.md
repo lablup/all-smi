@@ -233,7 +233,7 @@ live in argv.
 
 The label set of `all_smi_gpu_info` describes what a device *is*: name, instance, UUID, index, type, and the reader's static details (serial, firmware, driver and library versions, PCI address, and so on). A changing reading does not belong on it. Prometheus identifies a series by its full label set, so a label whose value moves between scrapes starts a new series on each scrape and leaves the previous one stale, making series and index cardinality grow with the number of scrapes instead of the number of devices. Readings have a dedicated series instead, which is also what makes `group_left` joins against `all_smi_gpu_info` stable over a range.
 
-A few readings on Intel Gaudi and the two Windows-only readers are not migrated yet and still appear as labels; issue #434 tracks them.
+Not every reading has moved yet, because a key can only be dropped from the label set once its value is published somewhere else. Intel Gaudi's `Free Memory`, the Intel GPU engine-busy percentages (`Engine: <class>`, and the Level Zero `Engine: <class> (L0)`, `Power (L0)` and `Frequency: <domain> (L0)` entries), and the AMD ADL and per-process VRAM readings on Windows still ride on the label set and still churn it. Issue #434 tracks them.
 
 Readings that used to ride on this label set, and the series that carries each of them now:
 
