@@ -72,6 +72,10 @@ pub mod sensors;
 #[cfg(target_os = "windows")]
 pub mod loader;
 
+use crate::device::readers::detail_keys::{
+    CLOCK_MEMORY_CURRENT_DETAIL_KEY, HOTSPOT_TEMPERATURE_DETAIL_KEY,
+    MEMORY_CONTROLLER_ACTIVITY_DETAIL_KEY, MEMORY_TEMPERATURE_DETAIL_KEY,
+};
 use crate::device::readers::windows_gpu_perf::note_metrics_source;
 use crate::device::types::{GpuInfo, MAX_GPU_FAN_RPM};
 use sensors::AdlReadout;
@@ -118,14 +122,20 @@ pub fn apply_to_gpu_info(gpu: &mut GpuInfo, readout: &AdlReadout) {
     }
     // Hotspot and memory temperatures have no dedicated `GpuInfo` field
     // but are the numbers that actually throttle a modern card, so they
-    // are surfaced as details rather than dropped.
+    // are surfaced as details rather than dropped. They travel as the
+    // matching thermal gauges rather than as `all_smi_gpu_info` labels,
+    // which their volatile-detail registrations remove.
     if let Some(hotspot) = readout.temperature_hotspot_c {
-        gpu.detail
-            .insert("Hotspot Temperature".to_string(), format!("{hotspot} C"));
+        gpu.detail.insert(
+            HOTSPOT_TEMPERATURE_DETAIL_KEY.to_string(),
+            format!("{hotspot} C"),
+        );
     }
     if let Some(memory) = readout.temperature_mem_c {
-        gpu.detail
-            .insert("Memory Temperature".to_string(), format!("{memory} C"));
+        gpu.detail.insert(
+            MEMORY_TEMPERATURE_DETAIL_KEY.to_string(),
+            format!("{memory} C"),
+        );
     }
 
     if let Some(power) = readout.power_w {
@@ -142,8 +152,15 @@ pub fn apply_to_gpu_info(gpu: &mut GpuInfo, readout: &AdlReadout) {
         applied.push("clocks");
     }
     if let Some(clock) = readout.clock_mem_mhz {
-        gpu.detail
-            .insert("Memory Clock".to_string(), format!("{clock} MHz"));
+        // Same bare-decimal key the Linux AMD plugin writes, so both
+        // vendors feed the `all_smi_gpu_clock_memory_current_mhz` gauge
+        // from one constant and the reading never becomes an
+        // `all_smi_gpu_info` label. The unit is carried in the gauge's
+        // name, not the value, matching the plugin's convention.
+        gpu.detail.insert(
+            CLOCK_MEMORY_CURRENT_DETAIL_KEY.to_string(),
+            clock.to_string(),
+        );
     }
 
     if let Some(rpm) = readout.fan_rpm {
@@ -174,8 +191,11 @@ pub fn apply_to_gpu_info(gpu: &mut GpuInfo, readout: &AdlReadout) {
         applied.push("utilization");
     }
     if let Some(activity) = readout.activity_mem_pct {
+        // The memory-side busy percentage, travelling as the
+        // `all_smi_gpu_memory_controller_activity` gauge rather than as a
+        // churning label.
         gpu.detail.insert(
-            "Memory Controller Activity".to_string(),
+            MEMORY_CONTROLLER_ACTIVITY_DETAIL_KEY.to_string(),
             format!("{activity:.0}%"),
         );
     }
@@ -322,12 +342,12 @@ mod tests {
         assert_eq!(gpu.power_consumption, 310.0);
         assert_eq!(gpu.power_consumption_reading(), Some(310.0));
         assert_eq!(gpu.frequency, 2400);
-        assert_eq!(gpu.detail["Hotspot Temperature"], "81 C");
-        assert_eq!(gpu.detail["Memory Temperature"], "70 C");
+        assert_eq!(gpu.detail[HOTSPOT_TEMPERATURE_DETAIL_KEY], "81 C");
+        assert_eq!(gpu.detail[MEMORY_TEMPERATURE_DETAIL_KEY], "70 C");
         assert_eq!(gpu.fan_speed_rpm, Some(1450));
         assert_eq!(gpu.detail["Fan Speed"], "1450 RPM");
-        assert_eq!(gpu.detail["Memory Clock"], "1250 MHz");
-        assert_eq!(gpu.detail["Memory Controller Activity"], "44%");
+        assert_eq!(gpu.detail[CLOCK_MEMORY_CURRENT_DETAIL_KEY], "1250");
+        assert_eq!(gpu.detail[MEMORY_CONTROLLER_ACTIVITY_DETAIL_KEY], "44%");
 
         assert_eq!(gpu.detail["Source: Temperature"], "ADL (edge)");
         assert_eq!(gpu.detail["Source: Power"], "ADL");
@@ -340,11 +360,11 @@ mod tests {
     fn detail_keys_follow_the_shared_reader_convention() {
         // Every reader that publishes these quantities uses the same
         // key with the unit carried in the *value*, not the key:
-        // the Linux AMD plugin writes `Fan Speed` = "1450 RPM" (its memory
-        // clock now travels as the bare-`MHz` `clock_memory_current` key and
-        // the `all_smi_gpu_clock_memory_current_mhz` gauge instead of a
-        // `Memory Clock` string), and `intel_gpu_linux` and the Level Zero
-        // reader match the fan spelling.
+        // the Linux AMD plugin writes `Fan Speed` = "1450 RPM" and its
+        // memory clock travels as the bare-`MHz` `clock_memory_current`
+        // key and the `all_smi_gpu_clock_memory_current_mhz` gauge, which
+        // this reader feeds from the same constant, and `intel_gpu_linux`
+        // and the Level Zero reader match the fan spelling.
         //
         // Two concrete costs of diverging, which is why this is locked
         // by a test rather than left to convention:
@@ -360,17 +380,20 @@ mod tests {
 
         for (key, expected) in [
             ("Fan Speed", "1450 RPM"),
-            ("Memory Clock", "1250 MHz"),
-            ("Hotspot Temperature", "81 C"),
-            ("Memory Temperature", "70 C"),
-            ("Memory Controller Activity", "44%"),
+            (CLOCK_MEMORY_CURRENT_DETAIL_KEY, "1250"),
+            (HOTSPOT_TEMPERATURE_DETAIL_KEY, "81 C"),
+            (MEMORY_TEMPERATURE_DETAIL_KEY, "70 C"),
+            (MEMORY_CONTROLLER_ACTIVITY_DETAIL_KEY, "44%"),
         ] {
             assert_eq!(gpu.detail.get(key).map(String::as_str), Some(expected));
         }
 
-        // The unit must not migrate back into the key.
+        // The unit must not migrate back into the key, and the Title Case
+        // clock string must not return: the reading ships as the
+        // `clock_memory_current` key both vendors write.
         for stale in [
             "Fan Speed (RPM)",
+            "Memory Clock",
             "Memory Clock (MHz)",
             "Hotspot Temperature (C)",
             "Memory Temperature (C)",

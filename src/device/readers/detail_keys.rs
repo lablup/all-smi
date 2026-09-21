@@ -83,9 +83,10 @@ pub const PCIE_WIDTH_CURRENT_DETAIL_KEY: &str = "pcie_width_current";
 ///
 /// Named to pair with the static `clock_memory_max`, whose gauge
 /// (`all_smi_gpu_clock_memory_max_mhz`) reports NVIDIA's maximum. This key
-/// holds the live reading, written by the Linux AMD plugin on every poll
-/// and travelling as the `all_smi_gpu_clock_memory_current_mhz` gauge, so
-/// it is listed in [`VOLATILE_DETAIL_KEYS`]. The value must be a bare
+/// holds the live reading, written by the Linux AMD plugin and by the
+/// Windows AMD ADL reader on every poll and travelling as the
+/// `all_smi_gpu_clock_memory_current_mhz` gauge, so it is listed in
+/// [`VOLATILE_DETAIL_KEYS`]. The value must be a bare
 /// number: the gauge is omitted for anything `parse::<f64>()` rejects.
 pub const CLOCK_MEMORY_CURRENT_DETAIL_KEY: &str = "clock_memory_current";
 
@@ -108,6 +109,108 @@ pub const CLOCK_MEMORY_CURRENT_DETAIL_KEY: &str = "clock_memory_current";
 /// series of its own and stays in `detail` for the TUI and the snapshot
 /// writers.
 pub const FAN_SPEED_DETAIL_KEY: &str = "Fan Speed";
+
+/// Total memory currently free on a device, in mebibytes, as a bare number
+/// followed by the unit (`"97076 MiB"`).
+///
+/// Written by the Gaudi reader from hl-smi's own CSV column, travelling as
+/// the `all_smi_gpu_memory_free_bytes` gauge rather than as a label: it is
+/// a live reading, so it is listed in [`VOLATILE_DETAIL_KEYS`]. The unit is
+/// carried in the value, so the gauge reader parses the leading number
+/// ([`free_memory_bytes`]) rather than the whole string.
+pub const FREE_MEMORY_DETAIL_KEY: &str = "Free Memory";
+
+/// Hottest reported temperature on a device, in whole degrees Celsius
+/// (`"81 C"`).
+///
+/// Written by the Windows AMD ADL reader from the PMLog hotspot sensor,
+/// travelling as the `all_smi_gpu_hotspot_temperature_celsius` gauge, so
+/// it is listed in [`VOLATILE_DETAIL_KEYS`].
+pub const HOTSPOT_TEMPERATURE_DETAIL_KEY: &str = "Hotspot Temperature";
+
+/// Memory die temperature on a device, in whole degrees Celsius (`"70 C"`),
+/// travelling as the `all_smi_gpu_memory_temperature_celsius` gauge. Same
+/// writer as [`HOTSPOT_TEMPERATURE_DETAIL_KEY`].
+pub const MEMORY_TEMPERATURE_DETAIL_KEY: &str = "Memory Temperature";
+
+/// Memory controller busy percentage on a device, as a whole number with a
+/// percent sign (`"44%"`), travelling as the
+/// `all_smi_gpu_memory_controller_activity` gauge. Same writer as
+/// [`HOTSPOT_TEMPERATURE_DETAIL_KEY`].
+pub const MEMORY_CONTROLLER_ACTIVITY_DETAIL_KEY: &str = "Memory Controller Activity";
+
+/// VRAM bytes the process running all-smi holds on an adapter
+/// (`"123456 bytes"`).
+///
+/// Written by the Windows DXGI layer, which measures the calling process.
+/// The reading is per process rather than per device, but the process is
+/// always the exporter itself and one agent runs per host, so the
+/// dimension collapses onto the device row: the gauge
+/// (`all_smi_gpu_process_vram_used_bytes`) carries the standard GPU label
+/// set and the metric name carries the scoping. Listed in
+/// [`VOLATILE_DETAIL_KEYS`].
+pub const VRAM_USAGE_PROCESS_DETAIL_KEY: &str = "VRAM Usage (this process)";
+
+/// VRAM budget the process running all-smi has on an adapter
+/// (`"7000000000 bytes"`), travelling as the
+/// `all_smi_gpu_process_vram_budget_bytes` gauge. Same writer and same
+/// scoping as [`VRAM_USAGE_PROCESS_DETAIL_KEY`].
+pub const VRAM_BUDGET_PROCESS_DETAIL_KEY: &str = "VRAM Budget (this process)";
+
+/// Reserved prefix of the Intel readers' per-engine busy-percentage keys.
+///
+/// Both Intel GPU layers write one `format!`-built entry per discovered
+/// engine class under this prefix — `"Engine: render"` in the sysfs layer
+/// (`intel_gpu_engine::apply_engine_readout`), `"Engine: render (L0)"` in
+/// the Level Zero augmentation — each holding a busy percentage with the
+/// unit carried in the value. The readings travel as the
+/// `all_smi_gpu_engine_utilization` gauge, one row per engine class keyed
+/// by the `engine` label carrying the rest of the key, so the family is
+/// listed in [`VOLATILE_DETAIL_KEY_PREFIXES`] and no key under the prefix
+/// reaches the `all_smi_gpu_info` label set. A reader author adding a key
+/// under this prefix commits to keeping it a moving measurement; a
+/// discrete state or a settable limit needs a different name.
+pub const ENGINE_DETAIL_KEY_PREFIX: &str = "Engine: ";
+
+/// Reserved prefix of the Level Zero per-clock-domain keys.
+///
+/// The Level Zero augmentation writes one `format!`-built entry per
+/// discovered clock domain under this prefix (`"Frequency: gpu (L0)"`),
+/// holding a live clock in MHz with the unit carried in the value. The
+/// readings travel as the `all_smi_gpu_clock_domain_current_mhz` gauge,
+/// one row per clock domain keyed by the `domain` label carrying the rest
+/// of the key, so the family is listed in [`VOLATILE_DETAIL_KEY_PREFIXES`]
+/// and no key under the prefix reaches the `all_smi_gpu_info` label set.
+/// The bare `frequency` key the Furiosa reader writes is a separate,
+/// already-registered entry: the colon and space keep the two names from
+/// touching.
+pub const FREQUENCY_DOMAIN_DETAIL_KEY_PREFIX: &str = "Frequency: ";
+
+/// Key prefixes whose runtime-built key families are continuously varying
+/// measurements, and which therefore must not become labels on
+/// `all_smi_gpu_info`.
+///
+/// The Intel GPU readers write one `format!`-built entry per engine class
+/// and per clock domain (`"Engine: render (L0)"` holding a busy percentage,
+/// `"Frequency: gpu (L0)"` holding a clock), so a fixed entry in
+/// [`VOLATILE_DETAIL_KEYS`] cannot name the family: whole-key matching
+/// cannot register a key a reader builds at runtime. A family belongs here
+/// when every key with the prefix holds a moving measurement and the reader
+/// agrees to keep the prefix reserved. [`is_volatile_detail_key`]
+/// consults this list after the exact and sanitized-label matches, so an
+/// exact entry still wins and a prefix can be narrowed later without
+/// renumbering anything.
+///
+/// Every family below names the series that carries it:
+///
+/// * `Engine: ` (Intel sysfs and Level Zero, Linux and Windows alike):
+///   `all_smi_gpu_engine_utilization`, one row per engine class, keyed by
+///   the `engine` label carrying the class name.
+/// * `Frequency: ` (Intel Level Zero):
+///   `all_smi_gpu_clock_domain_current_mhz`, one row per clock domain,
+///   keyed by the `domain` label carrying the domain name.
+pub const VOLATILE_DETAIL_KEY_PREFIXES: &[&str] =
+    &[ENGINE_DETAIL_KEY_PREFIX, FREQUENCY_DOMAIN_DETAIL_KEY_PREFIX];
 
 /// Detail keys whose value is a continuously varying measurement, and which
 /// therefore must not become labels on `all_smi_gpu_info`.
@@ -152,13 +255,41 @@ pub const FAN_SPEED_DETAIL_KEY: &str = "Fan Speed";
 ///   NVIDIA at reader initialisation and the Linux AMD plugin live.
 /// * `Fan Speed` (AMD, Intel): `all_smi_gpu_fan_speed_rpm`, which reads the
 ///   typed `GpuInfo::fan_speed_rpm` field first and falls back to this
-///   string. The exception is the Level Zero duty cycle: a device reporting
-///   only a percentage has no fan series, and that reading stays in
-///   `detail` for the TUI and the snapshot writers (#434 covers giving it
-///   one). The entry also catches the snake_case `fan_speed` key the
+///   string, and `all_smi_gpu_fan_duty_cycle` for the Level Zero duty
+///   cycle: a device reporting only a percentage has no tachometer series,
+///   and its reading ships as that percentage's own gauge instead. The
+///   entry also catches the snake_case `fan_speed` key the
 ///   Tenstorrent reader writes, through the sanitizer, which already ships
 ///   as its own `all_smi_tenstorrent_*` series.
 /// * `clock_memory_current` (AMD): `all_smi_gpu_clock_memory_current_mhz`.
+/// * `Free Memory` (Gaudi): `all_smi_gpu_memory_free_bytes`, which parses
+///   the leading number out of the `"97076 MiB"` string. Registered rather
+///   than derived as total minus used: hl-smi reports free memory in its
+///   own CSV column, so the subtraction is an approximation of a reading
+///   the reader already has exactly.
+/// * `Hotspot Temperature`, `Memory Temperature` (AMD ADL, Windows): the
+///   matching `all_smi_gpu_hotspot_temperature_celsius` /
+///   `all_smi_gpu_memory_temperature_celsius` gauges. Hotspot runs 15-30 C
+///   above the edge sensor the typed `temperature` field carries, and it is
+///   the number that actually throttles a modern card, so it gets a series
+///   of its own rather than a label that churns with it.
+/// * `Memory Controller Activity` (AMD ADL, Windows):
+///   `all_smi_gpu_memory_controller_activity`, the memory-side busy
+///   percentage that sits beside the graphics one the typed `utilization`
+///   field carries.
+/// * `VRAM Usage (this process)`, `VRAM Budget (this process)` (Windows
+///   DXGI): the matching `all_smi_gpu_process_vram_used_bytes` /
+///   `all_smi_gpu_process_vram_budget_bytes` gauges. Both figures are
+///   scoped to the process running all-smi, but that process is always the
+///   exporter and one agent runs per host, so the dimension collapses onto
+///   the device row and the metric name carries the scoping. They are
+///   deliberately kept out of the system-wide `used_memory` field, which
+///   counts every process.
+/// * `Power (L0)` (Intel Level Zero): no new series, and it needs none. The
+///   augmentation assigns the same reading to the typed
+///   `GpuInfo::power_consumption` field, which ships as
+///   `all_smi_gpu_power_consumption_watts`; registering the string costs
+///   the wire only a churning display label beside it.
 /// * `voltage`, `current`, `asic_temperature`, `vreg_temperature`,
 ///   `inlet_temperature`, `aiclk_mhz`, `arcclk_mhz`, `axiclk_mhz`
 ///   (Tenstorrent): the matching `all_smi_tenstorrent_*` gauges.
@@ -173,8 +304,7 @@ pub const FAN_SPEED_DETAIL_KEY: &str = "Fan Speed";
 ///   tachometer reading already ships as `all_smi_gpu_fan_speed_rpm` (the
 ///   typed field, or the exporter's legacy detail fallback), so dropping the
 ///   label costs the wire only a churning display string. A duty-cycle-only
-///   Level Zero percentage keeps no series of its own and stays in `detail`
-///   for the TUI and the snapshot writers.
+///   Level Zero percentage ships as `all_smi_gpu_fan_duty_cycle` instead.
 /// * `combined_power_mw` (Apple Silicon): `all_smi_combined_power_watts`,
 ///   which reads this very key out of `detail`. Filtering removes labels
 ///   only, never `detail` entries, which is what keeps that gauge alive.
@@ -238,6 +368,13 @@ pub const VOLATILE_DETAIL_KEYS: &[&str] = &[
     PCIE_WIDTH_CURRENT_DETAIL_KEY,
     FAN_SPEED_DETAIL_KEY,
     CLOCK_MEMORY_CURRENT_DETAIL_KEY,
+    FREE_MEMORY_DETAIL_KEY,
+    HOTSPOT_TEMPERATURE_DETAIL_KEY,
+    MEMORY_TEMPERATURE_DETAIL_KEY,
+    MEMORY_CONTROLLER_ACTIVITY_DETAIL_KEY,
+    VRAM_USAGE_PROCESS_DETAIL_KEY,
+    VRAM_BUDGET_PROCESS_DETAIL_KEY,
+    "Power (L0)",
 ];
 
 /// [`VOLATILE_DETAIL_KEYS`] as the label names they sanitize to, computed
@@ -249,35 +386,55 @@ static VOLATILE_LABEL_NAMES: LazyLock<Vec<String>> = LazyLock::new(|| {
         .collect()
 });
 
+/// [`VOLATILE_DETAIL_KEY_PREFIXES`] sanitized the same way, so the prefix
+/// check compares label name to label name.
+static VOLATILE_PREFIX_LABEL_NAMES: LazyLock<Vec<String>> = LazyLock::new(|| {
+    VOLATILE_DETAIL_KEY_PREFIXES
+        .iter()
+        .map(|prefix| sanitize_label_name(prefix))
+        .collect()
+});
+
 /// Whether `key` names a continuously varying measurement, and so must be
 /// kept out of the `all_smi_gpu_info` label set.
 ///
-/// A key matches when it equals a [`VOLATILE_DETAIL_KEYS`] entry verbatim, or
-/// when `sanitize_label_name` maps the two to the same label name. Sanitizing
-/// both sides is what makes the Title Case entries (`Current Power`,
-/// `Used Memory`) match the label they would have produced, and what stops a
-/// respelling of a registered key from slipping a live reading back onto the
-/// identity series.
+/// A key matches when it equals a [`VOLATILE_DETAIL_KEYS`] entry verbatim,
+/// when `sanitize_label_name` maps the two to the same label name, or when
+/// its sanitized name falls under a [`VOLATILE_DETAIL_KEY_PREFIXES`]
+/// family. Sanitizing both sides is what makes the Title Case entries
+/// (`Current Power`, `Used Memory`) match the label they would have
+/// produced, and what stops a respelling of a registered key from slipping
+/// a live reading back onto the identity series; the same sanitized
+/// comparison is what the prefix check applies, so a case-only respelling
+/// of an Intel engine key (`"engine: render"`) is caught too.
 ///
 /// It is not a spelling-independent guard. `sanitize_label_name` lowercases
 /// and replaces every non-alphanumeric character with `_`, so `"AI Clock"`
 /// becomes `"ai_clock"` and does not match the entry `aiclk_mhz`. The
 /// Tenstorrent reader writes the snake_case keys its own exporter reads, and
 /// that agreement, not this function, is what keeps its clocks off the
-/// identity series.
+/// identity series. The sanitizer also maps the reserved prefixes' space
+/// and colon to two underscores, so `"Engine: render"` and
+/// `"Frequency: gpu (L0)"` fall under their families while the bare
+/// `frequency` key stays clear of both.
 ///
-/// It also matches whole keys only, so a key a reader builds at runtime
-/// cannot be registered by spelling. The Intel GPU readers write one
-/// `format!`-built entry per engine class and per clock domain
-/// (`"Engine: render"`, `"Frequency: gpu (L0)"`), which no fixed entry here
-/// can name; issue #434 covers giving those readings a series and deciding
-/// how the registry should express a key family.
+/// The prefix families are the only route a key built at runtime can take:
+/// whole-key matching cannot register a key a reader formats at runtime,
+/// and the Intel GPU readers write one entry per discovered engine class
+/// and clock domain. The reservation is what keeps those readings off the
+/// identity series; a reader adding a name under a reserved prefix commits
+/// to keeping it a moving measurement.
 pub fn is_volatile_detail_key(key: &str) -> bool {
     if VOLATILE_DETAIL_KEYS.contains(&key) {
         return true;
     }
     let label = sanitize_label_name(key);
-    VOLATILE_LABEL_NAMES.contains(&label)
+    if VOLATILE_LABEL_NAMES.contains(&label) {
+        return true;
+    }
+    VOLATILE_PREFIX_LABEL_NAMES
+        .iter()
+        .any(|prefix| label.starts_with(prefix.as_str()))
 }
 
 /// The board power carried under [`CARD_POWER_WATTS_DETAIL_KEY`], or `None`
@@ -292,6 +449,61 @@ pub fn card_power_watts(detail: &HashMap<String, String>) -> Option<f64> {
         .parse::<f64>()
         .ok()
         .filter(|watts| watts.is_finite() && *watts >= 0.0)
+}
+
+/// The number a unit-suffixed string starts with, or `None` when it does
+/// not start with one.
+///
+/// Readers that travel a reading through `detail` with the unit carried in
+/// the value (`"97076 MiB"`, `"81 C"`, `"44%"`, `"123456 bytes"`,
+/// `"12.34%"`) all spell the number first, so it is parsed from the leading
+/// characters rather than by stripping a suffix: the unit differs per
+/// quantity while the number is always first. Anything that does not start
+/// with a decimal number (a provenance string, an empty entry, a hostile
+/// label from a remote snapshot) returns `None`, and so does a prefix that
+/// looks numeric but does not parse (`"1.2.3 bytes"`).
+pub fn leading_number(value: &str) -> Option<f64> {
+    let trimmed = value.trim_start();
+    let end = trimmed
+        .char_indices()
+        .take_while(|(_, ch)| ch.is_ascii_digit() || matches!(ch, '.' | '+' | '-' | 'e' | 'E'))
+        .map(|(index, ch)| index + ch.len_utf8())
+        .last()
+        .unwrap_or(0);
+    if end == 0 {
+        return None;
+    }
+    trimmed[..end].parse::<f64>().ok()
+}
+
+/// A whole string's leading number as a non-negative byte count, or `None`.
+///
+/// For the values the readers spell as `<n> bytes`. A negative, fractional,
+/// or overflowing count is dropped here rather than fabricated, the same
+/// validation [`card_power_watts`] applies to its own reading.
+pub fn detail_bytes(value: &str) -> Option<u64> {
+    let bytes = leading_number(value)?;
+    if !(bytes.is_finite() && bytes >= 0.0 && bytes.fract() == 0.0)
+        || bytes >= 9_007_199_254_740_992.0
+    {
+        return None;
+    }
+    Some(bytes as u64)
+}
+
+/// The free memory carried under [`FREE_MEMORY_DETAIL_KEY`], in bytes, or
+/// `None` when the key is absent or does not start with a number.
+///
+/// The reader spells the value in mebibytes with the unit in the value
+/// (`"97076 MiB"`), so the leading number is multiplied out here rather
+/// than parsed whole, and an overflow past what a u64 can hold drops the
+/// reading rather than wrapping.
+pub fn free_memory_bytes(detail: &HashMap<String, String>) -> Option<u64> {
+    let mib = leading_number(detail.get(FREE_MEMORY_DETAIL_KEY)?)?;
+    if !(mib.is_finite() && mib >= 0.0) {
+        return None;
+    }
+    (mib as u64).checked_mul(1024 * 1024)
 }
 
 /// Write the four PCIe link readings into `detail` in the exporter's
@@ -540,6 +752,91 @@ mod tests {
         assert!(is_volatile_detail_key("fan_speed"));
         assert!(is_volatile_detail_key("Fan Speed"));
         assert!(is_volatile_detail_key("FAN_SPEED"));
+    }
+
+    /// The prefix rule is the only way to register a key a reader builds at
+    /// runtime. Every shape both Intel layers actually spell must match,
+    /// including the case-only respelling the sanitizer is there to catch.
+    #[test]
+    fn the_prefix_rule_covers_the_runtime_built_families() {
+        for key in [
+            "Engine: render",
+            "Engine: render (L0)",
+            "Engine: compute (L0)",
+            "engine: render",
+            "ENGINE: 3d",
+            "Frequency: gpu (L0)",
+            "frequency: shader (L0)",
+        ] {
+            assert!(is_volatile_detail_key(key), "{key:?} must be volatile");
+        }
+    }
+
+    /// A prefix must not swallow whole names. The bare `frequency` key the
+    /// Furiosa reader writes is its own registered entry, and even the
+    /// capitalised `Frequency` respelling matches that entry through the
+    /// sanitizer, so neither belongs here; the near misses without the
+    /// colon-space escape the prefix families entirely.
+    #[test]
+    fn the_prefix_rule_does_not_catch_near_misses() {
+        for key in ["Engine", "Engineer", "Engineroom"] {
+            assert!(
+                !is_volatile_detail_key(key),
+                "{key:?} must stay a label: it is not a reserved-prefix key"
+            );
+        }
+    }
+
+    /// The unit-suffixed readers all spell the number first, so the leading
+    /// characters are the reading and the unit is decoration.
+    #[test]
+    fn leading_number_parses_every_reader_value_shape() {
+        assert_eq!(leading_number("97076 MiB"), Some(97_076.0));
+        assert_eq!(leading_number("81 C"), Some(81.0));
+        assert_eq!(leading_number("-8 C"), Some(-8.0));
+        assert_eq!(leading_number("44%"), Some(44.0));
+        assert_eq!(leading_number("12.34%"), Some(12.34));
+        assert_eq!(leading_number("123456 bytes"), Some(123_456.0));
+        assert_eq!(leading_number(" 2400 MHz"), Some(2_400.0));
+        assert_eq!(leading_number("1249"), Some(1_249.0));
+        for rejected in [
+            "",
+            "unknown RPM",
+            "Shared/system memory; dedicated VRAM budget unavailable",
+            "abc 42",
+            "1.2.3 bytes",
+        ] {
+            assert_eq!(leading_number(rejected), None, "{rejected:?}");
+        }
+    }
+
+    /// A negative or fractional byte count is not a byte count; the u64
+    /// floor keeps a f64 precision hole from fabricating one.
+    #[test]
+    fn detail_bytes_accepts_only_non_negative_whole_byte_counts() {
+        assert_eq!(detail_bytes("123456 bytes"), Some(123_456));
+        assert_eq!(detail_bytes("7000000000 bytes"), Some(7_000_000_000));
+        for rejected in ["-1 bytes", "12.5 bytes", "1.2.3 bytes", "abc", ""] {
+            assert_eq!(detail_bytes(rejected), None, "{rejected:?}");
+        }
+    }
+
+    /// The Gaudi reading's new home: the `MiB`-suffixed detail string
+    /// becomes a byte count on the gauge, without the total-minus-used
+    /// approximation.
+    #[test]
+    fn free_memory_bytes_parses_the_gaudi_mib_string() {
+        let with =
+            |value: &str| HashMap::from([(FREE_MEMORY_DETAIL_KEY.to_string(), value.to_string())]);
+        assert_eq!(
+            free_memory_bytes(&with("97076 MiB")),
+            Some(97_076 * 1024 * 1024)
+        );
+        assert_eq!(free_memory_bytes(&with("0 MiB")), Some(0));
+        for rejected in ["", "unknown", "-1 MiB"] {
+            assert_eq!(free_memory_bytes(&with(rejected)), None, "{rejected:?}");
+        }
+        assert_eq!(free_memory_bytes(&HashMap::new()), None);
     }
 
     /// Identity, discrete state and settable limits stay on the series: they

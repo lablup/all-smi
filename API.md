@@ -225,19 +225,32 @@ live in argv.
 | `all_smi_gpu_power_consumption_watts` | GPU power consumption      | watts   | `gpu_index`, `gpu_name`                   |
 | `all_smi_gpu_frequency_mhz`           | GPU frequency              | MHz     | `gpu_index`, `gpu_name`                   |
 | `all_smi_gpu_fan_speed_rpm`           | GPU fan speed              | RPM     | `gpu`, `instance`, `gpu_uuid`, `gpu_index` |
+| `all_smi_gpu_fan_duty_cycle`          | GPU fan duty cycle         | percent | `gpu`, `instance`, `gpu_uuid`, `gpu_index` |
 | `all_smi_gpu_pcie_gen_current`        | Current PCIe generation    | -       | `gpu`, `instance`, `gpu_uuid`, `gpu_index` |
 | `all_smi_gpu_pcie_width_current`      | Current PCIe link width    | -       | `gpu`, `instance`, `gpu_uuid`, `gpu_index` |
+| `all_smi_gpu_memory_free_bytes`       | GPU memory free            | bytes   | `gpu`, `instance`, `gpu_uuid`, `gpu_index` |
+| `all_smi_gpu_hotspot_temperature_celsius` | GPU hotspot temperature | celsius | `gpu`, `instance`, `gpu_uuid`, `gpu_index` |
+| `all_smi_gpu_memory_temperature_celsius` | GPU memory die temperature | celsius | `gpu`, `instance`, `gpu_uuid`, `gpu_index` |
+| `all_smi_gpu_memory_controller_activity` | GPU memory controller activity | percent | `gpu`, `instance`, `gpu_uuid`, `gpu_index` |
+| `all_smi_gpu_process_vram_used_bytes` | VRAM used by the all-smi process | bytes | `gpu`, `instance`, `gpu_uuid`, `gpu_index` |
+| `all_smi_gpu_process_vram_budget_bytes` | VRAM budget of the all-smi process | bytes | `gpu`, `instance`, `gpu_uuid`, `gpu_index` |
+| `all_smi_gpu_engine_utilization`      | GPU engine utilization, one row per engine class | percent | `gpu`, `instance`, `gpu_uuid`, `gpu_index`, `engine` |
+| `all_smi_gpu_clock_domain_current_mhz` | GPU clock domain frequency, one row per clock domain | MHz | `gpu`, `instance`, `gpu_uuid`, `gpu_index`, `domain` |
 | `all_smi_gpu_info`                    | GPU device information     | info    | `gpu_index`, `gpu_name`, `driver_version` |
 
-`all_smi_gpu_fan_speed_rpm` is emitted only by devices that expose a fan tachometer: AMD via amdgpu on Linux and ADL on Windows, and Intel via hwmon `fan1_input` or Level Zero Sysman. Passively cooled datacenter cards and drivers that report only a duty-cycle percentage omit the series entirely, so absence means "no tachometer" rather than "fan stopped". The legacy `fan_speed` label on `all_smi_gpu_info` is gone: the reading ships only as this gauge.
+`all_smi_gpu_fan_speed_rpm` is emitted only by devices that expose a fan tachometer: AMD via amdgpu on Linux and ADL on Windows, and Intel via hwmon `fan1_input` or Level Zero Sysman. Passively cooled datacenter cards omit the series entirely, so absence means "no tachometer" rather than "fan stopped". A Level Zero device whose driver exposes no tachometer reports its fan as a duty cycle instead, which ships as `all_smi_gpu_fan_duty_cycle`; the two families never appear together on one device. The legacy `fan_speed` label on `all_smi_gpu_info` is gone: the reading ships only as the gauges.
 
 The two PCIe current gauges ship on NVIDIA NVML hosts and on Linux AMD hosts, but the two vendors report different freshness. On NVIDIA the reading is the link state seen when the reader initialised (it lives in the startup-cached static detail map, the same contract as `all_smi_gpu_clock_memory_max_mhz` and `power_limit_current`); on Linux AMD it is live and re-read on every poll, because AMD GPUs retrain the link with the power state. Both widths are bare lane counts (`16`), not `x16`.
+
+The AMD ADL sensor gauges (`all_smi_gpu_hotspot_temperature_celsius`, `all_smi_gpu_memory_temperature_celsius`, `all_smi_gpu_memory_controller_activity`) ship on Windows hosts with the AMD driver, live and re-read on every poll; they are absent when a sensor does not answer, and a card without the AMD ADL library publishes none of them. `all_smi_gpu_memory_free_bytes` ships on Intel Gaudi hosts, taken from hl-smi's own CSV column rather than derived as total minus used. `all_smi_gpu_process_vram_used_bytes` and `all_smi_gpu_process_vram_budget_bytes` ship on Windows hosts: both are scoped to the process running all-smi, which is always the exporter itself, so the dimension collapses onto the device row and neither is mixed into the system-wide `all_smi_gpu_memory_used_bytes`.
+
+`all_smi_gpu_engine_utilization` and `all_smi_gpu_clock_domain_current_mhz` ship on Intel hosts, one row per discovered engine class and clock domain. The `engine` label carries the class name, and the `domain` label the clock domain; a Level Zero-sourced row keeps the driver's `(L0)` qualifier in its label value, so the two provenances stay distinct series rather than flipping one series between samples.
 
 ### `all_smi_gpu_info` carries device identity only
 
 The label set of `all_smi_gpu_info` describes what a device *is*: name, instance, UUID, index, type, and the reader's static details (serial, firmware, driver and library versions, PCI address, and so on). A changing reading does not belong on it. Prometheus identifies a series by its full label set, so a label whose value moves between scrapes starts a new series on each scrape and leaves the previous one stale, making series and index cardinality grow with the number of scrapes instead of the number of devices. Readings have a dedicated series instead, which is also what makes `group_left` joins against `all_smi_gpu_info` stable over a range.
 
-Not every reading has moved yet, because a key can only be dropped from the label set once its value is published somewhere else. Intel Gaudi's `Free Memory`, the Intel GPU engine-busy percentages (`Engine: <class>`, and the Level Zero `Engine: <class> (L0)`, `Power (L0)` and `Frequency: <domain> (L0)` entries), and the AMD ADL and per-process VRAM readings on Windows still ride on the label set and still churn it. Issue #434 tracks them.
+The sweep is complete: every `detail` key whose value is a continuously varying measurement is registered in `detail_keys::VOLATILE_DETAIL_KEYS`, and each one's reading ships as a dedicated series. A registry entry matches by exact key, by the sanitized label name it would have produced, or, for the Intel engine and clock families a reader builds at runtime, by a reserved key prefix. Keys that hold a discrete state (`Status`, `Performance State`), a settable limit or mode, or a provenance string are identity and stay labels.
 
 Readings that used to ride on this label set, and the series that carries each of them now:
 
@@ -256,10 +269,18 @@ Readings that used to ride on this label set, and the series that carries each o
 | `hlo_queue_size`, `hlo_exec_mean`, `hlo_exec_p50`, `hlo_exec_p90`, `hlo_exec_p95`, `hlo_exec_p99_9` | Google TPU | `all_smi_tpu_hlo_queue_size`, `all_smi_tpu_hlo_exec_mean_microseconds`, and the `p50`, `p90`, `p95` and `p999` variants |
 | `pcie_generation`, `pcie_width`                  | NVIDIA             | `all_smi_gpu_pcie_gen_current`, `all_smi_gpu_pcie_width_current` (new; the width is a bare lane count rather than `x16`, and the reading is the link state at reader initialisation) |
 | `current_link`                                   | AMD (Linux)        | `all_smi_gpu_pcie_gen_current`, `all_smi_gpu_pcie_width_current` (live) |
-| `memory_clock`                                   | AMD (Linux)        | `all_smi_gpu_clock_memory_current_mhz` (new)          |
-| `fan_speed`                                      | AMD, Intel         | `all_smi_gpu_fan_speed_rpm` (an Intel Level Zero duty-cycle-only reading has no series) |
+| `memory_clock`                                   | AMD (Linux, Windows ADL) | `all_smi_gpu_clock_memory_current_mhz` (live; both vendors write the same bare-`MHz` key) |
+| `fan_speed`                                      | AMD, Intel         | `all_smi_gpu_fan_speed_rpm`, or `all_smi_gpu_fan_duty_cycle` for a Level Zero device whose driver exposes no tachometer |
+| `free_memory`                                    | Intel Gaudi        | `all_smi_gpu_memory_free_bytes` (the same reading, in bytes, taken from hl-smi's CSV column) |
+| `hotspot_temperature`                            | AMD (Windows ADL)  | `all_smi_gpu_hotspot_temperature_celsius`               |
+| `memory_temperature`                             | AMD (Windows ADL)  | `all_smi_gpu_memory_temperature_celsius`                |
+| `memory_controller_activity`                     | AMD (Windows ADL)  | `all_smi_gpu_memory_controller_activity`                |
+| `vram_usage__this_process_`, `vram_budget__this_process_` | Windows (DXGI) | `all_smi_gpu_process_vram_used_bytes`, `all_smi_gpu_process_vram_budget_bytes` |
+| `power__l0_`                                     | Intel (Level Zero) | `all_smi_gpu_power_consumption_watts` (the same reading, assigned to the typed power field) |
+| `engine__<class>`, `engine__<class>__l0_`        | Intel (sysfs, Level Zero) | `all_smi_gpu_engine_utilization`, one row per engine class keyed by the `engine` label |
+| `frequency__<domain>__l0_`                       | Intel (Level Zero) | `all_smi_gpu_clock_domain_current_mhz`, one row per clock domain keyed by the `domain` label |
 
-This is an intentional exposition change: a scraper or dashboard that read any of these off `all_smi_gpu_info` must move to the series named above. Two differences are worth knowing when migrating. `all_smi_cpu_temperature_celsius` and `all_smi_gpu_temperature_celsius` are whole degrees, while the old Apple Silicon labels carried one decimal, so a migrated panel loses that decimal. And `all_smi_cpu_temperature_celsius` carries the CPU label set (`cpu_model`, `instance`, `hostname`, `index`), not the GPU one, so a panel that joined on `gpu_uuid` joins on `instance` instead.
+This is an intentional exposition change: a scraper or dashboard that read any of these off `all_smi_gpu_info` must move to the series named above. Three differences are worth knowing when migrating. `all_smi_cpu_temperature_celsius` and `all_smi_gpu_temperature_celsius` are whole degrees, while the old Apple Silicon labels carried one decimal, so a migrated panel loses that decimal. `all_smi_cpu_temperature_celsius` carries the CPU label set (`cpu_model`, `instance`, `hostname`, `index`), not the GPU one, so a panel that joined on `gpu_uuid` joins on `instance` instead. And the Intel engine rows gained an `engine` label carrying the class name, so a panel that read `Engine: <class>` off the identity series filters on `engine="<class>"` instead.
 
 The exposition also sorts these labels by name, so an unchanged device renders byte-identically from scrape to scrape and two scrapes can be compared with `diff`.
 
@@ -447,7 +468,7 @@ AMD GPUs (Radeon and Instinct series) provide comprehensive monitoring through R
 - **ASIC Information**: Device ID, revision ID, ASIC name
 - **Memory Clock**: Current memory clock frequency, shipped as the `all_smi_gpu_clock_memory_current_mhz` gauge
 
-The per-poll readings no longer ride on `all_smi_gpu_info` labels: `Current Link` (formatted `Gen<N> x<W>`) now ships as the two PCIe current gauges, `Memory Clock` as `all_smi_gpu_clock_memory_current_mhz`, and the tachometer reading only as `all_smi_gpu_fan_speed_rpm`. The rename is visible outside Prometheus too: snapshot JSON and CSV expose `detail` verbatim, so a query path such as `detail.Current Link` becomes `detail.pcie_gen_current` and `detail.pcie_width_current` (bare lane count), `detail.Memory Clock` becomes `detail.clock_memory_current` (bare MHz), and the values are numbers rather than unit-suffixed strings. The static `Max GPU Link`, `Max System Link`, `Min DPM Link` and `Max DPM Link` labels are unchanged.
+The per-poll readings no longer ride on `all_smi_gpu_info` labels: `Current Link` (formatted `Gen<N> x<W>`) now ships as the two PCIe current gauges, `Memory Clock` as `all_smi_gpu_clock_memory_current_mhz`, and the tachometer reading only as `all_smi_gpu_fan_speed_rpm`. The same gauge covers Windows: the AMD ADL reader writes the same bare-`MHz` key from PMLog, so both vendors feed one memory-clock family, and the four ADL sensor readings on Windows (edge temperature floors at 0 in the typed field, so a sub-zero die on a cold-started machine keeps its true value only in the detail string) ship as the `all_smi_gpu_hotspot_temperature_celsius`, `all_smi_gpu_memory_temperature_celsius` and `all_smi_gpu_memory_controller_activity` gauges instead of labels. The rename is visible outside Prometheus too: snapshot JSON and CSV expose `detail` verbatim, so a query path such as `detail.Current Link` becomes `detail.pcie_gen_current` and `detail.pcie_width_current` (bare lane count), `detail.Memory Clock` becomes `detail.clock_memory_current` (bare MHz), and the values are numbers rather than unit-suffixed strings. The static `Max GPU Link`, `Max System Link`, `Min DPM Link` and `Max DPM Link` labels are unchanged.
 
 **Process Tracking**:
 - AMD GPU process detection uses `fdinfo` from `/proc/<pid>/fdinfo/` for accurate memory tracking
@@ -617,10 +638,13 @@ Note: Furiosa NPUs use the RNGD architecture with 8 cores per NPU. Each core con
 | `all_smi_gpu_utilization`             | NPU utilization percentage | percent | `gpu_index`, `gpu_name`                   |
 | `all_smi_gpu_memory_used_bytes`       | NPU memory used            | bytes   | `gpu_index`, `gpu_name`                   |
 | `all_smi_gpu_memory_total_bytes`      | NPU memory total           | bytes   | `gpu_index`, `gpu_name`                   |
+| `all_smi_gpu_memory_free_bytes`       | NPU memory free            | bytes   | `gpu`, `instance`, `gpu_uuid`, `gpu_index` |
 | `all_smi_gpu_temperature_celsius`     | NPU temperature            | celsius | `gpu_index`, `gpu_name`                   |
 | `all_smi_gpu_power_consumption_watts` | NPU power consumption      | watts   | `gpu_index`, `gpu_name`                   |
 | `all_smi_gpu_frequency_mhz`           | NPU clock frequency        | MHz     | `gpu_index`, `gpu_name`                   |
 | `all_smi_gpu_info`                    | NPU device information     | info    | `gpu_index`, `gpu_name`, `driver_version` |
+
+`all_smi_gpu_memory_free_bytes` is taken from hl-smi's own CSV column rather than derived as `all_smi_gpu_memory_total_bytes` minus `all_smi_gpu_memory_used_bytes`, so it is the tool's reading and not an approximation of one. The old `Free Memory` label on `all_smi_gpu_info` is gone: the reading ships only as this gauge.
 
 #### Intel Gaudi-Specific Metrics
 | Metric                                        | Description                              | Unit    | Labels                                                        |
