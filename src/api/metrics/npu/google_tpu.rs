@@ -276,10 +276,6 @@ impl NpuExporter for GoogleTpuExporter {
             }
         }
     }
-
-    fn vendor_name(&self) -> &'static str {
-        "Google TPU"
-    }
 }
 
 #[cfg(test)]

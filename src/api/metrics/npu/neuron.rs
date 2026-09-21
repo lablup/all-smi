@@ -197,8 +197,4 @@ impl NpuExporter for NeuronExporter {
         self.export_driver_metrics(builder, info, index_str);
         self.export_topology_metrics(builder, info, index_str);
     }
-
-    fn vendor_name(&self) -> &'static str {
-        "AWS Neuron"
-    }
 }

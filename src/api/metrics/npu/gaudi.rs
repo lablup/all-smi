@@ -274,8 +274,4 @@ impl NpuExporter for GaudiExporter {
         self.export_power_metrics(builder, info, index);
         self.export_temperature_metrics(builder, info, index);
     }
-
-    fn vendor_name(&self) -> &'static str {
-        "Intel Gaudi"
-    }
 }

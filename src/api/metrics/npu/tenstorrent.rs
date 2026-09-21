@@ -627,8 +627,4 @@ impl NpuExporter for TenstorrentExporter {
         self.export_board_info(builder, info, index);
         self.export_pcie_dram(builder, info, index);
     }
-
-    fn vendor_name(&self) -> &'static str {
-        "Tenstorrent"
-    }
 }

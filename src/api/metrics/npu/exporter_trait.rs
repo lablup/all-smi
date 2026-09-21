@@ -29,7 +29,4 @@ pub trait NpuExporter: Send + Sync {
         index: usize,
         index_str: &str,
     );
-
-    /// Get the vendor name for identification purposes
-    fn vendor_name(&self) -> &'static str;
 }

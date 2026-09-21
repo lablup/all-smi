@@ -262,8 +262,4 @@ impl NpuExporter for FuriosaExporter {
         self.export_clock_metrics(builder, info, index);
         self.export_device_status(builder, info, index);
     }
-
-    fn vendor_name(&self) -> &'static str {
-        "Furiosa"
-    }
 }

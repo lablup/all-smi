@@ -201,14 +201,44 @@ mod tests {
         }
     }
 
-    fn vendor_for(info: &GpuInfo) -> Option<&'static str> {
+    /// Pool indices per platform, mirroring `find_exporter`'s mapping:
+    /// Linux `[Tenstorrent, Gaudi, Rebellions, Furiosa, Google TPU, AWS Neuron]`,
+    /// other `[Gaudi, Rebellions, Furiosa, Google TPU]`.
+    #[cfg(target_os = "linux")]
+    const TENSTORRENT_IDX: usize = 0;
+    #[cfg(target_os = "linux")]
+    const GAUDI_IDX: usize = 1;
+    #[cfg(target_os = "linux")]
+    const REBELLIONS_IDX: usize = 2;
+    #[cfg(target_os = "linux")]
+    const FURIOSA_IDX: usize = 3;
+    #[cfg(target_os = "linux")]
+    const TPU_IDX: usize = 4;
+    #[cfg(not(target_os = "linux"))]
+    const GAUDI_IDX: usize = 0;
+    #[cfg(not(target_os = "linux"))]
+    const REBELLIONS_IDX: usize = 1;
+    #[cfg(not(target_os = "linux"))]
+    const FURIOSA_IDX: usize = 2;
+    #[cfg(not(target_os = "linux"))]
+    const TPU_IDX: usize = 3;
+
+    /// Pool index of the exporter `find_exporter` routes `info` to.
+    fn vendor_for(info: &GpuInfo) -> Option<usize> {
         let devices: [GpuInfo; 0] = [];
         NpuMetricExporter::new(&devices)
             .find_exporter(info)
-            .map(|exporter| exporter.vendor_name())
+            .map(|exporter| {
+                EXPORTER_POOL
+                    .get()
+                    .expect("pool initialized")
+                    .iter()
+                    .position(|e| std::ptr::eq(e.as_ref(), exporter))
+                    .expect("the routed exporter is in the pool")
+            })
     }
 
-    fn vendor_for_name(name: &str) -> Option<&'static str> {
+    fn vendor_for_name(name: &str) -> Option<usize> {
         vendor_for(&npu_named(name, &[]))
     }
 
@@ -218,14 +248,20 @@ mod tests {
     #[test]
     fn a_real_rebellions_card_routes_to_the_rebellions_exporter() {
         let tagged = npu_named("RBLN-CA22", &[("lib_name", "RBLN-SDK")]);
-        assert_eq!(vendor_for(&tagged), Some("Rebellions"));
+        assert_eq!(vendor_for(&tagged), Some(REBELLIONS_IDX));
 
         // Untagged (remote node / mock server), and a hypothetical later SKU.
-        assert_eq!(vendor_for(&npu_named("RBLN-CA22", &[])), Some("Rebellions"));
-        assert_eq!(vendor_for(&npu_named("RBLN-CA25", &[])), Some("Rebellions"));
+        assert_eq!(
+            vendor_for(&npu_named("RBLN-CA22", &[])),
+            Some(REBELLIONS_IDX)
+        );
+        assert_eq!(
+            vendor_for(&npu_named("RBLN-CA25", &[])),
+            Some(REBELLIONS_IDX)
+        );
         assert_eq!(
             vendor_for(&npu_named("Rebellions ATOM", &[])),
-            Some("Rebellions")
+            Some(REBELLIONS_IDX)
         );
     }
 
@@ -233,22 +269,22 @@ mod tests {
     /// `vec!` order silently mis-routes vendors. Pin every position.
     #[test]
     fn the_other_vendors_still_route_to_their_own_exporters() {
-        assert_eq!(vendor_for(&npu_named("HL-325L", &[])), Some("Intel Gaudi"));
+        assert_eq!(vendor_for(&npu_named("HL-325L", &[])), Some(GAUDI_IDX));
         assert_eq!(
             vendor_for(&npu_named("Intel Gaudi 3", &[])),
-            Some("Intel Gaudi")
+            Some(GAUDI_IDX)
         );
         assert_eq!(
             vendor_for(&npu_named("FuriosaAI RNGD", &[])),
-            Some("Furiosa")
+            Some(FURIOSA_IDX)
         );
-        assert_eq!(vendor_for(&npu_named("Warboy", &[])), Some("Furiosa"));
-        assert_eq!(vendor_for(&npu_named("TPU v5e", &[])), Some("Google TPU"));
+        assert_eq!(vendor_for(&npu_named("Warboy", &[])), Some(FURIOSA_IDX));
+        assert_eq!(vendor_for(&npu_named("TPU v5e", &[])), Some(TPU_IDX));
 
         #[cfg(target_os = "linux")]
         assert_eq!(
             vendor_for(&npu_named("Tenstorrent Wormhole", &[])),
-            Some("Tenstorrent")
+            Some(TENSTORRENT_IDX)
         );
     }
 
@@ -256,20 +292,20 @@ mod tests {
     /// appending a vendor must not re-route any existing one.
     #[test]
     fn exporter_pool_indices_are_pinned() {
-        assert_eq!(vendor_for_name("Intel Gaudi 3"), Some("Intel Gaudi"));
-        assert_eq!(vendor_for_name("Rebellions ATOM"), Some("Rebellions"));
-        assert_eq!(vendor_for_name("Furiosa RNGD"), Some("Furiosa"));
-        assert_eq!(vendor_for_name("Google TPU v5e"), Some("Google TPU"));
+        assert_eq!(vendor_for_name("Intel Gaudi 3"), Some(GAUDI_IDX));
+        assert_eq!(vendor_for_name("Rebellions ATOM"), Some(REBELLIONS_IDX));
+        assert_eq!(vendor_for_name("Furiosa RNGD"), Some(FURIOSA_IDX));
+        assert_eq!(vendor_for_name("Google TPU v5e"), Some(TPU_IDX));
 
         #[cfg(target_os = "linux")]
         {
             assert_eq!(
                 vendor_for_name("Tenstorrent Wormhole n150s"),
-                Some("Tenstorrent")
+                Some(TENSTORRENT_IDX)
             );
             let pool = EXPORTER_POOL.get().expect("pool initialized");
             assert_eq!(pool.len(), 6);
-            assert_eq!(pool[NEURON_IDX].vendor_name(), "AWS Neuron");
+            assert!(pool[NEURON_IDX].can_handle(&npu_named("AWS Trainium1", &[])));
         }
     }
 
@@ -278,12 +314,12 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn neuron_rows_route_to_the_neuron_exporter() {
-        assert_eq!(vendor_for_name("AWS Trainium1"), Some("AWS Neuron"));
-        assert_eq!(vendor_for_name("AWS Inferentia2"), Some("AWS Neuron"));
-        assert_eq!(vendor_for_name("AWS Neuron Device"), Some("AWS Neuron"));
+        assert_eq!(vendor_for_name("AWS Trainium1"), Some(NEURON_IDX));
+        assert_eq!(vendor_for_name("AWS Inferentia2"), Some(NEURON_IDX));
+        assert_eq!(vendor_for_name("AWS Neuron Device"), Some(NEURON_IDX));
         assert_eq!(
             vendor_for(&npu_named("AWS Accelerator", &[("lib_name", "Neuron")])),
-            Some("AWS Neuron")
+            Some(NEURON_IDX)
         );
         assert_eq!(vendor_for_name("Neuronal Accelerator"), None);
     }

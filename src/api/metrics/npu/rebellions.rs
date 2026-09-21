@@ -187,10 +187,6 @@ impl NpuExporter for RebellionsExporter {
         self.export_performance_state(builder, info, index);
         self.export_device_status(builder, info, index);
     }
-
-    fn vendor_name(&self) -> &'static str {
-        "Rebellions"
-    }
 }
 
 #[cfg(test)]
