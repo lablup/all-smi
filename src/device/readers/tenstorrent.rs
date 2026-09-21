@@ -321,13 +321,23 @@ fn extract_static_info(chip: &Chip) -> Option<(DeviceStaticInfo, TenstorrentStat
 
     let uuid = Some(telem.board_serial_number_hex());
 
-    // Build detail map using DetailBuilder
+    // Build detail map using DetailBuilder.
+    //
+    // The keys are the snake_case ones `api::metrics::npu::tenstorrent` looks
+    // up, the same convention the dynamic telemetry below follows: a key the
+    // exporter cannot read by its own spelling makes its metric dead. These
+    // are static identity, so they are not registered in
+    // `detail_keys::VOLATILE_DETAIL_KEYS` and still travel as
+    // `all_smi_gpu_info` labels; `sanitize_label_name` maps the Title Case
+    // spellings this replaces to the same label names, so the label set
+    // changes only where the key itself changed (`PCIe Generation` became
+    // `pcie_link_gen`).
     let mut builder = DetailBuilder::new()
-        .insert("Board Type", board_type)
-        .insert("Board ID", telem.board_serial_number_hex())
-        .insert("ARC FW Version", telem.arc_fw_version())
-        .insert("ETH FW Version", telem.eth_fw_version())
-        .insert("FW Date", telem.firmware_date());
+        .insert("board_type", board_type)
+        .insert("board_id", telem.board_serial_number_hex())
+        .insert("arc_fw_version", telem.arc_fw_version())
+        .insert("eth_fw_version", telem.eth_fw_version())
+        .insert("fw_date", telem.firmware_date());
 
     // Extract PCIe information if available
     if let Ok(Some(device_info)) = chip.get_device_info() {
@@ -335,18 +345,21 @@ fn extract_static_info(chip: &Chip) -> Option<(DeviceStaticInfo, TenstorrentStat
             "{:04x}:{:02x}:{:02x}.{:x}",
             device_info.domain, device_info.bus, device_info.slot, device_info.function
         );
-        let pcie_link_width = format!("x{}", device_info.pcie_current_link_width());
-        let pcie_link_gen = format!("{}", device_info.pcie_current_link_gen());
+        let pcie_link_width = device_info.pcie_current_link_width().to_string();
+        let pcie_link_gen = device_info.pcie_current_link_gen().to_string();
 
         builder = builder
-            .insert("PCIe Address", &pcie_address)
-            .insert("PCIe Vendor ID", format!("0x{:04x}", device_info.vendor))
-            .insert("PCIe Device ID", format!("0x{:04x}", device_info.device_id))
-            .insert_pci_info(
-                Some(&pcie_address),
-                Some(&pcie_link_gen),
-                Some(&pcie_link_width),
-            );
+            .insert("pcie_address", &pcie_address)
+            .insert("pcie_vendor_id", format!("0x{:04x}", device_info.vendor))
+            .insert("pcie_device_id", format!("0x{:04x}", device_info.device_id))
+            .insert("pci_bus_id", &pcie_address)
+            // Explicit inserts rather than `insert_pci_info`, which writes
+            // the Title Case keys Rebellions still reads. Bare numbers, not
+            // "Gen4"/"x16": the exporter parses these with a plain `f64`
+            // parse, and `ui::topology::format_pcie` adds its own `Gen`/`x`
+            // prefixes when it renders them.
+            .insert("pcie_link_gen", pcie_link_gen)
+            .insert("pcie_link_width", pcie_link_width);
     }
 
     // Extract firmware versions
@@ -360,7 +373,7 @@ fn extract_static_info(chip: &Chip) -> Option<(DeviceStaticInfo, TenstorrentStat
     } else {
         None
     };
-    builder = builder.insert_optional("DDR FW Version", ddr_fw_version);
+    builder = builder.insert_optional("ddr_fw_version", ddr_fw_version);
 
     let spibootrom_fw_version = if telem.spibootrom_fw_version != 0 {
         Some(format!(
@@ -372,7 +385,7 @@ fn extract_static_info(chip: &Chip) -> Option<(DeviceStaticInfo, TenstorrentStat
     } else {
         None
     };
-    builder = builder.insert_optional("SPIBOOTROM FW Version", spibootrom_fw_version);
+    builder = builder.insert_optional("spibootrom_fw_version", spibootrom_fw_version);
 
     // Determine memory size and TDP based on board type
     let (total_memory, tdp_limit) = determine_memory_and_tdp(board_type);
@@ -499,11 +512,63 @@ fn build_device_details(
     detail.insert("arcclk_mhz".to_string(), telem.arc_clk().to_string());
     detail.insert("axiclk_mhz".to_string(), telem.axi_clk().to_string());
 
+    // Counters, status registers and limits luwen carries in `Telemetry`
+    // but that used to have no `detail` entry at all, so their whole
+    // exporter half was declared and documented without ever firing.
+    //
+    // The shapes are the ones each exporter site parses:
+    // `CommonNpuExporter::parse_hex_register` strips one leading `0x` and
+    // accepts at most eight hex digits, so `faults`, `throttler` and
+    // `ddr_status` are written as `0x` plus eight hex digits; everything
+    // else goes through the strict `parse_numeric_value`, so it is a bare
+    // decimal number with no unit suffix. `pcie_status` and the two
+    // ethernet statuses are label values of the matching info series and
+    // share the register form.
+    detail.insert("faults".to_string(), format!("0x{:08x}", telem.faults));
+    detail.insert(
+        "throttler".to_string(),
+        format!("0x{:08x}", telem.throttler),
+    );
+    detail.insert(
+        "ddr_status".to_string(),
+        format!("0x{:08x}", telem.ddr_status),
+    );
+    detail.insert(
+        "pcie_status".to_string(),
+        format!("0x{:08x}", telem.pcie_status),
+    );
+    detail.insert(
+        "eth_status0".to_string(),
+        format!("0x{:08x}", telem.eth_status0),
+    );
+    detail.insert(
+        "eth_status1".to_string(),
+        format!("0x{:08x}", telem.eth_status1),
+    );
+
+    detail.insert("arc0_health".to_string(), telem.arc0_health.to_string());
+    detail.insert("arc3_health".to_string(), telem.arc3_health.to_string());
+    // The raw heartbeat counter, not `telemetry_heartbeat()`: that helper
+    // returns `arc0_health` on non-Blackhole arches, which this map already
+    // carries under its own key.
+    detail.insert("heartbeat".to_string(), telem.timer_heartbeat.to_string());
+    detail.insert("fan_speed".to_string(), telem.fan_speed.to_string());
+    detail.insert("fan_rpm".to_string(), telem.fan_rpm.to_string());
+    detail.insert("tdp_limit".to_string(), telem.tdp.to_string());
+    detail.insert("tdc_limit".to_string(), telem.tdc.to_string());
+    detail.insert("thermal_limit".to_string(), telem.thm_limits.to_string());
+
+    // Boards without the sensor carry no key at all, so the DRAM info
+    // metric is omitted rather than exported with a `0` speed.
+    if let Some(speed) = telem.ddr_speed {
+        detail.insert("dram_speed".to_string(), speed.to_string());
+    }
+
     // Add unified AI acceleration library labels if not already present
     detail
         .entry("lib_name".to_string())
         .or_insert("Luwen".to_string());
-    if let Some(arc_fw) = detail.get("ARC FW Version") {
+    if let Some(arc_fw) = detail.get("arc_fw_version") {
         detail.insert("lib_version".to_string(), arc_fw.clone());
     }
 

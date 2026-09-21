@@ -477,7 +477,6 @@ Note: on Apple Silicon (M1/M2/M3/M4) `all_smi_gpu_temperature_celsius` reports t
 | Metric                                          | Description                        | Unit    | Labels                                                    |
 |-------------------------------------------------|------------------------------------|---------|-----------------------------------------------------------|
 | `all_smi_tenstorrent_board_info`                | Board and architecture information | info    | `npu`, `instance`, `npu_uuid`, `npu_index`, `board_type`, `board_id`, `architecture` |
-| `all_smi_tenstorrent_collection_method_info`    | Data collection method used        | info    | `npu`, `instance`, `npu_uuid`, `npu_index`, `method`             |
 | **Firmware Versions**                           |                                    |         |                                                           |
 | `all_smi_tenstorrent_arc_firmware_info`         | ARC firmware version               | info    | `npu`, `instance`, `npu_uuid`, `npu_index`, `version`            |
 | `all_smi_tenstorrent_eth_firmware_info`         | Ethernet firmware version          | info    | `npu`, `instance`, `npu_uuid`, `npu_index`, `version`            |
@@ -488,8 +487,6 @@ Note: on Apple Silicon (M1/M2/M3/M4) `all_smi_gpu_temperature_celsius` reports t
 | `all_smi_tenstorrent_asic_temperature_celsius`  | ASIC temperature                   | celsius | `npu`, `instance`, `npu_uuid`, `npu_index`                       |
 | `all_smi_tenstorrent_vreg_temperature_celsius`  | Voltage regulator temperature      | celsius | `npu`, `instance`, `npu_uuid`, `npu_index`                       |
 | `all_smi_tenstorrent_inlet_temperature_celsius` | Inlet temperature                  | celsius | `npu`, `instance`, `npu_uuid`, `npu_index`                       |
-| `all_smi_tenstorrent_outlet1_temperature_celsius`| Outlet 1 temperature              | celsius | `npu`, `instance`, `npu_uuid`, `npu_index`                       |
-| `all_smi_tenstorrent_outlet2_temperature_celsius`| Outlet 2 temperature              | celsius | `npu`, `instance`, `npu_uuid`, `npu_index`                       |
 | **Clock Frequencies**                           |                                    |         |                                                           |
 | `all_smi_tenstorrent_aiclk_mhz`                | AI clock frequency                 | MHz     | `npu`, `instance`, `npu_uuid`, `npu_index`                       |
 | `all_smi_tenstorrent_axiclk_mhz`               | AXI clock frequency                | MHz     | `npu`, `instance`, `npu_uuid`, `npu_index`                       |
@@ -497,9 +494,9 @@ Note: on Apple Silicon (M1/M2/M3/M4) `all_smi_gpu_temperature_celsius` reports t
 | **Power and Electrical**                        |                                    |         |                                                           |
 | `all_smi_tenstorrent_voltage_volts`            | Core voltage                       | volts   | `npu`, `instance`, `npu_uuid`, `npu_index`                       |
 | `all_smi_tenstorrent_current_amperes`          | Current draw                       | amperes | `npu`, `instance`, `npu_uuid`, `npu_index`                       |
-| `all_smi_tenstorrent_power_raw_watts`          | Raw power consumption              | watts   | `npu`, `instance`, `npu_uuid`, `npu_index`                       |
 | `all_smi_tenstorrent_tdp_limit_watts`          | TDP limit                          | watts   | `npu`, `instance`, `npu_uuid`, `npu_index`                       |
 | `all_smi_tenstorrent_tdc_limit_amperes`        | TDC limit                          | amperes | `npu`, `instance`, `npu_uuid`, `npu_index`                       |
+| `all_smi_tenstorrent_thermal_limit_celsius`    | Thermal limit                      | celsius | `npu`, `instance`, `npu_uuid`, `npu_index`                       |
 | **Status and Health**                           |                                    |         |                                                           |
 | `all_smi_tenstorrent_heartbeat`                | Device heartbeat counter           | counter | `npu`, `instance`, `npu_uuid`, `npu_index`                       |
 | `all_smi_tenstorrent_arc0_health`              | ARC0 health counter                | counter | `npu`, `instance`, `npu_uuid`, `npu_index`                       |
@@ -525,6 +522,8 @@ Note: Tenstorrent NPUs use the same basic metric names as GPUs for compatibility
 The telemetry gauges above (`all_smi_tenstorrent_voltage_volts`, `all_smi_tenstorrent_current_amperes`, the ASIC, voltage-regulator and inlet temperatures, and the AI, ARC and AXI clocks) now actually appear in the exposition. They had been documented and declared for some time without ever being emitted: the exporter looked up snake_case keys holding bare numbers while the reader wrote Title Case keys holding unit-suffixed strings such as `"800MHz"`, so every lookup missed and the readings reached Prometheus only as churning `all_smi_gpu_info` labels. The reader now writes the keys the exporter reads, at the same precision and without the unit suffix.
 
 The rename is visible outside Prometheus too. Snapshot JSON and CSV expose `detail` verbatim, so a query path such as `detail.AI Clock` becomes `detail.aiclk_mhz`, and the value is now `800` rather than `"800MHz"`. The full mapping is `VDD Voltage` to `voltage`, `Current` to `current`, `ASIC Temperature` to `asic_temperature`, `VR Temperature` to `vreg_temperature`, `Inlet Temperature` to `inlet_temperature`, `AI Clock` to `aiclk_mhz`, `ARC Clock` to `arcclk_mhz`, and `AXI Clock` to `axiclk_mhz`.
+
+The same convention now covers the static details and the health registers. The reader writes its board, firmware and PCIe information under the snake_case keys its exporter reads (`board_type`, `board_id`, `arc_fw_version`, `eth_fw_version`, `fw_date`, `ddr_fw_version`, `spibootrom_fw_version`, `pcie_address`, `pcie_vendor_id`, `pcie_device_id`, `pcie_link_gen`, `pcie_link_width`), which renames the corresponding snapshot JSON and CSV fields the same way; in the `all_smi_gpu_info` label set the names are unchanged except `pcie_generation`, which becomes `pcie_link_gen`, and the `pcie_link_width` value is now a bare lane count (`16`) rather than `x16`. The reader also populates the health and status values luwen already reported (`faults`, `throttler`, `arc0_health`, `arc3_health`, `pcie_status`, `eth_status0`, `eth_status1`, `ddr_status`, `fan_speed`, `fan_rpm`, `heartbeat`, `tdp_limit`, `tdc_limit`, `thermal_limit`, `dram_speed`), so the board, firmware, health, fan, PCIe and DRAM series above all appear; the register keys travel as their own series and never as `all_smi_gpu_info` labels. `all_smi_tenstorrent_collection_method_info`, `all_smi_tenstorrent_outlet1_temperature_celsius`, `all_smi_tenstorrent_outlet2_temperature_celsius` and `all_smi_tenstorrent_power_raw_watts` are gone: luwen exposes no outlet sensor, the collection method is already an `all_smi_gpu_info` label (`lib_name` = `Luwen`), and the raw power reading already ships as `all_smi_gpu_power_consumption_watts`.
 
 ### Rebellions NPU Metrics
 
@@ -1184,7 +1183,7 @@ Higher update rates provide more real-time data but increase system load. For pr
 4. Some metrics may not be available on all platforms
 5. Process metrics require the `--processes` flag and may impact performance
 6. Tenstorrent NPU metrics include comprehensive hardware monitoring data:
-   - Multiple temperature sensors (ASIC, voltage regulator, inlet/outlet)
+   - Multiple temperature sensors (ASIC, voltage regulator, inlet)
    - Detailed firmware versions and health counters
    - Power limits (TDP/TDC) and throttling information
    - PCIe and DDR status registers for diagnostics

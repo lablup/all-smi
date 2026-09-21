@@ -184,38 +184,9 @@ impl TenstorrentExporter {
                 );
         }
 
-        // Outlet temperatures
-        if let Some(outlet_temp1) = info.detail.get("outlet_temperature1")
-            && let Some(temp) = CommonNpuExporter::parse_numeric_value(outlet_temp1)
-        {
-            builder
-                .help(
-                    "all_smi_tenstorrent_outlet1_temperature_celsius",
-                    "Outlet 1 temperature in celsius",
-                )
-                .type_("all_smi_tenstorrent_outlet1_temperature_celsius", "gauge")
-                .metric(
-                    "all_smi_tenstorrent_outlet1_temperature_celsius",
-                    &base_labels,
-                    temp,
-                );
-        }
-
-        if let Some(outlet_temp2) = info.detail.get("outlet_temperature2")
-            && let Some(temp) = CommonNpuExporter::parse_numeric_value(outlet_temp2)
-        {
-            builder
-                .help(
-                    "all_smi_tenstorrent_outlet2_temperature_celsius",
-                    "Outlet 2 temperature in celsius",
-                )
-                .type_("all_smi_tenstorrent_outlet2_temperature_celsius", "gauge")
-                .metric(
-                    "all_smi_tenstorrent_outlet2_temperature_celsius",
-                    &base_labels,
-                    temp,
-                );
-        }
+        // Luwen exposes no outlet sensor, so there is no outlet temperature
+        // here: the reader carries no `outlet_temperature*` key and the
+        // `all_smi_tenstorrent_outlet*_temperature_celsius` series are gone.
     }
 
     fn export_clocks(&self, builder: &mut MetricBuilder, info: &GpuInfo, index: usize) {
@@ -291,39 +262,6 @@ impl TenstorrentExporter {
                 .metric("all_smi_tenstorrent_current_amperes", &base_labels, c);
         }
 
-        // Power limits
-        if let Some(tdp_limit) = info.detail.get("power_limit_tdp")
-            && let Some(power) = CommonNpuExporter::parse_numeric_value(tdp_limit)
-        {
-            builder
-                .help(
-                    "all_smi_tenstorrent_power_limit_tdp_watts",
-                    "TDP power limit in watts",
-                )
-                .type_("all_smi_tenstorrent_power_limit_tdp_watts", "gauge")
-                .metric(
-                    "all_smi_tenstorrent_power_limit_tdp_watts",
-                    &base_labels,
-                    power,
-                );
-        }
-
-        if let Some(tdc_limit) = info.detail.get("power_limit_tdc")
-            && let Some(current) = CommonNpuExporter::parse_numeric_value(tdc_limit)
-        {
-            builder
-                .help(
-                    "all_smi_tenstorrent_power_limit_tdc_amperes",
-                    "TDC current limit in amperes",
-                )
-                .type_("all_smi_tenstorrent_power_limit_tdc_amperes", "gauge")
-                .metric(
-                    "all_smi_tenstorrent_power_limit_tdc_amperes",
-                    &base_labels,
-                    current,
-                );
-        }
-
         // TDP limit (new field from enhanced metrics)
         if let Some(tdp_limit) = info.detail.get("tdp_limit")
             && let Some(power) = CommonNpuExporter::parse_numeric_value(tdp_limit)
@@ -378,18 +316,10 @@ impl TenstorrentExporter {
                 .metric("all_smi_tenstorrent_heartbeat", &base_labels, hb);
         }
 
-        // Raw power consumption in watts
-        if let Some(power_watts) = info.detail.get("power_watts")
-            && let Some(power) = CommonNpuExporter::parse_numeric_value(power_watts)
-        {
-            builder
-                .help(
-                    "all_smi_tenstorrent_power_raw_watts",
-                    "Raw power consumption in watts",
-                )
-                .type_("all_smi_tenstorrent_power_raw_watts", "gauge")
-                .metric("all_smi_tenstorrent_power_raw_watts", &base_labels, power);
-        }
+        // No `power_watts` key exists: the reading already ships as the
+        // typed `GpuInfo::power_consumption` and the documented
+        // `all_smi_gpu_power_consumption_watts`, so a raw series would be a
+        // second name for the same number.
     }
 
     fn export_status_health(&self, builder: &mut MetricBuilder, info: &GpuInfo, index: usize) {
@@ -570,27 +500,10 @@ impl TenstorrentExporter {
                 .metric("all_smi_tenstorrent_board_info", &board_labels, 1);
         }
 
-        // Collection method
-        if let Some(method) = info.detail.get("collection_method") {
-            let method_labels = [
-                ("npu", info.name.as_str()),
-                ("instance", info.instance.as_str()),
-                ("npu_uuid", info.uuid.as_str()),
-                ("npu_index", &index.to_string()),
-                ("method", method.as_str()),
-            ];
-            builder
-                .help(
-                    "all_smi_tenstorrent_collection_method_info",
-                    "Data collection method used",
-                )
-                .type_("all_smi_tenstorrent_collection_method_info", "gauge")
-                .metric(
-                    "all_smi_tenstorrent_collection_method_info",
-                    &method_labels,
-                    1,
-                );
-        }
+        // No `collection_method` key exists: the reader has exactly one
+        // collection path and already records it as `lib_name` = `"Luwen"`,
+        // which reaches the wire as an `all_smi_gpu_info` label, so an info
+        // metric would publish one fixed string per device twice.
     }
 
     fn export_pcie_dram(&self, builder: &mut MetricBuilder, info: &GpuInfo, index: usize) {
@@ -640,10 +553,11 @@ impl TenstorrentExporter {
                 .metric("all_smi_tenstorrent_pcie_device_info", &pcie_labels, 1);
         }
 
-        // PCIe generation
+        // PCIe generation. Bare numbers, like every other numeric key in
+        // this file: the reader stopped writing the "Gen4" prefix when it
+        // was re-keyed to snake_case.
         if let Some(pcie_gen) = info.detail.get("pcie_link_gen")
-            && let Some(gen_str) = pcie_gen.strip_prefix("Gen")
-            && let Some(generation) = CommonNpuExporter::parse_numeric_value(gen_str)
+            && let Some(generation) = CommonNpuExporter::parse_numeric_value(pcie_gen)
         {
             builder
                 .help("all_smi_tenstorrent_pcie_generation", "PCIe generation")
@@ -655,10 +569,9 @@ impl TenstorrentExporter {
                 );
         }
 
-        // PCIe width
+        // PCIe width, likewise a bare lane count now.
         if let Some(pcie_width) = info.detail.get("pcie_link_width")
-            && let Some(width_str) = pcie_width.strip_prefix("x")
-            && let Some(width) = CommonNpuExporter::parse_numeric_value(width_str)
+            && let Some(width) = CommonNpuExporter::parse_numeric_value(pcie_width)
         {
             builder
                 .help("all_smi_tenstorrent_pcie_width", "PCIe link width")

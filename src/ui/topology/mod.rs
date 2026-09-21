@@ -249,14 +249,23 @@ fn looks_nvidia(gpu: &GpuInfo) -> bool {
 
 /// Format PCIe display from the detail map. Falls back to the empty
 /// string when the reader did not populate any of the keys.
+///
+/// Three key families feed this: the Title Case keys the NVIDIA and Gaudi
+/// readers write, the snake_case `pcie_link_gen` / `pcie_link_width` the
+/// Tenstorrent reader writes as bare numbers (its exporter looks those up
+/// by their own spelling, so the reader cannot carry the Title Case ones),
+/// and the legacy `pcie_gen_current` / `pcie_width_current` no reader
+/// writes but a hand-built or old snapshot may.
 fn format_pcie(gpu: &GpuInfo) -> String {
     let gen_str = gpu
         .detail
         .get("PCIe Generation")
+        .or_else(|| gpu.detail.get("pcie_link_gen"))
         .or_else(|| gpu.detail.get("pcie_gen_current"));
     let width = gpu
         .detail
         .get("PCIe Link Width")
+        .or_else(|| gpu.detail.get("pcie_link_width"))
         .or_else(|| gpu.detail.get("pcie_width_current"));
     match (gen_str, width) {
         (Some(g), Some(w)) => format!("Gen{g} x{w}"),
@@ -391,6 +400,28 @@ mod tests {
             .insert("PCIe Link Width".to_string(), "16".to_string());
         let model = TopologyModel::from_host("h", &[gpu]);
         assert_eq!(model.gpus[0].pcie_display, "Gen5 x16");
+    }
+
+    /// The Tenstorrent reader carries its link data under the snake_case
+    /// keys its own exporter reads, holding bare numbers, so the topology
+    /// view renders a Tenstorrent card with one `x`, not the doubled
+    /// `Gen4 xx16` the old `x16` value produced.
+    #[test]
+    fn pcie_formatting_reads_the_tenstorrent_snake_case_keys() {
+        let mut gpu = mk_gpu(0, Some(0), vec![]);
+        gpu.detail
+            .insert("pcie_link_gen".to_string(), "4".to_string());
+        gpu.detail
+            .insert("pcie_link_width".to_string(), "16".to_string());
+        assert_eq!(format_pcie(&gpu), "Gen4 x16");
+
+        // The Title Case family wins when both are present, so a reader
+        // that writes its own keys is unaffected by the fallback.
+        gpu.detail
+            .insert("PCIe Generation".to_string(), "5".to_string());
+        gpu.detail
+            .insert("PCIe Link Width".to_string(), "32".to_string());
+        assert_eq!(format_pcie(&gpu), "Gen5 x32");
     }
 
     #[test]
