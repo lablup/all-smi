@@ -328,3 +328,123 @@ impl CommonNpuMetrics for GoogleTpuExporter {
         self.common.export_power_metrics(builder, info, index);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    /// A `GpuInfo` shaped like `readers::google_tpu` produces it for a v4
+    /// slice with gRPC HLO telemetry available: the six queue/latency
+    /// readings sit in `detail` under the Title Case keys the reader writes.
+    fn tpu_with_hlo(entries: &[(&str, &str)]) -> GpuInfo {
+        let mut detail: HashMap<String, String> = entries
+            .iter()
+            .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+            .collect();
+        detail.insert("lib_name".to_string(), "libtpu".to_string());
+
+        GpuInfo {
+            uuid: "TPU-0".to_string(),
+            time: "2026-09-21 00:00:00".to_string(),
+            name: "Google TPU v4".to_string(),
+            device_type: "TPU".to_string(),
+            host_id: "tpu-node".to_string(),
+            hostname: "tpu-node".to_string(),
+            instance: "tpu-node".to_string(),
+            utilization: 75.5,
+            ane_utilization: 0.0,
+            dla_utilization: None,
+            tensorcore_utilization: Some(50.0),
+            temperature: 65,
+            used_memory: 16 * 1024 * 1024 * 1024,
+            total_memory: 32 * 1024 * 1024 * 1024,
+            frequency: 0,
+            power_consumption: 150.0,
+            gpu_core_count: Some(2),
+            temperature_threshold_slowdown: None,
+            temperature_threshold_shutdown: None,
+            temperature_threshold_max_operating: None,
+            temperature_threshold_acoustic: None,
+            performance_state: None,
+            fan_speed_rpm: None,
+            numa_node_id: None,
+            gsp_firmware_mode: None,
+            gsp_firmware_version: None,
+            nvlink_remote_devices: Vec::new(),
+            gpm_metrics: None,
+            detail,
+        }
+    }
+
+    /// Issue #425 registered these six readings in `VOLATILE_DETAIL_KEYS` on
+    /// the strength of this exporter already parsing them out of `detail`
+    /// into their own `all_smi_tpu_hlo_*` gauges, so dropping them from the
+    /// `all_smi_gpu_info` label set would not orphan the reading. Nothing
+    /// exercised that parse end to end: a stale detail key or a broken
+    /// `split_whitespace` unit strip would have silently dropped a gauge
+    /// with every other test in the repo still green.
+    #[test]
+    fn hlo_readings_reach_their_own_gauges() {
+        let device = tpu_with_hlo(&[
+            ("HLO Queue Size", "3"),
+            ("HLO Exec Mean", "125.5 µs"),
+            ("HLO Exec P50", "100.0 µs"),
+            ("HLO Exec P90", "150.0 µs"),
+            ("HLO Exec P95", "200.0 µs"),
+            ("HLO Exec P99.9", "400.0 µs"),
+        ]);
+
+        let mut builder = MetricBuilder::new();
+        GoogleTpuExporter::new().export_vendor_metrics(&mut builder, &device, 0, "0");
+        let output = builder.build();
+
+        for (family, expected) in [
+            ("all_smi_tpu_hlo_queue_size", 3.0),
+            ("all_smi_tpu_hlo_exec_mean_microseconds", 125.5),
+            ("all_smi_tpu_hlo_exec_p50_microseconds", 100.0),
+            ("all_smi_tpu_hlo_exec_p90_microseconds", 150.0),
+            ("all_smi_tpu_hlo_exec_p95_microseconds", 200.0),
+            ("all_smi_tpu_hlo_exec_p999_microseconds", 400.0),
+        ] {
+            let prefix = format!("{family}{{");
+            let line = output
+                .lines()
+                .find(|line| line.starts_with(&prefix))
+                .unwrap_or_else(|| panic!("{family} missing from:\n{output}"));
+            let value: f64 = line
+                .rsplit(' ')
+                .next()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or_else(|| panic!("{family} sample is not a number: {line}"));
+            assert!(
+                (value - expected).abs() < 1e-9,
+                "{family} reads {value}, expected {expected}"
+            );
+        }
+    }
+
+    /// A device with none of the six readings (gRPC unreachable, or a
+    /// generation the collector does not query) publishes no HLO gauge at
+    /// all, rather than a fabricated zero.
+    #[test]
+    fn hlo_gauges_are_omitted_without_a_reading() {
+        let mut builder = MetricBuilder::new();
+        GoogleTpuExporter::new().export_vendor_metrics(&mut builder, &tpu_with_hlo(&[]), 0, "0");
+        let output = builder.build();
+
+        for family in [
+            "all_smi_tpu_hlo_queue_size",
+            "all_smi_tpu_hlo_exec_mean_microseconds",
+            "all_smi_tpu_hlo_exec_p50_microseconds",
+            "all_smi_tpu_hlo_exec_p90_microseconds",
+            "all_smi_tpu_hlo_exec_p95_microseconds",
+            "all_smi_tpu_hlo_exec_p999_microseconds",
+        ] {
+            assert!(
+                !output.contains(family),
+                "{family} must not appear without a reading:\n{output}"
+            );
+        }
+    }
+}
