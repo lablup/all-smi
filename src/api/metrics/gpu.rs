@@ -1086,6 +1086,12 @@ mod tests {
             ("frequency", "1500MHz", "1800MHz"),
             ("Current Power", "142.5 W", "301.0 W"),
             ("Used Memory", "1024 MiB", "2048 MiB"),
+            ("HLO Queue Size", "3", "7"),
+            ("HLO Exec Mean", "125.5 µs", "210.2 µs"),
+            ("HLO Exec P50", "100.0 µs", "180.4 µs"),
+            ("HLO Exec P90", "150.0 µs", "260.1 µs"),
+            ("HLO Exec P95", "175.0 µs", "300.9 µs"),
+            ("HLO Exec P99.9", "220.0 µs", "410.7 µs"),
         ];
 
         for (key, before, after) in polls {
@@ -1094,10 +1100,12 @@ mod tests {
             assert_eq!(first, second, "{key} moved the identity label set");
         }
 
-        // And together, which is how Apple Silicon actually polls: three
-        // labels churning at once used to make the macOS scrape start a new
-        // series every few seconds.
-        let together = |values: [&str; 6]| {
+        // And together. No single device carries all of these, but a real
+        // one carries several at once (three on Apple Silicon, eight on a
+        // Google TPU), which is what used to make a scrape start a new
+        // series every few seconds. Filtering has to hold for the whole set,
+        // not just one key at a time.
+        let together = |values: [&str; 12]| {
             let entries: Vec<(&str, &str)> = polls
                 .iter()
                 .zip(values)
@@ -1106,8 +1114,34 @@ mod tests {
             identity_line("Apple M2 Max GPU", &entries)
         };
         assert_eq!(
-            together(["12345.6", "48.6", "46.2", "1500MHz", "142.5 W", "1024 MiB"]),
-            together(["9876.5", "51.2", "49.8", "1800MHz", "301.0 W", "2048 MiB"]),
+            together([
+                "12345.6",
+                "48.6",
+                "46.2",
+                "1500MHz",
+                "142.5 W",
+                "1024 MiB",
+                "3",
+                "125.5 µs",
+                "100.0 µs",
+                "150.0 µs",
+                "175.0 µs",
+                "220.0 µs",
+            ]),
+            together([
+                "9876.5",
+                "51.2",
+                "49.8",
+                "1800MHz",
+                "301.0 W",
+                "2048 MiB",
+                "7",
+                "210.2 µs",
+                "180.4 µs",
+                "260.1 µs",
+                "300.9 µs",
+                "410.7 µs",
+            ]),
         );
     }
 

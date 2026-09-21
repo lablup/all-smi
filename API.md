@@ -233,7 +233,7 @@ live in argv.
 
 The label set of `all_smi_gpu_info` describes what a device *is*: name, instance, UUID, index, type, and the reader's static details (serial, firmware, driver and library versions, PCI address, and so on). A changing reading does not belong on it. Prometheus identifies a series by its full label set, so a label whose value moves between scrapes starts a new series on each scrape and leaves the previous one stale, making series and index cardinality grow with the number of scrapes instead of the number of devices. Readings have a dedicated series instead, which is also what makes `group_left` joins against `all_smi_gpu_info` stable over a range.
 
-A few readings on Google TPU, Intel Gaudi and the two Windows-only readers are not migrated yet and still appear as labels; issue #434 tracks them.
+A few readings on Intel Gaudi and the two Windows-only readers are not migrated yet and still appear as labels; issue #434 tracks them.
 
 Readings that used to ride on this label set, and the series that carries each of them now:
 
@@ -249,6 +249,7 @@ Readings that used to ride on this label set, and the series that carries each o
 | `frequency`                                      | Furiosa             | `all_smi_gpu_frequency_mhz`                             |
 | `current_power`                                  | Intel Gaudi, Google TPU | `all_smi_gpu_power_consumption_watts`                |
 | `used_memory`                                    | Intel Gaudi, Google TPU | `all_smi_gpu_memory_used_bytes`                      |
+| `hlo_queue_size`, `hlo_exec_mean`, `hlo_exec_p50`, `hlo_exec_p90`, `hlo_exec_p95`, `hlo_exec_p99_9` | Google TPU | `all_smi_tpu_hlo_queue_size`, `all_smi_tpu_hlo_exec_mean_microseconds`, and the `p50`, `p90`, `p95` and `p999` variants |
 
 This is an intentional exposition change: a scraper or dashboard that read any of these off `all_smi_gpu_info` must move to the series named above. Two differences are worth knowing when migrating. `all_smi_cpu_temperature_celsius` and `all_smi_gpu_temperature_celsius` are whole degrees, while the old Apple Silicon labels carried one decimal, so a migrated panel loses that decimal. And `all_smi_cpu_temperature_celsius` carries the CPU label set (`cpu_model`, `instance`, `hostname`, `index`), not the GPU one, so a panel that joined on `gpu_uuid` joins on `instance` instead.
 

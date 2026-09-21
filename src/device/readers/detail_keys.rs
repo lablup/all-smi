@@ -88,8 +88,13 @@ pub const CARD_POWER_WATTS_DETAIL_KEY: &str = "card_power_watts";
 /// * `frequency` (Furiosa): `all_smi_gpu_frequency_mhz`.
 /// * `Current Power` (Gaudi, Google TPU): `all_smi_gpu_power_consumption_watts`.
 /// * `Used Memory` (Gaudi, Google TPU): `all_smi_gpu_memory_used_bytes`.
+/// * `HLO Queue Size`, `HLO Exec Mean`, `HLO Exec P50`, `HLO Exec P90`,
+///   `HLO Exec P95`, `HLO Exec P99.9` (Google TPU): the matching
+///   `all_smi_tpu_hlo_*` gauges. That exporter reads these very strings out
+///   of `detail` and parses the leading number itself, so it keeps working
+///   with the unit suffix the reader writes (`"125.5 µs"`).
 ///
-/// The two Title Case entries are matched through `sanitize_label_name` (see
+/// The Title Case entries are matched through `sanitize_label_name` (see
 /// [`is_volatile_detail_key`]); they are spelled here as their readers write
 /// them so a reader author can find the key by grepping for the string they
 /// typed.
@@ -109,6 +114,12 @@ pub const VOLATILE_DETAIL_KEYS: &[&str] = &[
     "frequency",
     "Current Power",
     "Used Memory",
+    "HLO Queue Size",
+    "HLO Exec Mean",
+    "HLO Exec P50",
+    "HLO Exec P90",
+    "HLO Exec P95",
+    "HLO Exec P99.9",
 ];
 
 /// [`VOLATILE_DETAIL_KEYS`] as the label names they sanitize to, computed
