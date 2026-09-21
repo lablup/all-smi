@@ -14,24 +14,22 @@
 
 //! AWS Neuron (Trainium / Inferentia) Prometheus exporter.
 //!
-//! Emits the `all_smi_neuron_*` family. Shared metrics
-//! (`all_smi_npu_utilization`, memory, and friends) come from
-//! [`CommonNpuExporter`] because the reader tags every row
-//! `device_type = "NPU"`; only Neuron-specific identity and topology
-//! live here.
+//! Emits the `all_smi_neuron_*` family. Utilization, memory, power and
+//! temperature for these rows are published by the GPU exporter under the
+//! `all_smi_gpu_*` names, because `render_prometheus_exposition` runs the
+//! GPU and NPU exporters over the same rows; only Neuron-specific identity
+//! and topology live here.
 //!
 //! Every series is conditional on the corresponding `detail` key being
 //! present. A value the reader could not source is absent from `detail`
 //! and therefore absent from the exposition — it is never exported as 0.
 
 use super::common::CommonNpuExporter;
-use super::exporter_trait::{CommonNpuMetrics, NpuExporter};
+use super::exporter_trait::NpuExporter;
 use crate::api::metrics::MetricBuilder;
 use crate::device::GpuInfo;
 
-pub struct NeuronExporter {
-    common: CommonNpuExporter,
-}
+pub struct NeuronExporter;
 
 pub(crate) fn is_neuron_device(info: &GpuInfo) -> bool {
     if info
@@ -52,9 +50,7 @@ pub(crate) fn is_neuron_device(info: &GpuInfo) -> bool {
 
 impl NeuronExporter {
     pub fn new() -> Self {
-        Self {
-            common: CommonNpuExporter::new(),
-        }
+        Self
     }
 
     /// Base label set shared by every `all_smi_neuron_*` series.
@@ -204,51 +200,5 @@ impl NpuExporter for NeuronExporter {
 
     fn vendor_name(&self) -> &'static str {
         "AWS Neuron"
-    }
-}
-
-impl CommonNpuMetrics for NeuronExporter {
-    fn export_generic_npu_metrics(
-        &self,
-        builder: &mut MetricBuilder,
-        info: &GpuInfo,
-        index: usize,
-    ) {
-        self.common.export_generic_npu_metrics(builder, info, index);
-    }
-
-    fn export_generic_npu_metrics_str(
-        &self,
-        builder: &mut MetricBuilder,
-        info: &GpuInfo,
-        index_str: &str,
-    ) {
-        self.common
-            .export_generic_npu_metrics_str(builder, info, index_str);
-    }
-
-    fn export_device_info(&self, builder: &mut MetricBuilder, info: &GpuInfo, index: usize) {
-        self.export_identity_metrics(builder, info, &index.to_string());
-    }
-
-    fn export_firmware_info(&self, builder: &mut MetricBuilder, info: &GpuInfo, index: usize) {
-        self.export_driver_metrics(builder, info, &index.to_string());
-    }
-
-    fn export_temperature_metrics(
-        &self,
-        builder: &mut MetricBuilder,
-        info: &GpuInfo,
-        index: usize,
-    ) {
-        // Trainium exposes no temperature sensor. The common exporter
-        // already omits the series when `temperature_reading()` is
-        // `None`, so this stays a plain delegation rather than a
-        // synthesised value.
-        self.common.export_temperature_metrics(builder, info, index);
-    }
-
-    fn export_power_metrics(&self, builder: &mut MetricBuilder, info: &GpuInfo, index: usize) {
-        self.common.export_power_metrics(builder, info, index);
     }
 }

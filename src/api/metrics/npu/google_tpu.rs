@@ -12,21 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::common::CommonNpuExporter;
-use super::exporter_trait::{CommonNpuMetrics, NpuExporter};
+use super::exporter_trait::NpuExporter;
 use crate::api::metrics::MetricBuilder;
 use crate::device::GpuInfo;
 
 /// Google TPU-specific metric exporter
-pub struct GoogleTpuExporter {
-    common: CommonNpuExporter,
-}
+pub struct GoogleTpuExporter;
 
 impl GoogleTpuExporter {
     pub fn new() -> Self {
-        Self {
-            common: CommonNpuExporter::new(),
-        }
+        Self
     }
 }
 
@@ -284,48 +279,6 @@ impl NpuExporter for GoogleTpuExporter {
 
     fn vendor_name(&self) -> &'static str {
         "Google TPU"
-    }
-}
-
-impl CommonNpuMetrics for GoogleTpuExporter {
-    fn export_generic_npu_metrics(
-        &self,
-        builder: &mut MetricBuilder,
-        info: &GpuInfo,
-        index: usize,
-    ) {
-        self.common.export_generic_npu_metrics(builder, info, index);
-    }
-
-    fn export_generic_npu_metrics_str(
-        &self,
-        builder: &mut MetricBuilder,
-        info: &GpuInfo,
-        index_str: &str,
-    ) {
-        self.common
-            .export_generic_npu_metrics_str(builder, info, index_str);
-    }
-
-    fn export_device_info(&self, builder: &mut MetricBuilder, info: &GpuInfo, index: usize) {
-        self.common.export_device_info(builder, info, index);
-    }
-
-    fn export_firmware_info(&self, builder: &mut MetricBuilder, info: &GpuInfo, index: usize) {
-        self.common.export_firmware_info(builder, info, index);
-    }
-
-    fn export_temperature_metrics(
-        &self,
-        builder: &mut MetricBuilder,
-        info: &GpuInfo,
-        index: usize,
-    ) {
-        self.common.export_temperature_metrics(builder, info, index);
-    }
-
-    fn export_power_metrics(&self, builder: &mut MetricBuilder, info: &GpuInfo, index: usize) {
-        self.common.export_power_metrics(builder, info, index);
     }
 }
 

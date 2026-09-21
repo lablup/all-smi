@@ -471,7 +471,6 @@ Note: on Apple Silicon (M1/M2/M3/M4) `all_smi_gpu_temperature_celsius` reports t
 | `all_smi_gpu_power_consumption_watts` | NPU power consumption      | watts   | `gpu_index`, `gpu_name`                   |
 | `all_smi_gpu_frequency_mhz`           | NPU AI clock frequency     | MHz     | `gpu_index`, `gpu_name`                   |
 | `all_smi_gpu_info`                    | NPU device information     | info    | `gpu_index`, `gpu_name`, `driver_version` |
-| `all_smi_npu_firmware_info`           | NPU firmware version       | info    | `npu`, `instance`, `npu_uuid`, `npu_index`, `firmware` |
 
 #### Tenstorrent-Specific Metrics
 | Metric                                          | Description                        | Unit    | Labels                                                    |

@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use super::common::CommonNpuExporter;
-use super::exporter_trait::{CommonNpuMetrics, NpuExporter};
+use super::exporter_trait::NpuExporter;
 use crate::api::metrics::MetricBuilder;
 use crate::device::GpuInfo;
 
@@ -44,15 +44,11 @@ pub fn is_rebellions_device(info: &GpuInfo) -> bool {
 }
 
 /// Rebellions NPU-specific metric exporter
-pub struct RebellionsExporter {
-    common: CommonNpuExporter,
-}
+pub struct RebellionsExporter;
 
 impl RebellionsExporter {
     pub fn new() -> Self {
-        Self {
-            common: CommonNpuExporter::new(),
-        }
+        Self
     }
 
     fn export_firmware_info(&self, builder: &mut MetricBuilder, info: &GpuInfo, index: usize) {
@@ -194,50 +190,6 @@ impl NpuExporter for RebellionsExporter {
 
     fn vendor_name(&self) -> &'static str {
         "Rebellions"
-    }
-}
-
-impl CommonNpuMetrics for RebellionsExporter {
-    fn export_generic_npu_metrics(
-        &self,
-        builder: &mut MetricBuilder,
-        info: &GpuInfo,
-        index: usize,
-    ) {
-        self.common.export_generic_npu_metrics(builder, info, index);
-    }
-
-    fn export_generic_npu_metrics_str(
-        &self,
-        builder: &mut MetricBuilder,
-        info: &GpuInfo,
-        index_str: &str,
-    ) {
-        self.common
-            .export_generic_npu_metrics_str(builder, info, index_str);
-    }
-
-    fn export_device_info(&self, builder: &mut MetricBuilder, info: &GpuInfo, index: usize) {
-        // Use vendor-specific device info instead of common one for Rebellions
-        self.export_device_info(builder, info, index);
-    }
-
-    fn export_firmware_info(&self, builder: &mut MetricBuilder, info: &GpuInfo, index: usize) {
-        // Use vendor-specific firmware info for Rebellions
-        self.export_firmware_info(builder, info, index);
-    }
-
-    fn export_temperature_metrics(
-        &self,
-        builder: &mut MetricBuilder,
-        info: &GpuInfo,
-        index: usize,
-    ) {
-        self.common.export_temperature_metrics(builder, info, index);
-    }
-
-    fn export_power_metrics(&self, builder: &mut MetricBuilder, info: &GpuInfo, index: usize) {
-        self.common.export_power_metrics(builder, info, index);
     }
 }
 

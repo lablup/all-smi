@@ -25,7 +25,7 @@ pub mod tenstorrent;
 
 use crate::api::metrics::{MetricBuilder, MetricExporter};
 use crate::device::GpuInfo;
-use exporter_trait::{CommonNpuMetrics, NpuExporter};
+use exporter_trait::NpuExporter;
 use std::sync::OnceLock;
 
 /// Static pool of vendor exporters to avoid repeated allocations
@@ -40,7 +40,6 @@ const NEURON_IDX: usize = 5;
 /// Main NPU metric exporter that coordinates between different vendor-specific exporters
 pub struct NpuMetricExporter<'a> {
     pub npu_info: &'a [GpuInfo],
-    common: common::CommonNpuExporter,
 }
 
 impl<'a> NpuMetricExporter<'a> {
@@ -67,10 +66,7 @@ impl<'a> NpuMetricExporter<'a> {
             exporters
         });
 
-        Self {
-            npu_info,
-            common: common::CommonNpuExporter::new(),
-        }
+        Self { npu_info }
     }
 
     /// Find the appropriate exporter for a given NPU device
@@ -120,19 +116,6 @@ impl<'a> NpuMetricExporter<'a> {
         })
     }
 
-    /// Export generic NPU metrics that are common across all vendors
-    #[allow(dead_code)]
-    fn export_generic_npu_metrics(
-        &self,
-        builder: &mut MetricBuilder,
-        info: &GpuInfo,
-        index: usize,
-    ) {
-        // Device type check removed - caller already filters NPU devices
-        // Always export common metrics first
-        self.common.export_generic_npu_metrics(builder, info, index);
-    }
-
     /// Export vendor-specific metrics using the appropriate exporter
     fn export_vendor_metrics(
         &self,
@@ -151,24 +134,12 @@ impl<'a> NpuMetricExporter<'a> {
         // Pre-allocate index string once per device
         let index_str = index.to_string();
 
-        // Export generic metrics first
-        self.export_generic_npu_metrics_with_str(builder, info, &index_str);
-
-        // Then export vendor-specific metrics
+        // Export vendor-specific metrics. The generic `all_smi_npu_*` family
+        // that used to run here first never fired for any vendor (issue
+        // #431): no reader writes the `detail` keys it gated on, and NPU
+        // devices export under the `all_smi_gpu_*` names through the GPU
+        // exporter instead.
         self.export_vendor_metrics(builder, info, index, &index_str);
-    }
-
-    /// Export generic NPU metrics with pre-allocated index string
-    fn export_generic_npu_metrics_with_str(
-        &self,
-        builder: &mut MetricBuilder,
-        info: &GpuInfo,
-        index_str: &str,
-    ) {
-        // Device type check removed - caller already filters NPU devices
-        // Always export common metrics first
-        self.common
-            .export_generic_npu_metrics_str(builder, info, index_str);
     }
 }
 
@@ -343,5 +314,63 @@ mod tests {
         assert!(output.contains("all_smi_rebellions_device_info"));
         assert!(output.contains("all_smi_rebellions_firmware_info"));
         assert!(output.contains("all_smi_rebellions_status"));
+    }
+
+    /// Regression (issue #431): the generic `all_smi_npu_*` family was
+    /// removed because no reader writes the `detail` keys it gated on, and
+    /// NPU devices export under the `all_smi_gpu_*` names through the GPU
+    /// exporter. The rows below still carry every key the removed exporter
+    /// used to gate on, so a reintroduced half-wired copy fires here instead
+    /// of passing silently.
+    #[test]
+    fn no_removed_generic_npu_metric_name_appears_in_a_full_exposition() {
+        use crate::api::metrics::render::{MetricsRenderInputs, render_prometheus_exposition};
+        use crate::utils::RuntimeEnvironment;
+
+        const REMOVED: [&str; 5] = [
+            "all_smi_npu_power_watts",
+            "all_smi_npu_power_draw_watts",
+            "all_smi_npu_temperature_celsius",
+            "all_smi_npu_device_info",
+            "all_smi_npu_firmware_info",
+        ];
+        // Keys no reader writes, but that the removed exporter gated on.
+        let detail = &[
+            ("power", "17.5"),
+            ("power_draw", "17.5"),
+            ("temperature", "31"),
+            ("firmware", "3.0.0"),
+        ];
+        let mut tpu = npu_named("TPU v5e", detail);
+        tpu.device_type = "TPU".to_string();
+        let devices = [npu_named("RBLN-CA22", detail), tpu];
+
+        let env = RuntimeEnvironment::default();
+        let inputs = MetricsRenderInputs {
+            gpu_info: &devices,
+            process_info: &[],
+            cpu_info: &[],
+            memory_info: &[],
+            storage_info: &[],
+            runtime_environment: &env,
+            chassis_info: &[],
+            vgpu_info: &[],
+            mig_info: &[],
+            energy_integrator: None,
+            ready: true,
+        };
+        let output = render_prometheus_exposition(&inputs);
+
+        // The underlying values still reach the exposition through the GPU
+        // exporter, fed from the typed fields.
+        assert!(output.contains("all_smi_gpu_power_consumption_watts"));
+        assert!(output.contains("all_smi_gpu_temperature_celsius"));
+
+        for name in REMOVED {
+            assert!(
+                !output.lines().any(|line| line.contains(name)),
+                "removed generic NPU metric `{name}` must not appear in the exposition: {output}"
+            );
+        }
     }
 }
