@@ -144,4 +144,67 @@ mod tests {
         // No tachometer stays `None`, not a clamped zero.
         assert_eq!(clamp_fan_rpm(None), None);
     }
+
+    /// The per-poll sensor seam must write the shared conventions exactly:
+    /// bare snake_case PCIe numbers, the shared `Fan Speed` string, and the
+    /// bare-`MHz` `clock_memory_current`, with no `Current Link` or
+    /// `Memory Clock` key left behind to churn the identity label set.
+    #[test]
+    fn insert_sensor_details_writes_the_shared_reader_conventions() {
+        let mut detail = HashMap::new();
+        let fan_speed_rpm =
+            insert_sensor_details(&mut detail, Some((4, 16)), Some(u32::MAX), Some(1249));
+
+        assert_eq!(fan_speed_rpm, Some(MAX_GPU_FAN_RPM));
+        assert_eq!(
+            detail
+                .get(all_smi::device::readers::detail_keys::PCIE_GEN_CURRENT_DETAIL_KEY)
+                .map(String::as_str),
+            Some("4")
+        );
+        assert_eq!(
+            detail
+                .get(all_smi::device::readers::detail_keys::PCIE_WIDTH_CURRENT_DETAIL_KEY)
+                .map(String::as_str),
+            Some("16")
+        );
+        assert_eq!(
+            detail
+                .get(all_smi::device::readers::detail_keys::FAN_SPEED_DETAIL_KEY)
+                .map(String::as_str),
+            Some(format!("{MAX_GPU_FAN_RPM} RPM").as_str())
+        );
+        assert_eq!(
+            detail
+                .get(all_smi::device::readers::detail_keys::CLOCK_MEMORY_CURRENT_DETAIL_KEY)
+                .map(String::as_str),
+            Some("1249")
+        );
+        for absent in [
+            "Current Link",
+            "Memory Clock",
+            "pcie_gen_max",
+            "pcie_width_max",
+        ] {
+            assert!(
+                !detail.contains_key(absent),
+                "{absent} must not be written: it churned the identity label set"
+            );
+        }
+    }
+
+    /// A poll with no sensors at all writes nothing and leaves the field
+    /// `None`, not a clamped zero.
+    #[test]
+    fn insert_sensor_details_with_no_sensors_writes_nothing() {
+        let mut detail = HashMap::new();
+        detail.insert("Device Name".to_string(), "AMD Radeon".to_string());
+        let fan_speed_rpm = insert_sensor_details(&mut detail, None, None, None);
+
+        assert_eq!(fan_speed_rpm, None);
+        assert_eq!(
+            detail,
+            HashMap::from([("Device Name".to_string(), "AMD Radeon".to_string())])
+        );
+    }
 }

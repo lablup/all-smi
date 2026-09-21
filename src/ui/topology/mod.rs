@@ -424,6 +424,26 @@ mod tests {
         assert_eq!(format_pcie(&gpu), "Gen5 x32");
     }
 
+    /// Issue #433: the NVIDIA reader now writes the exporter's snake_case
+    /// keys through `detail_keys::insert_pcie_details`, so the topology view
+    /// renders an NVIDIA card with its width, where the same device showed
+    /// `Gen4` with no width when the reader wrote the Title Case pair.
+    #[test]
+    fn pcie_formatting_reads_the_shared_writer_snake_case_keys() {
+        use crate::device::readers::detail_keys;
+
+        let mut gpu = mk_gpu(0, Some(0), vec![]);
+        detail_keys::insert_pcie_details(&mut gpu.detail, Some(4), Some(16), None, None);
+        assert_eq!(format_pcie(&gpu), "Gen4 x16");
+        let model = TopologyModel::from_host("h", &[gpu]);
+        assert_eq!(model.gpus[0].pcie_display, "Gen4 x16");
+
+        // A generation with no width still renders the generation alone.
+        let mut gen_only = mk_gpu(1, Some(0), vec![]);
+        detail_keys::insert_pcie_details(&mut gen_only.detail, Some(4), None, None, None);
+        assert_eq!(format_pcie(&gen_only), "Gen4");
+    }
+
     #[test]
     fn summary_reports_gpu_numa_and_link_counts() {
         let g0 = mk_gpu(

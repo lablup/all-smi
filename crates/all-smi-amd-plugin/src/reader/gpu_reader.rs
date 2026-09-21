@@ -105,22 +105,18 @@ impl GpuReader for AmdGpuReader {
             // string that snapshots and the cross-reader overwrite guard in
             // `intel_gpu_level_zero::apply_fan` still depend on. Both come
             // from the same `sensors.fan_rpm` value so they cannot disagree.
-            let mut fan_speed_rpm = None;
-            if let Some(ref sensors) = sensors {
-                if let Some(link) = sensors.current_link {
-                    detail.insert(
-                        "Current Link".to_string(),
-                        format!("Gen{} x{}", link.r#gen, link.width),
-                    );
-                }
-                if let Some(fan) = clamp_fan_rpm(sensors.fan_rpm) {
-                    fan_speed_rpm = Some(fan);
-                    detail.insert("Fan Speed".to_string(), format!("{fan} RPM"));
-                }
-                if let Some(mclk) = sensors.mclk {
-                    detail.insert("Memory Clock".to_string(), format!("{mclk} MHz"));
-                }
-            }
+            // The link and memory-clock readings travel as dedicated series
+            // (`pcie_gen_current` / `pcie_width_current` /
+            // `clock_memory_current`), so they no longer churn the
+            // `all_smi_gpu_info` label set.
+            let fan_speed_rpm = sensors.as_ref().and_then(|s| {
+                insert_sensor_details(
+                    &mut detail,
+                    s.current_link.map(|l| (l.r#gen, l.width)),
+                    s.fan_rpm,
+                    s.mclk,
+                )
+            });
 
             let mut utilization = 0.0;
             let mut power_consumption = 0.0;

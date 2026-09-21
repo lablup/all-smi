@@ -15,14 +15,9 @@
 use super::{MetricBuilder, MetricExporter};
 use crate::device::GpuInfo;
 use crate::device::readers::detail_keys;
+use crate::device::readers::detail_keys::FAN_SPEED_DETAIL_KEY;
 use crate::device::types::MAX_GPU_FAN_RPM;
 use crate::parsing::common::{sanitize_label_name, sanitize_label_value};
-
-/// Legacy `detail` key every reader used before `GpuInfo::fan_speed_rpm`
-/// existed, and still writes alongside it. `sanitize_label_name` turns the
-/// key into the `fan_speed` label on `all_smi_gpu_info`, which is how a node
-/// running an older build puts the reading on the wire.
-pub(crate) const FAN_SPEED_DETAIL_KEY: &str = "Fan Speed";
 
 /// Recover an RPM reading from the legacy `Fan Speed` detail string.
 ///
@@ -327,8 +322,11 @@ impl<'a> GpuMetricExporter<'a> {
             ("gpu_index", row.index_str.as_str()),
         ];
 
-        // PCIe metrics
-        if let Some(pcie_gen) = info.detail.get("pcie_gen_current")
+        // PCIe metrics. The keys are the shared writer's constants
+        // (`detail_keys::insert_pcie_details` writes exactly these), so the
+        // lookup cannot drift from what the NVIDIA and Linux AMD readers
+        // write.
+        if let Some(pcie_gen) = info.detail.get(detail_keys::PCIE_GEN_CURRENT_DETAIL_KEY)
             && let Ok(pcie_gen_value) = pcie_gen.parse::<f64>()
         {
             builder
@@ -337,7 +335,7 @@ impl<'a> GpuMetricExporter<'a> {
                 .metric("all_smi_gpu_pcie_gen_current", &base_labels, pcie_gen_value);
         }
 
-        if let Some(pcie_width) = info.detail.get("pcie_width_current")
+        if let Some(pcie_width) = info.detail.get(detail_keys::PCIE_WIDTH_CURRENT_DETAIL_KEY)
             && let Ok(width) = pcie_width.parse::<f64>()
         {
             builder
@@ -369,6 +367,27 @@ impl<'a> GpuMetricExporter<'a> {
                 )
                 .type_("all_smi_gpu_clock_memory_max_mhz", "gauge")
                 .metric("all_smi_gpu_clock_memory_max_mhz", &base_labels, clock);
+        }
+
+        // Current memory clock, same shape as the maximum above: the Linux
+        // AMD plugin writes the live reading under
+        // `detail_keys::CLOCK_MEMORY_CURRENT_DETAIL_KEY` on every poll, and
+        // it travels as this gauge (registered as a volatile detail key, so
+        // it never becomes an `all_smi_gpu_info` label). Omitted when the
+        // key is absent or unparsable, matching the "absence means no data"
+        // convention above.
+        if let Some(clock_current) = info
+            .detail
+            .get(detail_keys::CLOCK_MEMORY_CURRENT_DETAIL_KEY)
+            && let Ok(clock) = clock_current.parse::<f64>()
+        {
+            builder
+                .help(
+                    "all_smi_gpu_clock_memory_current_mhz",
+                    "Current memory clock in MHz",
+                )
+                .type_("all_smi_gpu_clock_memory_current_mhz", "gauge")
+                .metric("all_smi_gpu_clock_memory_current_mhz", &base_labels, clock);
         }
 
         // Power limit metrics
@@ -1014,6 +1033,20 @@ mod tests {
             .to_string()
     }
 
+    /// The same line for a device whose `detail` is a map, as the shared
+    /// writers build them. Sorting keeps the rendering independent of the
+    /// map's iteration order, as the exporter itself does.
+    fn identity_line_map(name: &str, detail: &HashMap<String, String>) -> String {
+        let mut entries: Vec<(String, String)> =
+            detail.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        entries.sort();
+        let refs: Vec<(&str, &str)> = entries
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        identity_line(name, &refs)
+    }
+
     /// Issue #425: `all_smi_gpu_info` identifies a device, so its label set
     /// must not move when a reading does. Every registered key gets its own
     /// assertion, naming the key, so reverting the filter for one key fails
@@ -1073,6 +1106,106 @@ mod tests {
         assert!(first.contains("board_type=\"n300\""), "{first}");
         assert!(first.contains("arc_fw_version=\"2.28.0.0\""), "{first}");
         assert!(first.contains("lib_name=\"Luwen\""), "{first}");
+    }
+
+    /// Issue #433: the two PCIe current gauges read exactly the keys the
+    /// shared `detail_keys::insert_pcie_details` writer produces, so the
+    /// map is sourced from the helper and the test fails when either end
+    /// drifts. A test that inserted the keys by hand would pass on current
+    /// `main` and prove nothing.
+    #[test]
+    fn exporter_emits_pcie_current_gauges_from_the_shared_writer() {
+        let mut gpu = make_nvidia_gpu();
+        gpu.name = "NVIDIA H100 80GB HBM3".to_string();
+        detail_keys::insert_pcie_details(&mut gpu.detail, Some(4), Some(16), Some(5), Some(16));
+
+        let output = GpuMetricExporter::new(&[gpu]).export_metrics();
+
+        let gen_gauge = output
+            .lines()
+            .find(|l| l.starts_with("all_smi_gpu_pcie_gen_current{"))
+            .unwrap_or_else(|| panic!("gen gauge missing:\n{output}"));
+        assert!(
+            gen_gauge.ends_with(" 4"),
+            "expected a bare 4 sample, got {gen_gauge}"
+        );
+        let width_gauge = output
+            .lines()
+            .find(|l| l.starts_with("all_smi_gpu_pcie_width_current{"))
+            .unwrap_or_else(|| panic!("width gauge missing:\n{output}"));
+        assert!(
+            width_gauge.ends_with(" 16"),
+            "expected a bare 16 sample, got {width_gauge}"
+        );
+        for gauge in [gen_gauge, width_gauge] {
+            for label in ["gpu=\"", "instance=\"", "gpu_uuid=\"", "gpu_index=\""] {
+                assert!(gauge.contains(label), "{label} missing from {gauge}");
+            }
+        }
+
+        // The gauges carry the current readings; the identity series keeps
+        // the maximums and carries none of the current pair, which moved to
+        // the gauges.
+        let info_line = output
+            .lines()
+            .find(|l| l.starts_with("all_smi_gpu_info{"))
+            .unwrap_or_else(|| panic!("identity series missing:\n{output}"));
+        for stale in [
+            "pcie_generation=\"",
+            "pcie_width=\"",
+            "pcie_gen_current=\"",
+            "pcie_width_current=\"",
+        ] {
+            assert!(
+                !info_line.contains(stale),
+                "{stale} reached the identity series: {info_line}"
+            );
+        }
+        assert!(info_line.contains("pcie_gen_max=\"5\""), "{info_line}");
+        assert!(info_line.contains("pcie_width_max=\"16\""), "{info_line}");
+    }
+
+    /// The AMD half of the label-stability criterion, hand-built so it runs
+    /// on every platform: the plugin itself is Linux-only, but the export
+    /// path it feeds is not. Each poll's map is built through the shared
+    /// writers, so the test fails when either the reader's keys or the
+    /// registry drifts.
+    #[test]
+    fn an_amd_shaped_device_keeps_one_identity_series_across_polls() {
+        let poll = |link_gen: u32, fan_rpm: u32, mclk: &str| {
+            let mut detail = HashMap::new();
+            detail.insert("lib_name".to_string(), "ROCm".to_string());
+            detail.insert("Max GPU Link".to_string(), "Gen4 x16".to_string());
+            detail_keys::insert_pcie_details(&mut detail, Some(link_gen), Some(16), None, None);
+            detail.insert("Fan Speed".to_string(), format!("{fan_rpm} RPM"));
+            detail.insert(
+                detail_keys::CLOCK_MEMORY_CURRENT_DETAIL_KEY.to_string(),
+                mclk.to_string(),
+            );
+            identity_line_map("AMD Radeon RX 7900 XTX", &detail)
+        };
+
+        let first = poll(1, 0, "96");
+        let second = poll(4, 1450, "1249");
+        assert_eq!(first, second, "an AMD poll moved the label set");
+
+        // The identity labels are still there.
+        assert!(first.contains("lib_name=\"ROCm\""), "{first}");
+        assert!(first.contains("max_gpu_link=\"Gen4 x16\""), "{first}");
+        // And none of the per-poll readings reached the identity series.
+        for stale in [
+            "pcie_gen_current=\"",
+            "pcie_width_current=\"",
+            "fan_speed=\"",
+            "clock_memory_current=\"",
+            "current_link=\"",
+            "memory_clock=\"",
+        ] {
+            assert!(
+                !first.contains(stale),
+                "{stale} reached the identity series: {first}"
+            );
+        }
     }
 
     /// The same stability contract for the keys this change newly registers,

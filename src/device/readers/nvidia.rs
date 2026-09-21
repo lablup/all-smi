@@ -17,6 +17,7 @@ use crate::device::common::constants::BYTES_PER_MB;
 use crate::device::common::{execute_command_default, parse_csv_line};
 use crate::device::process_list::{get_all_processes, merge_gpu_processes};
 use crate::device::readers::common_cache::{DetailBuilder, DeviceStaticInfo, MAX_DEVICES};
+use crate::device::readers::detail_keys;
 use crate::device::readers::nvidia_hardware::{
     HardwareDetailCache, collect_gpm_metrics, collect_nvlink_remote_devices,
 };
@@ -641,14 +642,6 @@ macro_rules! add_detail {
     };
 }
 
-macro_rules! add_detail_fmt {
-    ($detail:expr_2021, $result:expr_2021, $key:expr_2021, $fmt:expr_2021) => {
-        if let Ok(value) = $result {
-            $detail.insert($key.to_string(), format!($fmt, value));
-        }
-    };
-}
-
 // Helper to create device detail HashMap
 fn create_device_detail(
     device: &nvml_wrapper::Device,
@@ -675,15 +668,18 @@ fn create_device_detail(
         detail.insert("Memory Type".to_string(), "Unified".to_string());
         detail.insert("Interconnect".to_string(), "Integrated".to_string());
     } else {
-        add_detail!(detail, device.current_pcie_link_gen(), "PCIe Generation");
-        add_detail_fmt!(
-            detail,
-            device.current_pcie_link_width(),
-            "PCIe Width",
-            "x{}"
+        // The exporter's snake_case bare-number convention, which this
+        // function already used for the two maximums. The current pair is
+        // what the `all_smi_gpu_pcie_gen_current` / `all_smi_gpu_width_current`
+        // gauges read out of `detail`, so the keys are written through the
+        // shared writer to keep the spellings compiler-checked at both ends.
+        detail_keys::insert_pcie_details(
+            &mut detail,
+            device.current_pcie_link_gen().ok(),
+            device.current_pcie_link_width().ok(),
+            device.max_pcie_link_gen().ok(),
+            device.max_pcie_link_width().ok(),
         );
-        add_detail!(detail, device.max_pcie_link_gen(), "pcie_gen_max");
-        add_detail!(detail, device.max_pcie_link_width(), "pcie_width_max");
     }
 
     add_detail!(detail, device.compute_mode(), "compute_mode");

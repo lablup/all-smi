@@ -244,4 +244,89 @@ mod tests {
             );
         }
     }
+
+    /// Issue #433: the AMD live readings reach `/metrics` — the production
+    /// renderer — as dedicated series, fed by the shared writer rather than
+    /// by hand-built detail literals. The plugin itself is Linux-only, but
+    /// the export path it feeds is cross-platform, so this runs everywhere.
+    #[test]
+    fn an_amd_shaped_row_renders_the_volatile_detail_series() {
+        use crate::device::readers::detail_keys;
+        use std::collections::HashMap;
+
+        let mut gpu = GpuInfo {
+            uuid: "GPU-0000:03:00.0".to_string(),
+            time: String::new(),
+            name: "AMD Radeon RX 7900 XTX".to_string(),
+            device_type: "GPU".to_string(),
+            host_id: "node-1".to_string(),
+            hostname: "node-1".to_string(),
+            instance: "node-1".to_string(),
+            utilization: 12.0,
+            ane_utilization: 0.0,
+            dla_utilization: None,
+            tensorcore_utilization: None,
+            temperature: 48,
+            used_memory: 1024,
+            total_memory: 24576,
+            frequency: 500,
+            power_consumption: 18.0,
+            gpu_core_count: None,
+            temperature_threshold_slowdown: None,
+            temperature_threshold_shutdown: None,
+            temperature_threshold_max_operating: None,
+            temperature_threshold_acoustic: None,
+            performance_state: None,
+            fan_speed_rpm: Some(700),
+            numa_node_id: None,
+            gsp_firmware_mode: None,
+            gsp_firmware_version: None,
+            nvlink_remote_devices: Vec::new(),
+            gpm_metrics: None,
+            detail: HashMap::new(),
+        };
+        detail_keys::insert_pcie_details(&mut gpu.detail, Some(4), Some(16), None, None);
+        gpu.detail.insert(
+            detail_keys::CLOCK_MEMORY_CURRENT_DETAIL_KEY.to_string(),
+            "1249".to_string(),
+        );
+
+        let env = RuntimeEnvironment::default();
+        let gpu_info = [gpu];
+        let inputs = MetricsRenderInputs {
+            gpu_info: &gpu_info,
+            ..empty_inputs(&env, true)
+        };
+        let rendered = render_prometheus_exposition(&inputs);
+
+        let gen_gauge = rendered
+            .lines()
+            .find(|l| l.starts_with("all_smi_gpu_pcie_gen_current{"))
+            .unwrap_or_else(|| panic!("gen gauge missing:\n{rendered}"));
+        assert!(
+            gen_gauge.ends_with(" 4"),
+            "expected a bare 4 sample, got {gen_gauge}"
+        );
+        let width_gauge = rendered
+            .lines()
+            .find(|l| l.starts_with("all_smi_gpu_pcie_width_current{"))
+            .unwrap_or_else(|| panic!("width gauge missing:\n{rendered}"));
+        assert!(
+            width_gauge.ends_with(" 16"),
+            "expected a bare 16 sample, got {width_gauge}"
+        );
+        let mclk_gauge = rendered
+            .lines()
+            .find(|l| l.starts_with("all_smi_gpu_clock_memory_current_mhz{"))
+            .unwrap_or_else(|| panic!("memory clock gauge missing:\n{rendered}"));
+        assert!(
+            mclk_gauge.ends_with(" 1249"),
+            "expected 1249 MHz, got {mclk_gauge}"
+        );
+        for gauge in [gen_gauge, width_gauge, mclk_gauge] {
+            for label in ["gpu=\"", "instance=\"", "gpu_uuid=\"", "gpu_index=\""] {
+                assert!(gauge.contains(label), "{label} missing from {gauge}");
+            }
+        }
+    }
 }
