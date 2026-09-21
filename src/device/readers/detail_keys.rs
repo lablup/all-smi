@@ -70,7 +70,15 @@ pub const CARD_POWER_WATTS_DETAIL_KEY: &str = "card_power_watts";
 /// here when it holds a discrete state (`Status`, `Performance State`), a
 /// settable limit or mode (`power_limit_max`, `ecc_mode_current`), or a
 /// provenance string (`Metrics Source`, `Source: *`): those are identity, and
-/// a change in them is a change a dashboard wants to see.
+/// a change in them is a change a dashboard wants to see. The carve-out is
+/// narrower than it looks, though: a Tenstorrent status register
+/// (`pcie_status`, `eth_status0`, `eth_status1`, `ddr_status`) is discrete in
+/// the sense that it holds a register word, but its raw hex dump is not
+/// identity an operator joins on, and each one already ships as the label
+/// value of its own `all_smi_tenstorrent_*` series, so registering it costs
+/// the identity series nothing. The rule the Tenstorrent batch applies: a key
+/// that has its own `all_smi_tenstorrent_*` series and is not stable device
+/// identity does not belong in the `all_smi_gpu_info` label set.
 ///
 /// Registering a key removes its only route onto the wire unless the same
 /// reading is already published as a dedicated series, so every entry below
@@ -80,6 +88,19 @@ pub const CARD_POWER_WATTS_DETAIL_KEY: &str = "card_power_watts";
 /// * `voltage`, `current`, `asic_temperature`, `vreg_temperature`,
 ///   `inlet_temperature`, `aiclk_mhz`, `arcclk_mhz`, `axiclk_mhz`
 ///   (Tenstorrent): the matching `all_smi_tenstorrent_*` gauges.
+/// * `faults`, `throttler`, `arc0_health`, `arc3_health`, `pcie_status`,
+///   `eth_status0`, `eth_status1`, `ddr_status`, `fan_speed`, `fan_rpm`,
+///   `heartbeat` (Tenstorrent): the matching `all_smi_tenstorrent_*` series
+///   — the two ethernet statuses and PCIe status as the label value of
+///   `all_smi_tenstorrent_eth_status_info` / `pcie_status_info`, the rest as
+///   their own gauge or counter. The `fan_speed` entry also catches the
+///   legacy Title Case `Fan Speed` key the AMD / Intel readers still write,
+///   through the sanitizer: that label value churned with the fan, and the
+///   tachometer reading already ships as `all_smi_gpu_fan_speed_rpm` (the
+///   typed field, or the exporter's legacy detail fallback), so dropping the
+///   label costs the wire only a churning display string. A duty-cycle-only
+///   Level Zero percentage keeps no series of its own and stays in `detail`
+///   for the TUI and the snapshot writers.
 /// * `combined_power_mw` (Apple Silicon): `all_smi_combined_power_watts`,
 ///   which reads this very key out of `detail`. Filtering removes labels
 ///   only, never `detail` entries, which is what keeps that gauge alive.
@@ -115,6 +136,17 @@ pub const VOLATILE_DETAIL_KEYS: &[&str] = &[
     "aiclk_mhz",
     "arcclk_mhz",
     "axiclk_mhz",
+    "faults",
+    "throttler",
+    "arc0_health",
+    "arc3_health",
+    "pcie_status",
+    "eth_status0",
+    "eth_status1",
+    "ddr_status",
+    "fan_speed",
+    "fan_rpm",
+    "heartbeat",
     "combined_power_mw",
     "cpu_temperature",
     "gpu_temperature",
@@ -371,12 +403,25 @@ mod tests {
         assert!(is_volatile_detail_key("Current-Power"));
     }
 
+    /// The Tenstorrent `fan_speed` entry also catches the legacy Title Case
+    /// `Fan Speed` key the AMD / Intel readers write, through the sanitizer.
+    /// That is intended: the label value churned with the fan, and the
+    /// tachometer reading already ships as the structured
+    /// `all_smi_gpu_fan_speed_rpm` series (the typed field, or the exporter's
+    /// legacy detail fallback), so removing the label costs the wire only a
+    /// churning display string.
+    #[test]
+    fn fan_speed_registration_also_filters_the_legacy_title_case_key() {
+        assert!(is_volatile_detail_key("fan_speed"));
+        assert!(is_volatile_detail_key("Fan Speed"));
+        assert!(is_volatile_detail_key("FAN_SPEED"));
+    }
+
     /// Identity, discrete state and settable limits stay on the series: they
     /// are what an operator joins and filters on.
     #[test]
     fn identity_and_state_keys_are_not_volatile() {
         for key in [
-            "Fan Speed",
             "Status",
             "Performance State",
             "power_limit_current",
