@@ -48,19 +48,25 @@ macro_rules! parse_metric {
 /// Example regex: r"^all_smi_([^\{]+)\{([^}]+)\} ([\d\.]+)$"
 /// Returns Option<(String, String, f64)>
 ///
+/// A line whose value fails to parse as `f64` is dropped (None), never
+/// turned into a fabricated `0.0`: zero is a real reading in this domain,
+/// so a fabricated one would be indistinguishable from a measurement
+/// downstream (issue #436).
+///
 /// # Safety
-/// This macro does not panic. Returns None for invalid input or regex mismatches.
+/// This macro does not panic. Returns None for invalid input, regex
+/// mismatches, or values that fail to parse.
 #[macro_export]
 macro_rules! parse_prometheus {
     ($line:expr_2021, $re:expr_2021) => {{
         if let Some(cap) = $re.captures($line.trim()) {
             let name = cap.get(1).map(|m| m.as_str().to_string());
             let labels = cap.get(2).map(|m| m.as_str().to_string());
-            let value = cap
-                .get(3)
-                .and_then(|m| m.as_str().parse::<f64>().ok())
-                .unwrap_or(0.0);
-            if let (Some(name), Some(labels)) = (name, labels) {
+            // A value the regex accepted but `f64::parse` rejects (the
+            // production value group is digits and dots, so `1.2.3` and `..`
+            // both match) must drop the line, not become a reading.
+            let value = cap.get(3).and_then(|m| m.as_str().parse::<f64>().ok());
+            if let (Some(name), Some(labels), Some(value)) = (name, labels, value) {
                 // Add length validation that was previously enforced by bounded quantifiers
                 if name.len() > 256 || labels.len() > 1024 {
                     None
@@ -340,6 +346,31 @@ mod tests {
         let line = "bad format";
         let parsed = parse_prometheus!(line, re);
         assert!(parsed.is_none());
+    }
+
+    /// Issue #436: the production value group is digits and dots, so values
+    /// like `1.2.3` or `..` match the regex but fail `f64::parse`. The macro
+    /// must drop the line rather than fabricate a `0.0` reading: zero is a
+    /// real reading here, so a fabricated one would be indistinguishable
+    /// from a measurement downstream. A well-formed value, including a
+    /// genuine zero, still parses.
+    #[test]
+    fn test_parse_prometheus_unparseable_value_is_rejected() {
+        let re = Regex::new(r"^all_smi_([^\{]+)\{([^}]+)\} ([\d\.]+)$").unwrap();
+
+        for line in [
+            r#"all_smi_gpu_utilization{gpu="RTX"} 1.2.3"#,
+            r#"all_smi_gpu_utilization{gpu="RTX"} 1.2.3.4"#,
+            r#"all_smi_gpu_utilization{gpu="RTX"} .."#,
+            r#"all_smi_gpu_utilization{gpu="RTX"} ..."#,
+        ] {
+            let parsed = parse_prometheus!(line, re);
+            assert!(parsed.is_none(), "line must be rejected: {line}");
+        }
+
+        // Well-formed values keep parsing, including genuine zeros.
+        let parsed = parse_prometheus!(r#"all_smi_gpu_utilization{gpu="RTX"} 0"#, re);
+        assert_eq!(parsed.unwrap().2, 0.0);
     }
 
     #[test]
