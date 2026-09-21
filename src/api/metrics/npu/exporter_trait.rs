@@ -17,7 +17,6 @@ use crate::device::GpuInfo;
 
 /// Trait for NPU vendor-specific metric exporters
 /// This trait defines the interface that all NPU vendor implementations must follow
-#[allow(dead_code)]
 pub trait NpuExporter: Send + Sync {
     /// Check if this exporter can handle the given NPU device
     fn can_handle(&self, info: &GpuInfo) -> bool;
@@ -30,34 +29,4 @@ pub trait NpuExporter: Send + Sync {
         index: usize,
         index_str: &str,
     );
-
-    /// Get the vendor name for identification purposes
-    fn vendor_name(&self) -> &'static str;
-}
-
-/// Common interface for exporting metrics that all NPU exporters should implement
-#[allow(dead_code)]
-pub trait CommonNpuMetrics {
-    /// Export generic NPU metrics that are common across vendors
-    fn export_generic_npu_metrics(&self, builder: &mut MetricBuilder, info: &GpuInfo, index: usize);
-
-    /// Export generic NPU metrics with pre-allocated index string (optimization)
-    fn export_generic_npu_metrics_str(
-        &self,
-        builder: &mut MetricBuilder,
-        info: &GpuInfo,
-        index_str: &str,
-    );
-
-    /// Export basic device information metrics
-    fn export_device_info(&self, builder: &mut MetricBuilder, info: &GpuInfo, index: usize);
-
-    /// Export firmware version information
-    fn export_firmware_info(&self, builder: &mut MetricBuilder, info: &GpuInfo, index: usize);
-
-    /// Export temperature metrics if available
-    fn export_temperature_metrics(&self, builder: &mut MetricBuilder, info: &GpuInfo, index: usize);
-
-    /// Export power-related metrics if available
-    fn export_power_metrics(&self, builder: &mut MetricBuilder, info: &GpuInfo, index: usize);
 }

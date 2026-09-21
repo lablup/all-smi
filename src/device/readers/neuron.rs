@@ -660,8 +660,10 @@ fn build_core_row(
         uuid: compose_uuid(ctx.sysfs.serial_number.as_deref(), &device.bdf, flat_core),
         time: ctx.time.clone(),
         name: compose_name(&ctx.sysfs, hardware),
-        // Drives `CommonNpuExporter`, which emits the shared
-        // `all_smi_npu_*` family for every "NPU" row.
+        // Tags the row for the NPU exporter chain. Utilization, memory,
+        // power and temperature for it are published under the
+        // `all_smi_gpu_*` names by the GPU exporter, which runs over the
+        // same rows.
         device_type: "NPU".to_string(),
         host_id: ctx.hostname.clone(),
         hostname: ctx.hostname.clone(),

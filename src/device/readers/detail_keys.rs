@@ -48,9 +48,10 @@ use std::sync::LazyLock;
 /// `all_smi_gpu_card_power_watts` gauge rather than as a label: it is a live
 /// reading, so it is listed in [`VOLATILE_DETAIL_KEYS`] and never reaches the
 /// `all_smi_gpu_info` label set. The key must not be `power` or `power_draw`:
-/// the generic NPU exporter turns those into `all_smi_npu_power_watts` and
-/// `all_smi_npu_power_draw_watts` series on every device that carries them,
-/// which would count the board once per device again.
+/// those spellings belong to per-device power readings, and a board figure
+/// under them reads as one power figure per die (issue #431 removed the dead
+/// generic NPU exporter that turned them into per-die series, but the
+/// spelling distinction stays load-bearing).
 pub const CARD_POWER_WATTS_DETAIL_KEY: &str = "card_power_watts";
 
 /// Detail keys whose value is a continuously varying measurement, and which

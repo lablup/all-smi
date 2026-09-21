@@ -13,21 +13,17 @@
 // limitations under the License.
 
 use super::common::CommonNpuExporter;
-use super::exporter_trait::{CommonNpuMetrics, NpuExporter};
+use super::exporter_trait::NpuExporter;
 use crate::api::metrics::MetricBuilder;
 use crate::device::GpuInfo;
 
 /// Furiosa AI NPU-specific metric exporter
 /// Currently uses common NPU metrics as Furiosa-specific metrics are not yet implemented
-pub struct FuriosaExporter {
-    common: CommonNpuExporter,
-}
+pub struct FuriosaExporter;
 
 impl FuriosaExporter {
     pub fn new() -> Self {
-        Self {
-            common: CommonNpuExporter::new(),
-        }
+        Self
     }
 
     fn export_device_info(&self, builder: &mut MetricBuilder, info: &GpuInfo, index: usize) {
@@ -265,53 +261,5 @@ impl NpuExporter for FuriosaExporter {
         self.export_memory_metrics(builder, info, index);
         self.export_clock_metrics(builder, info, index);
         self.export_device_status(builder, info, index);
-    }
-
-    fn vendor_name(&self) -> &'static str {
-        "Furiosa"
-    }
-}
-
-impl CommonNpuMetrics for FuriosaExporter {
-    fn export_generic_npu_metrics(
-        &self,
-        builder: &mut MetricBuilder,
-        info: &GpuInfo,
-        index: usize,
-    ) {
-        self.common.export_generic_npu_metrics(builder, info, index);
-    }
-
-    fn export_generic_npu_metrics_str(
-        &self,
-        builder: &mut MetricBuilder,
-        info: &GpuInfo,
-        index_str: &str,
-    ) {
-        self.common
-            .export_generic_npu_metrics_str(builder, info, index_str);
-    }
-
-    fn export_device_info(&self, builder: &mut MetricBuilder, info: &GpuInfo, index: usize) {
-        // Use vendor-specific device info for Furiosa
-        self.export_device_info(builder, info, index);
-    }
-
-    fn export_firmware_info(&self, builder: &mut MetricBuilder, info: &GpuInfo, index: usize) {
-        // Use vendor-specific firmware info for Furiosa
-        self.export_firmware_info(builder, info, index);
-    }
-
-    fn export_temperature_metrics(
-        &self,
-        builder: &mut MetricBuilder,
-        info: &GpuInfo,
-        index: usize,
-    ) {
-        self.common.export_temperature_metrics(builder, info, index);
-    }
-
-    fn export_power_metrics(&self, builder: &mut MetricBuilder, info: &GpuInfo, index: usize) {
-        self.common.export_power_metrics(builder, info, index);
     }
 }
