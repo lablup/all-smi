@@ -14,6 +14,7 @@
 
 use super::{MetricBuilder, MetricExporter};
 use crate::device::GpuInfo;
+use crate::device::readers::detail_keys;
 use crate::device::types::MAX_GPU_FAN_RPM;
 use crate::parsing::common::{sanitize_label_name, sanitize_label_value};
 
@@ -136,6 +137,28 @@ impl<'a> GpuMetricExporter<'a> {
                 .metric("all_smi_gpu_power_consumption_watts", &base_labels, power);
         }
 
+        // Board power, repeated identically on every device of a multi-device
+        // board. Carried in `detail` by the readers whose tool reports one
+        // power figure per board (the four dies of a Rebellions ATOM Max
+        // card), and read back through the same validator the TUI uses, so an
+        // absent or unparsable value publishes neither a label nor a sample.
+        //
+        // It is a separate family rather than a label on `all_smi_gpu_info`
+        // because it is a live reading: as a label it gave every die a new
+        // label set, and therefore a new series, on nearly every scrape. The
+        // `gpu_` prefix is load-bearing on the way back in, since the remote
+        // parser routes only `gpu_`, `npu_`, `nvlink_` and `ane_utilization`
+        // into the device accumulator.
+        if let Some(card_watts) = detail_keys::card_power_watts(&info.detail) {
+            builder
+                .help(
+                    "all_smi_gpu_card_power_watts",
+                    "Power of the physical board this device sits on, in watts, for display only. The same board value is repeated on every device of the board, so summing this metric multiplies a board's real draw by its device count (issue #418); sum all_smi_gpu_power_consumption_watts instead, which counts each board exactly once.",
+                )
+                .type_("all_smi_gpu_card_power_watts", "gauge")
+                .metric("all_smi_gpu_card_power_watts", &base_labels, card_watts);
+        }
+
         // Frequency. Omitted when the platform has no clock probe. This also
         // covers the readers that have always reported a static `0` to mean
         // "no probe" (Rebellions, Intel Gaudi, AMD via WMI), which the TUI
@@ -247,11 +270,32 @@ impl<'a> GpuMetricExporter<'a> {
         // Convert detail HashMap to label pairs with sanitized names and values.
         // Values are sanitized to strip control characters and prevent
         // injection of ANSI escape sequences from NVML.
-        let detail_labels: Vec<(String, String)> = info
+        //
+        // Keys registered in `detail_keys::VOLATILE_DETAIL_KEYS` are dropped
+        // first, before sanitizing, so this series carries device identity
+        // only. A label whose value moves between polls would give the device
+        // a new label set, and therefore a new Prometheus series, on nearly
+        // every scrape; each registered key's reading has a series of its own
+        // instead. This filters the *label set* and never `detail` itself, so
+        // the TUI, the snapshot writer and every exporter that reads a
+        // registered key out of `detail` (notably `all_smi_combined_power_watts`
+        // above) are unaffected.
+        let mut detail_labels: Vec<(String, String)> = info
             .detail
             .iter()
+            .filter(|(key, _)| !detail_keys::is_volatile_detail_key(key))
             .map(|(k, v)| (sanitize_label_name(k), sanitize_label_value(v)))
             .collect();
+
+        // `detail` is a `HashMap`, so its iteration order differs between the
+        // maps two consecutive polls build. Prometheus reads a label set
+        // rather than a line, so the order never affected series identity,
+        // but it does make the exposition text differ from scrape to scrape,
+        // which hides exactly the churn this filter removes: diffing two
+        // scrapes could not tell a reordered line from a new series. Sorting
+        // makes an unchanged device render byte-identically, so that diff is
+        // a usable check.
+        detail_labels.sort();
 
         builder
             .help("all_smi_gpu_info", "GPU/NPU device information")
@@ -952,6 +996,255 @@ mod tests {
         assert!(output.contains("all_smi_ane_utilization{"));
         // `all_smi_ane_power_watts` stays Apple-only, as before.
         assert!(!output.contains("all_smi_ane_power_watts{"));
+    }
+
+    /// The `all_smi_gpu_info` line for a device whose `detail` holds
+    /// `entries`, rendered through the real exporter.
+    fn identity_line(name: &str, entries: &[(&str, &str)]) -> String {
+        let mut gpu = make_nvidia_gpu();
+        gpu.name = name.to_string();
+        for (key, value) in entries {
+            gpu.detail.insert((*key).to_string(), (*value).to_string());
+        }
+        GpuMetricExporter::new(&[gpu])
+            .export_metrics()
+            .lines()
+            .find(|line| line.starts_with("all_smi_gpu_info{"))
+            .unwrap_or_else(|| panic!("identity series missing for {name}"))
+            .to_string()
+    }
+
+    /// Issue #425: `all_smi_gpu_info` identifies a device, so its label set
+    /// must not move when a reading does. Every registered key gets its own
+    /// assertion, naming the key, so reverting the filter for one key fails
+    /// on that key instead of hiding behind a neighbour.
+    #[test]
+    fn no_registered_volatile_key_reaches_the_identity_label_set() {
+        for key in detail_keys::VOLATILE_DETAIL_KEYS {
+            let first = identity_line("NVIDIA A100", &[(key, "1")]);
+            let second = identity_line("NVIDIA A100", &[(key, "2")]);
+            assert_eq!(
+                first, second,
+                "{key} changed the identity label set between polls"
+            );
+            let label = format!("{}=\"", sanitize_label_name(key));
+            assert!(
+                !first.contains(&label),
+                "{key} reached the identity series as {label}: {first}"
+            );
+        }
+    }
+
+    /// The Tenstorrent half of the label-stability criterion, hand-built so
+    /// it runs on every platform: the reader itself is Linux-only, but the
+    /// export path it feeds is not.
+    #[test]
+    fn a_tenstorrent_shaped_device_keeps_one_identity_series_across_polls() {
+        let stable: &[(&str, &str)] = &[
+            ("board_type", "n300"),
+            ("arc_fw_version", "2.28.0.0"),
+            ("lib_name", "Luwen"),
+        ];
+        let poll = |voltage, current, asic, vreg, inlet, ai, arc, axi| {
+            let mut entries = stable.to_vec();
+            entries.extend_from_slice(&[
+                ("voltage", voltage),
+                ("current", current),
+                ("asic_temperature", asic),
+                ("vreg_temperature", vreg),
+                ("inlet_temperature", inlet),
+                ("aiclk_mhz", ai),
+                ("arcclk_mhz", arc),
+                ("axiclk_mhz", axi),
+            ]);
+            identity_line("Tenstorrent Wormhole n300", &entries)
+        };
+
+        let first = poll(
+            "0.800", "12.34", "45.0", "45.0", "32.0", "800", "540", "900",
+        );
+        let second = poll(
+            "0.812", "13.01", "47.5", "46.2", "33.0", "1000", "540", "900",
+        );
+        assert_eq!(first, second, "a Tenstorrent poll moved the label set");
+
+        // The identity labels are still there: this filters readings, not
+        // the series.
+        assert!(first.contains("board_type=\"n300\""), "{first}");
+        assert!(first.contains("arc_fw_version=\"2.28.0.0\""), "{first}");
+        assert!(first.contains("lib_name=\"Luwen\""), "{first}");
+    }
+
+    /// The same stability contract for the keys this change newly registers,
+    /// one assertion per key so a partial revert names the key it broke.
+    #[test]
+    fn apple_furiosa_gaudi_and_tpu_readings_stay_off_the_identity_series() {
+        let polls: &[(&str, &str, &str)] = &[
+            ("combined_power_mw", "12345.6", "9876.5"),
+            ("cpu_temperature", "48.6", "51.2"),
+            ("gpu_temperature", "46.2", "49.8"),
+            ("frequency", "1500MHz", "1800MHz"),
+            ("Current Power", "142.5 W", "301.0 W"),
+            ("Used Memory", "1024 MiB", "2048 MiB"),
+            ("HLO Queue Size", "3", "7"),
+            ("HLO Exec Mean", "125.5 µs", "210.2 µs"),
+            ("HLO Exec P50", "100.0 µs", "180.4 µs"),
+            ("HLO Exec P90", "150.0 µs", "260.1 µs"),
+            ("HLO Exec P95", "175.0 µs", "300.9 µs"),
+            ("HLO Exec P99.9", "220.0 µs", "410.7 µs"),
+        ];
+
+        for (key, before, after) in polls {
+            let first = identity_line("Apple M2 Max GPU", &[(key, before)]);
+            let second = identity_line("Apple M2 Max GPU", &[(key, after)]);
+            assert_eq!(first, second, "{key} moved the identity label set");
+        }
+
+        // And together. No single device carries all of these, but a real
+        // one carries several at once (three on Apple Silicon, eight on a
+        // Google TPU), which is what used to make a scrape start a new
+        // series every few seconds. Filtering has to hold for the whole set,
+        // not just one key at a time.
+        let together = |values: [&str; 12]| {
+            let entries: Vec<(&str, &str)> = polls
+                .iter()
+                .zip(values)
+                .map(|((key, _, _), value)| (*key, value))
+                .collect();
+            identity_line("Apple M2 Max GPU", &entries)
+        };
+        assert_eq!(
+            together([
+                "12345.6",
+                "48.6",
+                "46.2",
+                "1500MHz",
+                "142.5 W",
+                "1024 MiB",
+                "3",
+                "125.5 µs",
+                "100.0 µs",
+                "150.0 µs",
+                "175.0 µs",
+                "220.0 µs",
+            ]),
+            together([
+                "9876.5",
+                "51.2",
+                "49.8",
+                "1800MHz",
+                "301.0 W",
+                "2048 MiB",
+                "7",
+                "210.2 µs",
+                "180.4 µs",
+                "260.1 µs",
+                "300.9 µs",
+                "410.7 µs",
+            ]),
+        );
+    }
+
+    /// The regression that would otherwise break Apple Silicon silently:
+    /// `all_smi_combined_power_watts` reads `combined_power_mw` straight out
+    /// of `detail`, so the filter has to drop the *label* and leave `detail`
+    /// alone.
+    #[test]
+    fn filtering_removes_labels_only_and_leaves_detail_readable() {
+        let mut gpu = make_nvidia_gpu();
+        gpu.name = "Apple M2 Max GPU".to_string();
+        gpu.detail
+            .insert("combined_power_mw".to_string(), "12345.6".to_string());
+
+        let output = GpuMetricExporter::new(&[gpu]).export_metrics();
+
+        let combined = output
+            .lines()
+            .find(|line| line.starts_with("all_smi_combined_power_watts{"))
+            .unwrap_or_else(|| panic!("combined power lost to the filter:\n{output}"));
+        let watts: f64 = combined
+            .rsplit(' ')
+            .next()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or_else(|| panic!("combined power sample is not a number: {combined}"));
+        assert!(
+            (watts - 12.3456).abs() < 1e-9,
+            "combined power must still be the detail reading, got {combined}"
+        );
+
+        let info = output
+            .lines()
+            .find(|line| line.starts_with("all_smi_gpu_info{"))
+            .expect("identity series");
+        assert!(
+            !info.contains("combined_power_mw=\""),
+            "the reading is still a label: {info}"
+        );
+    }
+
+    /// Issue #425: the board power reaches Prometheus as its own family, with
+    /// the same base label set as the power series it sits beside.
+    #[test]
+    fn card_power_is_published_as_its_own_gauge_not_as_a_label() {
+        let mut gpu = make_nvidia_gpu();
+        gpu.name = "RBLN-CA25".to_string();
+        gpu.device_type = "NPU".to_string();
+        gpu.detail.insert(
+            detail_keys::CARD_POWER_WATTS_DETAIL_KEY.to_string(),
+            "42.80".to_string(),
+        );
+
+        let output = GpuMetricExporter::new(&[gpu]).export_metrics();
+
+        let line = output
+            .lines()
+            .find(|l| l.starts_with("all_smi_gpu_card_power_watts{"))
+            .unwrap_or_else(|| panic!("card power gauge missing:\n{output}"));
+        assert!(line.ends_with(" 42.8"), "{line}");
+        assert!(line.contains("gpu=\"RBLN-CA25\""), "{line}");
+        assert!(line.contains("instance=\"node-1\""), "{line}");
+        assert!(line.contains("gpu_uuid=\"GPU-ABC\""), "{line}");
+        assert!(line.contains("gpu_index=\"0\""), "{line}");
+
+        // The HELP line has to carry the do-not-sum warning: summing this
+        // family recreates the 4x overcount issue #418 fixed.
+        let help = output
+            .lines()
+            .find(|l| l.starts_with("# HELP all_smi_gpu_card_power_watts"))
+            .expect("HELP line");
+        assert!(help.contains("sum"), "{help}");
+
+        let info = output
+            .lines()
+            .find(|l| l.starts_with("all_smi_gpu_info{"))
+            .expect("identity series");
+        assert!(!info.contains("card_power_watts=\""), "{info}");
+    }
+
+    /// No new failure path: a device without the key, or with one that does
+    /// not hold a finite non-negative number, publishes neither a label nor a
+    /// sample rather than a fabricated 0 W board.
+    #[test]
+    fn card_power_gauge_is_omitted_without_a_usable_reading() {
+        assert!(
+            !GpuMetricExporter::new(&[make_nvidia_gpu()])
+                .export_metrics()
+                .contains("all_smi_gpu_card_power_watts"),
+            "a device with no board value must publish no sample"
+        );
+
+        for rejected in ["-1", "NaN", "inf", "abc", ""] {
+            let mut gpu = make_nvidia_gpu();
+            gpu.detail.insert(
+                detail_keys::CARD_POWER_WATTS_DETAIL_KEY.to_string(),
+                rejected.to_string(),
+            );
+            let output = GpuMetricExporter::new(&[gpu]).export_metrics();
+            assert!(
+                !output.contains("all_smi_gpu_card_power_watts"),
+                "{rejected:?} must not reach the exposition:\n{output}"
+            );
+        }
     }
 
     #[test]

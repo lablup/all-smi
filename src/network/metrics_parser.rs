@@ -528,6 +528,18 @@ impl MetricsParser {
                     .detail
                     .insert("power_limit_max".to_string(), value.to_string());
             }
+            // Board power on every device of a multi-device board (the dies
+            // of an ATOM Max card). Only one device of the board carries a
+            // power series, so the viewer needs this to show the others'
+            // board value; `gpu_renderer` and the local reader both read it
+            // from `detail` under this key, at the two decimals the reader
+            // writes, so the round trip is byte-stable.
+            "gpu_card_power_watts" => {
+                gpu_info.detail.insert(
+                    crate::device::readers::detail_keys::CARD_POWER_WATTS_DETAIL_KEY.to_string(),
+                    format!("{value:.2}"),
+                );
+            }
             "gpu_info" => {
                 // Extract device type
                 if let Some(device_type) = labels.get("type") {
@@ -550,12 +562,12 @@ impl MetricsParser {
                         // Apple Silicon: why the live series are missing.
                         // Carried on the identity series so a remote viewer
                         // sees the reason and not just the absence (#325).
-                        "native_metrics",
-                        // Board power on every device of a multi-device
-                        // board (ATOM Max dies). Only one device of the
-                        // board carries a power series, so the viewer
-                        // needs this to show the others' board value.
-                        crate::device::readers::detail_keys::CARD_POWER_WATTS_DETAIL_KEY
+                        "native_metrics"
+                        // Nothing that moves between polls belongs here.
+                        // `all_smi_gpu_info` carries device identity only,
+                        // so a live reading such as the board power arrives
+                        // as its own metric (`gpu_card_power_watts` above)
+                        // rather than as a label.
                     ]
                 );
 
@@ -1746,18 +1758,22 @@ all_smi_gpu_power_consumption_watts{gpu="Apple M2 Max GPU", instance="mac-1", gp
         assert_eq!(gpu.power_consumption_reading(), Some(0.0));
     }
 
-    /// Issue #418: a non-reporting ATOM Max die has no power series but
-    /// carries its board's power on `all_smi_gpu_info`. The viewer keeps the
-    /// power absent and the board value in `detail` for display.
+    /// Issue #418: a non-reporting ATOM Max die has no power series of its
+    /// own but does carry its board's power. Issue #425 moved that value off
+    /// the `all_smi_gpu_info` label set and onto its own gauge, because a
+    /// live reading in the label set gave the die a new series per scrape.
+    /// The viewer keeps the power absent and the board value in `detail` for
+    /// display, exactly as before.
     #[test]
-    fn test_card_power_label_survives_without_a_power_series() {
+    fn test_card_power_gauge_survives_without_a_power_series() {
         let parser = create_test_parser();
         let re = create_test_regex();
         let host = "127.0.0.1:10058";
 
         let test_data = r#"
 all_smi_gpu_memory_total_bytes{gpu="RBLN-CA25", instance="atom-max-01", gpu_uuid="die-1", gpu_index="1"} 16877879296
-all_smi_gpu_info{gpu="RBLN-CA25", instance="atom-max-01", gpu_uuid="die-1", gpu_index="1", type="NPU", card_power_watts="42.80"} 1
+all_smi_gpu_card_power_watts{gpu="RBLN-CA25", instance="atom-max-01", gpu_uuid="die-1", gpu_index="1"} 42.8
+all_smi_gpu_info{gpu="RBLN-CA25", instance="atom-max-01", gpu_uuid="die-1", gpu_index="1", type="NPU"} 1
 "#;
 
         let parsed = parser.parse_metrics(test_data, host, &re);
@@ -1769,6 +1785,30 @@ all_smi_gpu_info{gpu="RBLN-CA25", instance="atom-max-01", gpu_uuid="die-1", gpu_
                 .get(crate::device::readers::detail_keys::CARD_POWER_WATTS_DETAIL_KEY)
                 .map(String::as_str),
             Some("42.80")
+        );
+    }
+
+    /// The label path is gone: a node that somehow still puts the board power
+    /// in the `all_smi_gpu_info` label set must not have it ingested, or the
+    /// value would come back as a churning label on the viewer's side too.
+    /// No released build emits that label, so nothing is lost by dropping it.
+    #[test]
+    fn test_card_power_label_is_no_longer_ingested() {
+        let parser = create_test_parser();
+        let re = create_test_regex();
+        let host = "127.0.0.1:10058";
+
+        let test_data = r#"
+all_smi_gpu_info{gpu="RBLN-CA25", instance="atom-max-01", gpu_uuid="die-1", gpu_index="1", type="NPU", card_power_watts="42.80"} 1
+"#;
+
+        let parsed = parser.parse_metrics(test_data, host, &re);
+        assert_eq!(parsed.gpu_info.len(), 1);
+        assert_eq!(
+            parsed.gpu_info[0]
+                .detail
+                .get(crate::device::readers::detail_keys::CARD_POWER_WATTS_DETAIL_KEY),
+            None
         );
     }
 

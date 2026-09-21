@@ -26,7 +26,9 @@
 //! Being always compiled also means the Linux test runner exercises this,
 //! which is the only runner this repository has.
 
+use crate::parsing::common::sanitize_label_name;
 use std::collections::HashMap;
+use std::sync::LazyLock;
 
 /// Power of the physical board a device sits on, in watts, as a bare number
 /// (`"42.80"`).
@@ -40,15 +42,133 @@ use std::collections::HashMap;
 /// longer show power. A board with a single device does not carry it: that
 /// device's `power_consumption` already is the board value.
 ///
-/// snake_case on purpose. Every detail key becomes a label on
-/// `all_smi_gpu_info` through `sanitize_label_name`, and a snake_case key
-/// survives that unchanged, so the key a local reader writes and the key the
+/// snake_case on purpose, so the key a local reader writes and the key the
 /// remote parser stores are the same string (the same pattern as
-/// `power_limit_max`). It must not be `power` or `power_draw`: the generic
-/// NPU exporter turns those into `all_smi_npu_power_watts` and
+/// `power_limit_max`). The value travels between nodes as the
+/// `all_smi_gpu_card_power_watts` gauge rather than as a label: it is a live
+/// reading, so it is listed in [`VOLATILE_DETAIL_KEYS`] and never reaches the
+/// `all_smi_gpu_info` label set. The key must not be `power` or `power_draw`:
+/// the generic NPU exporter turns those into `all_smi_npu_power_watts` and
 /// `all_smi_npu_power_draw_watts` series on every device that carries them,
 /// which would count the board once per device again.
 pub const CARD_POWER_WATTS_DETAIL_KEY: &str = "card_power_watts";
+
+/// Detail keys whose value is a continuously varying measurement, and which
+/// therefore must not become labels on `all_smi_gpu_info`.
+///
+/// Prometheus identifies a series by its full label set. `all_smi_gpu_info`
+/// exports every `detail` entry as a label, so a key whose value changes
+/// between polls starts a brand new series on each scrape and leaves the
+/// previous one stale. Series and index cardinality then scale with the
+/// number of scrapes rather than with the number of devices, range queries
+/// and `label_values` return thousands of dead series, and `group_left` joins
+/// over a range fragment across them.
+///
+/// This list is the single place a reader registers such a key. A key belongs
+/// here when its value is a measurement that moves on its own: a power,
+/// current, voltage, temperature, clock or byte count. A key does not belong
+/// here when it holds a discrete state (`Status`, `Performance State`), a
+/// settable limit or mode (`power_limit_max`, `ecc_mode_current`), or a
+/// provenance string (`Metrics Source`, `Source: *`): those are identity, and
+/// a change in them is a change a dashboard wants to see.
+///
+/// Registering a key removes its only route onto the wire unless the same
+/// reading is already published as a dedicated series, so every entry below
+/// names the series that carries it, or says why it needs none:
+///
+/// * `card_power_watts` (Rebellions): `all_smi_gpu_card_power_watts`.
+/// * `voltage`, `current`, `asic_temperature`, `vreg_temperature`,
+///   `inlet_temperature`, `aiclk_mhz`, `arcclk_mhz`, `axiclk_mhz`
+///   (Tenstorrent): the matching `all_smi_tenstorrent_*` gauges.
+/// * `combined_power_mw` (Apple Silicon): `all_smi_combined_power_watts`,
+///   which reads this very key out of `detail`. Filtering removes labels
+///   only, never `detail` entries, which is what keeps that gauge alive.
+/// * `cpu_temperature` (Apple Silicon): `all_smi_cpu_temperature_celsius`.
+/// * `gpu_temperature` (Apple Silicon): `all_smi_gpu_temperature_celsius`.
+/// * `frequency` (Furiosa): `all_smi_gpu_frequency_mhz`.
+/// * `Current Power` (Gaudi, Google TPU): `all_smi_gpu_power_consumption_watts`.
+/// * `Used Memory` (Gaudi, Google TPU): `all_smi_gpu_memory_used_bytes`.
+/// * `HLO Queue Size`, `HLO Exec Mean`, `HLO Exec P50`, `HLO Exec P90`,
+///   `HLO Exec P95`, `HLO Exec P99.9` (Google TPU): the matching
+///   `all_smi_tpu_hlo_*` gauges. That exporter reads these very strings out
+///   of `detail` and parses the leading number itself, so it keeps working
+///   with the unit suffix the reader writes (`"125.5 µs"`).
+/// * `power_utilization_raw` (AWS Neuron): no series, and it needs none. It
+///   is the raw `stats/power/utilization` line rather than a reading, nothing
+///   parses it, and its second field is a sampling timestamp that advances on
+///   its own, so it started a new series on every scrape even on an idle
+///   device. Filtering removes labels only, so the entry stays in `detail`
+///   for the TUI and the snapshot writers, and issue #434 covers giving its
+///   three utilization floats a series if that is ever wanted.
+///
+/// The Title Case entries are matched through `sanitize_label_name` (see
+/// [`is_volatile_detail_key`]); they are spelled here as their readers write
+/// them so a reader author can find the key by grepping for the string they
+/// typed.
+pub const VOLATILE_DETAIL_KEYS: &[&str] = &[
+    CARD_POWER_WATTS_DETAIL_KEY,
+    "voltage",
+    "current",
+    "asic_temperature",
+    "vreg_temperature",
+    "inlet_temperature",
+    "aiclk_mhz",
+    "arcclk_mhz",
+    "axiclk_mhz",
+    "combined_power_mw",
+    "cpu_temperature",
+    "gpu_temperature",
+    "frequency",
+    "Current Power",
+    "Used Memory",
+    "HLO Queue Size",
+    "HLO Exec Mean",
+    "HLO Exec P50",
+    "HLO Exec P90",
+    "HLO Exec P95",
+    "HLO Exec P99.9",
+    "power_utilization_raw",
+];
+
+/// [`VOLATILE_DETAIL_KEYS`] as the label names they sanitize to, computed
+/// once rather than on every detail entry of every device of every scrape.
+static VOLATILE_LABEL_NAMES: LazyLock<Vec<String>> = LazyLock::new(|| {
+    VOLATILE_DETAIL_KEYS
+        .iter()
+        .map(|key| sanitize_label_name(key))
+        .collect()
+});
+
+/// Whether `key` names a continuously varying measurement, and so must be
+/// kept out of the `all_smi_gpu_info` label set.
+///
+/// A key matches when it equals a [`VOLATILE_DETAIL_KEYS`] entry verbatim, or
+/// when `sanitize_label_name` maps the two to the same label name. Sanitizing
+/// both sides is what makes the Title Case entries (`Current Power`,
+/// `Used Memory`) match the label they would have produced, and what stops a
+/// respelling of a registered key from slipping a live reading back onto the
+/// identity series.
+///
+/// It is not a spelling-independent guard. `sanitize_label_name` lowercases
+/// and replaces every non-alphanumeric character with `_`, so `"AI Clock"`
+/// becomes `"ai_clock"` and does not match the entry `aiclk_mhz`. The
+/// Tenstorrent reader writes the snake_case keys its own exporter reads, and
+/// that agreement, not this function, is what keeps its clocks off the
+/// identity series.
+///
+/// It also matches whole keys only, so a key a reader builds at runtime
+/// cannot be registered by spelling. The Intel GPU readers write one
+/// `format!`-built entry per engine class and per clock domain
+/// (`"Engine: render"`, `"Frequency: gpu (L0)"`), which no fixed entry here
+/// can name; issue #434 covers giving those readings a series and deciding
+/// how the registry should express a key family.
+pub fn is_volatile_detail_key(key: &str) -> bool {
+    if VOLATILE_DETAIL_KEYS.contains(&key) {
+        return true;
+    }
+    let label = sanitize_label_name(key);
+    VOLATILE_LABEL_NAMES.contains(&label)
+}
 
 /// The board power carried under [`CARD_POWER_WATTS_DETAIL_KEY`], or `None`
 /// when the key is absent or does not hold a finite, non-negative number.
@@ -224,6 +344,57 @@ mod tests {
             missing_metric_sources(&detail, &["Power", "Fan"]),
             vec!["Power", "Fan"]
         );
+    }
+
+    /// Every registered key is recognised on its own, so a regression that
+    /// drops one entry fails on that entry rather than hiding behind a
+    /// neighbour.
+    #[test]
+    fn every_registered_key_is_volatile() {
+        for key in VOLATILE_DETAIL_KEYS {
+            assert!(
+                is_volatile_detail_key(key),
+                "{key} fell out of the registry"
+            );
+        }
+    }
+
+    /// The Title Case entries are matched through the label name they would
+    /// have produced, which is the whole reason both sides are sanitized.
+    #[test]
+    fn title_case_entries_match_through_the_sanitizer() {
+        assert!(is_volatile_detail_key("Current Power"));
+        assert!(is_volatile_detail_key("current_power"));
+        assert!(is_volatile_detail_key("Used Memory"));
+        assert!(is_volatile_detail_key("used_memory"));
+        // Same key, different spelling of the separator.
+        assert!(is_volatile_detail_key("Current-Power"));
+    }
+
+    /// Identity, discrete state and settable limits stay on the series: they
+    /// are what an operator joins and filters on.
+    #[test]
+    fn identity_and_state_keys_are_not_volatile() {
+        for key in [
+            "Fan Speed",
+            "Status",
+            "Performance State",
+            "power_limit_current",
+            "power_limit_max",
+            "ecc_mode_current",
+            "mig_mode_current",
+            "Metrics Source",
+            "Source: Power",
+            "serial_number",
+            "lib_name",
+            "Utilization",
+            // A near miss: the sanitizer is not a fuzzy matcher, so the old
+            // Tenstorrent spelling is not caught here. The reader writing
+            // `aiclk_mhz` is what keeps it off the label set.
+            "AI Clock",
+        ] {
+            assert!(!is_volatile_detail_key(key), "{key} must stay a label");
+        }
     }
 
     #[test]

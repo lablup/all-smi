@@ -397,8 +397,88 @@ fn sample_value(line: &str) -> f64 {
         .unwrap_or(f64::NAN)
 }
 
+fn lines_of<'a>(exposition: &'a str, family: &str) -> Vec<&'a str> {
+    let prefix = format!("{family}{{");
+    exposition
+        .lines()
+        .filter(|line| line.starts_with(&prefix))
+        .collect()
+}
+
+/// The same node one poll later, with every card drawing 1 W more.
+fn with_card_power_bumped(json: &str) -> String {
+    let re = Regex::new(r#""card_power": "(\d+)uW""#).expect("regex");
+    re.replace_all(json, |caps: &regex::Captures| {
+        let micro_watts: u64 = caps[1].parse().expect("fixture card_power is numeric");
+        format!(r#""card_power": "{}uW""#, micro_watts + 1_000_000)
+    })
+    .into_owned()
+}
+
+/// Strip the SGR sequences `print_gpu_info` writes, so an assertion can look
+/// at the text an operator reads. Mirrors the private `render_row` helper in
+/// `ui::renderers::gpu_renderer`.
+fn render_row(info: &GpuInfo) -> String {
+    let mut buf: Vec<u8> = Vec::new();
+    crate::ui::renderers::gpu_renderer::print_gpu_info(&mut buf, 0, info, 120, 0, 0, false);
+    let raw = String::from_utf8_lossy(&buf).into_owned();
+    let mut out = String::with_capacity(raw.len());
+    let mut chars = raw.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            if chars.peek() == Some(&'[') {
+                chars.next();
+                for c in chars.by_ref() {
+                    if ('@'..='~').contains(&c) {
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Issue #425: `all_smi_gpu_info` identifies the device, so its label set
+/// must be identical across two polls whose card powers differ. Before the
+/// fix, each of the 32 dies started a new Prometheus series per scrape.
+#[test]
+fn atom_max_identity_labels_hold_still_while_card_power_moves() {
+    let first = render(&poll(ATOM_MAX));
+    let second = render(&poll(&with_card_power_bumped(ATOM_MAX)));
+
+    let identity = |exposition: &str| -> Vec<String> {
+        lines_of(exposition, "all_smi_gpu_info")
+            .into_iter()
+            .map(str::to_string)
+            .collect()
+    };
+    assert_eq!(identity(&first).len(), 32);
+    assert_eq!(
+        identity(&first),
+        identity(&second),
+        "a card power change moved the identity label set"
+    );
+
+    // The reading itself did move; it just moved on its own family.
+    let card = |exposition: &str| -> Vec<String> {
+        lines_of(exposition, "all_smi_gpu_card_power_watts")
+            .into_iter()
+            .map(str::to_string)
+            .collect()
+    };
+    assert_eq!(card(&first).len(), 32);
+    assert_ne!(
+        card(&first),
+        card(&second),
+        "the board readings must still reach Prometheus"
+    );
+}
+
 /// `/metrics` for the ATOM Max node: one power series per card, never a
-/// sentinel, and the card value on every die's `all_smi_gpu_info`.
+/// sentinel, and the card value on its own gauge rather than as a label.
 #[test]
 fn atom_max_exposition_counts_each_card_once() {
     let exposition = render(&poll(ATOM_MAX));
@@ -436,10 +516,28 @@ fn atom_max_exposition_counts_each_card_once() {
         .filter(|line| line.starts_with("all_smi_gpu_info{"))
         .collect();
     assert_eq!(info.len(), 32);
+    // Issue #425 inverted this: the board power is a live reading, so it is
+    // no longer a label on the identity series.
     assert!(
-        info.iter()
-            .all(|line| line.contains(&format!("{CARD_POWER_WATTS_DETAIL_KEY}=\""))),
-        "every die carries the card value as a label"
+        !info
+            .iter()
+            .any(|line| line.contains(&format!("{CARD_POWER_WATTS_DETAIL_KEY}=\""))),
+        "the card value must not be an identity label"
+    );
+
+    // It is carried by its own family instead: every die repeats its board's
+    // value, which is exactly why summing this one is wrong.
+    let card = lines_of(&exposition, "all_smi_gpu_card_power_watts");
+    assert_eq!(card.len(), 32, "every die carries its board's value");
+    let distinct: BTreeSet<String> = card
+        .iter()
+        .map(|line| format!("{:.2}", sample_value(line)))
+        .collect();
+    assert_eq!(distinct.len(), 8, "one value per card: {distinct:?}");
+    let card_sum: f64 = card.iter().map(|line| sample_value(line)).sum();
+    assert!(
+        (card_sum - 4.0 * ATOM_MAX_CARD_TOTAL_WATTS).abs() < 1e-6,
+        "summing the card family overcounts by the die count, as documented: {card_sum}"
     );
 }
 
@@ -481,4 +579,24 @@ fn atom_max_exposition_round_trips_through_the_remote_parser() {
             row.uuid
         );
     }
+
+    // What the operator actually sees. A die with no power series of its own
+    // still shows its board's draw in parentheses in remote view, matching
+    // `die_without_own_power_shows_its_card_value_in_parentheses` in local
+    // view. This is the behavior the #425 re-routing had to preserve: the
+    // value now arrives as `all_smi_gpu_card_power_watts` rather than as an
+    // `all_smi_gpu_info` label.
+    let silent = parsed
+        .gpu_info
+        .iter()
+        .find(|row| row.power_consumption_reading().is_none())
+        .expect("three dies per card report no power of their own");
+    let (watts, _) = &cards[&sid_by_uuid[&silent.uuid]];
+    let rendered = render_row(silent);
+    assert!(
+        rendered.contains(&format!("({watts:.0}W)")),
+        "remote view lost the board value for {}: {rendered}",
+        silent.uuid
+    );
+    assert!(!rendered.contains("Pwr:     N/A"), "{rendered}");
 }

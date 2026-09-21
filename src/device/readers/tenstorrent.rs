@@ -467,31 +467,37 @@ fn build_device_details(
     // Clone the static details from DeviceStaticInfo
     let mut detail = static_info.detail.clone();
 
-    // Dynamic telemetry
+    // Dynamic telemetry.
+    //
+    // The keys are the snake_case ones `api::metrics::npu::tenstorrent`
+    // already looks up, and the values are bare numbers because
+    // `CommonNpuExporter::parse_numeric_value` is a plain `f64` parse: a
+    // `"800MHz"` or `"45.0°C"` string is rejected, which is why the whole
+    // `all_smi_tenstorrent_*` telemetry family used to be declared but never
+    // emitted. These readings change on every poll, so they are registered in
+    // `detail_keys::VOLATILE_DETAIL_KEYS` and reach Prometheus only through
+    // those gauges, never as `all_smi_gpu_info` labels.
+    detail.insert("voltage".to_string(), format!("{:.3}", telem.voltage()));
+    detail.insert("current".to_string(), format!("{:.2}", telem.current()));
     detail.insert(
-        "VDD Voltage".to_string(),
-        format!("{:.3}V", telem.voltage()),
+        "asic_temperature".to_string(),
+        format!("{:.1}", telem.asic_temperature()),
     );
-    detail.insert("Current".to_string(), format!("{:.2}A", telem.current()));
     detail.insert(
-        "ASIC Temperature".to_string(),
-        format!("{:.1}°C", telem.asic_temperature()),
-    );
-    detail.insert(
-        "VR Temperature".to_string(),
-        format!("{:.1}°C", telem.vreg_temperature()),
+        "vreg_temperature".to_string(),
+        format!("{:.1}", telem.vreg_temperature()),
     );
 
     if telem.board_temperature != 0 {
         detail.insert(
-            "Inlet Temperature".to_string(),
-            format!("{:.1}°C", telem.inlet_temperature()),
+            "inlet_temperature".to_string(),
+            format!("{:.1}", telem.inlet_temperature()),
         );
     }
 
-    detail.insert("AI Clock".to_string(), format!("{}MHz", telem.ai_clk()));
-    detail.insert("ARC Clock".to_string(), format!("{}MHz", telem.arc_clk()));
-    detail.insert("AXI Clock".to_string(), format!("{}MHz", telem.axi_clk()));
+    detail.insert("aiclk_mhz".to_string(), telem.ai_clk().to_string());
+    detail.insert("arcclk_mhz".to_string(), telem.arc_clk().to_string());
+    detail.insert("axiclk_mhz".to_string(), telem.axi_clk().to_string());
 
     // Add unified AI acceleration library labels if not already present
     detail
@@ -530,3 +536,7 @@ fn estimate_utilization(telem: &Telemetry, tdp_limit: f64) -> f64 {
     // Power is most reliable (60%), clock is secondary (30%), heartbeat is tertiary (10%)
     (power_utilization * 0.6 + clock_utilization * 0.3 + heartbeat_active * 10.0).min(100.0)
 }
+
+#[cfg(all(test, feature = "cli"))]
+#[path = "tenstorrent_telemetry_tests.rs"]
+mod telemetry_tests;
