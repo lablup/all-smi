@@ -17,8 +17,22 @@ use std::collections::{HashMap, HashSet};
 use sysinfo::{ProcessStatus, System};
 
 #[cfg(target_os = "macos")]
+#[path = "process_list/pidinfo_macos.rs"]
+mod pidinfo_macos;
+#[cfg(target_os = "macos")]
 #[path = "process_list/priority_macos.rs"]
 mod priority_macos;
+#[cfg(target_os = "macos")]
+#[path = "process_list/refresh_macos.rs"]
+pub mod refresh_macos;
+#[cfg(target_os = "macos")]
+#[path = "process_list/sampler_macos.rs"]
+pub mod sampler_macos;
+
+#[cfg(target_os = "macos")]
+pub use refresh_macos::refresh_processes;
+#[cfg(target_os = "macos")]
+pub use sampler_macos::ProcessSampler;
 
 /// Get all system processes with GPU usage information
 pub fn get_all_processes(system: &System, gpu_pids: &HashSet<u32>) -> Vec<ProcessInfo> {
@@ -71,6 +85,10 @@ pub fn get_all_processes(system: &System, gpu_pids: &HashSet<u32>) -> Vec<Proces
 /// Update a process cache in place, reusing existing ProcessInfo objects where possible.
 /// This reduces memory allocation overhead compared to creating new objects each cycle.
 /// Returns a Vec of ProcessInfo cloned from the cache for the current snapshot.
+///
+/// On macOS the per-tick pass is `refresh_processes` instead, which reads the
+/// dynamic values natively and runs sysinfo only on full ticks (issue #427).
+#[cfg(not(target_os = "macos"))]
 pub fn update_process_cache(
     system: &System,
     gpu_pids: &HashSet<u32>,
@@ -88,49 +106,17 @@ pub fn update_process_cache(
 
         if let Some(cached) = cache.get_mut(&pid_u32) {
             // Update existing entry - only update dynamic fields to reduce allocations
-            cached.cpu_percent = process.cpu_usage() as f64;
-            cached.memory_percent = (process.memory() as f64 / total_memory as f64) * 100.0;
-            cached.memory_rss = process.memory();
-            cached.memory_vms = process.virtual_memory();
-            cached.state = convert_process_state(process.status());
-            cached.cpu_time = process.run_time();
+            refresh_entry_from_sysinfo(cached, process, total_memory);
             // Update GPU status (may change if process starts/stops using GPU)
-            cached.uses_gpu = uses_gpu;
-            if uses_gpu && cached.device_uuid.is_empty() {
-                cached.device_uuid = "GPU".to_string();
-            }
+            mark_gpu(cached, uses_gpu);
             // Note: Static fields like process_name, user, command, start_time, ppid are kept unchanged
             // They don't change during process lifetime
         } else {
             // New process - create full ProcessInfo entry
-            let (priority, nice_value) = get_process_priority_nice(pid_u32);
-            let process_info = ProcessInfo {
-                device_id: 0,
-                device_uuid: if uses_gpu {
-                    "GPU".to_string()
-                } else {
-                    String::new()
-                },
-                pid: pid_u32,
-                process_name: process.name().to_string_lossy().to_string(),
-                used_memory: 0,
-                cpu_percent: process.cpu_usage() as f64,
-                memory_percent: (process.memory() as f64 / total_memory as f64) * 100.0,
-                memory_rss: process.memory(),
-                memory_vms: process.virtual_memory(),
-                user: get_process_user(process),
-                state: convert_process_state(process.status()),
-                start_time: format!("{}", process.start_time()),
-                cpu_time: process.run_time(),
-                command: get_process_command(process),
-                ppid: process.parent().map(|p| p.as_u32()).unwrap_or(0),
-                threads: 1,
-                uses_gpu,
-                priority,
-                nice_value,
-                gpu_utilization: 0.0,
-            };
-            cache.insert(pid_u32, process_info);
+            cache.insert(
+                pid_u32,
+                new_entry_from_sysinfo(pid_u32, process, total_memory, uses_gpu),
+            );
         }
     }
 
@@ -141,6 +127,64 @@ pub fn update_process_cache(
     let mut processes: Vec<ProcessInfo> = cache.values().cloned().collect();
     processes.sort_by_key(|p| p.pid);
     processes
+}
+
+/// A full row for a process sysinfo has just discovered.
+fn new_entry_from_sysinfo(
+    pid: u32,
+    process: &sysinfo::Process,
+    total_memory: u64,
+    uses_gpu: bool,
+) -> ProcessInfo {
+    let (priority, nice_value) = get_process_priority_nice(pid);
+    ProcessInfo {
+        device_id: 0,
+        device_uuid: if uses_gpu {
+            "GPU".to_string()
+        } else {
+            String::new()
+        },
+        pid,
+        process_name: process.name().to_string_lossy().to_string(),
+        used_memory: 0,
+        cpu_percent: process.cpu_usage() as f64,
+        memory_percent: (process.memory() as f64 / total_memory as f64) * 100.0,
+        memory_rss: process.memory(),
+        memory_vms: process.virtual_memory(),
+        user: get_process_user(process),
+        state: convert_process_state(process.status()),
+        start_time: format!("{}", process.start_time()),
+        cpu_time: process.run_time(),
+        command: get_process_command(process),
+        ppid: process.parent().map(|p| p.as_u32()).unwrap_or(0),
+        threads: 1,
+        uses_gpu,
+        priority,
+        nice_value,
+        gpu_utilization: 0.0,
+    }
+}
+
+/// The dynamic fields of an existing row, from sysinfo's refreshed process.
+fn refresh_entry_from_sysinfo(
+    cached: &mut ProcessInfo,
+    process: &sysinfo::Process,
+    total_memory: u64,
+) {
+    cached.cpu_percent = process.cpu_usage() as f64;
+    cached.memory_percent = (process.memory() as f64 / total_memory as f64) * 100.0;
+    cached.memory_rss = process.memory();
+    cached.memory_vms = process.virtual_memory();
+    cached.state = convert_process_state(process.status());
+    cached.cpu_time = process.run_time();
+}
+
+/// GPU attribution for this cycle; a process may start or stop using the GPU.
+fn mark_gpu(cached: &mut ProcessInfo, uses_gpu: bool) {
+    cached.uses_gpu = uses_gpu;
+    if uses_gpu && cached.device_uuid.is_empty() {
+        cached.device_uuid = "GPU".to_string();
+    }
 }
 
 /// Convert sysinfo ProcessStatus to standard Unix state code
@@ -315,10 +359,15 @@ pub fn merge_gpu_processes(
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
 
-    fn process(pid: u32, device_uuid: &str, used_memory: u64, uses_gpu: bool) -> ProcessInfo {
+    pub(in crate::device::process_list) fn process(
+        pid: u32,
+        device_uuid: &str,
+        used_memory: u64,
+        uses_gpu: bool,
+    ) -> ProcessInfo {
         ProcessInfo {
             device_id: 0,
             device_uuid: device_uuid.to_string(),
