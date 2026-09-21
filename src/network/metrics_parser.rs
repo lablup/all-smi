@@ -1758,6 +1758,32 @@ all_smi_gpu_power_consumption_watts{gpu="Apple M2 Max GPU", instance="mac-1", gp
         assert_eq!(gpu.power_consumption_reading(), Some(0.0));
     }
 
+    /// Issue #436: a value the regex accepts but `f64::parse` rejects (`1.2.3`
+    /// matches the digits-and-dots value group) must drop the line at ingest,
+    /// not fabricate a `0.0` reading. Zero is a real reading in this domain,
+    /// so the paired genuine `0` has to land as a reading to prove the
+    /// distinction is kept rather than everything being rejected.
+    #[test]
+    fn test_unparseable_value_drops_the_line_but_a_genuine_zero_lands() {
+        let parser = create_test_parser();
+        let re = create_test_regex();
+        let host = "127.0.0.1:10058";
+
+        let test_data = r#"
+all_smi_gpu_utilization{gpu="Buggy node", instance="node-x", gpu_uuid="GPU-BAD", index="0"} 1.2.3
+all_smi_gpu_utilization{gpu="Idle node", instance="node-x", gpu_uuid="GPU-ZERO", index="0"} 0
+"#;
+
+        let parsed = parser.parse_metrics(test_data, host, &re);
+
+        // Only the genuine zero becomes a device row; the unparseable line
+        // leaves nothing behind.
+        assert_eq!(parsed.gpu_info.len(), 1);
+        let gpu = &parsed.gpu_info[0];
+        assert_eq!(gpu.uuid, "GPU-ZERO");
+        assert_eq!(gpu.utilization_reading(), Some(0.0));
+    }
+
     /// Issue #418: a non-reporting ATOM Max die has no power series of its
     /// own but does carry its board's power. Issue #425 moved that value off
     /// the `all_smi_gpu_info` label set and onto its own gauge, because a
@@ -1785,6 +1811,34 @@ all_smi_gpu_info{gpu="RBLN-CA25", instance="atom-max-01", gpu_uuid="die-1", gpu_
                 .get(crate::device::readers::detail_keys::CARD_POWER_WATTS_DETAIL_KEY)
                 .map(String::as_str),
             Some("42.80")
+        );
+    }
+
+    /// Issue #436, guarding the #435 gauge path: an
+    /// `all_smi_gpu_card_power_watts` line whose value matches the regex but
+    /// fails `f64::parse` must leave the board power absent in `detail`, not
+    /// write a fabricated `0.00` that `gpu_renderer` would show as a
+    /// confident `(0W)`.
+    #[test]
+    fn test_card_power_gauge_with_unparseable_value_stays_absent() {
+        let parser = create_test_parser();
+        let re = create_test_regex();
+        let host = "127.0.0.1:10058";
+
+        let test_data = r#"
+all_smi_gpu_memory_total_bytes{gpu="RBLN-CA25", instance="atom-max-01", gpu_uuid="die-1", gpu_index="1"} 16877879296
+all_smi_gpu_card_power_watts{gpu="RBLN-CA25", instance="atom-max-01", gpu_uuid="die-1", gpu_index="1"} 1.2.3
+all_smi_gpu_info{gpu="RBLN-CA25", instance="atom-max-01", gpu_uuid="die-1", gpu_index="1", type="NPU"} 1
+"#;
+
+        let parsed = parser.parse_metrics(test_data, host, &re);
+        assert_eq!(parsed.gpu_info.len(), 1);
+        let gpu = &parsed.gpu_info[0];
+        assert_eq!(gpu.power_consumption_reading(), None);
+        assert_eq!(
+            gpu.detail
+                .get(crate::device::readers::detail_keys::CARD_POWER_WATTS_DETAIL_KEY),
+            None
         );
     }
 
