@@ -27,10 +27,11 @@
 //! sampled or read, next to the per-tick rows that count reused ticks as
 //! zero, and the first-tick table shows the CPU warm-up and the manager's
 //! first window overlapping reader construction instead of running after it.
-//! Since issue #427 the process pass on macOS goes through
-//! `refresh_processes`, as the collector's does: the "process refresh" rows
-//! are the native sampler on selective ticks and sysinfo plus the sampler on
-//! full ticks, and two "process sampler" rows show the sampler's own share.
+//! Since issue #427 the process pass on macOS and, since issue #428, on
+//! Linux goes through `refresh_processes`, as the collector's does: the
+//! "process refresh" rows are the native sampler on selective ticks and
+//! sysinfo plus the sampler on full ticks, and two "process sampler" rows
+//! show the sampler's own share.
 //!
 //! ```text
 //! cargo test --release --test perf_tick_stages -- --ignored --nocapture
@@ -40,9 +41,9 @@
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use all_smi::device::process_list::{ProcessSampler, merge_gpu_processes, refresh_processes};
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 use all_smi::device::process_list::{merge_gpu_processes, update_process_cache};
 use all_smi::device::{
     ProcessInfo, create_chassis_reader, get_cpu_readers, get_gpu_readers, get_memory_readers,
@@ -50,7 +51,7 @@ use all_smi::device::{
 use all_smi::storage::DiskCache;
 use all_smi::utils::{get_hostname, with_global_system};
 use sysinfo::{DiskRefreshKind, Disks};
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, UpdateKind};
 
 /// `LocalCollector`'s constants, repeated so the replay matches it.
@@ -123,8 +124,8 @@ struct Stages {
     chassis: Stage,
     refresh_full: Stage,
     refresh_selective: Stage,
-    /// The native process sampler's share of the refresh rows (issue #427;
-    /// zero off macOS).
+    /// The native process sampler's share of the refresh rows (issues #427
+    /// and #428; zero on Windows).
     sampler_full: Stage,
     sampler_selective: Stage,
     cache_full: Stage,
@@ -164,9 +165,9 @@ fn perf_tick_stages() {
     let mut disks = DiskCache::new();
     let mut cache: HashMap<u32, ProcessInfo> = HashMap::new();
     let mut tracked: Vec<sysinfo::Pid> = Vec::new();
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     let mut sampler = ProcessSampler::new();
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     let refresh_kind = ProcessRefreshKind::nothing()
         .with_cpu()
         .with_memory()
@@ -219,7 +220,7 @@ fn perf_tick_stages() {
         let t_storage = started.elapsed();
 
         let full = tick % FULL_REFRESH_INTERVAL == 0 || tracked.is_empty();
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         let (t_refresh, t_sampler, t_cache, processes) = with_global_system(|system| {
             let (processes, timings) =
                 refresh_processes(system, &mut sampler, &tracked, full, &gpu_pids, &mut cache);
@@ -232,7 +233,7 @@ fn perf_tick_stages() {
                 processes,
             )
         });
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         let (t_refresh, t_sampler, t_cache, processes) = with_global_system(|system| {
             let started = Instant::now();
             if full {
@@ -327,7 +328,7 @@ fn perf_tick_stages() {
     stages.storage.row("storage (DiskCache::storage_info)");
     stages.refresh_full.row("process refresh (full, every 5th)");
     stages.refresh_selective.row("process refresh (selective)");
-    if cfg!(target_os = "macos") {
+    if cfg!(any(target_os = "macos", target_os = "linux")) {
         stages.sampler_full.row("process sampler (full ticks)");
         stages
             .sampler_selective

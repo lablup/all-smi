@@ -42,9 +42,10 @@ async fn initialized_collector() -> LocalCollector {
 
 /// A full-refresh process pass through the same function the collector
 /// runs on the blocking pool, so a test that replicates a tick measures and
-/// compares the real path (on macOS, the native sampler; issue #427).
+/// compares the real path (on macOS and Linux, the native sampler; issues
+/// #427 and #428).
 fn full_process_pass(collector: &LocalCollector, gpu_pids: &HashSet<u32>) -> Vec<ProcessInfo> {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
         process_pass(
             &collector.process_cache,
@@ -54,7 +55,7 @@ fn full_process_pass(collector: &LocalCollector, gpu_pids: &HashSet<u32>) -> Vec
             gpu_pids,
         )
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         process_pass(&collector.process_cache, &[], true, gpu_pids)
     }
@@ -586,7 +587,7 @@ async fn first_iteration_collection_reports_startup_status() {
 /// recomputes the tracked set every tick from the top-N rows, where a
 /// process burning a core always lands, so the test overrides it after every
 /// tick to keep the child out.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn full_tick_does_not_inflate_untracked_processes() {
     let _serialize = TEST_LOCK.lock().await;

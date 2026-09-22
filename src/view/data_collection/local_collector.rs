@@ -27,9 +27,9 @@ type ProcessCache = std::sync::RwLock<HashMap<u32, ProcessInfo>>;
 use crate::app_state::AppState;
 #[cfg(target_os = "linux")]
 use crate::device::platform_detection::has_tenstorrent;
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 use crate::device::process_list::update_process_cache;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use crate::device::process_list::{ProcessSampler, refresh_processes};
 use crate::device::{
     ChassisInfo, ChassisReader, CpuInfo, CpuReader, GpuInfo, GpuReader, MemoryInfo, MemoryReader,
@@ -197,9 +197,40 @@ fn process_pass(
 }
 
 /// The process pass of one tick, run on the blocking pool under the global
+/// sysinfo lock.
+///
+/// On Linux the per-tick values (CPU percent, memory, state, run time) come
+/// from the native process sampler, and sysinfo refreshes processes only on
+/// full ticks, where it discovers new processes and supplies their static
+/// metadata (issue #428; `process_list::sampler_linux` explains why).
+#[cfg(target_os = "linux")]
+fn process_pass(
+    process_cache: &ProcessCache,
+    sampler: &std::sync::Mutex<ProcessSampler>,
+    tracked: &[sysinfo::Pid],
+    full: bool,
+    gpu_pids: &HashSet<u32>,
+) -> Vec<ProcessInfo> {
+    with_global_system(|system| {
+        // A panic elsewhere while either lock (or `GLOBAL_SYSTEM`, see
+        // `with_global_system`) was held would otherwise poison it and make
+        // every later cycle panic here too. Both hold plain metric state that
+        // is safe to keep using after a panic mid-update, so recover instead
+        // of propagating the poison.
+        let mut cache = process_cache
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut sampler = sampler
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        refresh_processes(system, &mut sampler, tracked, full, gpu_pids, &mut cache).0
+    })
+}
+
+/// The process pass of one tick, run on the blocking pool under the global
 /// sysinfo lock: sysinfo refreshes the tracked PIDs every tick and every
 /// process on full ticks.
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn process_pass(
     process_cache: &ProcessCache,
     tracked: &[sysinfo::Pid],
@@ -279,8 +310,9 @@ pub struct LocalCollector {
     /// Uses std::sync::RwLock for synchronous access within with_global_system closure.
     process_cache: Arc<ProcessCache>,
     /// Per-PID CPU-time baselines of the native process sampler, which
-    /// supplies the per-tick process values on macOS (issue #427).
-    #[cfg(target_os = "macos")]
+    /// supplies the per-tick process values on macOS and Linux (issues
+    /// #427 and #428).
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     process_sampler: Arc<std::sync::Mutex<ProcessSampler>>,
     /// Disk list shared across cycles. The mount table is enumerated off the
     /// collection path every 30 s; each cycle only refreshes capacities.
@@ -302,7 +334,7 @@ impl LocalCollector {
             process_cache: Arc::new(std::sync::RwLock::new(HashMap::with_capacity(
                 MAX_DISPLAY_PROCESSES,
             ))),
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
             process_sampler: Arc::new(std::sync::Mutex::new(ProcessSampler::new())),
             disk_cache: Arc::new(std::sync::Mutex::new(DiskCache::new())),
         }
@@ -462,7 +494,7 @@ impl LocalCollector {
         // below runs on the async worker, and the six groups genuinely overlap
         // instead of taking turns on one task the way `tokio::join!` did.
         let process_cache = Arc::clone(&self.process_cache);
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         let process_sampler = Arc::clone(&self.process_sampler);
         let status_tx_gpu = status_tx.clone();
         let status_tx_cpu = status_tx.clone();
@@ -532,10 +564,10 @@ impl LocalCollector {
             // deliberately empty here: `merge_gpu_processes` below applies
             // the GPU attribution for the first cycle.
             let gpu_pids: HashSet<u32> = HashSet::new();
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
             let all_processes =
                 process_pass(&process_cache, &process_sampler, &[], true, &gpu_pids);
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(not(any(target_os = "macos", target_os = "linux")))]
             let all_processes = process_pass(&process_cache, &[], true, &gpu_pids);
             let _ =
                 status_tx_proc.blocking_send((3, "✓ Process information collected".to_string()));
@@ -680,12 +712,12 @@ impl LocalCollector {
         } = join_or_log_default(gpu_task, "GPU").await;
 
         let process_cache = Arc::clone(&self.process_cache);
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         let process_sampler = Arc::clone(&self.process_sampler);
         let processes_task = tokio::task::spawn_blocking(move || {
             // Full refresh every FULL_REFRESH_INTERVAL cycles to discover new
             // high-CPU processes; otherwise only the tracked PIDs are read.
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
             {
                 process_pass(
                     &process_cache,
@@ -695,7 +727,7 @@ impl LocalCollector {
                     &gpu_pids,
                 )
             }
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(not(any(target_os = "macos", target_os = "linux")))]
             {
                 process_pass(
                     &process_cache,

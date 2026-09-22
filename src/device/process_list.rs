@@ -34,6 +34,18 @@ pub use refresh_macos::refresh_processes;
 #[cfg(target_os = "macos")]
 pub use sampler_macos::ProcessSampler;
 
+#[cfg(target_os = "linux")]
+#[path = "process_list/refresh_linux.rs"]
+pub mod refresh_linux;
+#[cfg(target_os = "linux")]
+#[path = "process_list/sampler_linux.rs"]
+pub mod sampler_linux;
+
+#[cfg(target_os = "linux")]
+pub use refresh_linux::refresh_processes;
+#[cfg(target_os = "linux")]
+pub use sampler_linux::ProcessSampler;
+
 /// Get all system processes with GPU usage information
 pub fn get_all_processes(system: &System, gpu_pids: &HashSet<u32>) -> Vec<ProcessInfo> {
     let mut processes = Vec::new();
@@ -86,9 +98,9 @@ pub fn get_all_processes(system: &System, gpu_pids: &HashSet<u32>) -> Vec<Proces
 /// This reduces memory allocation overhead compared to creating new objects each cycle.
 /// Returns a Vec of ProcessInfo cloned from the cache for the current snapshot.
 ///
-/// On macOS the per-tick pass is `refresh_processes` instead, which reads the
-/// dynamic values natively and runs sysinfo only on full ticks (issue #427).
-#[cfg(not(target_os = "macos"))]
+/// On macOS and Linux the per-tick pass is `refresh_processes` instead, which reads the
+/// dynamic values natively and runs sysinfo only on full ticks (issues #427 and #428).
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 pub fn update_process_cache(
     system: &System,
     gpu_pids: &HashSet<u32>,
