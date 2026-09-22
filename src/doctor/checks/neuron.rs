@@ -20,7 +20,6 @@
 //! there is no per-vendor health metric anywhere, so the PATH trap
 //! described below has nowhere else to be reported.
 
-#[cfg(target_os = "linux")]
 use crate::doctor::exec::try_exec;
 use crate::doctor::types::{Check, CheckCtx, CheckResult, Severity};
 
