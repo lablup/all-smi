@@ -780,6 +780,20 @@ jobs:
             ${{ runner.os }}-cargo-unit-tests-
             ${{ runner.os }}-cargo-
 
+      # Clippy gate (issue #429). Linux-only CI let #417 merge with an
+      # unused `try_exec` import whose only caller sits behind
+      # `#[cfg(target_os = "linux")]` in src/doctor/checks/neuron.rs:
+      # every required check stayed green, and `clippy -D warnings` then
+      # failed on every Mac until #422 removed the import. This step
+      # fails such non-Linux-cfg warnings on the PR itself. Windows-only
+      # warnings still get through: Windows lint lives in
+      # windows-selfhosted.yml and stays `push`-triggered by that file's
+      # header (a public repo must not run fork-PR code on the
+      # self-hosted runner), so Windows lint is post-merge by design and
+      # this macOS gate does not cover Windows-only warnings.
+      - name: Run clippy
+        run: cargo clippy --all-targets -- -D warnings
+
       - name: Native macOS metrics manager
         run: cargo test --lib device::macos_native
 
