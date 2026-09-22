@@ -17,6 +17,7 @@ use crate::device::GpuReader;
 use crate::device::hlsmi::parser::{GaudiDeviceMetrics, map_device_name};
 #[cfg(target_os = "linux")]
 use crate::device::readers::common_cache::{DetailBuilder, DeviceStaticInfo};
+#[cfg(target_os = "linux")]
 use crate::device::readers::detail_keys::FREE_MEMORY_DETAIL_KEY;
 use crate::device::types::{GpuInfo, ProcessInfo};
 #[cfg(target_os = "linux")]
