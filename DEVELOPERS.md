@@ -40,6 +40,16 @@ sudo dnf install pkg-config openssl-devel protobuf-compiler protobuf-devel
 sudo pacman -S pkg-config openssl protobuf
 ```
 
+Building the AMD companion library (`cargo build -p all-smi-amd-plugin`, or any `--workspace` build, test, or clippy run) also needs the libdrm development files, because the plugin links `-ldrm` and `-ldrm_amdgpu`:
+
+```bash
+sudo apt-get install libdrm-dev   # Ubuntu/Debian
+sudo dnf install libdrm-devel     # Fedora/RHEL
+sudo pacman -S libdrm             # Arch Linux
+```
+
+The main `all-smi` package does not link libdrm, so `cargo build` and `cargo build --bin all-smi` succeed without these packages. See [The AMD companion library](#the-amd-companion-library) for what the plugin adds.
+
 **macOS:**
 ```bash
 # Install Homebrew if not present
@@ -87,12 +97,12 @@ cargo build --release --bin all-smi-mock-server --features="mock"
 
 ### Optional Build Features
 
-The default build (`default = ["cli", "amd"]`) includes the full CLI, TUI, API server, and the AMD GPU backend. Cargo features:
+The default build (`default = ["cli", "amd"]`) includes the full CLI, TUI, and API server. On glibc Linux every build also contains the AMD runtime loader, whatever the feature set. Cargo features:
 
 | Feature | Default | Purpose |
 |---------|---------|---------|
 | `cli` | on | CLI parsing, TUI (`crossterm`), and the `axum` API server. Disable for a lean library-only build. |
-| `amd` | on | AMD GPU backend on glibc Linux via the `libamdgpu_top` crate. Disable to drop the `libdrm.so.2` / `libdrm_amdgpu.so.1` runtime dependency. |
+| `amd` | on, accepted no-op | Kept for downstream manifest compatibility. Linux AMD support is runtime-loaded from the `all-smi-amd-plugin` companion, so this feature adds no dependency and disabling it removes nothing. |
 | `mock` | off | Builds the `all-smi-mock-server` binary that simulates GPU/NPU clusters. |
 | `furiosa` | off | Furiosa NPU backend via the `furiosa-smi-rs` crate (Linux targets). |
 | `level_zero` | accepted no-op | The Intel oneAPI Level Zero (Sysman) backend it used to gate is now compiled into **every Linux and Windows build**. It dynamically loads `libze_loader.so.1` / `ze_loader.dll` at runtime and degrades silently to the sysfs/WMI baseline when the runtime is absent. Because the flag no longer decides anything, `features:` in a support bundle cannot tell you whether the backend is present; read `level_zero:` in `version.txt` instead. |
@@ -131,29 +141,20 @@ building:
 cargo build --release --features level_zero
 ```
 
-#### Dropping the AMD backend (`amd`)
+#### The AMD companion library
 
-`libamdgpu_top` pulls in `libdrm_amdgpu_sys`, which links `libdrm.so.2` and `libdrm_amdgpu.so.1` unconditionally. Those become hard `NEEDED` entries on every Linux binary that links this crate, so a host without AMD's userspace DRM libraries fails to start with a loader error before `main` runs, which the program cannot catch or report. Turning `amd` off removes the dependency and both `NEEDED` entries.
+Linux AMD support is runtime-loaded. The main `all-smi` package contains AMD PCI/sysfs detection and a `libloading` adapter only; `libamdgpu_top` and its libdrm linkage live in the `all-smi-amd-plugin` workspace package, which builds `liball_smi_amd.so`. The main binary therefore has no libdrm `NEEDED` entry in any feature configuration and starts normally on a host without AMD's userspace DRM libraries, and `--no-default-features` no longer removes AMD detection (it only drops `cli`).
 
 ```bash
-# Library-only build with no AMD backend and no libdrm linkage
-cargo build --release --no-default-features
-
-# CLI without the AMD backend: --no-default-features also drops `cli`,
-# so re-enable it explicitly
-cargo build --release --no-default-features --features cli
+# Main binary plus the AMD companion (the plugin needs libdrm-dev, see Prerequisites)
+cargo build --release -p all-smi -p all-smi-amd-plugin
 ```
 
-For a downstream crate the same rule applies. `default-features = false` turns off `cli` as well as `amd`, so a consumer that wants the CLI but not AMD must ask for `cli` back:
+Cargo places `target/release/liball_smi_amd.so` beside `target/release/all-smi`, which is one of the loader's search locations, so a local build finds its companion without further steps. The full search order, the `ALL_SMI_AMD_PLUGIN` override, and the loader's safety checks are documented in [docs/LIB_mode.md](docs/LIB_mode.md#cargo-features).
 
-```toml
-[dependencies]
-all-smi = { version = "0.25", default-features = false, features = ["cli"] }
-```
+Verify the split with `objdump -p target/release/all-smi | grep NEEDED`, which should list neither `libdrm.so.2` nor `libdrm_amdgpu.so.1`, and `objdump -p target/release/liball_smi_amd.so | grep NEEDED`, which should. CI enforces both in the `build-check` job.
 
-Verify the result with `objdump -p target/release/all-smi | grep NEEDED`; neither `libdrm.so.2` nor `libdrm_amdgpu.so.1` should appear.
-
-The musl release artifacts (`all-smi-linux-x86_64-musl`, `all-smi-linux-aarch64-musl`) have never included AMD support and stay the simplest option for minimal containers. `all-smi doctor` reports which gate applied: `amd.build.target_env` and `amd.libamdgpu_top.abi` distinguish a musl build from a glibc build without the `amd` feature, and `doctor --bundle` lists the enabled features. Windows AMD support goes through ADL/WMI and is unaffected by this feature.
+The musl release artifacts (`all-smi-linux-x86_64-musl`, `all-smi-linux-aarch64-musl`) omit the loader and have never included Linux AMD support. `all-smi doctor --only amd` reports which case applies: `amd.build.target_env` distinguishes a musl build from a glibc build with the loader, and `amd.libamdgpu_top.abi` reports whether a companion was found and loaded, naming the missing file, native dependency, or ABI mismatch when it was not. Windows AMD support goes through ADL/WMI and does not use the companion.
 
 ### Platform-Specific Builds
 
@@ -292,7 +293,7 @@ scripts/bench-local-interval.sh -h                 # full usage and flag list
 
 It requires `tmux` (macOS and Linux only) so the TUI runs detached at a fixed 200x50 size; terminal size affects render cost, so fixing it is what makes results from different machines comparable. CPU is computed from the process CPU-time delta rather than `ps -o %cpu`, because that column is a decaying recent average on macOS and a lifetime average on Linux. Results are percent of one core.
 
-On Linux, building needs `libdrm-dev`. Without it the link fails on `-ldrm` and `-ldrm_amdgpu` even on a host with no AMD GPU, because `libamdgpu_top` is a hard dependency of the glibc Linux target.
+On a Linux host with an AMD GPU, also build the companion (`cargo build --release -p all-smi-amd-plugin`) so `liball_smi_amd.so` sits beside the binary being measured. Without it the AMD reader is empty and the run under-measures collection cost. The companion build needs the libdrm development files listed under [Platform-Specific Requirements](#platform-specific-requirements); the main binary does not.
 
 The script prints an environment block (all-smi version, OS, CPU model and core topology, affinity, GPU, process count, terminal size, window length) above the numbers. Include it whenever you report results: collection cost depends heavily on which device readers are active, so numbers without that context cannot be compared.
 

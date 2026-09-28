@@ -39,10 +39,11 @@
 #     -h           print this text and exit
 #
 #   Build first:  cargo build --release --bin all-smi
-#                 On Linux this needs libdrm-dev: without it the link fails on
-#                 -ldrm and -ldrm_amdgpu even on a host with no AMD GPU,
-#                 because libamdgpu_top is a hard dependency of the glibc
-#                 Linux target
+#                 On a Linux host with an AMD GPU, also build the companion
+#                 (cargo build --release -p all-smi-amd-plugin) so
+#                 liball_smi_amd.so sits beside the binary; without it the
+#                 AMD reader is empty and the run under-measures collection
+#                 cost. Only the companion build needs libdrm-dev
 #
 # REQUIREMENTS
 #

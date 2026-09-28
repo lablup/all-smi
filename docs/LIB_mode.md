@@ -701,7 +701,7 @@ fn print_chassis_info() -> Result<()> {
 
 | Platform | Device Types | Requirements |
 |----------|--------------|--------------|
-| Linux | NVIDIA GPU, AMD GPU, Intel Gaudi, Furiosa, Rebellions, Tenstorrent, TPU | Vendor SDKs. AMD needs a glibc target and the `amd` feature (see [Cargo features](#cargo-features)) |
+| Linux | NVIDIA GPU, AMD GPU, Intel Gaudi, Furiosa, Rebellions, Tenstorrent, TPU | Vendor SDKs. AMD needs a glibc target and the runtime-loaded companion library (see [Cargo features](#cargo-features)) |
 | macOS | Apple Silicon GPU/ANE | macOS 12+ |
 | Windows | NVIDIA GPU | NVML |
 
