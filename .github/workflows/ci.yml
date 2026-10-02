@@ -239,6 +239,28 @@ jobs:
           done
           exit "$fail"
 
+      # The v0.27.0 Launchpad build failed at dh_auto_install because the
+      # rules file installed liball_smi_amd.so without ever building it: a
+      # bare `cargo build` at the workspace root compiles only the root
+      # package. Launchpad is the only place that runs these rules, so catch
+      # the mismatch here instead of after an upload.
+      - name: Source rules must build the AMD companion they install
+        run: |
+          set -eu
+          fail=0
+          if ! diff -u debian/rules debian/rules.source; then
+            echo "::error file=debian/rules.source::debian/rules.source has drifted from debian/rules"
+            fail=1
+          fi
+          for rules in debian/rules debian/rules.source; do
+            if grep -q 'target/release/liball_smi_amd\.so' "$rules" \
+              && ! grep -Eq 'build .*(-p all-smi-amd-plugin|--workspace)' "$rules"; then
+              echo "::error file=${rules}::${rules} installs liball_smi_amd.so but never builds all-smi-amd-plugin"
+              fail=1
+            fi
+          done
+          exit "$fail"
+
   # ═══════════════════════════════════════════════════════════════
   # Job: systemd service lifecycle smoke test (issue #309)
   # ═══════════════════════════════════════════════════════════════

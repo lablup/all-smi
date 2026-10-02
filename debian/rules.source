@@ -34,6 +34,10 @@ override_dh_auto_configure:
 
 override_dh_auto_build:
 	$(CARGO) build --release --frozen
+	# The workspace root is itself a package, so the bare build above compiles
+	# only all-smi. The AMD companion installed below is a separate workspace
+	# member and needs its own invocation, as in release.yml.
+	$(CARGO) build --release --frozen -p all-smi-amd-plugin
 
 override_dh_auto_install:
 	install -D -m 0755 target/release/all-smi debian/all-smi/usr/bin/all-smi

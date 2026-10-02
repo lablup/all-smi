@@ -88,6 +88,8 @@ Only three variants are reachable, and all three carry the systemd changes:
 | `debian/rules.launchpad` | nothing | no |
 | `debian/rules.launchpad-simple` | nothing | no |
 
+`debian/rules` and `debian/rules.source` are kept byte-identical. Both build the AMD companion with a second `cargo build -p all-smi-amd-plugin`, because the workspace root is itself a package and a bare `cargo build` compiles only `all-smi`. The `packaging-sync` CI job checks both properties.
+
 `rules.launchpad` and `rules.launchpad-simple` are unreferenced legacy templates. Nothing copies them into place, so changes there would have no effect. If you resurrect one, port the `override_dh_installsystemd` target and the `/etc/default/all-smi` install line from `debian/rules` first.
 
 ### Automatic Version Incrementing
