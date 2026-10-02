@@ -12,6 +12,8 @@ all-smi (0.27.0-0) jammy; urgency=medium
   * Drop remote Prometheus lines whose value does not parse instead of recording a fabricated 0.0 reading (#438)
   * Remove the generic all_smi_npu_* metric declarations and three Tenstorrent series that no reader ever fed (#439, #440)
   * Rename Tenstorrent and AMD snapshot detail fields to snake_case keys; API.md carries the mapping (#435, #439, #441)
+  * Report AMD GPU power in watts: stop dividing the hwmon reading by 1000 a second time, which showed an Instinct MI300X drawing 148 W as 0.148, and scale the gpu_metrics socket power by table format (#447)
+  * Stop a default cargo install from installing the debug-pid-mapping tool beside all-smi (#448)
   * Update dirs to 7 and zstd to 0.14 (#409)
 
  -- Jeongkyu Shin <inureyes@gmail.com>  Fri, 02 Oct 2026 00:00:00 +0000

@@ -129,10 +129,15 @@ impl GpuReader for AmdGpuReader {
                     // Validate utilization is within reasonable bounds
                     utilization = (gfx_activity as f64).clamp(0.0, MAX_GPU_UTILIZATION);
                 }
-                if let Some(power) = metrics.get_average_socket_power() {
-                    // Validate power consumption
-                    let watts = power as f64 / 1000.0; // Convert mW to W
-                    power_consumption = watts.clamp(0.0, MAX_GPU_POWER_WATTS);
+                // v1.4 / v1.5 tables carry `curr_socket_power` and no
+                // average; every other table carries the average only.
+                let socket_power = metrics
+                    .get_average_socket_power()
+                    .or_else(|| metrics.get_current_socket_power().map(u32::from));
+                if let (Some(header), Some(raw)) = (metrics.get_header(), socket_power)
+                    && let Some(watts) = metrics_socket_power_watts(header.format_revision, raw)
+                {
+                    power_consumption = watts;
                 }
                 if let Some(temp) = metrics.get_temperature_edge() {
                     // Validate temperature
@@ -152,11 +157,9 @@ impl GpuReader for AmdGpuReader {
                 }
                 if power_consumption == 0.0 {
                     if let Some(ref p) = s.average_power {
-                        let watts = p.value as f64 / 1000.0; // Convert mW to W
-                        power_consumption = watts.clamp(0.0, MAX_GPU_POWER_WATTS);
+                        power_consumption = hwmon_power_watts(p.value);
                     } else if let Some(ref p) = s.input_power {
-                        let watts = p.value as f64 / 1000.0; // Convert mW to W
-                        power_consumption = watts.clamp(0.0, MAX_GPU_POWER_WATTS);
+                        power_consumption = hwmon_power_watts(p.value);
                     }
                 }
                 if temperature == 0

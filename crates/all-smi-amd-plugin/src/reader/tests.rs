@@ -207,4 +207,41 @@ mod tests {
             HashMap::from([("Device Name".to_string(), "AMD Radeon".to_string())])
         );
     }
+
+    /// The MI300X report: hwmon said 148 W and the metric said 0.148.
+    #[test]
+    fn hwmon_power_is_already_watts() {
+        assert_eq!(hwmon_power_watts(148), 148.0);
+        assert_eq!(hwmon_power_watts(0), 0.0);
+        assert_eq!(hwmon_power_watts(u32::MAX), MAX_GPU_POWER_WATTS);
+    }
+
+    /// dGPU tables (format 1, including the MI300 `curr_socket_power`) are
+    /// watts and must not be divided.
+    #[test]
+    fn metrics_socket_power_format_1_is_watts() {
+        assert_eq!(metrics_socket_power_watts(1, 148), Some(148.0));
+        assert_eq!(metrics_socket_power_watts(1, 0), Some(0.0));
+        assert_eq!(
+            metrics_socket_power_watts(1, 5000),
+            Some(MAX_GPU_POWER_WATTS)
+        );
+    }
+
+    /// APU tables (formats 2 and 3) keep the milliwatt scaling they had.
+    #[test]
+    fn metrics_socket_power_formats_2_and_3_are_milliwatts() {
+        assert_eq!(metrics_socket_power_watts(2, 15_300), Some(15.3));
+        assert_eq!(metrics_socket_power_watts(3, 28_000), Some(28.0));
+    }
+
+    /// The driver's unsupported sentinel and an unknown format revision
+    /// yield no reading, so the caller falls back to hwmon.
+    #[test]
+    fn metrics_socket_power_rejects_sentinels_and_unknown_formats() {
+        assert_eq!(metrics_socket_power_watts(1, u32::from(u16::MAX)), None);
+        assert_eq!(metrics_socket_power_watts(3, u32::MAX), None);
+        assert_eq!(metrics_socket_power_watts(0, 148), None);
+        assert_eq!(metrics_socket_power_watts(4, 148), None);
+    }
 }

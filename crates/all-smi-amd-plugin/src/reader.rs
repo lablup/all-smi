@@ -44,6 +44,40 @@ fn clamp_fan_rpm(rpm: Option<u32>) -> Option<u32> {
     rpm.map(|value| value.min(MAX_GPU_FAN_RPM))
 }
 
+/// Convert a `gpu_metrics` socket power reading to watts.
+///
+/// The unit depends on the table's format revision, so one divisor cannot
+/// serve every card. The amdgpu driver fills the dGPU tables (format 1:
+/// `average_socket_power` up to v1.3, `curr_socket_power` on the v1.4 / v1.5
+/// tables the Instinct MI300 series uses) in watts, and the APU tables
+/// (formats 2 and 3) from SMU fields that are milliwatts on every SMU except
+/// Renoir firmware new enough to report watts, which the table cannot tell
+/// apart and which keeps its previous scaling here.
+///
+/// Returns `None` for the driver's unsupported sentinel and for a format
+/// revision this reader does not know, so the caller falls back to hwmon
+/// instead of publishing a guess.
+fn metrics_socket_power_watts(format_revision: u8, raw: u32) -> Option<f64> {
+    if raw == u32::from(u16::MAX) || raw == u32::MAX {
+        return None;
+    }
+    let watts = match format_revision {
+        1 => f64::from(raw),
+        2 | 3 => f64::from(raw) / 1000.0,
+        _ => return None,
+    };
+    Some(watts.clamp(0.0, MAX_GPU_POWER_WATTS))
+}
+
+/// Convert a `libamdgpu_top` hwmon power reading to watts.
+///
+/// `HwmonPower::value` is already whole watts: `libamdgpu_top` divides the
+/// kernel's microwatt `power1_average` / `power1_input` by 1,000,000 before
+/// handing it over. Dividing again reported an MI300X drawing 148 W as 0.148.
+fn hwmon_power_watts(value: u32) -> f64 {
+    f64::from(value).clamp(0.0, MAX_GPU_POWER_WATTS)
+}
+
 /// Write the plugin's three per-poll sensor readings into `detail` in the
 /// shared reader conventions, returning the clamped tachometer value for
 /// `GpuInfo::fan_speed_rpm`.
