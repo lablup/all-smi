@@ -13,7 +13,7 @@
 // limitations under the License.
 
 /// Debug tool for PID namespace mapping
-/// Usage: cargo run --bin debug-pid-mapping -- [host_pid]
+/// Usage: cargo run --example debug-pid-mapping -- [host_pid]
 use std::env;
 use std::fs;
 
