@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import re
+import subprocess
 from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
@@ -85,6 +86,13 @@ def check(paths: list[Path], root: Path = ROOT) -> list[str]:
     errors: list[str] = []
     documents: dict[Path, Document] = {}
     root = root.resolve()
+    tracked: set[str] | None = None
+    if (root / ".git").exists():
+        tracked = set(
+            subprocess.check_output(
+                ["git", "-C", str(root), "ls-files", "-z"], text=True
+            ).split("\0")
+        )
 
     def read(path: Path) -> Document:
         if path not in documents:
@@ -116,6 +124,12 @@ def check(paths: list[Path], root: Path = ROOT) -> list[str]:
                 errors.append(f"{label}: target escapes repository")
             elif not target.exists():
                 errors.append(f"{label}: missing target")
+            elif (
+                target.is_file()
+                and tracked is not None
+                and target.relative_to(root).as_posix() not in tracked
+            ):
+                errors.append(f"{label}: target is not tracked by git")
             elif url.fragment and target.suffix.lower() == ".md":
                 anchor = unquote(url.fragment)
                 if anchor not in read(target).anchors:

@@ -117,7 +117,7 @@ make all
 make container-cpu-frequency
 ```
 
-For detailed information about shell script tests, see: [tests/README.md](tests/README.md)
+For detailed information about shell script tests, see: [test scripts](tests/)
 
 ### Key Test Categories
 - **Container Tests**: Test all-smi behavior inside Docker containers with resource limits

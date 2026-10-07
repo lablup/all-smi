@@ -96,3 +96,16 @@ def test_rendered_configuration_table() -> None:
     source = (checker.ROOT / "docs/configuration.md").read_text()
     rendered = checker.markdown.markdown(source, extensions=["tables"])
     assert "<td><code>compress</code></td>" in rendered
+
+
+def test_local_ignored_file_is_not_a_valid_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / ".git").mkdir()
+    (tmp_path / "ignored.md").write_text("# Locally present only")
+    readme = tmp_path / "README.md"
+    readme.write_text("[ignored](ignored.md)")
+    monkeypatch.setattr(
+        checker.subprocess, "check_output", lambda *args, **kwargs: "README.md\0"
+    )
+    assert "not tracked by git" in checker.check([readme], tmp_path)[0]

@@ -100,14 +100,14 @@ all-smi does not ship a container image, and container deployment is not a suppo
   - Run with: `all-smi local`
 
 ### Linux with AMD GPUs
-- **Device permissions:** AMD GPU monitoring needs access to `/dev/dri` devices; membership in the appropriate `video`/`render` groups can avoid running as root.
+- **Local-mode privilege gate:** On glibc Linux, `all-smi` / `all-smi local` checks for root when an AMD GPU is detected, even if device permissions would otherwise suffice. Run `sudo all-smi local` for this path.
 - **Driver:** A working `amdgpu` kernel driver and userspace DRM libraries are required. A full ROCm installation is not required for the companion reader.
 - **Build Requirements:**
   - AMD GPU support is available in **glibc builds only** (`x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`)
   - **Not available in musl builds** (`x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`) due to library compatibility
 - **Runtime Companion Library:** Linux AMD monitoring is loaded at runtime from `liball_smi_amd.so`, the only artifact that links `libdrm.so.2` and `libdrm_amdgpu.so.1`. The main binary has no libdrm dependency and starts on every host; without the companion or AMD's userspace DRM libraries (`libdrm2 libdrm-amdgpu1` on Debian/Ubuntu, `libdrm` on RHEL/Fedora) it reports no AMD GPU, and `all-smi doctor --only amd` names what is missing. Release archives, Homebrew, and the Debian/PPA packages install the companion; `cargo install` does not
 - **The `amd` cargo feature:** an accepted no-op kept for downstream manifest compatibility. It adds no dependency, and `--no-default-features` no longer removes AMD detection. Building the companion from source needs the libdrm development files; see [DEVELOPERS.md](../DEVELOPERS.md#the-amd-companion-library)
-- **Permissions:** Add user to `video` and `render` groups as an alternative to sudo:
+- **Device access for API/snapshot/library use:** Membership in `video` and `render` can provide access to `/dev/dri` without root. This does not bypass the current local-mode privilege gate:
   ```bash
   sudo usermod -a -G video,render $USER
   # Log out and back in for changes to take effect
