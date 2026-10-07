@@ -21,7 +21,7 @@ This guide provides comprehensive information for developers and contributors wo
 ### Prerequisites
 
 #### Required Tools
-- **Rust**: 1.88 or later (install via [rustup](https://rustup.rs/))
+- **Rust**: 1.96 or later (the minimum is declared in `Cargo.toml`) (install via [rustup](https://rustup.rs/))
 - **Cargo**: Comes with Rust installation
 - **Git**: For version control
 - **protoc**: Protocol buffer compiler (only required for Linux builds, which compile the Google TPU gRPC client)
@@ -541,6 +541,29 @@ The CI builds for these platforms:
 2. **Write Tests**: Add tests for new functionality
 3. **Update Docs**: Keep documentation current
 4. **Test Thoroughly**: Run full test suite
+
+### Optional mock telemetry
+
+Set these environment variables to `1` when running the mock server to exercise views without the corresponding hardware:
+
+| Variable | Adds |
+|---|---|
+| `ALL_SMI_MOCK_PROCESSES` | Synthetic users/processes for the cluster Users tab |
+| `ALL_SMI_MOCK_TOPOLOGY` | DGX-like NVIDIA topology for the Topology tab |
+| `ALL_SMI_MOCK_VGPU` | NVIDIA vGPU host and instance data |
+| `ALL_SMI_MOCK_MIG` | NVIDIA MIG data |
+| `ALL_SMI_MOCK_HARDWARE_DETAILS` | Extended NVIDIA NUMA, GSP, NvLink, GPM, and thermal details |
+
+### Documentation ownership
+
+Keep `README.md` as the product entry point: overview, screenshots, hardware summary, installation, quick start, and documentation links. Aim for roughly 150–220 lines; do not add a detailed section for each new feature. Preserve the local and remote screenshots.
+
+- Put operational instructions in the linked installation, usage, configuration, service, recording, or troubleshooting guide under `docs/`.
+- Keep HTTP endpoints and metric definitions in `API.md`, Rust library examples in `docs/LIB_mode.md`, and build/test instructions here or in `TESTING.md`.
+- Keep release history in `CHANGELOG.md`, not the README. Record current behavior in guides and implementation rationale in `docs/ARCHITECTURE.md` or source comments.
+- Maintain a single authoritative description of defaults and limitations. Link to it instead of copying tables; use `<command> --help` for exhaustive CLI flags and `examples/` for longer executable examples.
+- Verify commands, defaults, and permissions against current code. Distinguish source-verified behavior from hardware-tested behavior; do not imply all backends provide all metrics.
+- When moving sections, update relative links and repository references. Install the checker dependencies with `python3 -m pip install -r scripts/requirements-docs.txt`, then run `python3 scripts/check-doc-links.py` and `python3 -m pytest scripts/tests/test_doc_links.py` before submitting. The checker validates local links, images, and heading anchors in the user guides; it does not fetch external URLs.
 
 ### Submitting Pull Requests
 

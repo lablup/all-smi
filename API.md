@@ -196,7 +196,7 @@ turned off for the SSE route.
 
 | Env var | Default | Effect |
 |---------|---------|--------|
-| `ALL_SMI_API_CORS_ALLOWED_ORIGINS` | (empty → **no CORS**) | Comma-separated list of origins permitted to read `/metrics`, `/snapshot`, and `/events` cross-origin. Set to `*` to revert to the pre-0.21 wildcard; a warning is logged in that case. |
+| `ALL_SMI_API_CORS_ALLOWED_ORIGINS` | (empty → **no CORS**) | Comma-separated list of origins permitted to read `/metrics`, `/snapshot`, and `/events` cross-origin. Set to `*` to allow all origins; a warning is logged in that case. |
 | `ALL_SMI_API_MAX_SSE_SUBSCRIBERS` | `256` | Cap on concurrent `/events` subscribers. Extra clients get `503 Service Unavailable` with `Retry-After: 5`. Set to `0` to disable the cap. |
 
 The default CORS posture blocks cross-origin browser reads of the live
@@ -211,6 +211,12 @@ output surfaces (Prometheus `/metrics`, JSON `/snapshot`, and SSE
 `...(N bytes truncated)` marker. This caps scrape-response
 amplification and limits the blast radius of secrets that happen to
 live in argv.
+
+For command-line exports and recording, see [Snapshots, recording, and replay](docs/recording-and-scripting.md). For background operation, see [Running as a service](docs/services.md).
+
+## Energy accounting
+
+`all_smi_energy_consumed_joules_total` is a lifetime energy counter with `host` and `scope` labels (`gpu`, `cpu`, or `chassis`); GPU samples also carry `gpu_index` and `gpu_uuid`. Resetting the TUI session with `R` does not reset this counter. Configure persistence and cost estimates through [`[energy]`](docs/configuration.md#schema).
 
 ## Available Metrics
 
@@ -755,13 +761,13 @@ Note: Storage metrics exclude Docker bind mounts and are filtered to show only r
 
 ### Chassis/Node-Level Metrics
 
-Chassis metrics provide visibility into system-wide power consumption, thermal conditions, and cooling status at the node level. These metrics aggregate information from CPU, GPU, ANE, and BMC sensors.
+Chassis metrics provide visibility into system-wide power consumption, thermal conditions, and cooling status at the node level. Availability and meaning depend on the platform reader. Generic Linux readers use DMI, thermal zones, and available aggregate GPU power rather than a BMC integration.
 
 #### Common Chassis Metrics (All Platforms)
 
 | Metric                              | Description                                    | Unit    | Labels                  |
 |-------------------------------------|------------------------------------------------|---------|-------------------------|
-| `all_smi_chassis_power_watts`       | Total chassis power consumption (CPU+GPU+ANE)  | watts   | `hostname`, `instance`  |
+| `all_smi_chassis_power_watts`       | Platform-reported or estimated chassis power  | watts   | `hostname`, `instance`  |
 
 #### Apple Silicon Chassis Metrics
 
@@ -772,12 +778,12 @@ Chassis metrics provide visibility into system-wide power consumption, thermal c
 | `all_smi_chassis_gpu_power_watts`        | GPU power consumption                     | watts   | `hostname`, `instance`           |
 | `all_smi_chassis_ane_power_watts`        | ANE (Apple Neural Engine) power           | watts   | `hostname`, `instance`           |
 
-#### Server Chassis Metrics (BMC-enabled Systems)
+#### Chassis temperatures and fans
 
 | Metric                                      | Description                      | Unit    | Labels                                     |
 |---------------------------------------------|----------------------------------|---------|-------------------------------------------|
-| `all_smi_chassis_inlet_temperature_celsius` | Chassis inlet temperature        | celsius | `hostname`, `instance`                    |
-| `all_smi_chassis_outlet_temperature_celsius`| Chassis outlet temperature       | celsius | `hostname`, `instance`                    |
+| `all_smi_chassis_inlet_temperature_celsius` | Minimum readable thermal-zone temperature on generic Linux hosts | celsius | `hostname`, `instance`                    |
+| `all_smi_chassis_outlet_temperature_celsius`| Maximum readable thermal-zone temperature on generic Linux hosts | celsius | `hostname`, `instance`                    |
 | `all_smi_chassis_fan_speed_rpm`             | Fan speed                        | RPM     | `hostname`, `instance`, `fan_id`, `fan_name` |
 
 Note: Chassis metrics provide a unified view of node-level power consumption and thermal conditions, useful for cluster-wide capacity planning and power monitoring.
@@ -1247,7 +1253,7 @@ Higher update rates provide more real-time data but increase system load. For pr
     - Total chassis power consumption aggregating CPU, GPU, and ANE power
     - Thermal pressure monitoring (Apple Silicon)
     - Individual power component breakdown (CPU, GPU, ANE)
-    - Inlet/outlet temperature monitoring (BMC-enabled servers)
+    - Thermal-zone temperature estimates on generic Linux hosts; these are not dedicated BMC inlet/outlet probes
     - Fan speed monitoring with per-fan granularity
 12. NVIDIA vGPU metrics include:
     - Host-level SR-IOV mode and scheduler configuration per physical GPU

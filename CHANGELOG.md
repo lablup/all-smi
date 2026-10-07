@@ -1,0 +1,64 @@
+# Changelog
+
+[Home](README.md) · [Release downloads](https://github.com/lablup/all-smi/releases)
+
+## Release history
+- **v0.27.0 (2026/10/02):** Added AWS Neuron (Trainium and Inferentia) monitoring, cut per-tick collection cost on macOS and Linux, fixed Apple Silicon and Rebellions power over-counts, and stopped all_smi_gpu_info label churn
+- **v0.26.3 (2026/09/01):** Fixed local TUI wrapping and duplicated metrics in narrow terminals, accepted comma-separated `--hosts` lists with startup validation, corrected user-facing CLI and doc text, and updated Rust dependencies including nvml-wrapper 0.13
+- **v0.26.2 (2026/08/25):** Moved Linux AMD monitoring into a runtime-loaded companion, fixed unavailable Windows GPU metrics and Level Zero memory provenance, and made native Windows tests and lint checks pass.
+- **v0.26.1 (2026/08/24):** Fixed macOS release signing and recovery, added early validation for Homebrew credentials and native Windows checks, and refreshed Rust dependencies
+- **v0.26.0 (2026/08/24):** Run API mode as a supervised service on Linux, macOS, and Windows, add Windows GPU metrics via DXGI, PDH, and AMD ADL, and compile the Intel Level Zero backend into every Linux and Windows build
+- **v0.25.0 (2026/07/31):** Cut local-mode collection cost with continuous IOReport sampling and a parallelized collection pipeline, give local mode its own polling cadence instead of the remote one, and make Activity history graphs scroll in time instead of shrinking as history accumulates
+- **v0.24.2 (2026/07/24):** Report VRAM total, VRAM used, and power draw for Intel Battlemage GPUs on the mainline `xe` driver, which does not expose the `tile0/vram0` sysfs counters the `i915` path relies on
+- **v0.24.1 (2026/07/20):** Replace the yanked `aes` and `crypto-bigint` crates (pulled in transitively through `russh`) with their latest non-yanked releases, and bump `russh` to 0.62 and `tower-http` to 0.7, moving several transitive crypto crates from prerelease to stable
+- **v0.24.0 (2026/07/20):** Redesign the local Activity panel history graphs for readability: btop-style multi-row braille graphs with bottom-to-top height-gradient colors on tall terminals, soft auto-ranging and trend glyphs (up/down arrows) for single-row sparklines, bucket max-pooling resampling that preserves peaks, and width-safe panel rendering
+- **v0.23.1 (2026/07/20):** Fix Prometheus scrape failures from unsanitized dynamic label names, add Intel Xe GPU utilization computed from the Xe kernel driver's gtidle idle-residency, support Xe hwmon temperature sensor numbering (temp2-based), and raise the minimum Rust version to 1.96 (MSRV)
+- **v0.23.0 (2026/06/27):** Migrate the Tenstorrent reader to the upstream-published luwen 0.8.5 crates (supported architectures now Wormhole and Blackhole), suppress console windows on Windows subprocess spawns, and bump sysinfo to 0.39. **BREAKING**: Tenstorrent Grayskull is no longer supported (detected and skipped instead of aborting); building from source now requires Rust 1.95 (MSRV)
+- **v0.22.0 (2026/05/27):** Harden the release workflow with a corrected macOS notarization key decode, self-healing rebuild and re-notarization of past tags, and a per-OS build target selector; document Intel client GPU support (Arc/Iris Xe) across the README, `--help` output, and developer docs
+- **v0.21.1 (2026/05/27):** Add Intel client GPU monitoring (Arc/Iris Xe) on Windows and Linux with an opt-in Level Zero backend, fdinfo-based per-process memory, and engine-busy utilization; add notarized macOS and code-signed Windows release binaries
+- **v0.21.0 (2026/05/26):** Major release adding `snapshot`/`record`/`view --replay`/`config`/`doctor` subcommands, cluster-wide Users (`V`) and Topology (`T`) tabs, agentless SSH transport, TOML config support, energy/cost accounting, filter query (`/`) and threshold alerts (`A`), and NVIDIA vGPU/MIG/extended thermal monitoring. **BREAKING**: rename Prometheus labels `index`/`uuid` to `gpu_index`/`gpu_uuid` (NVIDIA) and `npu_index`/`npu_uuid` (other NPUs); old names still accepted.
+- **v0.20.1 (2026/04/10):** Fix local header metric row jitter by using fixed-width formatted fields; auto-promote pre-release to release in CI
+- **v0.20.0 (2026/04/10):** Redesign local-mode TUI with Activity panel featuring braille sparklines, CPU per-core view, host summary bar, and per-node LED grid; add Apple M5 Pro/Max Super core (S-CPU) support
+- **v0.19.0 (2026/04/08):** Fix Apple Silicon SMC float decoding to restore real CPU/GPU die temperatures, cache platform detection to avoid per-frame system_profiler on macOS, and fix TIME+/Command column alignment in process list
+- **v0.18.1 (2026/04/08):** Fix TUI responsiveness over SSH with non-blocking flush, eliminate 1-second per-frame stall from RuntimeEnvironment::detect(), drain key events after render, and cache per-frame filesystem reads
+- **v0.18.0 (2026/04/07):** Reduce TUI idle CPU with event-driven wakeups, snapshot-based rendering, cached view data, and trimmed hot-path overhead; fix scroll calculation and render throttle for cursor/scroll input
+- **v0.17.6 (2026/04/06):** Bump hyper 1.9, nvml-wrapper 0.12.1, libamdgpu_top 0.11.3 and update GitHub Actions to Node.js 24
+- **v0.17.5 (2026/03/29):** Bump dependencies including nvml-wrapper 0.12 and fix yanked uds_windows
+- **v0.17.4 (2026/03/29):** Feature-gate CLI/TUI deps behind `cli` feature for lighter library builds, fix Furiosa RNGD support for latest SDK & driver APIs
+- **v0.17.3 (2026/03/04):** Fix multi-GPU process duplication, upgrade breaking dependencies (rand, reqwest, sysinfo, whoami)
+- **v0.17.2 (2026/02/08):** Fix file descriptor leaks in Jetson, Tenstorrent, and NVIDIA readers by using global system instance
+- **v0.17.1 (2026/02/08):** Fix file descriptor leak in API mode by reusing resource handles
+- **v0.17.0 (2026/01/13):** Add GPU process filter toggle ('f' key) and improve process list sort stability
+- **v0.16.0 (2026/01/04):** Add proper library API for external Rust projects with high-level AllSmi client, unified error handling, and comprehensive documentation
+- **v0.15.2 (2026/01/02):** Fix Rebellions NPU detection compatibility with rbln SDK 2.0.x
+- **v0.15.1 (2025/12/31):** Fix memory leak in IOReportIterator on Apple Silicon by properly releasing CFDictionaryRef
+- **v0.15.0 (2025/12/31):** Add Unix Domain Socket support for API mode, Windows CPU temperature fallback chain, binary size optimization, and repository organization change
+- **v0.14.0 (2025/12/25):** Add Windows x64 build target, native macOS APIs for no-sudo monitoring, chassis/node-level power monitoring, and remove legacy powermetrics
+- **v0.13.1 (2025/12/23):** Upgrade tonic/prost to 0.14, wmi to 0.18, libloading to 0.9, and optimize build dependencies
+- **v0.13.0 (2025/12/23):** Add Google Cloud TPU monitoring support (v2-v7/Ironwood), optimize CPU utilization with improved polling and rendering
+- **v0.12.0 (2025/12/07):** Add Windows build support, fix AMD GPU dependencies in Dockerfile builder stage
+- **v0.11.0 (2025/11/25):** Add Intel Gaudi 3 AI accelerator support, unified AI acceleration library naming for cross-platform consistency, GPU/NPU reader caching optimization for performance, and AMD GPU driver version extraction
+- **v0.10.0 (2025/11/21):** Add AMD GPU support with ROCm/libamdgpu_top integration, comprehensive security and performance review with critical fixes, refactor data collection with Strategy pattern, enhanced parsing macros, and Linux-only NPU support
+- **v0.9.0 (2025/08/29):** Separate local/remote monitoring commands, Backend.AI cluster auto-discovery, modular refactoring for better maintainability, and Prometheus metric fixes
+- **v0.8.0 (2025/08/08):** Container-aware resource monitoring, enhanced ARM CPU frequency detection, UI improvements for process list, license change to Apache 2.0, and PPA build enhancements
+- **v0.7.2 (2025/08/06):** Reorganize man page location in release archives, add GPU core count for Apple Silicon, animated loading progress bar, and fix display issues
+- **v0.7.1 (2025/08/03):** Add manpage for Debian/Ubuntu package, updated installation guide with PPA support, and fixed debian_build workflow
+- **v0.7.0 (2025/08/02):** Add Furiosa RNGD NPU support, Debian/Ubuntu PPA packaging, scrolling device names, and improved CI/CD workflows
+- **v0.6.3 (2025/07/28):** Add Rebellions ATOM NPU support with secure container monitoring
+- **v0.6.2 (2025/07/25):** Added multi-segment bar visualization with stacked memory display, CPU temperature for Linux, CPU cache detection, per-core CPU metrics, and fixed-width CPU display formatting
+- **v0.6.1 (2025/07/19):** Fixed multi-node view hanging, improved hostname handling, optimized network fetch, and updated Ubuntu release workflows
+- **v0.6.0 (2025/07/18):** Added Tenstorrent NPU support, improved UI alignment and terminal resize handling, modularized API metrics, and enhanced disk filtering
+- **v0.5.0 (2025/07/12):** Enhanced Apple Silicon support with ANE power in watts, P+E frequency display, thermal pressure text, interactive process sorting, and configurable PowerMetrics intervals
+- **v0.4.3 (2025/07/11):** Fix P-CPU/E-CPU gauges for all Apple Silicon variants (M1/M2/M3/M4) including M1 Pro hybrid format
+- **v0.4.2 (2025/07/10):** Eliminate PowerMetrics temp file growth with in-memory buffer, Homebrew installation support
+- **v0.4.1 (2025/07/10):** Mock server improvements, efficient Apple Silicon and NVidia GPU support
+- **v0.4.0 (2025/07/08):** Architectural refactoring, Smart sudo detection and comprehensive unit testing
+- **v0.3.3 (2025/07/07):** CPU, Memory, and ANE support, and UI fixes
+- **v0.3.2 (2025/07/06):** Cargo.toml for publishing and release process
+- **v0.3.1 (2025/07/06):** GitHub actions and Dockerfile, and UI fixes
+- **v0.3.0 (2025/07/06):** Multi-architecture support, optimized space allocation, enhanced UI
+- **v0.2.2 (2025/07/06):** GPU sorting functionality with hotkeys
+- **v0.2.1 (2025/07/05):** Help system improvements and code refactoring
+- **v0.2.0 (2025/07/05):** Remote monitoring and cluster management features
+- **v0.1.1 (2025/07/04):** ANE (Apple Neural Engine) support, page navigation keys, and scrolling fixes
+- **v0.1.0 (2024/08/11):** Initial release with local GPU monitoring

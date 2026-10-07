@@ -19,7 +19,7 @@ All-SMI is a unified GPU/NPU monitoring tool that provides both terminal UI (TUI
 11. [Security Architecture](#security-architecture)
 12. [Configuration Management](#configuration-management)
 13. [Build System and Features](#build-system-and-features)
-14. [Strategy Pattern Implementation](#strategy-pattern-implementation)
+14. [Strategy Pattern Implementation](#strategy-pattern-for-data-collection)
 15. [Testing Strategy](#testing-strategy)
 16. [Future Roadmap](#future-roadmap)
 
@@ -1062,3 +1062,22 @@ The codebase demonstrates best practices in:
 - User interface implementation
 
 This architecture provides a solid foundation for future enhancements while maintaining the flexibility to adapt to evolving requirements in the GPU monitoring space.
+
+## Operational implementation notes
+
+### Service isolation
+
+See the [service guide](services.md) for installation and operating procedures. The renderers embed the canonical [systemd unit](../packaging/systemd/all-smi.service) and [launchd plist](../packaging/launchd/com.lablup.all-smi.plist).
+
+- The systemd unit restricts filesystem and privilege access, but deliberately does not enable `PrivateDevices`, `ProtectProc`, or `ProcSubset`: hardware readers need device nodes and process enumeration.
+- User-scope units omit account/group directives and namespace-dependent hardening that an unprivileged service manager cannot set up. `ProtectHome` is also omitted so a user's own config remains readable.
+- LaunchAgents omit `UserName`, `GroupName`, and `InitGroups`; those belong to system-scope jobs. A custom macOS service account uses its primary group rather than assuming an eponymous group exists.
+- The systemd unit provides `/run/all-smi` for a reachable Unix socket because `PrivateTmp` isolates `/tmp` in system scope.
+
+### TUI input and export safeguards
+
+- Webhook clients do not follow redirects. This prevents redirect-based pivots, not direct requests to a configured internal address; the operator still controls the destination.
+- The interactive filter buffer is capped at 512 characters and the lexer at 16 KiB. These bounds limit parse work on pasted or programmatically supplied input.
+- Users-tab exports reject symlinks at the cache-directory and output-file paths. Unix files are owner-only (`0600`); Windows uses exclusive sharing.
+- CSV exports quote fields and prefix formula-like strings with an apostrophe to prevent spreadsheet formula interpretation of untrusted usernames and commands.
+- Remote process labels have per-field size limits; the general parser also bounds label sizes and counts to limit memory consumption from untrusted hosts.

@@ -34,12 +34,12 @@ This document provides comprehensive documentation for using `all-smi` as a Rust
 The `all-smi` library provides a unified, cross-platform API for monitoring hardware accelerators (GPUs, NPUs, TPUs), CPUs, and system memory. It abstracts away platform-specific details, allowing you to write hardware monitoring code that works across:
 
 - **NVIDIA GPUs** (via NVML)
-- **AMD GPUs** (via ROCm SMI)
+- **AMD GPUs** (via the Linux AMD companion or Windows ADL)
 - **Apple Silicon** (via IOReport/SMC)
 - **Intel Gaudi NPUs** (via hl-smi)
 - **Furiosa NPUs** (via furiosa-smi)
 - **Rebellions NPUs** (via rbln-stat)
-- **Tenstorrent NPUs** (via tt-smi)
+- **Tenstorrent NPUs** (via luwen)
 - **Google TPUs** (via libtpu)
 
 ## Installation
@@ -48,7 +48,7 @@ Add `all-smi` to your `Cargo.toml`. The package is `all-smi`; the library is imp
 
 ```toml
 [dependencies]
-all-smi = "0.25"
+all-smi = "0.27"
 ```
 
 Or using cargo:
@@ -179,6 +179,8 @@ fn main() -> Result<()> {
 | `with_config(config)` | `Result<AllSmi>` | Create instance with custom config |
 | `get_gpu_info()` | `Vec<GpuInfo>` | Get all GPU/NPU information |
 | `get_process_info()` | `Vec<ProcessInfo>` | Get GPU process information |
+| `get_vgpu_info()` | `Vec<VgpuHostInfo>` | NVIDIA vGPU host/instance metrics; empty when unavailable |
+| `get_mig_info()` | `Vec<MigGpuInfo>` | NVIDIA MIG mode/instance metrics; empty when unavailable |
 | `get_cpu_info()` | `Vec<CpuInfo>` | Get CPU information |
 | `get_memory_info()` | `Vec<MemoryInfo>` | Get system memory information |
 | `get_storage_info()` | `Vec<StorageInfo>` | Get disk/storage information (the first call returns the complete list however long enumeration takes; after that the mount table is re-enumerated in the background at most every 30 s and capacities are refreshed on every call) |
