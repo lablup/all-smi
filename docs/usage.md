@@ -164,10 +164,7 @@ sum_over_gpus(
 
 per GPU the user touches, summed across GPUs. The formula is an
 approximation because `nvidia-smi`/NVML does not report per-process power
-directly; we proxy it with the user's share of VRAM on each GPU. The value
-is clamped to ≥ 0 to guard against race conditions where the sum of process
-VRAM exceeds the GPU's reported `memory_used`. The `*` in the header marks
-the column as approximate.
+directly; we proxy it with the user's share of reported process VRAM on each GPU. Negative input power is clamped to zero. The `*` in the header marks the column as approximate; this is not a per-process power measurement or a billing value.
 
 **In-tab keybindings**
 
