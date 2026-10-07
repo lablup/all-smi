@@ -78,13 +78,6 @@ fn installed_roff_text(manpage: &str) -> String {
         .join("\n")
 }
 
-fn readme_operator_text(readme: &str) -> &str {
-    readme
-        .split_once("\n## Changelog\n")
-        .map(|(operator_text, _)| operator_text)
-        .expect("README.md must retain a distinct historical changelog section")
-}
-
 #[test]
 fn every_directly_addressable_help_page_is_operator_facing() {
     let command = build_command_with_runtime_help();
@@ -104,11 +97,40 @@ fn every_directly_addressable_help_page_is_operator_facing() {
 }
 
 #[test]
-fn readme_operator_text_is_free_of_internal_churn() {
-    assert_surface_is_operator_facing(
-        "README.md operator guidance",
-        readme_operator_text(include_str!("../README.md")),
+fn operator_guides_are_free_of_internal_churn() {
+    for (surface, text) in [
+        ("README.md", include_str!("../README.md")),
+        ("installation", include_str!("../docs/installation.md")),
+        ("usage", include_str!("../docs/usage.md")),
+        ("configuration", include_str!("../docs/configuration.md")),
+        ("services", include_str!("../docs/services.md")),
+        (
+            "recording",
+            include_str!("../docs/recording-and-scripting.md"),
+        ),
+        (
+            "troubleshooting",
+            include_str!("../docs/troubleshooting.md"),
+        ),
+    ] {
+        assert_surface_is_operator_facing(surface, text);
+    }
+}
+
+#[test]
+fn release_history_is_separate_from_operator_guidance() {
+    let readme = include_str!("../README.md");
+    assert!(
+        readme.contains("](CHANGELOG.md)"),
+        "README must link to release history"
     );
+    assert!(
+        !readme.contains("\n## Changelog\n"),
+        "release history belongs in CHANGELOG.md"
+    );
+    let changelog = include_str!("../CHANGELOG.md");
+    assert!(changelog.starts_with("# Changelog\n"));
+    assert!(changelog.contains("## Release history\n"));
 }
 
 #[test]
@@ -138,8 +160,8 @@ fn tracker_guard_ignores_normal_operator_prose_and_roff_comments() {
         "tracker guard must ignore roff comments that are absent from the installed manpage"
     );
 
-    let readme = "# Tool\nOperator guidance.\n\n## Changelog\n\n- Fixed issue #123.";
-    assert_surface_is_operator_facing("README.md operator guidance", readme_operator_text(readme));
+    let readme = "# Tool\nOperator guidance.\n\n[Release history](CHANGELOG.md)";
+    assert_surface_is_operator_facing("README.md operator guidance", readme);
 }
 
 #[test]
