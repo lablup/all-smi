@@ -1,3 +1,20 @@
+all-smi (0.27.1-0) jammy; urgency=medium
+
+  * Added display-only --hide-storage to local and view modes, including replay (#455).
+  * Fixed false remote host disconnection notices (#454).
+  * Fixed endpoint-isolated viewer-session energy and cost accounting (#454).
+  * Bounded remote HTTP response buffering (#454).
+  * Cancelled timed-out remote fetch tasks (#454).
+  * Fixed UTF-8 parser truncation (#454).
+  * Fixed Launchpad packaging by building the AMD companion before installation (#450).
+  * Added packaging-rule CI checks (#450).
+  * Added documentation-link CI checks (#452).
+  * Reorganized operator guides (#452).
+  * Removed the Homebrew tap requirement (aaf1b36).
+  * Updated Rust dependencies, including clap 4.6.7, russh 0.63.3, uuid 1.26.1, and thiserror 2.0.21 (f987501).
+
+ -- Jeongkyu Shin <inureyes@gmail.com>  Sun, 11 Oct 2026 00:00:00 +0900
+
 all-smi (0.27.0-0) jammy; urgency=medium
 
   * Add AWS Neuron support on Linux for Trainium and Inferentia devices: inventory, per-NeuronCore memory and utilization, Prometheus metrics, doctor checks, and mock data (#417)

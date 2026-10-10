@@ -111,6 +111,10 @@ all-smi --help
 
 Configuration is optional. To keep an exporter running across reboots, follow the [service guide](docs/services.md) for your platform and installation method.
 
+## Recent Updates
+
+- **v0.27.1 (2026/10/11):** Added storage hiding, fixed remote host tabs and energy accounting, hardened HTTP collection, repaired Launchpad AMD packaging, refreshed documentation, and updated dependencies.
+
 ## Documentation
 
 | I want to… | Read |

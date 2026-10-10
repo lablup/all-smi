@@ -2,7 +2,25 @@
 
 [Home](README.md) · [Release downloads](https://github.com/lablup/all-smi/releases)
 
+## v0.27.1 (2026/10/11)
+
+- Added display-only `--hide-storage` to local and view modes, including replay, without changing storage collection or exports (#455).
+- Fixed false remote host disconnection notices by sharing endpoint identities across collection and tabs (#454).
+- Fixed remote energy and configured cost displays using chassis power and separate viewer-session totals for each endpoint (#454).
+- Bounded remote HTTP response buffering to limit memory use (#454).
+- Cancelled timed-out remote fetch tasks instead of leaving them running (#454).
+- Prevented parser truncation from splitting UTF-8 characters (#454).
+- Fixed Launchpad builds by compiling the AMD companion before packaging it (#450).
+- Added CI guards for AMD companion build rules (#450).
+- Added CI documentation-link checks and checker regression tests (#452).
+- Reorganized operator documentation into focused guides (#452).
+- Removed the Homebrew tap requirement after inclusion in homebrew-core (aaf1b36).
+- Updated Rust dependencies, including clap 4.6.7, russh 0.63.3, uuid 1.26.1, and thiserror 2.0.21 (f987501).
+
+[Full changelog](https://github.com/lablup/all-smi/compare/v0.27.0...v0.27.1)
+
 ## Release history
+- **v0.27.1 (2026/10/11):** Added storage hiding, fixed remote host tabs and energy accounting, hardened HTTP collection, repaired Launchpad AMD packaging, refreshed documentation, and updated dependencies.
 - **v0.27.0 (2026/10/02):** Added AWS Neuron (Trainium and Inferentia) monitoring, cut per-tick collection cost on macOS and Linux, fixed Apple Silicon and Rebellions power over-counts, and stopped all_smi_gpu_info label churn
 - **v0.26.3 (2026/09/01):** Fixed local TUI wrapping and duplicated metrics in narrow terminals, accepted comma-separated `--hosts` lists with startup validation, corrected user-facing CLI and doc text, and updated Rust dependencies including nvml-wrapper 0.13
 - **v0.26.2 (2026/08/25):** Moved Linux AMD monitoring into a runtime-loaded companion, fixed unavailable Windows GPU metrics and Level Zero memory provenance, and made native Windows tests and lint checks pass.
