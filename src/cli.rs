@@ -151,6 +151,9 @@ pub struct LocalArgs {
     /// The interval in seconds at which to update the GPU information.
     #[arg(short, long)]
     pub interval: Option<u64>,
+    /// Hide storage rows in the TUI while continuing to collect storage data.
+    #[arg(long)]
+    pub hide_storage: bool,
     /// Temperature in Celsius at which GPUs trigger a `warn` alert.
     /// The matching `crit` threshold is auto-set 10°C higher unless an
     /// explicit config file overrides it.
@@ -177,6 +180,9 @@ pub struct ViewArgs {
     /// The interval in seconds at which to update the GPU information. If not specified, uses adaptive interval based on node count.
     #[arg(short, long)]
     pub interval: Option<u64>,
+    /// Hide storage rows in the TUI while continuing to collect storage data.
+    #[arg(long)]
+    pub hide_storage: bool,
     /// Temperature in Celsius at which GPUs trigger a `warn` alert.
     /// The matching `crit` threshold is auto-set 10°C higher unless an
     /// explicit config file overrides it.
@@ -274,6 +280,7 @@ impl ViewArgs {
             hosts: None,
             hostfile: None,
             interval: None,
+            hide_storage: false,
             alert_temp: None,
             alert_util_low_mins: None,
             replay: None,
@@ -667,6 +674,55 @@ pub fn build_command_with_runtime_help() -> clap::Command {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hide_storage_defaults_to_false_for_local_and_view() {
+        let local = Cli::try_parse_from(["all-smi", "local"]).expect("parse local");
+        let Commands::Local(local) = local.command.expect("local command") else {
+            panic!("expected local command");
+        };
+        assert!(!local.hide_storage);
+
+        let view = Cli::try_parse_from(["all-smi", "view"]).expect("parse view");
+        let Commands::View(view) = view.command.expect("view command") else {
+            panic!("expected view command");
+        };
+        assert!(!view.hide_storage);
+    }
+
+    #[test]
+    fn hide_storage_flag_is_available_for_local_and_view() {
+        let local =
+            Cli::try_parse_from(["all-smi", "local", "--hide-storage"]).expect("parse local flag");
+        let Commands::Local(local) = local.command.expect("local command") else {
+            panic!("expected local command");
+        };
+        assert!(local.hide_storage);
+
+        let view =
+            Cli::try_parse_from(["all-smi", "view", "--hide-storage"]).expect("parse view flag");
+        let Commands::View(view) = view.command.expect("view command") else {
+            panic!("expected view command");
+        };
+        assert!(view.hide_storage);
+    }
+
+    #[test]
+    fn local_and_view_help_describe_hide_storage() {
+        let mut command = build_command_with_runtime_help();
+        for subcommand in ["local", "view"] {
+            let help = command
+                .find_subcommand_mut(subcommand)
+                .expect("monitoring subcommand")
+                .render_long_help()
+                .to_string();
+            assert!(help.contains("--hide-storage"), "{subcommand}: {help}");
+            assert!(
+                help.contains("continuing to collect storage data"),
+                "{subcommand}: {help}"
+            );
+        }
+    }
 
     #[test]
     fn snapshot_includes_is_empty_when_all_false() {

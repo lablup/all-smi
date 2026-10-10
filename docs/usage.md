@@ -13,6 +13,9 @@ all-smi local        # Explicit local mode
 
 # With custom refresh interval
 all-smi local --interval 5
+
+# Reclaim vertical space for processes without changing collected data
+all-smi local --hide-storage
 ```
 
 ## Remote View Mode (Monitor Remote Nodes)
@@ -26,7 +29,12 @@ all-smi view --hosts http://gpu-node1:9090,http://gpu-node2:9090
 
 # Using host file (required)
 all-smi view --hostfile hosts.csv --interval 2
+
+# Hide storage rows on host tabs
+all-smi view --hosts http://gpu-node1:9090 --hide-storage
 ```
+
+`--hide-storage` is a display-only option for both `local` and `view`, including replay. Storage collection, API metrics, snapshots, and recordings remain unchanged.
 
 **Note:** HTTP view mode needs endpoints from `--hosts`, `--hostfile`, or configuration. SSH and replay use their own inputs. `--hosts` accepts endpoints separated by spaces, commas, or a mixture of both; explicit `http://` and `https://` schemes are preserved. Invalid endpoint syntax is reported before the TUI starts. For local monitoring, use `all-smi local` instead.
 

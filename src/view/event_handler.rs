@@ -1002,13 +1002,19 @@ fn handle_navigation_keys(key_event: KeyEvent, state: &mut AppState, args: &View
 fn handle_up_arrow(state: &mut AppState, args: &ViewArgs) {
     // `args.replay` routes scrolling through the remote branch because the
     // replay UI renders tabs + GPU columns (not the local process list).
-    let is_remote = args.hosts.is_some() || args.hostfile.is_some() || args.replay.is_some();
+    let is_remote = args.hosts.is_some()
+        || args.hostfile.is_some()
+        || args.replay.is_some()
+        || (args.hide_storage && !state.is_local_mode);
     if is_remote {
+        if args.hide_storage {
+            state.storage_scroll_offset = 0;
+        }
         // Unified scrolling for remote mode
         if state.gpu_scroll_offset > 0 {
             state.gpu_scroll_offset -= 1;
             state.storage_scroll_offset = 0; // Reset storage scroll when in GPU area
-        } else if state.storage_scroll_offset > 0 {
+        } else if !args.hide_storage && state.storage_scroll_offset > 0 {
             state.storage_scroll_offset -= 1;
         }
     } else {
@@ -1025,8 +1031,14 @@ fn handle_up_arrow(state: &mut AppState, args: &ViewArgs) {
 fn handle_down_arrow(state: &mut AppState, args: &ViewArgs) {
     // `args.replay` routes scrolling through the remote branch because the
     // replay UI renders tabs + GPU columns (not the local process list).
-    let is_remote = args.hosts.is_some() || args.hostfile.is_some() || args.replay.is_some();
+    let is_remote = args.hosts.is_some()
+        || args.hostfile.is_some()
+        || args.replay.is_some()
+        || (args.hide_storage && !state.is_local_mode);
     if is_remote {
+        if args.hide_storage {
+            state.storage_scroll_offset = 0;
+        }
         // Unified scrolling for remote mode
         let gpu_count = if state.current_tab == 0 {
             state.gpu_info.len()
@@ -1038,7 +1050,7 @@ fn handle_down_arrow(state: &mut AppState, args: &ViewArgs) {
                 .count()
         };
 
-        let storage_count = if state.current_tab == 0 {
+        let storage_count = if args.hide_storage || state.current_tab == 0 {
             // No storage on 'All' tab
             0
         } else {
@@ -1069,41 +1081,55 @@ fn handle_down_arrow(state: &mut AppState, args: &ViewArgs) {
     }
 }
 
+fn remote_gpu_page_items(state: &AppState, args: &ViewArgs) -> (usize, usize) {
+    let viewport = Viewport::current();
+
+    if args.hide_storage {
+        let content_area =
+            LayoutCalculator::calculate_content_area(state, viewport.cols, viewport.rows);
+        let params = LayoutCalculator::calculate_gpu_display_params(state, args, &content_area);
+        return (params.max_items, params.max_items.max(1));
+    }
+
+    // Preserve the established default paging calculation. Storage rendering
+    // currently has a different legacy row model, so only the opt-in hidden
+    // path uses the shared layout calculation above.
+    let content_start_row = 19;
+    let available_rows = viewport
+        .rows
+        .saturating_sub(content_start_row)
+        .saturating_sub(1) as usize;
+    let storage_items_count = if state.current_tab > 0 && !state.storage_info.is_empty() {
+        let current_hostname = &state.tabs[state.current_tab];
+        state
+            .storage_info
+            .iter()
+            .filter(|info| info.host_id == *current_hostname)
+            .count()
+    } else {
+        0
+    };
+    let storage_display_rows = if storage_items_count > 0 {
+        storage_items_count + 2
+    } else {
+        0
+    };
+    let gpu_display_rows = available_rows.saturating_sub(storage_display_rows);
+    let lines_per_gpu = LayoutCalculator::max_gpu_lines_for_tab(state).max(2);
+    let max_gpu_items = gpu_display_rows / lines_per_gpu;
+    (max_gpu_items, max_gpu_items.max(1))
+}
+
 fn handle_page_up(state: &mut AppState, args: &ViewArgs) {
     // `args.replay` routes scrolling through the remote branch because the
     // replay UI renders tabs + GPU columns (not the local process list).
-    let is_remote = args.hosts.is_some() || args.hostfile.is_some() || args.replay.is_some();
+    let is_remote = args.hosts.is_some()
+        || args.hostfile.is_some()
+        || args.replay.is_some()
+        || (args.hide_storage && !state.is_local_mode);
     if is_remote {
         // Remote mode - page up through GPU list
-        let rows = Viewport::current().rows;
-        let content_start_row = 19;
-        let available_rows = rows.saturating_sub(content_start_row).saturating_sub(1) as usize;
-
-        // Calculate storage display space for current tab
-        let storage_items_count = if state.current_tab > 0 && !state.storage_info.is_empty() {
-            let current_hostname = &state.tabs[state.current_tab];
-            state
-                .storage_info
-                .iter()
-                .filter(|info| info.host_id == *current_hostname)
-                .count()
-        } else {
-            0
-        };
-        let storage_display_rows = if storage_items_count > 0 {
-            storage_items_count + 2 // Each storage item takes 1 line (labels + bar on same line)
-        } else {
-            0
-        };
-
-        let gpu_display_rows = available_rows.saturating_sub(storage_display_rows);
-        // Per-GPU line count is dynamic now: NVIDIA rows with thermal /
-        // P-state data emit 3 lines, vGPU-enabled GPUs emit even more.
-        // Use the maximum line count any visible GPU would render so the
-        // page size never overshoots the rendered area.
-        let lines_per_gpu = LayoutCalculator::max_gpu_lines_for_tab(state).max(2);
-        let max_gpu_items = gpu_display_rows / lines_per_gpu;
-        let page_size = max_gpu_items.max(1); // At least 1 item per page
+        let (_, page_size) = remote_gpu_page_items(state, args);
 
         state.gpu_scroll_offset = state.gpu_scroll_offset.saturating_sub(page_size);
         state.storage_scroll_offset = 0; // Reset storage scroll when paging GPU list
@@ -1120,38 +1146,16 @@ fn handle_page_up(state: &mut AppState, args: &ViewArgs) {
 fn handle_page_down(state: &mut AppState, args: &ViewArgs) {
     // `args.replay` routes scrolling through the remote branch because the
     // replay UI renders tabs + GPU columns (not the local process list).
-    let is_remote = args.hosts.is_some() || args.hostfile.is_some() || args.replay.is_some();
+    let is_remote = args.hosts.is_some()
+        || args.hostfile.is_some()
+        || args.replay.is_some()
+        || (args.hide_storage && !state.is_local_mode);
     if is_remote {
         // Remote mode - page down through GPU list
-        let rows = Viewport::current().rows;
-        let content_start_row = 19;
-        let available_rows = rows.saturating_sub(content_start_row).saturating_sub(1) as usize;
-
-        // Calculate storage display space for current tab
-        let storage_items_count = if state.current_tab > 0 && !state.storage_info.is_empty() {
-            let current_hostname = &state.tabs[state.current_tab];
-            state
-                .storage_info
-                .iter()
-                .filter(|info| info.host_id == *current_hostname)
-                .count()
-        } else {
-            0
-        };
-        let storage_display_rows = if storage_items_count > 0 {
-            storage_items_count + 2 // Each storage item takes 1 line (labels + bar on same line)
-        } else {
-            0
-        };
-
-        let gpu_display_rows = available_rows.saturating_sub(storage_display_rows);
-        // Per-GPU line count is dynamic now: NVIDIA rows with thermal /
-        // P-state data emit 3 lines, vGPU-enabled GPUs emit even more.
-        // Use the maximum line count any visible GPU would render so the
-        // page size never overshoots the rendered area.
-        let lines_per_gpu = LayoutCalculator::max_gpu_lines_for_tab(state).max(2);
-        let max_gpu_items = gpu_display_rows / lines_per_gpu;
-        let page_size = max_gpu_items.max(1); // At least 1 item per page
+        if args.hide_storage {
+            state.storage_scroll_offset = 0;
+        }
+        let (max_gpu_items, page_size) = remote_gpu_page_items(state, args);
 
         // Calculate total GPUs for current tab
         let total_gpus = if state.current_tab == 0 {
@@ -1288,6 +1292,7 @@ fn handle_process_header_click(x: u16, y: u16, state: &mut AppState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::StorageInfo;
     use crossterm::event::{KeyEvent, KeyModifiers};
 
     fn key(code: KeyCode) -> KeyEvent {
@@ -1300,6 +1305,158 @@ mod tests {
 
     fn args() -> ViewArgs {
         ViewArgs::empty()
+    }
+
+    fn storage(host_id: &str, index: u32) -> StorageInfo {
+        StorageInfo {
+            mount_point: format!("/mnt/{index}"),
+            total_bytes: 1_000,
+            available_bytes: 500,
+            host_id: host_id.to_string(),
+            hostname: host_id.to_string(),
+            index,
+        }
+    }
+
+    fn remote_storage_state(count: u32) -> AppState {
+        AppState {
+            is_local_mode: false,
+            tabs: vec!["All".into(), "host-a".into()],
+            current_tab: 1,
+            storage_info: (0..count).map(|index| storage("host-a", index)).collect(),
+            ..AppState::default()
+        }
+    }
+
+    fn gpu(host_id: &str, index: usize) -> crate::device::GpuInfo {
+        crate::device::GpuInfo {
+            uuid: format!("{host_id}/gpu-{index}"),
+            time: String::new(),
+            name: format!("GPU {index}"),
+            device_type: "GPU".into(),
+            host_id: host_id.into(),
+            hostname: host_id.into(),
+            instance: host_id.into(),
+            utilization: 0.0,
+            ane_utilization: 0.0,
+            dla_utilization: None,
+            tensorcore_utilization: None,
+            temperature: 50,
+            used_memory: 0,
+            total_memory: 1,
+            frequency: 0,
+            power_consumption: 0.0,
+            gpu_core_count: None,
+            temperature_threshold_slowdown: None,
+            temperature_threshold_shutdown: None,
+            temperature_threshold_max_operating: None,
+            temperature_threshold_acoustic: None,
+            performance_state: None,
+            fan_speed_rpm: None,
+            numa_node_id: None,
+            gsp_firmware_mode: None,
+            gsp_firmware_version: None,
+            nvlink_remote_devices: Vec::new(),
+            gpm_metrics: None,
+            detail: std::collections::HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn hidden_remote_arrow_navigation_ignores_storage_and_clears_stale_offset() {
+        let mut remote_args = args();
+        remote_args.hosts = Some(vec!["host-a".into()]);
+        remote_args.hide_storage = true;
+        let mut state = remote_storage_state(50);
+        state.storage_scroll_offset = 17;
+
+        handle_down_arrow(&mut state, &remote_args);
+        assert_eq!(state.storage_scroll_offset, 0);
+        handle_up_arrow(&mut state, &remote_args);
+        assert_eq!(state.storage_scroll_offset, 0);
+
+        remote_args.hide_storage = false;
+        handle_down_arrow(&mut state, &remote_args);
+        assert_eq!(
+            state.storage_scroll_offset, 1,
+            "default storage navigation changed"
+        );
+    }
+
+    #[test]
+    fn hidden_replay_navigation_ignores_storage() {
+        let mut replay_args = args();
+        replay_args.replay = Some("recording.ndjson".into());
+        replay_args.hide_storage = true;
+        let mut state = remote_storage_state(50);
+        state.storage_scroll_offset = 9;
+
+        handle_down_arrow(&mut state, &replay_args);
+        assert_eq!(state.storage_scroll_offset, 0);
+        handle_page_down(&mut state, &replay_args);
+        assert_eq!(state.storage_scroll_offset, 0);
+    }
+
+    #[test]
+    fn hidden_remote_page_size_is_independent_of_storage_count() {
+        let mut remote_args = args();
+        remote_args.hosts = Some(vec!["host-a".into()]);
+        remote_args.hide_storage = true;
+        let empty = remote_storage_state(0);
+        let many = remote_storage_state(50);
+
+        assert_eq!(
+            remote_gpu_page_items(&empty, &remote_args),
+            remote_gpu_page_items(&many, &remote_args)
+        );
+    }
+
+    #[test]
+    fn hidden_remote_page_up_clears_storage_and_uses_reclaimed_rows() {
+        let mut remote_args = args();
+        remote_args.hosts = Some(vec!["host-a".into()]);
+        remote_args.hide_storage = true;
+        let mut empty = remote_storage_state(0);
+        empty.gpu_scroll_offset = 100;
+        let mut many = remote_storage_state(50);
+        many.gpu_scroll_offset = 100;
+        many.storage_scroll_offset = 12;
+
+        handle_page_up(&mut empty, &remote_args);
+        handle_page_up(&mut many, &remote_args);
+
+        assert_eq!(empty.gpu_scroll_offset, many.gpu_scroll_offset);
+        assert_eq!(many.storage_scroll_offset, 0);
+    }
+
+    #[test]
+    fn hidden_replay_page_navigation_matches_rendered_gpu_layout() {
+        let mut replay_args = args();
+        replay_args.replay = Some("recording.ndjson".into());
+        replay_args.hide_storage = true;
+        let mut state = remote_storage_state(50);
+        state.gpu_info = (0..50).map(|index| gpu("host-a", index)).collect();
+
+        let viewport = Viewport::current();
+        let content_area =
+            LayoutCalculator::calculate_content_area(&state, viewport.cols, viewport.rows);
+        let rendered =
+            LayoutCalculator::calculate_gpu_display_params(&state, &replay_args, &content_area);
+        let (max_items, page_size) = remote_gpu_page_items(&state, &replay_args);
+        assert_eq!(rendered.lines_per_gpu, 2, "replay must use remote rows");
+        assert_eq!(max_items, rendered.max_items);
+        assert_eq!(page_size, rendered.max_items.max(1));
+
+        handle_page_down(&mut state, &replay_args);
+        assert_eq!(
+            state.gpu_scroll_offset,
+            page_size.min(50usize.saturating_sub(max_items))
+        );
+        assert_eq!(state.storage_scroll_offset, 0);
+
+        handle_page_up(&mut state, &replay_args);
+        assert_eq!(state.gpu_scroll_offset, 0);
+        assert_eq!(state.storage_scroll_offset, 0);
     }
 
     #[tokio::test]
