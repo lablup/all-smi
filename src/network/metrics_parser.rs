@@ -36,7 +36,6 @@ pub struct ParsedMetrics {
     pub cpu_info: Vec<CpuInfo>,
     pub memory_info: Vec<MemoryInfo>,
     pub storage_info: Vec<StorageInfo>,
-    pub chassis_info: Vec<crate::device::ChassisInfo>,
     pub vgpu_info: Vec<VgpuHostInfo>,
     pub mig_info: Vec<MigGpuInfo>,
     /// Per-process rows parsed from `all_smi_process_*` metric families on
@@ -44,6 +43,14 @@ pub struct ParsedMetrics {
     /// and consumed by the cluster-wide Users tab aggregator (issue #189).
     /// Empty when the scraped host was not started with `--processes`.
     pub process_info: Vec<ParsedProcessRow>,
+}
+
+/// Internal extension of [`ParsedMetrics`] for the remote-view collector.
+/// Keeping chassis data outside the public result preserves the existing
+/// exhaustive-struct API for embedding callers.
+pub(crate) struct ParsedRemoteMetrics {
+    pub(crate) metrics: ParsedMetrics,
+    pub(crate) chassis_info: Vec<crate::device::ChassisInfo>,
 }
 
 /// One row emitted by the remote metrics parser for each `(host, pid,
@@ -120,6 +127,15 @@ impl MetricsParser {
     }
 
     pub fn parse_metrics(&self, text: &str, host: &str, re: &Regex) -> ParsedMetrics {
+        self.parse_metrics_with_chassis(text, host, re).metrics
+    }
+
+    pub(crate) fn parse_metrics_with_chassis(
+        &self,
+        text: &str,
+        host: &str,
+        re: &Regex,
+    ) -> ParsedRemoteMetrics {
         // Limit the maximum size of HashMaps to prevent memory exhaustion
         const MAX_DEVICES_PER_TYPE: usize = 256;
         const MAX_TEXT_SIZE: usize = 10_485_760; // 10MB max input
@@ -131,7 +147,7 @@ impl MetricsParser {
                 text.len()
             );
             let truncated = &text[..MAX_TEXT_SIZE];
-            return self.parse_metrics(truncated, host, re);
+            return self.parse_metrics_with_chassis(truncated, host, re);
         }
 
         let mut gpu_info_map: HashMap<String, GpuInfo> = HashMap::with_capacity(16);
@@ -260,15 +276,17 @@ impl MetricsParser {
             );
         }
 
-        ParsedMetrics {
-            gpu_info: gpu_info_map.into_values().collect(),
-            cpu_info: cpu_info_map.into_values().collect(),
-            memory_info: memory_info_map.into_values().collect(),
-            storage_info: storage_info_map.into_values().collect(),
+        ParsedRemoteMetrics {
             chassis_info: chassis_state.finish(),
-            vgpu_info: vgpu_state.finish(),
-            mig_info: mig_state.finish(),
-            process_info: process_info_map.into_values().collect(),
+            metrics: ParsedMetrics {
+                gpu_info: gpu_info_map.into_values().collect(),
+                cpu_info: cpu_info_map.into_values().collect(),
+                memory_info: memory_info_map.into_values().collect(),
+                storage_info: storage_info_map.into_values().collect(),
+                vgpu_info: vgpu_state.finish(),
+                mig_info: mig_state.finish(),
+                process_info: process_info_map.into_values().collect(),
+            },
         }
     }
 

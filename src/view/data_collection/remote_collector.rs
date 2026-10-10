@@ -179,37 +179,27 @@ impl DataCollectionStrategy for RemoteCollector {
             return Err(CollectionError::Other("No hosts configured".to_string()));
         }
 
-        let (
-            gpu_info,
-            cpu_info,
-            memory_info,
-            storage_info,
-            chassis_info,
-            vgpu_info,
-            mig_info,
-            remote_process_info,
-            connection_statuses,
-        ) = self
+        let remote = self
             .network_client
-            .fetch_remote_data(&config.hosts, &self.semaphore, &self.regex)
+            .fetch_remote_metrics(&config.hosts, &self.semaphore, &self.regex)
             .await;
 
-        let deduplicated_storage = Self::deduplicate_storage_info(storage_info);
+        let deduplicated_storage = Self::deduplicate_storage_info(remote.storage_info);
 
         Ok(CollectionData {
-            gpu_info,
-            cpu_info,
-            memory_info,
+            gpu_info: remote.gpu_info,
+            cpu_info: remote.cpu_info,
+            memory_info: remote.memory_info,
             // Local `ProcessInfo` is only populated in local mode — the
             // remote path feeds `remote_process_info` instead (see
             // CollectionData docs).
             process_info: Vec::new(),
             storage_info: deduplicated_storage,
-            chassis_info,
-            vgpu_info,
-            mig_info,
-            connection_statuses,
-            remote_process_info,
+            chassis_info: remote.chassis_info,
+            vgpu_info: remote.vgpu_info,
+            mig_info: remote.mig_info,
+            connection_statuses: remote.connection_statuses,
+            remote_process_info: remote.process_info,
         })
     }
 

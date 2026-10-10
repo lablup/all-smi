@@ -35,6 +35,24 @@ pub struct NetworkClient {
     rate_limiter: Arc<RwLock<RateLimiter>>,
 }
 
+/// Internal structured result used by the remote view collector. The public
+/// [`NetworkClient::fetch_remote_data`] tuple remains unchanged for embedding
+/// callers while the in-crate pipeline can carry chassis records as well.
+pub(crate) struct RemoteScrapeData {
+    pub(crate) gpu_info: Vec<GpuInfo>,
+    pub(crate) cpu_info: Vec<CpuInfo>,
+    pub(crate) memory_info: Vec<MemoryInfo>,
+    pub(crate) storage_info: Vec<StorageInfo>,
+    // The library target does not compile the binary-only `view` module, but
+    // the main target consumes this field in RemoteCollector.
+    #[allow(dead_code)]
+    pub(crate) chassis_info: Vec<ChassisInfo>,
+    pub(crate) vgpu_info: Vec<crate::device::VgpuHostInfo>,
+    pub(crate) mig_info: Vec<crate::device::MigGpuInfo>,
+    pub(crate) process_info: Vec<ParsedProcessRow>,
+    pub(crate) connection_statuses: Vec<ConnectionStatus>,
+}
+
 /// Simple rate limiter to prevent DoS attacks
 struct RateLimiter {
     /// Map of host to (last_request_time, request_count)
@@ -242,7 +260,7 @@ impl NetworkClient {
         }
     }
 
-    #[allow(clippy::type_complexity)]
+    #[allow(clippy::type_complexity, dead_code)]
     pub async fn fetch_remote_data(
         &self,
         hosts: &[String],
@@ -253,12 +271,30 @@ impl NetworkClient {
         Vec<CpuInfo>,
         Vec<MemoryInfo>,
         Vec<StorageInfo>,
-        Vec<ChassisInfo>,
         Vec<crate::device::VgpuHostInfo>,
         Vec<crate::device::MigGpuInfo>,
         Vec<ParsedProcessRow>,
         Vec<ConnectionStatus>,
     ) {
+        let data = self.fetch_remote_metrics(hosts, semaphore, re).await;
+        (
+            data.gpu_info,
+            data.cpu_info,
+            data.memory_info,
+            data.storage_info,
+            data.vgpu_info,
+            data.mig_info,
+            data.process_info,
+            data.connection_statuses,
+        )
+    }
+
+    pub(crate) async fn fetch_remote_metrics(
+        &self,
+        hosts: &[String],
+        semaphore: &Arc<tokio::sync::Semaphore>,
+        re: &Regex,
+    ) -> RemoteScrapeData {
         let mut all_gpu_info = Vec::new();
         let mut all_cpu_info = Vec::new();
         let mut all_memory_info = Vec::new();
@@ -404,14 +440,18 @@ impl NetworkClient {
                                     connection_statuses.push(connection_status);
                                 } else {
                                     let parser = super::metrics_parser::MetricsParser::new();
-                                    let parsed = parser.parse_metrics(&text, &host_identifier, re);
+                                    let parsed = parser.parse_metrics_with_chassis(
+                                        &text,
+                                        &host_identifier,
+                                        re,
+                                    );
 
                                     // Extract the instance name from device info if available
-                                    let instance_name = if let Some(first_gpu) = parsed.gpu_info.first() {
+                                    let instance_name = if let Some(first_gpu) = parsed.metrics.gpu_info.first() {
                                         Some(first_gpu.instance.clone())
-                                    } else if let Some(first_cpu) = parsed.cpu_info.first() {
+                                    } else if let Some(first_cpu) = parsed.metrics.cpu_info.first() {
                                         Some(first_cpu.instance.clone())
-                                    } else if let Some(first_memory) = parsed.memory_info.first() {
+                                    } else if let Some(first_memory) = parsed.metrics.memory_info.first() {
                                         Some(first_memory.instance.clone())
                                     } else {
                                         parsed
@@ -424,14 +464,14 @@ impl NetworkClient {
                                     connection_status.actual_hostname = instance_name;
                                     connection_statuses.push(connection_status);
 
-                                    all_gpu_info.extend(parsed.gpu_info);
-                                    all_cpu_info.extend(parsed.cpu_info);
-                                    all_memory_info.extend(parsed.memory_info);
-                                    all_storage_info.extend(parsed.storage_info);
+                                    all_gpu_info.extend(parsed.metrics.gpu_info);
+                                    all_cpu_info.extend(parsed.metrics.cpu_info);
+                                    all_memory_info.extend(parsed.metrics.memory_info);
+                                    all_storage_info.extend(parsed.metrics.storage_info);
                                     all_chassis_info.extend(parsed.chassis_info);
-                                    all_vgpu_info.extend(parsed.vgpu_info);
-                                    all_mig_info.extend(parsed.mig_info);
-                                    all_process_info.extend(parsed.process_info);
+                                    all_vgpu_info.extend(parsed.metrics.vgpu_info);
+                                    all_mig_info.extend(parsed.metrics.mig_info);
+                                    all_process_info.extend(parsed.metrics.process_info);
                                 }
                             }
                         }
@@ -465,17 +505,17 @@ impl NetworkClient {
         //     );
         // }
 
-        (
-            all_gpu_info,
-            all_cpu_info,
-            all_memory_info,
-            all_storage_info,
-            all_chassis_info,
-            all_vgpu_info,
-            all_mig_info,
-            all_process_info,
+        RemoteScrapeData {
+            gpu_info: all_gpu_info,
+            cpu_info: all_cpu_info,
+            memory_info: all_memory_info,
+            storage_info: all_storage_info,
+            chassis_info: all_chassis_info,
+            vgpu_info: all_vgpu_info,
+            mig_info: all_mig_info,
+            process_info: all_process_info,
             connection_statuses,
-        )
+        }
     }
 }
 

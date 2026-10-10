@@ -25,6 +25,7 @@ use tokio::sync::Mutex;
 use crate::app_state::AppState;
 use crate::cli::ViewArgs;
 use crate::common::config::EnergyConfig;
+use crate::metrics::energy::EnergyKey;
 use crate::network::metrics_parser::MetricsParser;
 use crate::view::data_collection::remote_collector::RemoteCollectorBuilder;
 use crate::view::data_collection::strategy::{CollectionConfig, DataCollectionStrategy};
@@ -66,7 +67,8 @@ async fn spawn_metrics_server() -> SocketAddr {
 
 #[test]
 fn chassis_metrics_round_trip_into_remote_model() {
-    let parsed = MetricsParser::new().parse_metrics(METRICS, "node-a:9090", &metrics_regex());
+    let parsed =
+        MetricsParser::new().parse_metrics_with_chassis(METRICS, "node-a:9090", &metrics_regex());
 
     assert_eq!(parsed.chassis_info.len(), 1);
     let chassis = &parsed.chassis_info[0];
@@ -139,6 +141,15 @@ async fn explicit_http_host_renders_devices_chassis_energy_and_cost() {
         assert_eq!(state.hostname_to_host_id["node-a"], host_id);
         assert_eq!(state.gpu_info[0].host_id, host_id);
         assert_eq!(state.chassis_info[0].host_id, host_id);
+        let energy_key = EnergyKey::chassis("node-a");
+        let session_joules = state.energy.integrator().session_joules(&energy_key);
+        let lifetime_joules = state.energy.integrator().lifetime_joules(&energy_key);
+        assert!(session_joules > 0.0);
+        assert_eq!(lifetime_joules, session_joules);
+        assert!(
+            session_joules < 900_000.0,
+            "remote lifetime counter must not become viewer session energy"
+        );
         state.current_tab = state
             .tabs
             .iter()
