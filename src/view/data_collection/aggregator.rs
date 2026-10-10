@@ -85,7 +85,16 @@ impl DataAggregator {
         // Per-chassis samples.
         for chassis in &state.chassis_info {
             if let Some(power) = chassis.total_power_watts {
-                let key = EnergyKey::chassis(chassis.hostname.clone());
+                // Local/API chassis records have historically used the exporter
+                // hostname as their counter identity. Remote records instead
+                // use the configured endpoint identifier so two endpoints that
+                // report the same hostname cannot share energy accounting.
+                let host = if state.is_local_mode {
+                    &chassis.hostname
+                } else {
+                    &chassis.host_id
+                };
+                let key = EnergyKey::chassis(host.clone());
                 samples.push((key, power));
             }
         }
@@ -389,5 +398,49 @@ fn current_ane_power_watts(state: &AppState) -> f64 {
 impl Default for DataAggregator {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::thread;
+    use std::time::Duration;
+
+    use super::*;
+    use crate::device::ChassisInfo;
+
+    #[test]
+    fn remote_chassis_energy_uses_endpoint_identity_for_duplicate_hostnames() {
+        let mut state = AppState::new();
+        state.is_local_mode = false;
+        state.chassis_info = vec![
+            ChassisInfo {
+                host_id: "endpoint-a:9090".to_string(),
+                hostname: "reported-hostname".to_string(),
+                total_power_watts: Some(100.0),
+                ..Default::default()
+            },
+            ChassisInfo {
+                host_id: "endpoint-b:9090".to_string(),
+                hostname: "reported-hostname".to_string(),
+                total_power_watts: Some(200.0),
+                ..Default::default()
+            },
+        ];
+        let aggregator = DataAggregator::new();
+
+        aggregator.update_energy_counters(&mut state);
+        thread::sleep(Duration::from_millis(1));
+        aggregator.update_energy_counters(&mut state);
+
+        let first = EnergyKey::chassis("endpoint-a:9090");
+        let second = EnergyKey::chassis("endpoint-b:9090");
+        let shared_hostname = EnergyKey::chassis("reported-hostname");
+        let integrator = state.energy.integrator();
+        assert!(integrator.has_samples(&first));
+        assert!(integrator.has_samples(&second));
+        assert_eq!(integrator.session_joules(&shared_hostname), 0.0);
+        assert!(integrator.session_joules(&first) > 0.0);
+        assert!(integrator.session_joules(&second) > integrator.session_joules(&first));
     }
 }

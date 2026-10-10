@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod chassis_metrics_parser;
 pub mod client;
 pub mod metrics_parser;
 pub mod nvidia_smi_shim;

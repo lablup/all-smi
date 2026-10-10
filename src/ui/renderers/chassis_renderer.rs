@@ -18,9 +18,7 @@ use crossterm::{queue, style::Color, style::Print};
 
 use crate::common::config::EnergyConfig;
 use crate::device::ChassisInfo;
-use crate::metrics::energy::{
-    EnergyKey, EnergyScope, PowerIntegrator, joules_to_cost, joules_to_kwh,
-};
+use crate::metrics::energy::{EnergyKey, PowerIntegrator, joules_to_cost, joules_to_kwh};
 use crate::ui::text::print_colored_text;
 use crate::ui::widgets::draw_bar;
 
@@ -53,22 +51,31 @@ impl ChassisRenderer {
 /// `price_per_kwh` comes from the runtime [`EnergyConfig`].  When
 /// `cost_visible()` is false the renderer drops the `|  $cost` half
 /// of the line.
+#[allow(dead_code)] // Public hostname-keyed API retained for downstream callers.
 pub fn print_chassis_energy_row<W: Write>(
     stdout: &mut W,
     info: &ChassisInfo,
     integrator: &PowerIntegrator,
     energy_config: &EnergyConfig,
 ) {
-    let key = EnergyKey::chassis(info.hostname.clone());
-    let stats = integrator
-        .iter_stats()
-        .find(|s| s.key.scope == EnergyScope::Chassis && s.key.host == info.hostname);
-    let joules = match stats {
-        Some(s) if s.session_joules > 0.0 => s.session_joules,
-        _ => return, // No session energy — render nothing.
-    };
-    let _ = key; // suppress unused warning if future callers want to
-    // look up the key directly.
+    print_chassis_energy_row_for_host(stdout, integrator, energy_config, &info.hostname);
+}
+
+/// Render the energy row for an explicitly selected accounting host.
+///
+/// Remote collection keys chassis energy by its configured endpoint, while
+/// the public [`print_chassis_energy_row`] keeps its established hostname
+/// behavior for local/API callers.
+pub(crate) fn print_chassis_energy_row_for_host<W: Write>(
+    stdout: &mut W,
+    integrator: &PowerIntegrator,
+    energy_config: &EnergyConfig,
+    energy_host: &str,
+) {
+    let joules = integrator.session_joules(&EnergyKey::chassis(energy_host));
+    if joules <= 0.0 {
+        return;
+    }
 
     let kwh = joules_to_kwh(joules);
     let kwh_display = if kwh >= 0.001 {
@@ -353,6 +360,47 @@ mod tests {
         let output = String::from_utf8(buffer).unwrap();
         assert!(output.contains("kWh"));
         assert!(!output.contains('$'), "cost should be hidden: {output}");
+    }
+
+    #[test]
+    fn energy_row_uses_endpoint_identity_for_duplicate_remote_hostnames() {
+        let first = ChassisInfo {
+            host_id: "endpoint-a:9090".to_string(),
+            hostname: "reported-hostname".to_string(),
+            ..Default::default()
+        };
+        let second = ChassisInfo {
+            host_id: "endpoint-b:9090".to_string(),
+            hostname: "reported-hostname".to_string(),
+            ..Default::default()
+        };
+        let origin = Instant::now();
+        let mut integrator = PowerIntegrator::default();
+        for (host, watts) in [(&first.host_id, 100.0), (&second.host_id, 200.0)] {
+            let key = EnergyKey::chassis(host);
+            integrator.record_sample(key.clone(), origin, watts);
+            integrator.record_sample(key, origin + Duration::from_secs(600), watts);
+        }
+        let cfg = EnergyConfig {
+            show_cost: false,
+            ..EnergyConfig::default()
+        };
+        let mut first_output = Vec::new();
+        let mut second_output = Vec::new();
+
+        print_chassis_energy_row_for_host(&mut first_output, &integrator, &cfg, &first.host_id);
+        print_chassis_energy_row_for_host(&mut second_output, &integrator, &cfg, &second.host_id);
+
+        assert!(
+            String::from_utf8(first_output)
+                .unwrap()
+                .contains("0.017 kWh")
+        );
+        assert!(
+            String::from_utf8(second_output)
+                .unwrap()
+                .contains("0.033 kWh")
+        );
     }
 
     #[test]

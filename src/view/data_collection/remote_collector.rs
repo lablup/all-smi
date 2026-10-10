@@ -28,29 +28,9 @@ use super::strategy::{
     CollectionConfig, CollectionData, CollectionError, CollectionResult, DataCollectionStrategy,
 };
 
-/// Extract hostname from URL, handling both simple hostnames and full URLs
-fn extract_hostname_from_url(url: &str) -> String {
-    // Handle full URLs like "http://remote1:9090"
-    if url.starts_with("http://") || url.starts_with("https://") {
-        if let Some(start) = url.find("://") {
-            let after_protocol = &url[start + 3..];
-            if let Some(end) = after_protocol.find('/') {
-                after_protocol[..end].to_string()
-            } else {
-                after_protocol.to_string()
-            }
-        } else {
-            url.to_string()
-        }
-    } else {
-        // Handle simple hostname:port format
-        url.to_string()
-    }
-}
-
 /// Extract the full host:port combination as unique identifier
 fn extract_host_identifier(url: &str) -> String {
-    extract_hostname_from_url(url)
+    crate::common::http_hosts::http_host_identifier(url)
 }
 
 pub struct RemoteCollector {
@@ -199,36 +179,27 @@ impl DataCollectionStrategy for RemoteCollector {
             return Err(CollectionError::Other("No hosts configured".to_string()));
         }
 
-        let (
-            gpu_info,
-            cpu_info,
-            memory_info,
-            storage_info,
-            vgpu_info,
-            mig_info,
-            remote_process_info,
-            connection_statuses,
-        ) = self
+        let remote = self
             .network_client
-            .fetch_remote_data(&config.hosts, &self.semaphore, &self.regex)
+            .fetch_remote_metrics(&config.hosts, &self.semaphore, &self.regex)
             .await;
 
-        let deduplicated_storage = Self::deduplicate_storage_info(storage_info);
+        let deduplicated_storage = Self::deduplicate_storage_info(remote.storage_info);
 
         Ok(CollectionData {
-            gpu_info,
-            cpu_info,
-            memory_info,
+            gpu_info: remote.gpu_info,
+            cpu_info: remote.cpu_info,
+            memory_info: remote.memory_info,
             // Local `ProcessInfo` is only populated in local mode — the
             // remote path feeds `remote_process_info` instead (see
             // CollectionData docs).
             process_info: Vec::new(),
             storage_info: deduplicated_storage,
-            chassis_info: Vec::new(), // TODO: Parse chassis info from remote metrics
-            vgpu_info,
-            mig_info,
-            connection_statuses,
-            remote_process_info,
+            chassis_info: remote.chassis_info,
+            vgpu_info: remote.vgpu_info,
+            mig_info: remote.mig_info,
+            connection_statuses: remote.connection_statuses,
+            remote_process_info: remote.process_info,
         })
     }
 
@@ -252,6 +223,7 @@ impl DataCollectionStrategy for RemoteCollector {
         state.cpu_info = data.cpu_info;
         state.memory_info = data.memory_info;
         state.storage_info = data.storage_info;
+        state.chassis_info = data.chassis_info;
         state.vgpu_info = data.vgpu_info;
         state.mig_info = data.mig_info;
         state.remote_process_info = data.remote_process_info;

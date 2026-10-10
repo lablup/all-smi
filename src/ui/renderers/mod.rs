@@ -27,6 +27,7 @@ pub mod vgpu_renderer;
 pub mod widgets;
 
 // Re-export the main rendering functions for backward compatibility
+#[allow(unused_imports)] // Public API used by downstream callers.
 pub use chassis_renderer::{print_chassis_energy_row, print_chassis_info};
 pub use cpu_renderer::print_cpu_info;
 #[allow(unused_imports)] // Reserved for the optional `E` energy panel.
