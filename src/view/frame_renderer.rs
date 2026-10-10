@@ -61,13 +61,8 @@ pub struct FrameRenderer;
 impl FrameRenderer {
     /// Render help popup content from the snapshot.
     pub fn render_help(snapshot: &RenderSnapshot, args: &ViewArgs, cols: u16, rows: u16) -> String {
+        let is_remote = args.hosts.is_some() || args.hostfile.is_some();
         let view_state = snapshot.as_app_state();
-        // Preserve the established default transport detection. When storage
-        // hiding is explicitly requested, AppState is authoritative so replay,
-        // SSH, and config-provided remote hosts use the remote device path.
-        let is_remote = args.hosts.is_some()
-            || args.hostfile.is_some()
-            || (args.hide_storage && !view_state.is_local_mode);
         crate::ui::help::generate_help_popup_content(cols, rows, &view_state, is_remote)
     }
 
@@ -201,12 +196,16 @@ impl FrameRenderer {
             None,
         );
 
-        // Preserve the established default transport detection. When storage
-        // hiding is explicitly requested, AppState is authoritative so replay,
-        // SSH, and config-provided remote hosts use the remote device path.
-        let is_remote = args.hosts.is_some()
-            || args.hostfile.is_some()
-            || (args.hide_storage && !view_state.is_local_mode);
+        // Keep the established chrome mode independent of this rendering-only
+        // option. In particular, storage-free Users/Topology tabs and help must
+        // not gain different function keys merely because storage is hidden.
+        let chrome_is_remote = args.hosts.is_some() || args.hostfile.is_some();
+
+        // SSH and replay do not populate the HTTP host arguments. The opt-in
+        // hidden path can use AppState to select their remote device/layout
+        // pipeline without changing their existing chrome when the flag is off.
+        let render_remote_devices =
+            chrome_is_remote || (args.hide_storage && !view_state.is_local_mode);
 
         // Cluster Overview, dashboard items, and the tabs row are only meaningful
         // when monitoring multiple remote hosts. `is_local_mode` is false the moment
@@ -255,7 +254,7 @@ impl FrameRenderer {
                 cols,
                 avail,
             );
-            print_function_keys(&mut buffer, cols, rows, &view_state, is_remote);
+            print_function_keys(&mut buffer, cols, rows, &view_state, chrome_is_remote);
             return (buffer.get_buffer().to_string(), 0);
         }
 
@@ -272,7 +271,7 @@ impl FrameRenderer {
                 cols,
                 rows,
             );
-            print_function_keys(&mut buffer, cols, rows, &view_state, is_remote);
+            print_function_keys(&mut buffer, cols, rows, &view_state, chrome_is_remote);
             return (buffer.get_buffer().to_string(), 0);
         }
 
@@ -283,7 +282,7 @@ impl FrameRenderer {
         Self::render_gpu_section(&mut buffer, snapshot, &view_state, args, cols, rows, cache);
 
         // Render other device information based on mode
-        let visible_process_rows = if is_remote {
+        let visible_process_rows = if render_remote_devices {
             Self::render_remote_devices(&mut buffer, snapshot, args, width, cache);
             0
         } else {
@@ -291,7 +290,7 @@ impl FrameRenderer {
         };
 
         // Add function keys to main content view
-        print_function_keys(&mut buffer, cols, rows, &view_state, is_remote);
+        print_function_keys(&mut buffer, cols, rows, &view_state, chrome_is_remote);
 
         (buffer.get_buffer().to_string(), visible_process_rows)
     }
@@ -1094,8 +1093,18 @@ mod tests {
             FrameRenderer::render_main(&snapshot, &args, 120, 40, None);
 
         assert!(visible_process_rows > 0, "process rows were not reclaimed");
-        assert!(content.contains("Processes"), "process section missing");
-        assert!(content.contains("h:Help"), "function-key footer missing");
+        let visible_rows: Vec<&str> = content.lines().take(40).collect();
+        assert_eq!(visible_rows.len(), 40, "frame did not fill the viewport");
+        assert!(
+            visible_rows.iter().any(|row| row.contains("worker-")),
+            "no process data row landed in the viewport"
+        );
+        assert!(
+            visible_rows
+                .last()
+                .is_some_and(|row| row.contains("h:Help")),
+            "function-key footer did not land on the final viewport row"
+        );
         assert!(!content.contains("Disk "), "storage label remained");
         assert!(!content.contains("hidden-mount"), "storage mount remained");
 
@@ -1188,6 +1197,63 @@ mod tests {
         let mut all = BufferWriter::new();
         FrameRenderer::render_remote_devices(&mut all, &all_snapshot, &args, 120, None);
         assert!(all.get_buffer().is_empty(), "All tab emitted devices");
+    }
+
+    #[test]
+    fn hide_storage_does_not_change_storage_free_tabs_or_help() {
+        let mut ssh_args = ViewArgs::empty();
+        ssh_args.ssh = Some("user@host-a".into());
+
+        let mut replay_args = ViewArgs::empty();
+        replay_args.replay = Some("recording.ndjson".into());
+
+        let mut configured_http_args = ViewArgs::empty();
+        configured_http_args.hosts = Some(vec!["host-a:9090".into()]);
+
+        for (transport, args, replay) in [
+            ("ssh", ssh_args, false),
+            ("replay", replay_args, true),
+            ("configured HTTP", configured_http_args, false),
+        ] {
+            for current_tab in [1, 2] {
+                let mut state = AppState::new();
+                state.is_local_mode = false;
+                state.tabs = vec![
+                    "All".into(),
+                    crate::ui::tabs::USERS_TAB_NAME.into(),
+                    crate::ui::tabs::TOPOLOGY_TAB_NAME.into(),
+                    "host-a".into(),
+                ];
+                state.current_tab = current_tab;
+                state.storage_info = vec![make_storage("host-a", 0)];
+                if replay {
+                    state.replay = Some(crate::view::data_collection::initial_replay_state(
+                        1.0, false,
+                    ));
+                }
+                let snapshot = RenderSnapshot::capture(&mut state);
+
+                let mut hidden_args = args.clone();
+                hidden_args.hide_storage = true;
+                let (visible, _) = FrameRenderer::render_main(&snapshot, &args, 120, 40, None);
+                let (hidden, _) =
+                    FrameRenderer::render_main(&snapshot, &hidden_args, 120, 40, None);
+                let visible_body = visible
+                    .split_once("\r\n")
+                    .map_or(&*visible, |(_, body)| body);
+                let hidden_body = hidden.split_once("\r\n").map_or(&*hidden, |(_, body)| body);
+                assert_eq!(
+                    visible_body, hidden_body,
+                    "{transport} tab {current_tab} changed"
+                );
+
+                assert_eq!(
+                    FrameRenderer::render_help(&snapshot, &args, 120, 50),
+                    FrameRenderer::render_help(&snapshot, &hidden_args, 120, 50),
+                    "{transport} help changed"
+                );
+            }
+        }
     }
 
     #[test]
