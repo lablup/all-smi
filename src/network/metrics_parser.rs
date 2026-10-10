@@ -126,6 +126,7 @@ impl MetricsParser {
         Self
     }
 
+    #[allow(dead_code)] // Public library API; the binary uses the chassis-aware internal variant.
     pub fn parse_metrics(&self, text: &str, host: &str, re: &Regex) -> ParsedMetrics {
         self.parse_metrics_with_chassis(text, host, re).metrics
     }
