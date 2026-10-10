@@ -103,7 +103,12 @@ impl LayoutCalculator {
         args: &ViewArgs,
         content_area: &ContentArea,
     ) -> GpuDisplayParams {
-        let is_remote = args.hosts.is_some() || args.hostfile.is_some();
+        // Remote transports keep their historical layout by default. The
+        // opt-in hidden path can trust AppState so replay, SSH, and hosts from
+        // configuration use remote GPU row heights without changing defaults.
+        let is_remote = args.hosts.is_some()
+            || args.hostfile.is_some()
+            || (args.hide_storage && !state.is_local_mode);
 
         // Calculate storage space requirements
         let storage_items_count = Self::calculate_storage_items_count(state, args);
@@ -219,6 +224,10 @@ impl LayoutCalculator {
     }
 
     fn calculate_storage_items_count(state: &AppState, args: &ViewArgs) -> usize {
+        if args.hide_storage {
+            return 0;
+        }
+
         let is_remote = args.hosts.is_some() || args.hostfile.is_some();
 
         if state.storage_info.is_empty() {
@@ -384,6 +393,75 @@ pub(crate) fn max_gpu_lines_over<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::StorageInfo;
+
+    fn storage(host_id: &str, index: u32) -> StorageInfo {
+        StorageInfo {
+            mount_point: format!("/mnt/{index}"),
+            total_bytes: 1_000,
+            available_bytes: 500,
+            host_id: host_id.to_string(),
+            hostname: host_id.to_string(),
+            index,
+        }
+    }
+
+    #[test]
+    fn hidden_storage_reserves_no_layout_rows_for_zero_or_many_disks() {
+        let content_area = ContentArea {
+            x: 0,
+            y: 0,
+            width: 120,
+            height: 30,
+            available_rows: 30,
+        };
+        let mut args = ViewArgs::empty();
+        args.hide_storage = true;
+
+        let empty = AppState::default();
+        let empty_params =
+            LayoutCalculator::calculate_gpu_display_params(&empty, &args, &content_area);
+
+        let many = AppState {
+            storage_info: (0..50).map(|index| storage("localhost", index)).collect(),
+            ..AppState::default()
+        };
+        let many_params =
+            LayoutCalculator::calculate_gpu_display_params(&many, &args, &content_area);
+
+        assert_eq!(empty_params.storage_rows, 0);
+        assert_eq!(many_params.storage_rows, 0);
+        assert_eq!(empty_params.display_rows, many_params.display_rows);
+        assert_eq!(empty_params.max_items, many_params.max_items);
+    }
+
+    #[test]
+    fn default_remote_layout_still_reserves_host_storage_rows() {
+        let state = AppState {
+            is_local_mode: false,
+            tabs: vec!["All".into(), "host-a".into()],
+            current_tab: 1,
+            storage_info: vec![storage("host-a", 0), storage("host-a", 1)],
+            ..AppState::default()
+        };
+        let mut args = ViewArgs::empty();
+        args.hosts = Some(vec!["host-a".into()]);
+        let content_area = ContentArea {
+            x: 0,
+            y: 0,
+            width: 120,
+            height: 30,
+            available_rows: 30,
+        };
+
+        let visible = LayoutCalculator::calculate_gpu_display_params(&state, &args, &content_area);
+        args.hide_storage = true;
+        let hidden = LayoutCalculator::calculate_gpu_display_params(&state, &args, &content_area);
+
+        assert_eq!(visible.storage_rows, 4);
+        assert_eq!(hidden.storage_rows, 0);
+        assert_eq!(hidden.display_rows, content_area.available_rows);
+    }
 
     #[test]
     fn test_calculate_progress_bar_layout() {

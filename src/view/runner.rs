@@ -43,6 +43,16 @@ fn build_alert_config(
         .with_cli_overrides(alert_temp, alert_util_low_mins)
 }
 
+fn local_view_args(args: &LocalArgs) -> ViewArgs {
+    ViewArgs {
+        interval: args.interval,
+        hide_storage: args.hide_storage,
+        alert_temp: args.alert_temp,
+        alert_util_low_mins: args.alert_util_low_mins,
+        ..ViewArgs::empty()
+    }
+}
+
 pub async fn run_local_mode(args: &LocalArgs, settings: &Settings) {
     let mut startup_profiler = crate::utils::StartupProfiler::new();
     startup_profiler.checkpoint("Starting run_local_mode");
@@ -85,12 +95,7 @@ pub async fn run_local_mode(args: &LocalArgs, settings: &Settings) {
     // Start data collection in background with notification handle
     let data_collector =
         DataCollector::with_notify(Arc::clone(&app_state), Arc::clone(&data_notify));
-    let view_args = ViewArgs {
-        interval: args.interval,
-        alert_temp: args.alert_temp,
-        alert_util_low_mins: args.alert_util_low_mins,
-        ..ViewArgs::empty()
-    };
+    let view_args = local_view_args(args);
     tokio::spawn(async move {
         data_collector.run_local_mode(view_args).await;
     });
@@ -108,12 +113,7 @@ pub async fn run_local_mode(args: &LocalArgs, settings: &Settings) {
     startup_profiler.finish();
 
     // Create ViewArgs again for UI loop
-    let view_args = ViewArgs {
-        interval: args.interval,
-        alert_temp: args.alert_temp,
-        alert_util_low_mins: args.alert_util_low_mins,
-        ..ViewArgs::empty()
-    };
+    let view_args = local_view_args(args);
     if let Err(e) = ui_loop.run(&view_args).await {
         eprintln!("UI loop error: {e}");
     }
@@ -409,4 +409,26 @@ pub async fn run_view_mode(args: &ViewArgs, settings: &Settings) {
     }
 
     // Terminal cleanup is handled by TerminalManager's Drop trait
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn local_hide_storage_reaches_both_collector_and_ui_view_args() {
+        let local = LocalArgs {
+            interval: Some(7),
+            hide_storage: true,
+            alert_temp: Some(80),
+            alert_util_low_mins: Some(12),
+        };
+
+        let view = local_view_args(&local);
+
+        assert_eq!(view.interval, Some(7));
+        assert!(view.hide_storage);
+        assert_eq!(view.alert_temp, Some(80));
+        assert_eq!(view.alert_util_low_mins, Some(12));
+    }
 }

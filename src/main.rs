@@ -715,6 +715,7 @@ async fn run_command(cli: Cli, settings: Settings) {
 
                 let local_args = LocalArgs {
                     interval: settings.local.interval_secs,
+                    hide_storage: false,
                     alert_temp: None,
                     alert_util_low_mins: None,
                 };

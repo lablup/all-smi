@@ -196,7 +196,16 @@ impl FrameRenderer {
             None,
         );
 
-        let is_remote = args.hosts.is_some() || args.hostfile.is_some();
+        // Keep the established chrome mode independent of this rendering-only
+        // option. In particular, storage-free Users/Topology tabs and help must
+        // not gain different function keys merely because storage is hidden.
+        let chrome_is_remote = args.hosts.is_some() || args.hostfile.is_some();
+
+        // SSH and replay do not populate the HTTP host arguments. The opt-in
+        // hidden path can use AppState to select their remote device/layout
+        // pipeline without changing their existing chrome when the flag is off.
+        let render_remote_devices =
+            chrome_is_remote || (args.hide_storage && !view_state.is_local_mode);
 
         // Cluster Overview, dashboard items, and the tabs row are only meaningful
         // when monitoring multiple remote hosts. `is_local_mode` is false the moment
@@ -245,7 +254,7 @@ impl FrameRenderer {
                 cols,
                 avail,
             );
-            print_function_keys(&mut buffer, cols, rows, &view_state, is_remote);
+            print_function_keys(&mut buffer, cols, rows, &view_state, chrome_is_remote);
             return (buffer.get_buffer().to_string(), 0);
         }
 
@@ -262,7 +271,7 @@ impl FrameRenderer {
                 cols,
                 rows,
             );
-            print_function_keys(&mut buffer, cols, rows, &view_state, is_remote);
+            print_function_keys(&mut buffer, cols, rows, &view_state, chrome_is_remote);
             return (buffer.get_buffer().to_string(), 0);
         }
 
@@ -273,15 +282,15 @@ impl FrameRenderer {
         Self::render_gpu_section(&mut buffer, snapshot, &view_state, args, cols, rows, cache);
 
         // Render other device information based on mode
-        let visible_process_rows = if is_remote {
-            Self::render_remote_devices(&mut buffer, snapshot, width, cache);
+        let visible_process_rows = if render_remote_devices {
+            Self::render_remote_devices(&mut buffer, snapshot, args, width, cache);
             0
         } else {
-            Self::render_local_devices(&mut buffer, snapshot, cols, rows, cache)
+            Self::render_local_devices(&mut buffer, snapshot, args, cols, rows, cache)
         };
 
         // Add function keys to main content view
-        print_function_keys(&mut buffer, cols, rows, &view_state, is_remote);
+        print_function_keys(&mut buffer, cols, rows, &view_state, chrome_is_remote);
 
         (buffer.get_buffer().to_string(), visible_process_rows)
     }
@@ -543,6 +552,7 @@ impl FrameRenderer {
     fn render_remote_devices(
         buffer: &mut BufferWriter,
         snapshot: &RenderSnapshot,
+        args: &ViewArgs,
         width: usize,
         cache: Option<&ViewCache>,
     ) {
@@ -637,19 +647,21 @@ impl FrameRenderer {
         }
 
         // Storage with scroll offset
-        for (i, &idx) in stor_idx
-            .iter()
-            .skip(snapshot.storage_scroll_offset)
-            .take(10)
-            .enumerate()
-        {
-            let storage_info = &snapshot.storage_info[idx];
-            let hostname_scroll_offset = snapshot
-                .host_id_scroll_offsets
-                .get(&storage_info.host_id)
-                .copied()
-                .unwrap_or(0);
-            print_storage_info(buffer, i, storage_info, width, hostname_scroll_offset, true);
+        if !args.hide_storage {
+            for (i, &idx) in stor_idx
+                .iter()
+                .skip(snapshot.storage_scroll_offset)
+                .take(10)
+                .enumerate()
+            {
+                let storage_info = &snapshot.storage_info[idx];
+                let hostname_scroll_offset = snapshot
+                    .host_id_scroll_offsets
+                    .get(&storage_info.host_id)
+                    .copied()
+                    .unwrap_or(0);
+                print_storage_info(buffer, i, storage_info, width, hostname_scroll_offset, true);
+            }
         }
     }
 
@@ -747,6 +759,7 @@ impl FrameRenderer {
     fn render_local_devices(
         buffer: &mut BufferWriter,
         snapshot: &RenderSnapshot,
+        args: &ViewArgs,
         cols: u16,
         rows: u16,
         cache: Option<&ViewCache>,
@@ -766,20 +779,22 @@ impl FrameRenderer {
         }
 
         // Storage information for local mode
-        for (i, storage_info) in snapshot.storage_info.iter().enumerate() {
-            let hostname_scroll_offset = snapshot
-                .host_id_scroll_offsets
-                .get(&storage_info.host_id)
-                .copied()
-                .unwrap_or(0);
-            print_storage_info(
-                buffer,
-                i,
-                storage_info,
-                width,
-                hostname_scroll_offset,
-                false,
-            );
+        if !args.hide_storage {
+            for (i, storage_info) in snapshot.storage_info.iter().enumerate() {
+                let hostname_scroll_offset = snapshot
+                    .host_id_scroll_offsets
+                    .get(&storage_info.host_id)
+                    .copied()
+                    .unwrap_or(0);
+                print_storage_info(
+                    buffer,
+                    i,
+                    storage_info,
+                    width,
+                    hostname_scroll_offset,
+                    false,
+                );
+            }
         }
 
         // Process information for local mode (if available)
@@ -994,6 +1009,8 @@ fn lookup_mig_gpu<'a>(
 mod tests {
     use super::*;
     use crate::app_state::AppState;
+    use crate::device::MemoryInfo;
+    use crate::storage::StorageInfo;
     use crate::view::render_snapshot::RenderSnapshot;
 
     fn make_local_args() -> ViewArgs {
@@ -1003,6 +1020,288 @@ mod tests {
     fn make_snapshot() -> RenderSnapshot {
         let mut state = AppState::new();
         RenderSnapshot::capture(&mut state)
+    }
+
+    fn make_storage(host_id: &str, index: u32) -> StorageInfo {
+        StorageInfo {
+            mount_point: format!("/hidden-mount-{index}"),
+            total_bytes: 1_000_000_000,
+            available_bytes: 500_000_000,
+            host_id: host_id.to_string(),
+            hostname: host_id.to_string(),
+            index,
+        }
+    }
+
+    fn make_process(pid: u32) -> ProcessInfo {
+        ProcessInfo {
+            device_id: 0,
+            device_uuid: String::new(),
+            pid,
+            process_name: format!("worker-{pid}"),
+            used_memory: 0,
+            cpu_percent: 12.5,
+            memory_percent: 1.0,
+            memory_rss: 1024,
+            memory_vms: 2048,
+            user: "test-user".into(),
+            state: "R".into(),
+            start_time: "00:00".into(),
+            cpu_time: 1,
+            command: format!("worker-{pid} --train"),
+            ppid: 1,
+            threads: 1,
+            uses_gpu: false,
+            priority: 20,
+            nice_value: 0,
+            gpu_utilization: 0.0,
+        }
+    }
+
+    fn make_memory(host_id: &str) -> MemoryInfo {
+        MemoryInfo {
+            index: 0,
+            host_id: host_id.into(),
+            hostname: host_id.into(),
+            instance: host_id.into(),
+            total_bytes: 16 * 1024 * 1024 * 1024,
+            used_bytes: 8 * 1024 * 1024 * 1024,
+            available_bytes: 8 * 1024 * 1024 * 1024,
+            free_bytes: 8 * 1024 * 1024 * 1024,
+            buffers_bytes: 0,
+            cached_bytes: 0,
+            swap_total_bytes: 0,
+            swap_used_bytes: 0,
+            swap_free_bytes: 0,
+            utilization: 50.0,
+            time: String::new(),
+        }
+    }
+
+    #[test]
+    fn hidden_local_storage_reclaims_process_rows_and_keeps_footer_visible() {
+        let mut state = AppState::new();
+        state.process_info = (1..=20).map(make_process).collect();
+        state.storage_info = (0..50)
+            .map(|index| make_storage("localhost", index))
+            .collect();
+        let snapshot = RenderSnapshot::capture(&mut state);
+        let mut args = make_local_args();
+        args.hide_storage = true;
+
+        let (content, visible_process_rows) =
+            FrameRenderer::render_main(&snapshot, &args, 120, 40, None);
+
+        assert!(visible_process_rows > 0, "process rows were not reclaimed");
+        let visible_rows: Vec<&str> = content.lines().take(40).collect();
+        assert_eq!(visible_rows.len(), 40, "frame did not fill the viewport");
+        assert!(
+            visible_rows.iter().any(|row| row.contains("worker-")),
+            "no process data row landed in the viewport"
+        );
+        assert!(
+            visible_rows
+                .last()
+                .is_some_and(|row| row.contains("h:Help")),
+            "function-key footer did not land on the final viewport row"
+        );
+        assert!(!content.contains("Disk "), "storage label remained");
+        assert!(!content.contains("hidden-mount"), "storage mount remained");
+
+        args.hide_storage = false;
+        let (default_content, _) = FrameRenderer::render_main(&snapshot, &args, 120, 40, None);
+        assert!(
+            default_content.contains("Disk "),
+            "default storage display changed"
+        );
+    }
+
+    #[test]
+    fn hidden_local_render_is_identical_with_zero_or_many_disks() {
+        let mut empty_state = AppState::new();
+        empty_state.process_info = (1..=5).map(make_process).collect();
+        let empty_snapshot = RenderSnapshot::capture(&mut empty_state);
+
+        let mut many_state = AppState::new();
+        many_state.process_info = (1..=5).map(make_process).collect();
+        many_state.storage_info = (0..50)
+            .map(|index| make_storage("localhost", index))
+            .collect();
+        let many_snapshot = RenderSnapshot::capture(&mut many_state);
+
+        let mut args = make_local_args();
+        args.hide_storage = true;
+        let mut empty_buffer = BufferWriter::new();
+        let empty_rows = FrameRenderer::render_local_devices(
+            &mut empty_buffer,
+            &empty_snapshot,
+            &args,
+            120,
+            40,
+            None,
+        );
+        let mut many_buffer = BufferWriter::new();
+        let many_rows = FrameRenderer::render_local_devices(
+            &mut many_buffer,
+            &many_snapshot,
+            &args,
+            120,
+            40,
+            None,
+        );
+
+        assert_eq!(empty_rows, many_rows);
+        assert_eq!(empty_buffer.get_buffer(), many_buffer.get_buffer());
+    }
+
+    #[test]
+    fn hidden_remote_storage_keeps_cpu_and_memory_on_host_tabs() {
+        let mut state = AppState::new();
+        state.is_local_mode = false;
+        state.tabs = vec![
+            "All".into(),
+            crate::ui::tabs::USERS_TAB_NAME.into(),
+            crate::ui::tabs::TOPOLOGY_TAB_NAME.into(),
+            "host-a".into(),
+        ];
+        state.current_tab = 3;
+        let mut cpu = make_cpu();
+        cpu.host_id = "host-a".into();
+        cpu.hostname = "host-a".into();
+        state.cpu_info = vec![cpu];
+        state.memory_info = vec![make_memory("host-a")];
+        state.storage_info = vec![make_storage("host-a", 0)];
+        let snapshot = RenderSnapshot::capture(&mut state);
+        let mut args = ViewArgs::empty();
+        args.hosts = Some(vec!["host-a".into()]);
+        args.hide_storage = true;
+
+        let mut hidden = BufferWriter::new();
+        FrameRenderer::render_remote_devices(&mut hidden, &snapshot, &args, 120, None);
+        let hidden = hidden.get_buffer();
+        assert!(hidden.contains("CPU  "), "CPU row missing: {hidden}");
+        assert!(
+            hidden.contains("Host Memory"),
+            "memory row missing: {hidden}"
+        );
+        assert!(!hidden.contains("Disk "), "storage row remained: {hidden}");
+
+        args.hide_storage = false;
+        let mut visible = BufferWriter::new();
+        FrameRenderer::render_remote_devices(&mut visible, &snapshot, &args, 120, None);
+        assert!(visible.get_buffer().contains("Disk "));
+
+        let mut all_state = state;
+        all_state.current_tab = 0;
+        let all_snapshot = RenderSnapshot::capture(&mut all_state);
+        let mut all = BufferWriter::new();
+        FrameRenderer::render_remote_devices(&mut all, &all_snapshot, &args, 120, None);
+        assert!(all.get_buffer().is_empty(), "All tab emitted devices");
+    }
+
+    #[test]
+    fn hide_storage_does_not_change_storage_free_tabs_or_help() {
+        let mut ssh_args = ViewArgs::empty();
+        ssh_args.ssh = Some("user@host-a".into());
+
+        let mut replay_args = ViewArgs::empty();
+        replay_args.replay = Some("recording.ndjson".into());
+
+        let mut configured_http_args = ViewArgs::empty();
+        configured_http_args.hosts = Some(vec!["host-a:9090".into()]);
+
+        for (transport, args, replay) in [
+            ("ssh", ssh_args, false),
+            ("replay", replay_args, true),
+            ("configured HTTP", configured_http_args, false),
+        ] {
+            for current_tab in [1, 2] {
+                let mut state = AppState::new();
+                state.is_local_mode = false;
+                state.tabs = vec![
+                    "All".into(),
+                    crate::ui::tabs::USERS_TAB_NAME.into(),
+                    crate::ui::tabs::TOPOLOGY_TAB_NAME.into(),
+                    "host-a".into(),
+                ];
+                state.current_tab = current_tab;
+                state.storage_info = vec![make_storage("host-a", 0)];
+                if replay {
+                    state.replay = Some(crate::view::data_collection::initial_replay_state(
+                        1.0, false,
+                    ));
+                }
+                let snapshot = RenderSnapshot::capture(&mut state);
+
+                let mut hidden_args = args.clone();
+                hidden_args.hide_storage = true;
+                let (visible, _) = FrameRenderer::render_main(&snapshot, &args, 120, 40, None);
+                let (hidden, _) =
+                    FrameRenderer::render_main(&snapshot, &hidden_args, 120, 40, None);
+                let visible_body = visible
+                    .split_once("\r\n")
+                    .map_or(&*visible, |(_, body)| body);
+                let hidden_body = hidden.split_once("\r\n").map_or(&*hidden, |(_, body)| body);
+                assert_eq!(
+                    visible_body, hidden_body,
+                    "{transport} tab {current_tab} changed"
+                );
+
+                assert_eq!(
+                    FrameRenderer::render_help(&snapshot, &args, 120, 50),
+                    FrameRenderer::render_help(&snapshot, &hidden_args, 120, 50),
+                    "{transport} help changed"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn replay_hide_storage_suppresses_recorded_storage_rows() {
+        let mut state = AppState::new();
+        state.is_local_mode = false;
+        state.storage_info = vec![make_storage("recorded-host", 0)];
+        let snapshot = RenderSnapshot::capture(&mut state);
+        let mut args = ViewArgs::empty();
+        args.replay = Some("recording.ndjson".into());
+        args.hide_storage = true;
+
+        let (hidden, _) = FrameRenderer::render_main(&snapshot, &args, 120, 40, None);
+        assert!(!hidden.contains("Disk "));
+        assert!(!hidden.contains("hidden-mount"));
+
+        args.hide_storage = false;
+        let (visible, _) = FrameRenderer::render_main(&snapshot, &args, 120, 40, None);
+        assert!(visible.contains("Disk "));
+    }
+
+    #[test]
+    fn hidden_replay_renders_the_gpu_count_reserved_by_remote_layout() {
+        let mut state = AppState::new();
+        state.is_local_mode = false;
+        state.gpu_info = (0..30)
+            .map(|index| make_gpu(&format!("gpu-{index}"), &format!("G{index:02}")))
+            .collect();
+        state.storage_info = (0..50)
+            .map(|index| make_storage("recorded-host", index))
+            .collect();
+        let snapshot = RenderSnapshot::capture(&mut state);
+        let mut args = ViewArgs::empty();
+        args.replay = Some("recording.ndjson".into());
+        args.hide_storage = true;
+
+        let view_state = snapshot.as_app_state();
+        let content_area = LayoutCalculator::calculate_content_area(&view_state, 120, 40);
+        let params =
+            LayoutCalculator::calculate_gpu_display_params(&view_state, &args, &content_area);
+        let (content, _) = FrameRenderer::render_main(&snapshot, &args, 120, 40, None);
+        let rendered_gpus = (0..30)
+            .filter(|index| content.contains(&format!("G{index:02}")))
+            .count();
+
+        assert_eq!(rendered_gpus, params.max_items.min(30));
+        assert!(!content.contains("Disk "));
+        assert!(!content.contains("hidden-mount"));
     }
 
     // -----------------------------------------------------------------------
