@@ -25,6 +25,8 @@ use crate::device::{
 };
 use crate::storage::info::StorageInfo;
 
+use super::chassis_metrics_parser::ChassisParseState;
+
 /// Structured return type for [`MetricsParser::parse_metrics`], replacing the
 /// previous 6-tuple. Each field holds the parsed device records for a single
 /// metric family.
@@ -34,6 +36,7 @@ pub struct ParsedMetrics {
     pub cpu_info: Vec<CpuInfo>,
     pub memory_info: Vec<MemoryInfo>,
     pub storage_info: Vec<StorageInfo>,
+    pub chassis_info: Vec<crate::device::ChassisInfo>,
     pub vgpu_info: Vec<VgpuHostInfo>,
     pub mig_info: Vec<MigGpuInfo>,
     /// Per-process rows parsed from `all_smi_process_*` metric families on
@@ -135,6 +138,7 @@ impl MetricsParser {
         let mut cpu_info_map: HashMap<String, CpuInfo> = HashMap::with_capacity(8);
         let mut memory_info_map: HashMap<String, MemoryInfo> = HashMap::with_capacity(8);
         let mut storage_info_map: HashMap<String, StorageInfo> = HashMap::with_capacity(32);
+        let mut chassis_state = ChassisParseState::new();
         // Keyed by (gpu_uuid, vgpu_id) for instance rows, and by (gpu_uuid, "__host__")
         // for host-scoped metrics.
         let mut vgpu_state = VgpuParseState::new();
@@ -170,7 +174,9 @@ impl MetricsParser {
                 // either the GPU (`gpu_uuid`/`gpu_index`) or NPU
                 // (`npu_uuid`/`npu_index`) label aliases; see
                 // `process_gpu_metrics` for the fallback chain.
-                if metric_name.starts_with("vgpu_") {
+                if metric_name.starts_with("chassis_") {
+                    chassis_state.process(&metric_name, &labels, value, host);
+                } else if metric_name.starts_with("vgpu_") {
                     vgpu_state.process(&metric_name, &labels, value, host);
                 } else if metric_name == "gpu_mig_mode" || metric_name.starts_with("mig_instance_")
                 {
@@ -259,6 +265,7 @@ impl MetricsParser {
             cpu_info: cpu_info_map.into_values().collect(),
             memory_info: memory_info_map.into_values().collect(),
             storage_info: storage_info_map.into_values().collect(),
+            chassis_info: chassis_state.finish(),
             vgpu_info: vgpu_state.finish(),
             mig_info: mig_state.finish(),
             process_info: process_info_map.into_values().collect(),

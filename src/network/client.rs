@@ -25,7 +25,7 @@ use tokio::sync::RwLock;
 
 use crate::app_state::ConnectionStatus;
 use crate::common::config::{AppConfig, EnvConfig};
-use crate::device::{CpuInfo, GpuInfo, MemoryInfo};
+use crate::device::{ChassisInfo, CpuInfo, GpuInfo, MemoryInfo};
 use crate::network::metrics_parser::ParsedProcessRow;
 use crate::storage::info::StorageInfo;
 
@@ -253,6 +253,7 @@ impl NetworkClient {
         Vec<CpuInfo>,
         Vec<MemoryInfo>,
         Vec<StorageInfo>,
+        Vec<ChassisInfo>,
         Vec<crate::device::VgpuHostInfo>,
         Vec<crate::device::MigGpuInfo>,
         Vec<ParsedProcessRow>,
@@ -262,6 +263,7 @@ impl NetworkClient {
         let mut all_cpu_info = Vec::new();
         let mut all_memory_info = Vec::new();
         let mut all_storage_info = Vec::new();
+        let mut all_chassis_info = Vec::new();
         let mut all_vgpu_info: Vec<crate::device::VgpuHostInfo> = Vec::new();
         let mut all_mig_info: Vec<crate::device::MigGpuInfo> = Vec::new();
         let mut all_process_info: Vec<ParsedProcessRow> = Vec::new();
@@ -385,7 +387,8 @@ impl NetworkClient {
 
                     match task_result {
                         Ok(Some((host, text, error))) => {
-                            let host_identifier = host.clone();
+                            let host_identifier =
+                                crate::common::http_hosts::http_host_identifier(&host);
                             let mut connection_status =
                                 ConnectionStatus::new(host_identifier.clone(), host.clone());
 
@@ -401,14 +404,21 @@ impl NetworkClient {
                                     connection_statuses.push(connection_status);
                                 } else {
                                     let parser = super::metrics_parser::MetricsParser::new();
-                                    let parsed = parser.parse_metrics(&text, &host, re);
+                                    let parsed = parser.parse_metrics(&text, &host_identifier, re);
 
                                     // Extract the instance name from device info if available
                                     let instance_name = if let Some(first_gpu) = parsed.gpu_info.first() {
                                         Some(first_gpu.instance.clone())
                                     } else if let Some(first_cpu) = parsed.cpu_info.first() {
                                         Some(first_cpu.instance.clone())
-                                    } else { parsed.memory_info.first().map(|first_memory| first_memory.instance.clone()) };
+                                    } else if let Some(first_memory) = parsed.memory_info.first() {
+                                        Some(first_memory.instance.clone())
+                                    } else {
+                                        parsed
+                                            .chassis_info
+                                            .first()
+                                            .map(|chassis| chassis.instance.clone())
+                                    };
 
                                     // Store the instance name as actual_hostname for display purposes
                                     connection_status.actual_hostname = instance_name;
@@ -418,6 +428,7 @@ impl NetworkClient {
                                     all_cpu_info.extend(parsed.cpu_info);
                                     all_memory_info.extend(parsed.memory_info);
                                     all_storage_info.extend(parsed.storage_info);
+                                    all_chassis_info.extend(parsed.chassis_info);
                                     all_vgpu_info.extend(parsed.vgpu_info);
                                     all_mig_info.extend(parsed.mig_info);
                                     all_process_info.extend(parsed.process_info);
@@ -459,6 +470,7 @@ impl NetworkClient {
             all_cpu_info,
             all_memory_info,
             all_storage_info,
+            all_chassis_info,
             all_vgpu_info,
             all_mig_info,
             all_process_info,

@@ -23,4 +23,7 @@ pub mod ui_events;
 pub mod ui_loop;
 pub mod view_cache;
 
+#[cfg(test)]
+mod remote_view_tests;
+
 pub use runner::*;

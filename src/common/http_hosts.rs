@@ -111,6 +111,22 @@ pub(crate) fn parse_http_host_url(host: &str) -> Result<Url, HttpHostError> {
     Ok(url)
 }
 
+/// Return the scheme-less endpoint identifier used by remote-view tabs,
+/// connection status, and parsed device rows.
+///
+/// Callers pass values that have already gone through
+/// [`normalize_http_hosts`]. Keeping the conversion here, beside the URL
+/// parser, prevents the transport and UI layers from inventing subtly
+/// different identifiers for explicit `http://` / `https://` endpoints.
+pub(crate) fn http_host_identifier(host: &str) -> String {
+    parse_http_host_url(host)
+        .map(|url| url[url::Position::BeforeHost..url::Position::AfterPort].to_string())
+        // NetworkClient also creates a failure status for malformed inputs.
+        // Preserve the original value in that defensive path so the error is
+        // still attributable even though normal startup validation rejects it.
+        .unwrap_or_else(|_| host.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -210,5 +226,19 @@ mod tests {
             strings(&["https://does-not-exist.invalid:9443", "[2001:db8::2]:9090"])
         );
         assert_eq!(parse_http_host_url(&hosts[0]).unwrap().scheme(), "https");
+    }
+
+    #[test]
+    fn endpoint_identifier_is_stable_across_schemes_and_paths() {
+        assert_eq!(http_host_identifier("http://node-a:9090"), "node-a:9090");
+        assert_eq!(
+            http_host_identifier("https://node-a:9090/ignored/path"),
+            "node-a:9090"
+        );
+        assert_eq!(http_host_identifier("node-a:9090"), "node-a:9090");
+        assert_eq!(
+            http_host_identifier("http://[2001:db8::1]:9090"),
+            "[2001:db8::1]:9090"
+        );
     }
 }
