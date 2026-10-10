@@ -188,3 +188,79 @@ fn update_fan(chassis: &mut ChassisInfo, labels: &HashMap<String, String>, speed
         chassis.fan_speeds.sort_by_key(|fan| fan.id);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn labels(hostname: &str, instance: &str) -> HashMap<String, String> {
+        HashMap::from([
+            ("hostname".to_string(), hostname.to_string()),
+            ("instance".to_string(), instance.to_string()),
+        ])
+    }
+
+    #[test]
+    fn invalid_readings_are_ignored_and_power_is_bounded() {
+        let mut state = ChassisParseState::new();
+        let mut metric_labels = labels("reported-host", "reported-instance");
+
+        state.process(
+            "chassis_power_watts",
+            &metric_labels,
+            MAX_POWER_WATTS * 2.0,
+            "endpoint:9090",
+        );
+        state.process(
+            "chassis_inlet_temperature_celsius",
+            &metric_labels,
+            f64::INFINITY,
+            "endpoint:9090",
+        );
+        metric_labels.insert("fan_id".to_string(), "1".to_string());
+        state.process(
+            "chassis_fan_speed_rpm",
+            &metric_labels,
+            1_234.5,
+            "endpoint:9090",
+        );
+
+        let chassis = state.finish().pop().expect("one chassis record");
+        assert_eq!(chassis.host_id, "endpoint:9090");
+        assert_eq!(chassis.total_power_watts, Some(MAX_POWER_WATTS));
+        assert_eq!(chassis.inlet_temperature, None);
+        assert!(chassis.fan_speeds.is_empty());
+    }
+
+    #[test]
+    fn scrape_cardinality_limits_chassis_and_fans() {
+        let mut state = ChassisParseState::new();
+
+        for index in 0..=MAX_CHASSIS_PER_SCRAPE {
+            state.process(
+                "chassis_info",
+                &labels(&format!("host-{index}"), &format!("instance-{index}")),
+                1.0,
+                "endpoint:9090",
+            );
+        }
+
+        let mut chassis = state.finish();
+        assert_eq!(chassis.len(), MAX_CHASSIS_PER_SCRAPE);
+
+        let mut fan_state = ChassisParseState::new();
+        for id in 0..=MAX_FANS_PER_CHASSIS {
+            let mut metric_labels = labels("reported-host", "reported-instance");
+            metric_labels.insert("fan_id".to_string(), id.to_string());
+            fan_state.process(
+                "chassis_fan_speed_rpm",
+                &metric_labels,
+                1_000.0,
+                "endpoint:9090",
+            );
+        }
+
+        chassis = fan_state.finish();
+        assert_eq!(chassis[0].fan_speeds.len(), MAX_FANS_PER_CHASSIS);
+    }
+}
