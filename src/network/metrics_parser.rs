@@ -27,6 +27,24 @@ use crate::storage::info::StorageInfo;
 
 use super::chassis_metrics_parser::ChassisParseState;
 
+/// Maximum number of response-body bytes accepted from a remote metrics endpoint.
+///
+/// The network client enforces this while reading the response, and the parser
+/// repeats the limit for callers that supply metrics text directly.
+pub(crate) const MAX_METRICS_TEXT_BYTES: usize = 10_485_760;
+
+fn truncate_utf8_at_byte_limit(text: &str, max_bytes: usize) -> &str {
+    if text.len() <= max_bytes {
+        return text;
+    }
+
+    let mut boundary = max_bytes;
+    while boundary > 0 && !text.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    &text[..boundary]
+}
+
 /// Structured return type for [`MetricsParser::parse_metrics`], replacing the
 /// previous 6-tuple. Each field holds the parsed device records for a single
 /// metric family.
@@ -139,17 +157,19 @@ impl MetricsParser {
     ) -> ParsedRemoteMetrics {
         // Limit the maximum size of HashMaps to prevent memory exhaustion
         const MAX_DEVICES_PER_TYPE: usize = 256;
-        const MAX_TEXT_SIZE: usize = 10_485_760; // 10MB max input
 
-        // Validate input size
-        if text.len() > MAX_TEXT_SIZE {
+        // Validate input size. Move the byte cutoff to the preceding UTF-8
+        // boundary so a multi-byte code point straddling the limit cannot
+        // make the defensive truncation itself panic.
+        let text = if text.len() > MAX_METRICS_TEXT_BYTES {
             eprintln!(
                 "Warning: Metrics text too large ({}), truncating to 10MB",
                 text.len()
             );
-            let truncated = &text[..MAX_TEXT_SIZE];
-            return self.parse_metrics_with_chassis(truncated, host, re);
-        }
+            truncate_utf8_at_byte_limit(text, MAX_METRICS_TEXT_BYTES)
+        } else {
+            text
+        };
 
         let mut gpu_info_map: HashMap<String, GpuInfo> = HashMap::with_capacity(16);
         let mut cpu_info_map: HashMap<String, CpuInfo> = HashMap::with_capacity(8);
@@ -1640,6 +1660,33 @@ mod tests {
 
     fn create_test_regex() -> Regex {
         Regex::new(r"^all_smi_([^\{]+)\{([^}]+)\} ([\d\.]+)$").unwrap()
+    }
+
+    #[test]
+    fn utf8_truncation_moves_to_the_previous_character_boundary() {
+        let text = "abc가z";
+
+        assert_eq!(truncate_utf8_at_byte_limit(text, 4), "abc");
+    }
+
+    #[test]
+    fn oversized_unicode_metrics_do_not_panic_at_the_byte_limit() {
+        let parser = create_test_parser();
+        let re = create_test_regex();
+        let metric = concat!(
+            "all_smi_gpu_utilization{gpu=\"NVIDIA A100\", instance=\"node-1\", ",
+            "gpu_uuid=\"GPU-X\", gpu_index=\"0\"} 50\n"
+        );
+        let mut text = String::with_capacity(MAX_METRICS_TEXT_BYTES + 3);
+        text.push_str(metric);
+        text.push_str(&"x".repeat(MAX_METRICS_TEXT_BYTES - metric.len() - 1));
+        // This code point begins one byte before the cap, so the old direct
+        // `&text[..MAX_METRICS_TEXT_BYTES]` slice panicked inside the parser.
+        text.push('가');
+
+        let parsed = parser.parse_metrics(&text, "node-1:10001", &re);
+
+        assert_eq!(parsed.gpu_info.len(), 1);
     }
 
     /// Minimal agent-side [`GpuInfo`] used to drive genuine

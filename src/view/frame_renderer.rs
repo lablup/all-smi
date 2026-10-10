@@ -45,8 +45,8 @@ use crate::ui::renderer::{
     print_loading_indicator, print_memory_info, print_mig_section, print_process_info,
     print_storage_info, print_vgpu_section,
 };
+use crate::ui::renderers::chassis_renderer::print_chassis_energy_row_for_host;
 use crate::ui::renderers::gpu_renderer::print_gpu_diagnostic_rows;
-use crate::ui::renderers::print_chassis_energy_row;
 use crate::ui::tabs::draw_tabs;
 use crate::ui::text::print_colored_text;
 use crate::view::render_snapshot::RenderSnapshot;
@@ -482,11 +482,16 @@ impl FrameRenderer {
                 }
                 // Energy session + cost row (issue #191). Self-hides
                 // when no chassis samples have been recorded yet.
-                print_chassis_energy_row(
+                let energy_host = if snapshot.is_local_mode {
+                    &chassis.hostname
+                } else {
+                    &chassis.host_id
+                };
+                print_chassis_energy_row_for_host(
                     buffer,
-                    chassis,
                     snapshot.energy.integrator(),
                     &snapshot.energy_config,
+                    energy_host,
                 );
             }
             return;
@@ -521,11 +526,16 @@ impl FrameRenderer {
             }
             // Energy session + cost row (issue #191). Self-hides when no
             // chassis samples have been recorded yet.
-            print_chassis_energy_row(
+            let energy_host = if snapshot.is_local_mode {
+                &chassis.hostname
+            } else {
+                &chassis.host_id
+            };
+            print_chassis_energy_row_for_host(
                 buffer,
-                chassis,
                 snapshot.energy.integrator(),
                 &snapshot.energy_config,
+                energy_host,
             );
         }
     }

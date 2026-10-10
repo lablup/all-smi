@@ -26,8 +26,56 @@ use tokio::sync::RwLock;
 use crate::app_state::ConnectionStatus;
 use crate::common::config::{AppConfig, EnvConfig};
 use crate::device::{ChassisInfo, CpuInfo, GpuInfo, MemoryInfo};
-use crate::network::metrics_parser::ParsedProcessRow;
+use crate::network::metrics_parser::{MAX_METRICS_TEXT_BYTES, ParsedProcessRow};
 use crate::storage::info::StorageInfo;
+
+const INITIAL_METRICS_BODY_CAPACITY: usize = 64 * 1024;
+
+async fn read_response_text_with_limit(
+    mut response: reqwest::Response,
+    max_bytes: usize,
+) -> Result<String, reqwest::Error> {
+    // Do not trust Content-Length enough to preallocate the full advertised
+    // size. A small hint avoids repeated growth for normal responses without
+    // letting a malicious header reserve the entire limit before any bytes
+    // arrive.
+    let initial_capacity = response
+        .content_length()
+        .and_then(|length| usize::try_from(length).ok())
+        .unwrap_or_default()
+        .min(max_bytes)
+        .min(INITIAL_METRICS_BODY_CAPACITY);
+    let mut body = Vec::with_capacity(initial_capacity);
+
+    while body.len() < max_bytes {
+        let Some(chunk) = response.chunk().await? else {
+            break;
+        };
+        let bytes_to_copy = chunk.len().min(max_bytes - body.len());
+        body.extend_from_slice(&chunk[..bytes_to_copy]);
+
+        if bytes_to_copy < chunk.len() || body.len() == max_bytes {
+            break;
+        }
+    }
+
+    // Dropping a response whose body exceeded the limit cancels the remaining
+    // body stream instead of buffering it in the background. Match reqwest's
+    // `Response::text` behavior for malformed UTF-8 by replacing invalid byte
+    // sequences rather than rejecting the entire scrape.
+    drop(response);
+    Ok(String::from_utf8_lossy(&body).into_owned())
+}
+
+async fn abort_pending_tasks<T>(tasks: &mut FuturesUnordered<tokio::task::JoinHandle<T>>) {
+    for task in tasks.iter() {
+        task.abort();
+    }
+
+    // Await every aborted handle so cancellation has taken effect before the
+    // collector returns and the next polling tick can begin.
+    while tasks.next().await.is_some() {}
+}
 
 pub struct NetworkClient {
     client: reqwest::Client,
@@ -358,7 +406,9 @@ impl NetworkClient {
                     match send_result {
                         Ok(response) => {
                             if response.status().is_success() {
-                                let text_result = response.text().await;
+                                let text_result =
+                                    read_response_text_with_limit(response, MAX_METRICS_TEXT_BYTES)
+                                        .await;
                                 match text_result {
                                     Ok(text) => return Some((host, text, None)),
                                     Err(e) => {
@@ -492,7 +542,10 @@ impl NetworkClient {
                 }
                 // Timeout reached - return partial results
                 _ = &mut timeout_future => {
-                    // Mark remaining hosts as timed out
+                    // A dropped JoinHandle detaches its task. Explicitly abort
+                    // and drain every remaining handle so retry/download tasks
+                    // cannot overlap with a later collector tick.
+                    abort_pending_tasks(&mut fetch_futures).await;
                     break;
                 }
             }
@@ -522,5 +575,75 @@ impl NetworkClient {
 impl Default for NetworkClient {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::future::pending;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    use super::*;
+
+    #[tokio::test]
+    async fn response_body_reading_stops_at_byte_limit() {
+        const BODY_SIZE: usize = 128 * 1024;
+        const READ_LIMIT: usize = 1024;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 1024];
+            let _ = socket.read(&mut request).await;
+            let headers = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {BODY_SIZE}\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n"
+            );
+            socket.write_all(headers.as_bytes()).await.unwrap();
+            let _ = socket.write_all(&vec![b'x'; BODY_SIZE]).await;
+        });
+
+        let response = reqwest::Client::new()
+            .get(format!("http://{address}/metrics"))
+            .send()
+            .await
+            .unwrap();
+        let text = read_response_text_with_limit(response, READ_LIMIT)
+            .await
+            .unwrap();
+
+        assert_eq!(text.len(), READ_LIMIT);
+        assert!(text.bytes().all(|byte| byte == b'x'));
+        let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn abort_pending_tasks_waits_for_cancellation() {
+        struct DropCounter(Arc<AtomicUsize>);
+
+        impl Drop for DropCounter {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let task_dropped = dropped.clone();
+        let task = tokio::spawn(async move {
+            let _counter = DropCounter(task_dropped);
+            let _ = started_tx.send(());
+            pending::<()>().await;
+        });
+        started_rx.await.unwrap();
+
+        let mut tasks = FuturesUnordered::new();
+        tasks.push(task);
+        abort_pending_tasks(&mut tasks).await;
+
+        assert!(tasks.is_empty());
+        assert_eq!(dropped.load(Ordering::SeqCst), 1);
     }
 }

@@ -141,11 +141,19 @@ async fn explicit_http_host_renders_devices_chassis_energy_and_cost() {
         assert_eq!(state.hostname_to_host_id["node-a"], host_id);
         assert_eq!(state.gpu_info[0].host_id, host_id);
         assert_eq!(state.chassis_info[0].host_id, host_id);
-        let energy_key = EnergyKey::chassis("node-a");
+        let energy_key = EnergyKey::chassis(host_id.clone());
         let session_joules = state.energy.integrator().session_joules(&energy_key);
         let lifetime_joules = state.energy.integrator().lifetime_joules(&energy_key);
         assert!(session_joules > 0.0);
         assert_eq!(lifetime_joules, session_joules);
+        assert_eq!(
+            state
+                .energy
+                .integrator()
+                .session_joules(&EnergyKey::chassis("node-a")),
+            0.0,
+            "remote chassis energy must not use the exporter hostname as its identity"
+        );
         assert!(
             session_joules < 900_000.0,
             "remote lifetime counter must not become viewer session energy"
