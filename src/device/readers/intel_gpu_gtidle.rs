@@ -19,6 +19,21 @@
 //! is used as an activity estimate. It is deliberately treated as a fallback:
 //! active residency is not the same as engine busy time and must not replace a
 //! valid zero-percent engine-busy sample.
+//!
+//! A zero idle delta is ambiguous: a GT under sustained full load never enters
+//! its deepest idle state, so its counter legitimately stops advancing, but a
+//! frozen counter (seen on Xe2 BMG gt0) looks identical. The two are told apart
+//! by liveness: a zero delta is trusted as full activity only from a counter
+//! that has been observed advancing since it was seeded (or since its last
+//! reset). A zero delta from a counter that never advanced is "stalled": it is
+//! excluded from the max across GTs, and when no GT is trusted the readout is
+//! reported as stalled instead of a false 100%.
+//!
+//! Accepted trade-offs, both inherent to idle-residency data: if all-smi starts
+//! while a GT is already under sustained full load, that GT has never been seen
+//! advancing and is excluded until it idles once, so utilization can under-read
+//! until then; and a counter that advanced earlier and freezes later is
+//! indistinguishable from sustained load and still reads 100%.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -31,10 +46,14 @@ use crate::device::readers::intel_gpu_sysfs::read_gtidle_ms;
 const GTIDLE_SEEDING_NOTE: &str =
     "Xe GT idle residency seeded (utilization available next refresh)";
 
+const GTIDLE_STALLED_NOTE: &str = "Xe GT idle residency not advancing (utilization unavailable)";
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum GtidleReadout {
     Unavailable,
     Seeded,
+    /// No GT produced a trusted value and at least one counter is frozen.
+    Stalled,
     Available(f64),
 }
 
@@ -42,6 +61,9 @@ enum GtidleReadout {
 struct GtidleSample {
     idle_ms: u64,
     tick: Instant,
+    /// True once this counter has been observed advancing since seeding or
+    /// its last reset. Only then is a zero delta trusted as full activity.
+    advanced: bool,
 }
 
 #[derive(Debug, Default)]
@@ -79,6 +101,13 @@ pub fn apply_fallback(
                 "Xe GT idle residency (seeded)".to_string(),
             );
         }
+        GtidleReadout::Stalled => {
+            detail.insert("Utilization".to_string(), GTIDLE_STALLED_NOTE.to_string());
+            detail.insert(
+                "Source: Utilization".to_string(),
+                "Xe GT idle residency (stalled)".to_string(),
+            );
+        }
         GtidleReadout::Unavailable => {}
     }
 }
@@ -114,6 +143,7 @@ fn refresh_at(state: &mut GtidleState, device_dir: &Path, now: Instant) -> Gtidl
     let mut max_utilization = 0.0_f64;
     let mut has_delta = false;
     let mut seeded = false;
+    let mut stalled = false;
 
     for (sample, reading) in state.samples.iter_mut().zip(readings) {
         let Some(current_idle_ms) = reading else {
@@ -126,6 +156,7 @@ fn refresh_at(state: &mut GtidleState, device_dir: &Path, now: Instant) -> Gtidl
             *sample = Some(GtidleSample {
                 idle_ms: current_idle_ms,
                 tick: now,
+                advanced: false,
             });
             seeded = true;
             continue;
@@ -138,6 +169,7 @@ fn refresh_at(state: &mut GtidleState, device_dir: &Path, now: Instant) -> Gtidl
             *sample = Some(GtidleSample {
                 idle_ms: current_idle_ms,
                 tick: now,
+                advanced: false,
             });
             seeded = true;
             continue;
@@ -148,7 +180,21 @@ fn refresh_at(state: &mut GtidleState, device_dir: &Path, now: Instant) -> Gtidl
             continue;
         }
 
-        let idle_us = u128::from(current_idle_ms - previous.idle_ms) * 1_000;
+        let delta_ms = current_idle_ms - previous.idle_ms;
+        if delta_ms == 0 && !previous.advanced {
+            // Never seen advancing: cannot tell a frozen counter from a busy
+            // GT, so do not contribute. Still move the baseline forward so the
+            // first real advance is measured over the latest interval only.
+            *sample = Some(GtidleSample {
+                idle_ms: current_idle_ms,
+                tick: now,
+                advanced: false,
+            });
+            stalled = true;
+            continue;
+        }
+
+        let idle_us = u128::from(delta_ms) * 1_000;
         let idle_fraction = idle_us as f64 / elapsed_us as f64;
         let utilization = ((1.0 - idle_fraction) * 100.0).clamp(0.0, 100.0);
         max_utilization = max_utilization.max(utilization);
@@ -156,13 +202,18 @@ fn refresh_at(state: &mut GtidleState, device_dir: &Path, now: Instant) -> Gtidl
         *sample = Some(GtidleSample {
             idle_ms: current_idle_ms,
             tick: now,
+            advanced: previous.advanced || delta_ms > 0,
         });
     }
 
+    // Precedence: any trusted value, then Seeded (a counter was just
+    // (re)baselined), then Stalled (only frozen counters remain).
     if has_delta {
         GtidleReadout::Available(max_utilization)
     } else if seeded {
         GtidleReadout::Seeded
+    } else if stalled {
+        GtidleReadout::Stalled
     } else {
         GtidleReadout::Unavailable
     }
@@ -247,6 +298,127 @@ mod tests {
         write_gt(dir.path(), 1, 600);
         let result = refresh_at(&mut state, dir.path(), start + Duration::from_secs(1));
         assert_eq!(result, GtidleReadout::Available(50.0));
+    }
+
+    fn sec(start: Instant, n: u64) -> Instant {
+        start + Duration::from_secs(n)
+    }
+
+    #[test]
+    fn frozen_gt_is_excluded_from_max() {
+        let dir = tempdir().unwrap();
+        write_gt(dir.path(), 0, 439_722);
+        write_gt(dir.path(), 1, 1_355_117);
+        let start = Instant::now();
+        let mut state = GtidleState::empty();
+        assert_eq!(
+            refresh_at(&mut state, dir.path(), start),
+            GtidleReadout::Seeded
+        );
+
+        write_gt(dir.path(), 1, 1_361_119);
+        let result = refresh_at(&mut state, dir.path(), sec(start, 6));
+        assert_eq!(result, GtidleReadout::Available(0.0));
+    }
+
+    #[test]
+    fn proven_busy_gt_still_reports_full_utilization() {
+        let dir = tempdir().unwrap();
+        write_gt(dir.path(), 0, 1_000);
+        let start = Instant::now();
+        let mut state = GtidleState::empty();
+        refresh_at(&mut state, dir.path(), start);
+
+        write_gt(dir.path(), 0, 1_500);
+        assert_eq!(
+            refresh_at(&mut state, dir.path(), sec(start, 1)),
+            GtidleReadout::Available(50.0)
+        );
+        // Counter stops advancing: sustained load on a proven counter.
+        assert_eq!(
+            refresh_at(&mut state, dir.path(), sec(start, 2)),
+            GtidleReadout::Available(100.0)
+        );
+    }
+
+    #[test]
+    fn frozen_single_gt_reports_stalled_not_full() {
+        let dir = tempdir().unwrap();
+        write_gt(dir.path(), 0, 439_722);
+        let start = Instant::now() - Duration::from_secs(10);
+        let mut state = GtidleState::empty();
+        refresh_at(&mut state, dir.path(), start);
+        assert_eq!(
+            refresh_at(&mut state, dir.path(), sec(start, 6)),
+            GtidleReadout::Stalled
+        );
+
+        let state = Mutex::new(state);
+        let mut detail = HashMap::new();
+        let mut utilization = 0.0;
+        apply_fallback(
+            "xe",
+            &engine_readout(Some(ENGINE_UNAVAILABLE_NOTE)),
+            &state,
+            dir.path(),
+            &mut detail,
+            &mut utilization,
+        );
+        assert_eq!(utilization, 0.0);
+        assert_eq!(
+            detail.get("Utilization").map(String::as_str),
+            Some(GTIDLE_STALLED_NOTE)
+        );
+        assert_eq!(
+            detail.get("Source: Utilization").map(String::as_str),
+            Some("Xe GT idle residency (stalled)")
+        );
+    }
+
+    #[test]
+    fn stalled_baseline_moves_forward() {
+        let dir = tempdir().unwrap();
+        write_gt(dir.path(), 0, 1_000);
+        let start = Instant::now();
+        let mut state = GtidleState::empty();
+        refresh_at(&mut state, dir.path(), start);
+        for n in 1..=3 {
+            assert_eq!(
+                refresh_at(&mut state, dir.path(), sec(start, n)),
+                GtidleReadout::Stalled
+            );
+        }
+        // Advances by 500 ms over the last 1 s interval only. A stale
+        // baseline would spread it over 4 s and report 87.5%.
+        write_gt(dir.path(), 0, 1_500);
+        assert_eq!(
+            refresh_at(&mut state, dir.path(), sec(start, 4)),
+            GtidleReadout::Available(50.0)
+        );
+    }
+
+    #[test]
+    fn counter_reset_clears_liveness() {
+        let dir = tempdir().unwrap();
+        write_gt(dir.path(), 0, 1_000);
+        let start = Instant::now();
+        let mut state = GtidleState::empty();
+        refresh_at(&mut state, dir.path(), start);
+        write_gt(dir.path(), 0, 1_500);
+        assert_eq!(
+            refresh_at(&mut state, dir.path(), sec(start, 1)),
+            GtidleReadout::Available(50.0)
+        );
+
+        write_gt(dir.path(), 0, 5);
+        assert_eq!(
+            refresh_at(&mut state, dir.path(), sec(start, 2)),
+            GtidleReadout::Seeded
+        );
+        assert_eq!(
+            refresh_at(&mut state, dir.path(), sec(start, 3)),
+            GtidleReadout::Stalled
+        );
     }
 
     fn engine_readout(status_note: Option<&'static str>) -> EngineReadout {
