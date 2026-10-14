@@ -202,7 +202,8 @@ fn refresh_at(state: &mut GtidleState, device_dir: &Path, now: Instant) -> Gtidl
         *sample = Some(GtidleSample {
             idle_ms: current_idle_ms,
             tick: now,
-            advanced: previous.advanced || delta_ms > 0,
+            // Reaching here means the counter advanced now or was proven before.
+            advanced: true,
         });
     }
 
@@ -345,11 +346,14 @@ mod tests {
     fn frozen_single_gt_reports_stalled_not_full() {
         let dir = tempdir().unwrap();
         write_gt(dir.path(), 0, 439_722);
-        let start = Instant::now() - Duration::from_secs(10);
+        // Back-date safely: monotonic uptime can be shorter than the offset.
+        let Some(start) = Instant::now().checked_sub(Duration::from_secs(2)) else {
+            return;
+        };
         let mut state = GtidleState::empty();
         refresh_at(&mut state, dir.path(), start);
         assert_eq!(
-            refresh_at(&mut state, dir.path(), sec(start, 6)),
+            refresh_at(&mut state, dir.path(), sec(start, 1)),
             GtidleReadout::Stalled
         );
 
@@ -394,6 +398,34 @@ mod tests {
         assert_eq!(
             refresh_at(&mut state, dir.path(), sec(start, 4)),
             GtidleReadout::Available(50.0)
+        );
+    }
+
+    #[test]
+    fn seeded_takes_precedence_over_stalled_in_same_round() {
+        let dir = tempdir().unwrap();
+        write_gt(dir.path(), 0, 1_000);
+        let start = Instant::now();
+        let mut state = GtidleState::empty();
+        assert_eq!(
+            refresh_at(&mut state, dir.path(), start),
+            GtidleReadout::Seeded
+        );
+        assert_eq!(
+            refresh_at(&mut state, dir.path(), sec(start, 1)),
+            GtidleReadout::Stalled
+        );
+
+        // gt1 appears for the first time while gt0 is still frozen.
+        write_gt(dir.path(), 1, 5_000);
+        assert_eq!(
+            refresh_at(&mut state, dir.path(), sec(start, 2)),
+            GtidleReadout::Seeded
+        );
+        // Both frozen now.
+        assert_eq!(
+            refresh_at(&mut state, dir.path(), sec(start, 3)),
+            GtidleReadout::Stalled
         );
     }
 
