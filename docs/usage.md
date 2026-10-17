@@ -70,8 +70,6 @@ http://gpu-node3:9090
 remote machines over SSH and renders their metrics in the same TUI,
 **without** first installing or starting `all-smi api` on the targets.
 
-The SSH transport is not available in the Windows on ARM64 build (see [installation](installation.md#windows)); there `view --ssh` exits with an error.
-
 On first connect the transport probes each host, in order:
 
 1. `all-smi snapshot --format json` — used when the binary is present

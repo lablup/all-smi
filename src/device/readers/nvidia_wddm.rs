@@ -48,19 +48,27 @@ pub(crate) struct NvmlPciIdentity {
 /// `PCI\VEN_xxxx&DEV_xxxx` string that function parses, so NVIDIA devices
 /// are paired by exactly the rules the AMD and Intel readers use. Devices
 /// without a PCI identity (the N1X NPU) are skipped.
+///
+/// `match_adapter` breaks a tie between identical cards with an ordinal
+/// counted inside the group sharing one PCI vendor/device id, so the
+/// ordinal passed here counts only earlier NVML devices with the same
+/// `pci_device_id`, not the global NVML index.
 pub(crate) fn map_devices_to_luids(
     devices: &[NvmlPciIdentity],
     adapters: &[AdapterIdentity],
 ) -> HashMap<String, AdapterLuid> {
+    let mut seen_per_model: HashMap<u32, usize> = HashMap::new();
     devices
         .iter()
-        .enumerate()
-        .filter(|(_, device)| device.pci_device_id != 0)
-        .filter_map(|(ordinal, device)| {
+        .filter(|device| device.pci_device_id != 0)
+        .filter_map(|device| {
+            let seen = seen_per_model.entry(device.pci_device_id).or_insert(0);
+            let model_ordinal = *seen;
+            *seen += 1;
             let vendor = device.pci_device_id & 0xFFFF;
             let device_id = device.pci_device_id >> 16;
             let pnp = format!("PCI\\VEN_{vendor:04X}&DEV_{device_id:04X}");
-            let adapter = match_adapter(adapters, Some(&pnp), &device.name, ordinal)?;
+            let adapter = match_adapter(adapters, Some(&pnp), &device.name, model_ordinal)?;
             Some((device.uuid.clone(), adapter.luid))
         })
         .collect()
@@ -163,6 +171,47 @@ mod tests {
     fn nvml_pci_ids_pair_with_the_dxgi_adapter() {
         let luids = map_devices_to_luids(&[n1x()], &adapters());
         assert_eq!(luids.get(N1X_UUID), Some(&N1X_LUID));
+    }
+
+    fn nvidia_adapter(low: u32, device_id: u32, description: &str) -> AdapterIdentity {
+        AdapterIdentity {
+            luid: AdapterLuid { high: 0, low },
+            vendor_id: 0x10DE,
+            device_id,
+            description: description.to_string(),
+        }
+    }
+
+    fn nvml_device(uuid: &str, name: &str, device_id: u32) -> NvmlPciIdentity {
+        NvmlPciIdentity {
+            uuid: uuid.to_string(),
+            name: name.to_string(),
+            pci_device_id: (device_id << 16) | 0x10DE,
+        }
+    }
+
+    #[test]
+    fn identical_cards_pair_by_ordinal_within_their_model() {
+        // NVML order: a different model first, then two identical cards.
+        // With the global NVML index the second 4090 would get ordinal 2,
+        // past the end of the two-entry 4090 group, and fall back onto the
+        // first card's adapter.
+        let devices = [
+            nvml_device("GPU-a4000", "NVIDIA RTX A4000", 0x24B0),
+            nvml_device("GPU-4090-0", "NVIDIA GeForce RTX 4090", 0x2684),
+            nvml_device("GPU-4090-1", "NVIDIA GeForce RTX 4090", 0x2684),
+        ];
+        let adapters = [
+            nvidia_adapter(0x4090, 0x2684, "NVIDIA GeForce RTX 4090"),
+            nvidia_adapter(0xA400, 0x24B0, "NVIDIA RTX A4000"),
+            nvidia_adapter(0x4091, 0x2684, "NVIDIA GeForce RTX 4090"),
+        ];
+
+        let luids = map_devices_to_luids(&devices, &adapters);
+
+        assert_eq!(luids["GPU-a4000"].low, 0xA400);
+        assert_eq!(luids["GPU-4090-0"].low, 0x4090);
+        assert_eq!(luids["GPU-4090-1"].low, 0x4091);
     }
 
     #[test]

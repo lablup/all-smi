@@ -23,17 +23,22 @@
 //! 2. AMD Ryzen Master SDK (AMD CPUs only - if DLL present)
 //! 3. Intel WMI (Intel CPUs only - root/Intel namespace)
 //! 4. LibreHardwareMonitor WMI (any CPU - if app running)
-//! 5. None (graceful fallback with no error spam)
+//! 5. Win32_PerfFormattedData_Counters_ThermalZoneInformation (the ACPI
+//!    zones again, readable without elevation; last so it never pre-empts
+//!    the CPU package sensors above, issue #459)
+//! 6. None (graceful fallback with no error spam)
 
 mod acpi_thermal;
 mod amd_ryzen;
 mod intel_wmi;
 mod libre_hwmon;
+mod thermal_zone_info;
 
 pub use acpi_thermal::AcpiThermalSource;
 pub use amd_ryzen::AmdRyzenSource;
 pub use intel_wmi::IntelWmiSource;
 pub use libre_hwmon::LibreHardwareMonitorSource;
+pub use thermal_zone_info::ThermalZoneInfoSource;
 
 use once_cell::sync::OnceCell;
 use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
@@ -116,6 +121,8 @@ pub struct TemperatureManager {
     intel_available: RwLock<SourceAvailability>,
     /// LibreHardwareMonitor WMI availability
     libre_available: RwLock<SourceAvailability>,
+    /// ThermalZoneInformation performance-counter availability
+    thermal_zone_info_available: RwLock<SourceAvailability>,
     /// ACPI thermal zone source
     acpi_source: AcpiThermalSource,
     /// AMD Ryzen Master SDK source
@@ -124,6 +131,36 @@ pub struct TemperatureManager {
     intel_source: IntelWmiSource,
     /// LibreHardwareMonitor source
     libre_source: LibreHardwareMonitorSource,
+    /// ThermalZoneInformation performance-counter source
+    thermal_zone_info_source: ThermalZoneInfoSource,
+}
+
+/// One entry in the temperature fallback chain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TempSource {
+    Acpi,
+    AmdRyzen,
+    IntelWmi,
+    LibreHardwareMonitor,
+    ThermalZoneInfo,
+}
+
+/// The sources to try, in priority order, for a CPU vendor.
+///
+/// The CPU package sensors (vendor SDKs, LibreHardwareMonitor) come before
+/// the ThermalZoneInformation counters, which report ACPI zones and answer
+/// on almost every machine; trying them earlier would hide the package
+/// temperature on Intel and AMD hosts.
+fn source_order(vendor: CpuVendor) -> Vec<TempSource> {
+    let mut order = vec![TempSource::Acpi];
+    match vendor {
+        CpuVendor::Amd => order.push(TempSource::AmdRyzen),
+        CpuVendor::Intel => order.push(TempSource::IntelWmi),
+        CpuVendor::Unknown => {}
+    }
+    order.push(TempSource::LibreHardwareMonitor);
+    order.push(TempSource::ThermalZoneInfo);
+    order
 }
 
 impl Default for TemperatureManager {
@@ -144,6 +181,8 @@ impl TemperatureManager {
             amd_source: AmdRyzenSource::new(),
             intel_source: IntelWmiSource::new(),
             libre_source: LibreHardwareMonitorSource::new(),
+            thermal_zone_info_available: RwLock::new(SourceAvailability::Unknown),
+            thermal_zone_info_source: ThermalZoneInfoSource::new(),
         }
     }
 
@@ -156,78 +195,54 @@ impl TemperatureManager {
         root_wmi_conn: Option<&WMIConnection>,
         cimv2_conn: Option<&WMIConnection>,
     ) -> Option<u32> {
-        // 1. Try ACPI thermal zones: root\WMI, then the root\cimv2
-        //    performance counters for the same zones.
-        if self.is_source_potentially_available(&self.acpi_available) {
-            match self.acpi_source.get_temperature(root_wmi_conn, cimv2_conn) {
-                TemperatureResult::Success(temp) => {
-                    self.mark_available(&self.acpi_available);
-                    return Some(temp);
-                }
-                TemperatureResult::NotFound => {
-                    self.mark_unavailable(&self.acpi_available);
-                }
-                TemperatureResult::Error => {
-                    // Transient error, don't mark as unavailable
-                }
-                TemperatureResult::NoValidReading => {
-                    // No valid reading but source exists
-                }
+        for source in source_order(get_cpu_vendor()) {
+            let status = self.availability(source);
+            if !self.is_source_potentially_available(status) {
+                continue;
             }
-        }
-
-        let vendor = get_cpu_vendor();
-
-        // 2. Try AMD Ryzen Master SDK (AMD only)
-        if vendor == CpuVendor::Amd && self.is_source_potentially_available(&self.amd_available) {
-            match self.amd_source.get_temperature() {
+            match self.query(source, root_wmi_conn, cimv2_conn) {
                 TemperatureResult::Success(temp) => {
-                    self.mark_available(&self.amd_available);
+                    self.mark_available(status);
                     return Some(temp);
                 }
-                TemperatureResult::NotFound => {
-                    self.mark_unavailable(&self.amd_available);
-                }
-                TemperatureResult::Error => {
-                    // Transient error
-                }
-                TemperatureResult::NoValidReading => {}
-            }
-        }
-
-        // 3. Try Intel WMI (Intel only)
-        if vendor == CpuVendor::Intel && self.is_source_potentially_available(&self.intel_available)
-        {
-            match self.intel_source.get_temperature() {
-                TemperatureResult::Success(temp) => {
-                    self.mark_available(&self.intel_available);
-                    return Some(temp);
-                }
-                TemperatureResult::NotFound => {
-                    self.mark_unavailable(&self.intel_available);
-                }
-                TemperatureResult::Error => {}
-                TemperatureResult::NoValidReading => {}
-            }
-        }
-
-        // 4. Try LibreHardwareMonitor WMI (any CPU)
-        if self.is_source_potentially_available(&self.libre_available) {
-            match self.libre_source.get_temperature() {
-                TemperatureResult::Success(temp) => {
-                    self.mark_available(&self.libre_available);
-                    return Some(temp);
-                }
-                TemperatureResult::NotFound => {
-                    self.mark_unavailable(&self.libre_available);
-                }
-                TemperatureResult::Error => {}
-                TemperatureResult::NoValidReading => {}
+                TemperatureResult::NotFound => self.mark_unavailable(status),
+                // Transient error, or the source exists without a valid
+                // reading: keep it for the next poll.
+                TemperatureResult::Error | TemperatureResult::NoValidReading => {}
             }
         }
 
         // All sources failed - return None gracefully (no error spam)
         None
+    }
+
+    /// Availability cell for a source.
+    fn availability(&self, source: TempSource) -> &RwLock<SourceAvailability> {
+        match source {
+            TempSource::Acpi => &self.acpi_available,
+            TempSource::AmdRyzen => &self.amd_available,
+            TempSource::IntelWmi => &self.intel_available,
+            TempSource::LibreHardwareMonitor => &self.libre_available,
+            TempSource::ThermalZoneInfo => &self.thermal_zone_info_available,
+        }
+    }
+
+    /// Query one source.
+    fn query(
+        &self,
+        source: TempSource,
+        root_wmi_conn: Option<&WMIConnection>,
+        cimv2_conn: Option<&WMIConnection>,
+    ) -> TemperatureResult {
+        match source {
+            TempSource::Acpi => self.acpi_source.get_temperature(root_wmi_conn),
+            TempSource::AmdRyzen => self.amd_source.get_temperature(),
+            TempSource::IntelWmi => self.intel_source.get_temperature(),
+            TempSource::LibreHardwareMonitor => self.libre_source.get_temperature(),
+            TempSource::ThermalZoneInfo => {
+                self.thermal_zone_info_source.get_temperature(cimv2_conn)
+            }
+        }
     }
 
     /// Check if a source is potentially available (not marked as permanently unavailable).
@@ -283,6 +298,25 @@ mod tests {
             vendor,
             CpuVendor::Intel | CpuVendor::Amd | CpuVendor::Unknown
         ));
+    }
+
+    #[test]
+    fn thermal_zone_info_is_tried_after_every_cpu_sensor() {
+        use TempSource::*;
+        assert_eq!(
+            source_order(CpuVendor::Intel),
+            [Acpi, IntelWmi, LibreHardwareMonitor, ThermalZoneInfo]
+        );
+        assert_eq!(
+            source_order(CpuVendor::Amd),
+            [Acpi, AmdRyzen, LibreHardwareMonitor, ThermalZoneInfo]
+        );
+        // RTX Spark N1X (Arm brand string): no vendor SDK, and the
+        // unelevated thermal-zone counters are the source that answers.
+        assert_eq!(
+            source_order(CpuVendor::Unknown),
+            [Acpi, LibreHardwareMonitor, ThermalZoneInfo]
+        );
     }
 
     #[test]

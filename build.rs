@@ -14,7 +14,6 @@
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     emit_level_zero_cfg();
-    emit_ssh_cfg();
 
     // NOTE: `#[cfg(target_os = ...)]` inside a build script describes the
     // *host*, not the build target. That is correct here, because the proto
@@ -93,25 +92,5 @@ fn emit_level_zero_cfg() {
 
     if matches!(target_os.as_str(), "linux" | "windows") {
         println!("cargo::rustc-cfg=all_smi_level_zero");
-    }
-}
-
-/// Emit the `all_smi_ssh` cfg alias for every target that can build the
-/// russh-backed agentless SSH transport (`view --ssh`, issue #194).
-///
-/// Off only on Windows on ARM64 (issue #459). russh needs `aws-lc-rs` or
-/// `ring` as its crypto backend, and on `aarch64-pc-windows-msvc` both build
-/// scripts require clang (`clang-cl` for aws-lc-sys's ARMv8 assembly, plain
-/// `clang` for ring's C sources), which a stock MSVC toolchain does not ship.
-/// `Cargo.toml` therefore leaves russh out of that target's dependency
-/// graph, and this alias keeps the code that uses it out of the build.
-fn emit_ssh_cfg() {
-    println!("cargo::rustc-check-cfg=cfg(all_smi_ssh)");
-
-    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
-    let target_arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
-
-    if !(target_os == "windows" && target_arch == "aarch64") {
-        println!("cargo::rustc-cfg=all_smi_ssh");
     }
 }

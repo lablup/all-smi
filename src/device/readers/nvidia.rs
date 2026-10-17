@@ -501,7 +501,15 @@ fn fold_dla_readings(
     gpu_rows: &[(usize, bool)],
     dla_readings: Vec<(DlaReading, Option<String>)>,
 ) {
+    if dla_readings.is_empty() {
+        return;
+    }
     let Some(gpu) = pair_dla_with_gpu(gpu_rows).and_then(|row| gpu_info.get_mut(row)) else {
+        tracing::debug!(
+            dla_count = dla_readings.len(),
+            gpu_rows = gpu_rows.len(),
+            "dropping DLA readings: no SoC GPU row to host them"
+        );
         return;
     };
     let mut combined: Option<(DlaReading, Option<String>)> = None;
@@ -587,11 +595,7 @@ fn get_gpu_processes_nvml(nvml: &Nvml) -> (Vec<ProcessInfo>, HashSet<u32>) {
                     .uuid()
                     .unwrap_or_else(|_| format!("GPU-{device_index}"));
                 #[cfg(target_os = "windows")]
-                pci_identities.push(crate::device::readers::nvidia_wddm::NvmlPciIdentity {
-                    uuid: device_uuid.clone(),
-                    name: device.name().unwrap_or_default(),
-                    pci_device_id: device.pci_info().map(|p| p.pci_device_id).unwrap_or(0),
-                });
+                pci_identities.push(cached_pci_identity(&device, &device_uuid));
 
                 // Compute processes first, then graphics processes.
                 let process_lists = [
@@ -631,6 +635,31 @@ fn get_gpu_processes_nvml(nvml: &Nvml) -> (Vec<ProcessInfo>, HashSet<u32>) {
     let _ = &unavailable;
 
     (rows, gpu_pids)
+}
+
+/// PCI identity of an NVML device for the WDDM memory supplement, queried
+/// once per device UUID instead of on every poll: name and PCI ids never
+/// change while the device is present.
+#[cfg(target_os = "windows")]
+fn cached_pci_identity(
+    device: &nvml_wrapper::Device,
+    uuid: &str,
+) -> crate::device::readers::nvidia_wddm::NvmlPciIdentity {
+    use crate::device::readers::nvidia_wddm::NvmlPciIdentity;
+
+    static CACHE: OnceLock<Mutex<HashMap<String, NvmlPciIdentity>>> = OnceLock::new();
+    let mut cache = CACHE
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    cache
+        .entry(uuid.to_string())
+        .or_insert_with(|| NvmlPciIdentity {
+            uuid: uuid.to_string(),
+            name: device.name().unwrap_or_default(),
+            pci_device_id: device.pci_info().map(|p| p.pci_device_id).unwrap_or(0),
+        })
+        .clone()
 }
 
 fn merge_nvml_process_entry(
@@ -824,6 +853,12 @@ fn create_device_detail(
     detail
 }
 
+/// `power.draw` from `nvidia-smi --format=csv,nounits`, which is already
+/// in watts (`"45.32"`, or `"[N/A]"` when the board does not report it).
+fn parse_csv_power_watts(field: &str) -> f64 {
+    field.trim().parse::<f64>().unwrap_or(0.0)
+}
+
 // Fallback implementation using nvidia-smi
 fn get_gpu_info_nvidia_smi() -> Vec<GpuInfo> {
     let output = match execute_command_default(
@@ -899,8 +934,7 @@ fn get_gpu_info_nvidia_smi() -> Vec<GpuInfo> {
                 used_memory,
                 total_memory,
                 frequency: parts[7].parse().unwrap_or(0),
-                power_consumption: parts[8].replace("[N/A]", "0").parse::<f64>().unwrap_or(0.0)
-                    / 1000.0,
+                power_consumption: parse_csv_power_watts(&parts[8]),
                 gpu_core_count: None,
                 // nvidia-smi CSV path does not surface thresholds / P-state;
                 // they stay unavailable. The NVML path above is the
@@ -987,6 +1021,15 @@ fn parse_memory_value(value: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn csv_power_draw_is_already_watts() {
+        // `nvidia-smi --query-gpu=power.draw --format=csv,noheader,nounits`
+        // on an RTX Spark N1X prints `0.69` for 0.69 W.
+        assert!((parse_csv_power_watts("0.69") - 0.69).abs() < 1e-9);
+        assert!((parse_csv_power_watts(" 245.10") - 245.10).abs() < 1e-9);
+        assert_eq!(parse_csv_power_watts("[N/A]"), 0.0);
+    }
 
     fn test_process(pid: u32, device_uuid: &str, used_memory: u64) -> ProcessInfo {
         ProcessInfo {

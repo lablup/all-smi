@@ -109,6 +109,10 @@ pub const DLA_CLOCK_MEMORY_DETAIL_KEY: &str = "dla_clock_memory_mhz";
 /// `all_smi_dla_temperature_celsius`.
 pub const DLA_TEMPERATURE_DETAIL_KEY: &str = "dla_temperature";
 
+/// NVML UUID (`DLA-...`) of the DLA folded into this GPU row. Static, so it
+/// is not in [`VOLATILE_DETAIL_KEYS`].
+pub const DLA_UUID_DETAIL_KEY: &str = "dla_uuid";
+
 /// Legacy `detail` key every reader used before `GpuInfo::fan_speed_rpm`
 /// existed, and still writes alongside it.
 ///

@@ -239,7 +239,9 @@ fn folded_dla_fills_the_gpu_row_and_keeps_mean_utilization() {
     );
     assert!(!gpu.detail.contains_key(detail_keys::DLA_CLOCK_DETAIL_KEY));
     assert_eq!(
-        gpu.detail.get("dla_uuid").map(String::as_str),
+        gpu.detail
+            .get(detail_keys::DLA_UUID_DETAIL_KEY)
+            .map(String::as_str),
         Some(N1X_NPU_UUID)
     );
 

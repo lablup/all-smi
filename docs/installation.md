@@ -69,6 +69,8 @@ sudo apt-get install pkg-config libssl-dev protobuf-compiler
 sudo dnf install pkg-config openssl-devel protobuf-compiler protobuf-devel
 ```
 
+On Windows on ARM64 (`aarch64-pc-windows-msvc`), install LLVM and put `clang` on `PATH` first, for example with `winget install LLVM.LLVM` (it installs to `C:\Program Files\LLVM\bin`). The `ring` and `aws-lc-sys` crypto crates used by HTTPS and the SSH transport need clang on that target; MSVC alone cannot build them.
+
 After installation, the binary will be available in your `$PATH` as `all-smi`.
 
 `cargo install` installs Cargo binary targets only, so it does not install the Linux AMD companion library. The resulting binary still starts on every host and `all-smi doctor --only amd` reports the plugin as unavailable; use the release archive, Homebrew, PPA/Debian package, or the source-build instructions below when Linux AMD monitoring is required.
@@ -129,10 +131,11 @@ all-smi does not ship a container image, and container deployment is not a suppo
 - **CPU Temperature Limitations:**
   - Standard Windows WMI thermal zones (MSAcpi_ThermalZoneTemperature) are not available on all systems
   - The application uses a fallback chain to try multiple temperature sources:
-    1. ACPI Thermal Zones (standard WMI `root\WMI:MSAcpi_ThermalZoneTemperature`, then `root\cimv2:Win32_PerfFormattedData_Counters_ThermalZoneInformation`, which needs no Administrator rights)
+    1. ACPI Thermal Zones (standard WMI)
     2. AMD Ryzen Master SDK (AMD CPUs - requires AMD drivers or Ryzen Master)
     3. Intel WMI (Intel CPUs - if chipset drivers support it)
     4. LibreHardwareMonitor WMI (any CPU - if [LibreHardwareMonitor](https://github.com/LibreHardwareMonitor/LibreHardwareMonitor) is running)
+    5. ACPI thermal-zone performance counters (`Win32_PerfFormattedData_Counters_ThermalZoneInformation`, any CPU, no Administrator rights; the source that answers on the RTX Spark N1X)
   - If temperature is not available, it will be shown as "N/A" without error messages
   - For best temperature monitoring on Windows, install and run LibreHardwareMonitor in the background
 - **NVIDIA under WDDM:** NVML cannot report per-process GPU memory under the Windows display driver model, so all-smi fills it from the PDH `\GPU Process Memory(*)` counters, the same source the AMD and Intel readers use.
@@ -140,7 +143,7 @@ all-smi does not ship a container image, and container deployment is not a suppo
   - The integrated NPU, which NVML lists as a second device named `NVIDIA NPU` with a `DLA-` UUID, is shown as a `DLA` gauge and sparkline on the GPU row and exported as `all_smi_dla_utilization`, `all_smi_dla_power_watts`, `all_smi_dla_clock_memory_mhz`, and `all_smi_dla_temperature_celsius`, not as a separate device. The public NVML API exposes no DLA engine clock on this driver, so `all_smi_dla_frequency_mhz` is absent.
   - The GPU is reported with unified memory over NVLink-C2C, without the PCIe link metrics NVML stubs out as `Gen 1 x1`.
   - CPU cores are split into Performance (Cortex-X925) and Efficiency (Cortex-A725) from the per-core registry identifiers.
-  - The agentless SSH transport (`view --ssh`) is not available in this build: its crypto backends (aws-lc-rs, ring) cannot be compiled with MSVC alone on ARM64. Use `view --hosts` with `all-smi api` on the targets instead. HTTPS uses the Windows TLS stack (SChannel).
+  - Building from source requires LLVM with `clang` on `PATH` (for example `winget install LLVM.LLVM`), because `ring` and `aws-lc-sys` need clang on `aarch64-pc-windows-msvc`. The release binary needs nothing extra.
 
 ## Accelerator backends on Linux
 

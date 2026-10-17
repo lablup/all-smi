@@ -312,7 +312,10 @@ pub(crate) fn apply_dla_reading(gpu: &mut GpuInfo, reading: &DlaReading, dla_uui
         );
     }
     if let Some(uuid) = dla_uuid {
-        gpu.detail.insert("dla_uuid".to_string(), uuid.to_string());
+        gpu.detail.insert(
+            detail_keys::DLA_UUID_DETAIL_KEY.to_string(),
+            uuid.to_string(),
+        );
     }
 }
 

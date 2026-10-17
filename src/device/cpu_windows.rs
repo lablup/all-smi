@@ -159,15 +159,15 @@ impl WindowsCpuReader {
     /// Get CPU temperature using the fallback chain.
     ///
     /// Tries multiple temperature sources in order:
-    /// 1. ACPI thermal zones (MSAcpi_ThermalZoneTemperature, then the
-    ///    ThermalZoneInformation performance counters)
+    /// 1. ACPI thermal zones (MSAcpi_ThermalZoneTemperature)
     /// 2. AMD Ryzen Master SDK (AMD CPUs only)
     /// 3. Intel WMI (Intel CPUs only)
     /// 4. LibreHardwareMonitor WMI (any CPU)
-    /// 5. None (graceful fallback)
+    /// 5. ThermalZoneInformation performance counters (any CPU, no elevation)
+    /// 6. None (graceful fallback)
     fn get_cpu_temperature(&self) -> Option<u32> {
         // Get the root\WMI connection for ACPI thermal zones
-        // The cimv2 connection serves the ACPI thermal-zone fallback
+        // The cimv2 connection serves the last fallback
         // (Win32_PerfFormattedData_Counters_ThermalZoneInformation).
         with_cimv2_connection(|cimv2| {
             with_root_wmi_connection(|wmi_conn| {

@@ -61,6 +61,7 @@ The main `all-smi` package does not link libdrm, so `cargo build` and `cargo bui
 
 **Windows:**
 - Not officially supported, but may work with WSL2
+- On Windows on ARM64 (`aarch64-pc-windows-msvc`), install LLVM and put `clang` on `PATH` (for example `winget install LLVM.LLVM`, then add `C:\Program Files\LLVM\bin` to `PATH`). The `ring` and `aws-lc-sys` crates need clang on that target; MSVC alone cannot build them
 
 ### Setting Up the Repository
 

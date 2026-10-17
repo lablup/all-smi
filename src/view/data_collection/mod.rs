@@ -16,7 +16,6 @@ pub mod aggregator;
 pub mod local_collector;
 pub mod remote_collector;
 pub mod replay_collector;
-#[cfg(all_smi_ssh)]
 pub mod ssh_strategy;
 pub mod strategy;
 
@@ -25,6 +24,5 @@ pub use aggregator::DataAggregator;
 pub use local_collector::LocalCollector;
 pub use remote_collector::RemoteCollectorBuilder;
 pub use replay_collector::{ReplayDriver, initial_replay_state};
-#[cfg(all_smi_ssh)]
 pub use ssh_strategy::{SshStrategy, SshStrategyConfig};
 pub use strategy::{CollectionConfig, DataCollectionStrategy};

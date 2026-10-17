@@ -206,6 +206,11 @@ jobs:
       - name: Add target architecture
         run: rustup target add ${{ matrix.target }}
 
+      # 4.5) clang for ring and aws-lc-sys on Windows on ARM64 (issue #459)
+      - name: Setup clang (Windows ARM64 only)
+        if: matrix.target == 'aarch64-pc-windows-msvc'
+        uses: ./.workflow-actions/.github/actions/setup-clang-windows-arm64
+
       # 5) Install musl tools only for musl builds
       - name: Install musl tools (Linux musl only)
         if: contains(matrix.target, 'musl')

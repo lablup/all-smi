@@ -1175,10 +1175,9 @@ jobs:
   # ═══════════════════════════════════════════════════════════════
   # aarch64-pc-windows-msvc is the target of the NVIDIA RTX Spark N1X.
   # It runs on a GitHub-hosted `windows-11-arm` runner, so it is safe on
-  # pull requests (no self-hosted machine is involved). The release build
-  # is the regression check for the crypto-backend choice in Cargo.toml:
-  # aws-lc-sys and ring both need clang on this target, and a dependency
-  # that pulls either of them back in fails here first.
+  # pull requests (no self-hosted machine is involved). ring and aws-lc-sys
+  # (behind russh and reqwest's rustls) need clang on this target, so the
+  # job puts LLVM on PATH before any cargo step.
   # ───────────────────────────────────────────────────────────────
   windows-arm64:
     name: Windows ARM64 (aarch64-pc-windows-msvc)
@@ -1191,6 +1190,9 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+
+      - name: Setup clang
+        uses: ./.github/actions/setup-clang-windows-arm64
 
       - name: Cache cargo
         uses: actions/cache@v5
