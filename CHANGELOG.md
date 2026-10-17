@@ -2,6 +2,22 @@
 
 [Home](README.md) · [Release downloads](https://github.com/lablup/all-smi/releases)
 
+## v0.28.0 (2026/10/17)
+
+- Added NVIDIA RTX Spark N1X support: the integrated NPU folds into the SoC GPU row as a DLA gauge and sparkline instead of a separate device, and the GPU reports unified memory over NVLink-C2C without PCIe gauges (#460).
+- Added native Windows ARM64 (`aarch64-pc-windows-msvc`) builds and the `all-smi-windows-aarch64` release asset; building on this target requires LLVM with clang on `PATH` (#460).
+- Added `all_smi_dla_power_watts`, `all_smi_dla_frequency_mhz`, `all_smi_dla_clock_memory_mhz`, `all_smi_dla_temperature_celsius`, and `all_smi_dla_max_frequency_mhz` Prometheus gauges, read back by remote view (#460, #462).
+- Added the N1X DLA engine clock, read from D3DKMT node performance data because NVML reports it as unsupported (#462).
+- Added Windows ARM CPU detection with P/E core mapping and a registry processor-name fallback (#460).
+- Added Windows thermal-zone performance counters as a last-resort CPU temperature source (#460).
+- Filled WDDM per-process GPU memory from PDH samples when NVML reports it unavailable (#460).
+- Fixed constant false 100% Intel Xe GPU utilization when a GT idle-residency counter never advances (#458).
+- Fixed the nvidia-smi CSV fallback dividing power draw by 1000 (#460).
+- Stopped retrying the `root\WMI` temperature query every poll after an access-denied error (#460).
+- Added a `windows-11-arm` CI job and a Windows ARM64 release build (#460).
+
+[Full changelog](https://github.com/lablup/all-smi/compare/v0.27.1...v0.28.0)
+
 ## v0.27.1 (2026/10/11)
 
 - Added display-only `--hide-storage` to local and view modes, including replay, without changing storage collection or exports (#455).

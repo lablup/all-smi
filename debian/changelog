@@ -1,3 +1,18 @@
+all-smi (0.28.0-0) jammy; urgency=medium
+
+  * Added NVIDIA RTX Spark N1X support with DLA metrics folded into the GPU row (#460).
+  * Added native Windows ARM64 builds; LLVM with clang is required on this target (#460).
+  * Added all_smi_dla_* Prometheus gauges (#460, #462).
+  * Added the N1X DLA engine clock from D3DKMT node performance data (#462).
+  * Added Windows ARM CPU detection with P/E core mapping (#460).
+  * Added Windows thermal-zone counters as a fallback CPU temperature source (#460).
+  * Filled WDDM per-process GPU memory from PDH samples (#460).
+  * Fixed false 100% Intel Xe utilization from frozen GT idle counters (#458).
+  * Fixed nvidia-smi CSV fallback power scaling (#460).
+  * Added Windows ARM64 CI and release builds (#460).
+
+ -- Jeongkyu Shin <inureyes@gmail.com>  Sat, 17 Oct 2026 00:00:00 +0900
+
 all-smi (0.27.1-0) jammy; urgency=medium
 
   * Added display-only --hide-storage to local and view modes, including replay (#455).
