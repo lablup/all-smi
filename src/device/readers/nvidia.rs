@@ -623,6 +623,7 @@ fn get_gpu_processes_nvml(nvml: &Nvml) -> (Vec<ProcessInfo>, HashSet<u32>) {
         }
     }
 
+    #[cfg_attr(not(target_os = "windows"), allow(unused_mut))]
     let mut rows: Vec<ProcessInfo> = gpu_process_map.into_values().collect();
     // Under WDDM NVML has no per-process memory; Windows does (issue #459).
     #[cfg(target_os = "windows")]
