@@ -24,8 +24,8 @@ use crate::device::readers::nvidia_hardware::{
 use crate::device::readers::nvidia_mig::collect_mig_info;
 use crate::device::readers::nvidia_soc::{
     DlaReading, MemoryClass, NvmlDeviceKind, apply_dla_reading, c2c_enabled, classify_memory,
-    classify_nvml_device, is_soc_device_name, pair_dla_with_gpu, raw_brand, read_dla,
-    system_memory_for_uma, valid_threshold,
+    classify_nvml_device, dla_engine_clocks, is_soc_device_name, pair_dla_with_gpu, raw_brand,
+    read_dla, system_memory_for_uma, valid_threshold,
 };
 use crate::device::readers::nvidia_vgpu::collect_vgpu_info;
 use crate::device::types::{GpuInfo, MigGpuInfo, ProcessInfo, VgpuHostInfo};
@@ -75,6 +75,9 @@ struct NvmlStaticDevice {
     kind: NvmlDeviceKind,
     /// Memory and interconnect class; only meaningful for a GPU.
     memory_class: MemoryClass,
+    /// NVML engine clock types a DLA answers, probed once so the poll does
+    /// not repeat the calls N1X always refuses (#461). Empty for a GPU.
+    dla_engine_clocks: Vec<nvml_wrapper::enum_wrappers::device::Clock>,
 }
 
 pub struct NvidiaGpuReader {
@@ -254,6 +257,11 @@ impl NvidiaGpuReader {
                         let kind = classify_nvml_device(&name, uuid.as_deref(), raw_brand(&device));
                         let mem_total = device.memory_info().map(|m| m.total).unwrap_or(0);
                         let memory_class = device_memory_class(&device, &name, mem_total);
+                        let dla_engine_clocks = if kind == NvmlDeviceKind::Dla {
+                            dla_engine_clocks(&device)
+                        } else {
+                            Vec::new()
+                        };
                         let detail = create_device_detail(
                             &device,
                             &driver_version,
@@ -266,6 +274,7 @@ impl NvidiaGpuReader {
                                 info: DeviceStaticInfo::with_details(name, uuid, detail),
                                 kind,
                                 memory_class,
+                                dla_engine_clocks,
                             },
                         );
                     }
@@ -297,12 +306,31 @@ impl NvidiaGpuReader {
         // Get cached static device information (fetched only once)
         let device_static_info = self.get_device_static_info(nvml);
 
+        // NVML has no N1X DLA engine clock; Windows' D3DKMT node data does
+        // (issue #461). Taken before this poll's NVML queries reach the NPU,
+        // see `nvidia_dla_clock::read_npu_node_clock`.
+        #[cfg(target_os = "windows")]
+        let dla_node_clock = if device_static_info
+            .values()
+            .any(|d| d.kind == NvmlDeviceKind::Dla)
+        {
+            crate::device::readers::nvidia_dla_clock::read_npu_node_clock()
+        } else {
+            None
+        };
+
         if let Ok(device_count) = nvml.device_count() {
             for i in 0..device_count {
                 if let Ok(device) = nvml.device_by_index(i) {
                     let static_device = device_static_info.get(&i);
-                    if static_device.is_some_and(|d| d.kind == NvmlDeviceKind::Dla) {
-                        dla_readings.push((read_dla(&device), device.uuid().ok()));
+                    if let Some(dla) = static_device.filter(|d| d.kind == NvmlDeviceKind::Dla) {
+                        let reading = read_dla(&device, &dla.dla_engine_clocks);
+                        #[cfg(target_os = "windows")]
+                        let reading = crate::device::readers::nvidia_dla_clock::apply_node_clock(
+                            reading,
+                            dla_node_clock,
+                        );
+                        dla_readings.push((reading, device.uuid().ok()));
                         continue;
                     }
                     let memory_class = static_device
@@ -881,6 +909,9 @@ fn parse_csv_power_watts(field: &str) -> f64 {
 
 // Fallback implementation using nvidia-smi
 fn get_gpu_info_nvidia_smi() -> Vec<GpuInfo> {
+    // Before `nvidia-smi` wakes the NPU, as on the NVML path (issue #461).
+    #[cfg(target_os = "windows")]
+    let dla_node_clock = crate::device::readers::nvidia_dla_clock::read_npu_node_clock();
     let output = match execute_command_default(
         "nvidia-smi",
         &[
@@ -907,16 +938,18 @@ fn get_gpu_info_nvidia_smi() -> Vec<GpuInfo> {
         // The N1X NPU is folded into its SoC GPU's row, as on the NVML
         // path (issue #459).
         if classify_nvml_device(&parts[2], Some(&parts[1]), None) == NvmlDeviceKind::Dla {
-            dla_readings.push((
-                DlaReading {
-                    utilization: parts[3].parse().ok(),
-                    power_watts: parts[8].parse().ok(),
-                    clock_mhz: parts[7].parse().ok().filter(|&mhz: &u32| mhz > 0),
-                    memory_clock_mhz: None,
-                    temperature: parts[4].parse().ok().filter(|&t: &u32| t > 0),
-                },
-                Some(parts[1].to_string()),
-            ));
+            let reading = DlaReading {
+                utilization: parts[3].parse().ok(),
+                power_watts: parts[8].parse().ok(),
+                clock_mhz: parts[7].parse().ok().filter(|&mhz: &u32| mhz > 0),
+                max_clock_mhz: None,
+                memory_clock_mhz: None,
+                temperature: parts[4].parse().ok().filter(|&t: &u32| t > 0),
+            };
+            #[cfg(target_os = "windows")]
+            let reading =
+                crate::device::readers::nvidia_dla_clock::apply_node_clock(reading, dla_node_clock);
+            dla_readings.push((reading, Some(parts[1].to_string())));
             continue;
         }
         let soc = is_uma_device_name(&parts[2]);

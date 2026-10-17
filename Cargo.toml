@@ -86,6 +86,8 @@ libloading = "0.9"
 # transitive dependency to a direct one rather than adding a new entry
 # to the supply chain.
 windows = { version = "0.62", features = [
+    # D3DKMT adapter queries for the RTX Spark N1X DLA engine clock (#461).
+    "Wdk_Graphics_Direct3D",
     "Win32_Foundation",
     "Win32_Graphics_Dxgi",
     "Win32_Graphics_Dxgi_Common",
