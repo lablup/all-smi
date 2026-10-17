@@ -26,7 +26,7 @@
 //! other three entry points are plain `gdi32.dll` exports since Windows 8.
 
 use std::ffi::c_void;
-use std::sync::Mutex;
+use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use libloading::os::windows::LOAD_LIBRARY_SEARCH_SYSTEM32;
@@ -81,7 +81,10 @@ static STATE: Mutex<State> = Mutex::new(State::Undiscovered { not_before: None }
 /// N1X) for about 10 ms, so a read inside that window reports the
 /// monitor's own load rather than the clock `nvidia-smi` shows.
 pub(crate) fn read_npu_node_clock() -> Option<NodeClock> {
-    let mut state = STATE.lock().ok()?;
+    // Every transition below assigns a whole `State`, so the value behind
+    // a poisoned lock is still valid; recovering keeps the D3DKMT clock and
+    // the open handle instead of dropping both for the process lifetime.
+    let mut state = STATE.lock().unwrap_or_else(PoisonError::into_inner);
     if let State::Undiscovered { not_before } = *state {
         if not_before.is_some_and(|t| Instant::now() < t) {
             return None;
