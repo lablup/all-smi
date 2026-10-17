@@ -1,0 +1,35 @@
+name: "Setup clang (Windows on ARM64)"
+description: "Make clang and clang-cl available on PATH for aarch64-pc-windows-msvc builds"
+
+# ring 0.17 and aws-lc-sys (the crypto backends behind russh and reqwest's
+# rustls) need clang to build on aarch64-pc-windows-msvc; MSVC alone cannot
+# compile their ARMv8 sources (issue #459). The windows-11-arm image lists
+# LLVM in its manifest (actions/partner-runner-images,
+# images/arm-windows-11-image.md), but whether its bin directory is on PATH
+# is not documented, so this action puts it there and installs LLVM through
+# Chocolatey only when the image does not have it.
+
+runs:
+  using: "composite"
+  steps:
+    - name: Ensure clang is on PATH
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $llvmBin = 'C:\Program Files\LLVM\bin'
+        if (-not (Get-Command clang -ErrorAction SilentlyContinue) -and -not (Test-Path "$llvmBin\clang.exe")) {
+          # Pinned so a release build never picks up whatever the community
+          # feed published last; bump deliberately.
+          $llvmVersion = '22.1.8'
+          Write-Host "clang not found on the image; installing LLVM $llvmVersion with Chocolatey"
+          choco install llvm --version=$llvmVersion -y --no-progress
+          if ($LASTEXITCODE -ne 0) { throw "choco install llvm $llvmVersion failed" }
+        }
+        if (Test-Path "$llvmBin\clang.exe") {
+          $llvmBin | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          $env:PATH = "$llvmBin;$env:PATH"
+        }
+        & clang --version
+        if ($LASTEXITCODE -ne 0) { throw 'clang is not runnable' }
+        & clang-cl --version
+        if ($LASTEXITCODE -ne 0) { throw 'clang-cl is not runnable' }

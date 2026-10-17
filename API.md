@@ -448,11 +448,17 @@ NVIDIA MIG (Multi-Instance GPU) metrics are emitted only on hosts where at least
 - `all_smi_gpu_mig_mode` is emitted for every GPU that supports MIG (enabled or disabled), so consumers can detect mode transitions even when no instances are active.
 - To simulate MIG responses in development/testing without MIG hardware, set `ALL_SMI_MOCK_MIG=1` when running with the `mock` feature.
 
-### NVIDIA Jetson Specific Metrics
+### NVIDIA DLA Metrics (Jetson and RTX Spark N1X)
 
-| Metric                    | Description                                 | Unit    | Labels                  |
-|---------------------------|---------------------------------------------|---------|-------------------------|
-| `all_smi_dla_utilization` | DLA (Deep Learning Accelerator) utilization | percent | `gpu_index`, `gpu_name` |
+| Metric                            | Description                                                  | Unit    | Labels                  |
+|-----------------------------------|--------------------------------------------------------------|---------|-------------------------|
+| `all_smi_dla_utilization`         | DLA (Deep Learning Accelerator) utilization                  | percent | `gpu_index`, `gpu_name` |
+| `all_smi_dla_power_watts`         | DLA power consumption                                        | watts   | `gpu_index`, `gpu_name` |
+| `all_smi_dla_frequency_mhz`       | DLA engine clock                                             | MHz     | `gpu_index`, `gpu_name` |
+| `all_smi_dla_clock_memory_mhz`    | DLA memory clock                                             | MHz     | `gpu_index`, `gpu_name` |
+| `all_smi_dla_temperature_celsius` | DLA temperature                                              | celsius | `gpu_index`, `gpu_name` |
+
+On the NVIDIA RTX Spark N1X (Windows on ARM64) the NPU that NVML lists as a separate `DLA-` device is folded into the GPU row, so these series carry the GPU's labels instead of a device of their own. Every series except `all_smi_dla_utilization` is omitted when the driver does not report it; the N1X driver exposes no DLA engine clock, so `all_smi_dla_frequency_mhz` is absent there.
 
 ### AMD GPU Specific Metrics
 

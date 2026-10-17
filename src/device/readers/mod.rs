@@ -37,7 +37,12 @@ pub mod nvidia;
 pub mod nvidia_hardware;
 pub mod nvidia_jetson;
 pub mod nvidia_mig;
+pub(crate) mod nvidia_soc;
+// WDDM per-process memory for NVIDIA; compiled under `test` everywhere for
+// the same reason as `windows_gpu_perf` below.
 pub mod nvidia_vgpu;
+#[cfg(any(target_os = "windows", test))]
+pub(crate) mod nvidia_wddm;
 pub mod rebellions;
 #[cfg(target_os = "linux")]
 pub mod tpu_grpc;

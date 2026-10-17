@@ -101,6 +101,16 @@ pub fn first_ane_power_watts(gpus: &[GpuInfo]) -> Option<f64> {
         .map(|mw| mw / 1000.0)
 }
 
+/// Mean DLA utilization (%) across the GPU rows that carry a DLA reading
+/// (Jetson, RTX Spark N1X NPU; issue #459), or `None` when no row does.
+pub fn mean_dla_utilization(gpus: &[GpuInfo]) -> Option<f64> {
+    mean(
+        gpus.iter()
+            .filter_map(|gpu| gpu.dla_utilization)
+            .filter(|u| u.is_finite() && *u >= 0.0),
+    )
+}
+
 fn mean(values: impl Iterator<Item = f64>) -> Option<f64> {
     let mut count = 0usize;
     let mut sum = 0.0;

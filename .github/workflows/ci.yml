@@ -1169,3 +1169,47 @@ jobs:
       # Nothing in this job consumes that artifact.
       - name: The level_zero feature does not move Cargo.lock
         run: cargo build --release --locked --features level_zero --bin all-smi
+
+  # ═══════════════════════════════════════════════════════════════
+  # Job: Windows on ARM64 (issue #459)
+  # ═══════════════════════════════════════════════════════════════
+  # aarch64-pc-windows-msvc is the target of the NVIDIA RTX Spark N1X.
+  # It runs on a GitHub-hosted `windows-11-arm` runner, so it is safe on
+  # pull requests (no self-hosted machine is involved). ring and aws-lc-sys
+  # (behind russh and reqwest's rustls) need clang on this target, so the
+  # job puts LLVM on PATH before any cargo step.
+  # ───────────────────────────────────────────────────────────────
+  windows-arm64:
+    name: Windows ARM64 (aarch64-pc-windows-msvc)
+    runs-on: windows-11-arm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Setup clang
+        uses: ./.github/actions/setup-clang-windows-arm64
+
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-arm64-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-arm64-cargo-
+
+      - name: cargo clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: cargo test --lib
+        run: cargo test --locked --lib
+
+      - name: Build release binary
+        run: cargo build --release --locked --bin all-smi

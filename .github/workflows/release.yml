@@ -68,7 +68,8 @@ jobs:
             {"os_family":"linux",   "target":"aarch64-unknown-linux-musl",  "os":"ubuntu-24.04-arm",        "artifact_name":"all-smi",     "asset_name":"all-smi-linux-aarch64-musl", "archive_ext":".tar.gz", "protoc_platform":"linux-aarch_64"},
             {"os_family":"macos",   "target":"aarch64-apple-darwin",        "os":"macos-14",                "artifact_name":"all-smi",     "asset_name":"all-smi-macos-aarch64",      "archive_ext":".zip",    "protoc_platform":"osx-aarch_64"},
             {"os_family":"macos",   "target":"x86_64-apple-darwin",         "os":{"group":"macOS x64","labels":"self-hosted-macos-15-x64"}, "artifact_name":"all-smi", "asset_name":"all-smi-macos-x86_64", "archive_ext":".zip", "protoc_platform":"osx-x86_64"},
-            {"os_family":"windows", "target":"x86_64-pc-windows-msvc",      "os":"windows-on-macmini02-x64","artifact_name":"all-smi.exe", "asset_name":"all-smi-windows-x86_64",     "archive_ext":".zip",    "protoc_platform":""}
+            {"os_family":"windows", "target":"x86_64-pc-windows-msvc",      "os":"windows-on-macmini02-x64","artifact_name":"all-smi.exe", "asset_name":"all-smi-windows-x86_64",     "archive_ext":".zip",    "protoc_platform":""},
+            {"os_family":"windows", "target":"aarch64-pc-windows-msvc",     "os":"windows-11-arm",          "artifact_name":"all-smi.exe", "asset_name":"all-smi-windows-aarch64",    "archive_ext":".zip",    "protoc_platform":""}
           ]'
 
           # Normalize selection: lowercase, strip spaces; empty => all.
@@ -204,6 +205,11 @@ jobs:
       # 4) Add target architecture
       - name: Add target architecture
         run: rustup target add ${{ matrix.target }}
+
+      # 4.5) clang for ring and aws-lc-sys on Windows on ARM64 (issue #459)
+      - name: Setup clang (Windows ARM64 only)
+        if: matrix.target == 'aarch64-pc-windows-msvc'
+        uses: ./.workflow-actions/.github/actions/setup-clang-windows-arm64
 
       # 5) Install musl tools only for musl builds
       - name: Install musl tools (Linux musl only)
@@ -502,8 +508,13 @@ jobs:
       # so the certificate paths and the KMS key identifier are NOT committed:
       # scripts/sign-windows.ps1 reads them from the env vars below, which are
       # injected from repository secrets (GitHub masks secret values in logs).
+      #
+      # Only the x86_64 build runs on that signing box. The aarch64 build
+      # (issue #459) runs on a GitHub-hosted `windows-11-arm` runner, which
+      # has no access to the KMS-backed key, so its binary is published
+      # unsigned until ARM64 signing is set up.
       - name: Sign Windows binary with signtool
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && matrix.target == 'x86_64-pc-windows-msvc'
         shell: pwsh
         env:
           # Required (configure as repository secrets):

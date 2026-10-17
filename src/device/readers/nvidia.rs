@@ -22,6 +22,11 @@ use crate::device::readers::nvidia_hardware::{
     HardwareDetailCache, collect_gpm_metrics, collect_nvlink_remote_devices,
 };
 use crate::device::readers::nvidia_mig::collect_mig_info;
+use crate::device::readers::nvidia_soc::{
+    DlaReading, MemoryClass, NvmlDeviceKind, apply_dla_reading, c2c_enabled, classify_memory,
+    classify_nvml_device, is_soc_device_name, pair_dla_with_gpu, raw_brand, read_dla,
+    system_memory_for_uma, valid_threshold,
+};
 use crate::device::readers::nvidia_vgpu::collect_vgpu_info;
 use crate::device::types::{GpuInfo, MigGpuInfo, ProcessInfo, VgpuHostInfo};
 use crate::utils::{get_hostname, with_global_system};
@@ -63,13 +68,22 @@ impl ThermalThresholds {
     }
 }
 
+/// Per-handle facts that never change at runtime.
+struct NvmlStaticDevice {
+    info: DeviceStaticInfo,
+    /// GPU, or an integrated DLA folded into its SoC GPU's row (#459).
+    kind: NvmlDeviceKind,
+    /// Memory and interconnect class; only meaningful for a GPU.
+    memory_class: MemoryClass,
+}
+
 pub struct NvidiaGpuReader {
     /// Cached driver version (fetched only once)
     driver_version: OnceLock<String>,
     /// Cached CUDA version (fetched only once)
     cuda_version: OnceLock<String>,
     /// Cached static device information per device index
-    device_static_info: OnceLock<HashMap<u32, DeviceStaticInfo>>,
+    device_static_info: OnceLock<HashMap<u32, NvmlStaticDevice>>,
     /// Cached NVML handle (initialized once, reused across calls)
     nvml: Mutex<Option<Nvml>>,
     /// Cached temperature thresholds per device index. Populated lazily on
@@ -149,19 +163,15 @@ impl NvidiaGpuReader {
             return *existing;
         }
 
+        // `valid_threshold` drops the `0` some drivers return for a
+        // threshold they do not implement (N1X reports a 0 C max operating
+        // limit, issue #459).
+        let threshold = |kind| valid_threshold(device.temperature_threshold(kind).ok());
         let thresholds = ThermalThresholds {
-            slowdown: device
-                .temperature_threshold(TemperatureThreshold::Slowdown)
-                .ok(),
-            shutdown: device
-                .temperature_threshold(TemperatureThreshold::Shutdown)
-                .ok(),
-            max_operating: device
-                .temperature_threshold(TemperatureThreshold::GpuMax)
-                .ok(),
-            acoustic: device
-                .temperature_threshold(TemperatureThreshold::AcousticCurr)
-                .ok(),
+            slowdown: threshold(TemperatureThreshold::Slowdown),
+            shutdown: threshold(TemperatureThreshold::Shutdown),
+            max_operating: threshold(TemperatureThreshold::GpuMax),
+            acoustic: threshold(TemperatureThreshold::AcousticCurr),
         };
 
         if thresholds.has_any_value()
@@ -227,7 +237,7 @@ impl NvidiaGpuReader {
     }
 
     /// Get cached static device info for all devices, initializing if needed
-    fn get_device_static_info(&self, nvml: &Nvml) -> &HashMap<u32, DeviceStaticInfo> {
+    fn get_device_static_info(&self, nvml: &Nvml) -> &HashMap<u32, NvmlStaticDevice> {
         self.device_static_info.get_or_init(|| {
             let mut device_info_map = HashMap::new();
             let driver_version = self.get_driver_version(nvml);
@@ -239,11 +249,25 @@ impl NvidiaGpuReader {
 
                 for i in 0..device_count {
                     if let Ok(device) = nvml.device_by_index(i) {
-                        let detail = create_device_detail(&device, &driver_version, &cuda_version);
                         let name = device.name().unwrap_or_else(|_| "Unknown GPU".to_string());
                         let uuid = device.uuid().ok();
-                        device_info_map
-                            .insert(i, DeviceStaticInfo::with_details(name, uuid, detail));
+                        let kind = classify_nvml_device(&name, uuid.as_deref(), raw_brand(&device));
+                        let mem_total = device.memory_info().map(|m| m.total).unwrap_or(0);
+                        let memory_class = device_memory_class(&device, &name, mem_total);
+                        let detail = create_device_detail(
+                            &device,
+                            &driver_version,
+                            &cuda_version,
+                            memory_class,
+                        );
+                        device_info_map.insert(
+                            i,
+                            NvmlStaticDevice {
+                                info: DeviceStaticInfo::with_details(name, uuid, detail),
+                                kind,
+                                memory_class,
+                            },
+                        );
                     }
                 }
             }
@@ -265,6 +289,10 @@ impl NvidiaGpuReader {
     /// Get GPU info using NVML with cached static values
     fn get_gpu_info_nvml(&self, nvml: &Nvml) -> Vec<GpuInfo> {
         let mut gpu_info = Vec::new();
+        // `(row index, is SoC GPU)` per GPU row, and the DLA handles to fold
+        // into one of them once every row exists (issue #459).
+        let mut gpu_rows: Vec<(usize, bool)> = Vec::new();
+        let mut dla_readings: Vec<(DlaReading, Option<String>)> = Vec::new();
 
         // Get cached static device information (fetched only once)
         let device_static_info = self.get_device_static_info(nvml);
@@ -272,18 +300,26 @@ impl NvidiaGpuReader {
         if let Ok(device_count) = nvml.device_count() {
             for i in 0..device_count {
                 if let Ok(device) = nvml.device_by_index(i) {
+                    let static_device = device_static_info.get(&i);
+                    if static_device.is_some_and(|d| d.kind == NvmlDeviceKind::Dla) {
+                        dla_readings.push((read_dla(&device), device.uuid().ok()));
+                        continue;
+                    }
+                    let memory_class = static_device
+                        .map(|d| d.memory_class)
+                        .unwrap_or(MemoryClass::Discrete);
                     // Get cached static detail for this device
-                    let detail = device_static_info
-                        .get(&i)
-                        .map(|info| info.detail.clone())
+                    let detail = static_device
+                        .map(|d| d.info.detail.clone())
                         .unwrap_or_default();
 
-                    // Determine memory values: use system memory for UMA devices
+                    // Determine memory values: use system memory for SoC GPUs
+                    // with no framebuffer of their own.
                     let mem_info = device.memory_info().ok();
                     let mem_total_raw = mem_info.as_ref().map(|m| m.total).unwrap_or(0);
-                    let uma = is_uma_device_with_mem(&device, mem_total_raw);
-                    let (total_memory, used_memory) = if uma {
-                        get_system_memory_for_uma()
+                    let (total_memory, used_memory) = if memory_class == MemoryClass::UnifiedSystem
+                    {
+                        system_memory_for_uma()
                     } else {
                         (
                             mem_total_raw,
@@ -362,11 +398,13 @@ impl NvidiaGpuReader {
                         gpm_metrics,
                         detail,
                     };
+                    gpu_rows.push((gpu_info.len(), memory_class.is_soc()));
                     gpu_info.push(info);
                 }
             }
         }
 
+        fold_dla_readings(&mut gpu_info, &gpu_rows, dla_readings);
         gpu_info
     }
 }
@@ -432,53 +470,64 @@ impl GpuReader for NvidiaGpuReader {
     }
 }
 
-/// Return `true` when the device name indicates a UMA-class chip.
-///
-/// This covers the nvidia-smi fallback path and the NVML name-check fallback
-/// in `is_uma_device_with_mem`.  Extracted as a pure function for testability.
+/// Return `true` when the device name indicates a UMA-class SoC GPU
+/// (GB10 / DGX Spark, RTX Spark N1X). Used by the nvidia-smi fallback path;
+/// the NVML path goes through [`device_memory_class`].
 fn is_uma_device_name(name: &str) -> bool {
-    let name_lower = name.to_lowercase();
-    name_lower.contains("gb10") || name_lower.contains("dgx spark")
+    is_soc_device_name(name)
 }
 
-/// Detect whether a device uses Unified Memory Architecture (UMA).
-///
-/// Returns `true` when NVML cannot report dedicated GPU memory (total == 0 or error)
-/// AND the device is identified as a UMA-class chip (e.g. GB10 / Blackwell).
-/// Check if a device is UMA based on architecture or device name.
-/// The caller should pass memory_total from a prior `memory_info()` call
-/// to avoid redundant NVML IPC round-trips.
-fn is_uma_device_with_mem(device: &nvml_wrapper::Device, memory_total: u64) -> bool {
-    if memory_total > 0 {
-        return false;
-    }
-
-    // Check architecture first (preferred — covers future Blackwell UMA products)
-    if let Ok(arch) = device.architecture()
-        && arch == DeviceArchitecture::Blackwell
-    {
-        return true;
-    }
-
-    // Fallback: match known UMA device names
-    if let Ok(name) = device.name()
-        && is_uma_device_name(&name)
-    {
-        return true;
-    }
-
-    false
+/// Classify a GPU's memory and interconnect from NVML. Called once per
+/// device and cached with the static info.
+fn device_memory_class(
+    device: &nvml_wrapper::Device,
+    name: &str,
+    memory_total: u64,
+) -> MemoryClass {
+    let is_blackwell = device
+        .architecture()
+        .is_ok_and(|arch| arch == DeviceArchitecture::Blackwell);
+    // C2C counts only on Windows, where no C2C part has HBM of its own
+    // (Grace Hopper on Linux also enables C2C but is a discrete-memory GPU).
+    let c2c_soc_hint = cfg!(target_os = "windows") && memory_total > 0 && c2c_enabled(device);
+    classify_memory(memory_total, is_blackwell, name, c2c_soc_hint)
 }
 
-/// Read system memory from `/proc/meminfo` for UMA devices.
-/// Returns `(total_bytes, used_bytes)`.
-fn get_system_memory_for_uma() -> (u64, u64) {
-    read_meminfo_memory("/proc/meminfo")
+/// Fold every DLA reading into the SoC GPU row that hosts it, combining
+/// several DLAs paired with the same row. A reading with no host row is
+/// dropped: by design a DLA never gets a device row of its own (#459).
+fn fold_dla_readings(
+    gpu_info: &mut [GpuInfo],
+    gpu_rows: &[(usize, bool)],
+    dla_readings: Vec<(DlaReading, Option<String>)>,
+) {
+    if dla_readings.is_empty() {
+        return;
+    }
+    let Some(gpu) = pair_dla_with_gpu(gpu_rows).and_then(|row| gpu_info.get_mut(row)) else {
+        tracing::debug!(
+            dla_count = dla_readings.len(),
+            gpu_rows = gpu_rows.len(),
+            "dropping DLA readings: no SoC GPU row to host them"
+        );
+        return;
+    };
+    let mut combined: Option<(DlaReading, Option<String>)> = None;
+    for (reading, uuid) in dla_readings {
+        combined = Some(match combined {
+            None => (reading, uuid),
+            Some((acc, first_uuid)) => (acc.merge(reading), first_uuid.or(uuid)),
+        });
+    }
+    if let Some((reading, uuid)) = combined {
+        apply_dla_reading(gpu, &reading, uuid.as_deref());
+    }
 }
 
 /// Parse `/proc/meminfo`-format content and return `(total_bytes, used_bytes)`.
 /// Extracted for testability.
-fn read_meminfo_memory(path: &str) -> (u64, u64) {
+#[cfg_attr(target_os = "windows", allow(dead_code))]
+pub(crate) fn read_meminfo_memory(path: &str) -> (u64, u64) {
     let content = match std::fs::read_to_string(path) {
         Ok(c) => c,
         Err(_) => return (0, 0),
@@ -533,6 +582,11 @@ pub fn get_nvml_status_message() -> Option<String> {
 fn get_gpu_processes_nvml(nvml: &Nvml) -> (Vec<ProcessInfo>, HashSet<u32>) {
     let mut gpu_process_map: HashMap<(u32, String), ProcessInfo> = HashMap::new();
     let mut gpu_pids = HashSet::new();
+    // `(pid, device uuid)` rows whose memory NVML could not report (WDDM),
+    // and the PCI identity of each device, for the PDH supplement below.
+    let mut unavailable: HashSet<(u32, String)> = HashSet::new();
+    #[cfg(target_os = "windows")]
+    let mut pci_identities = Vec::new();
 
     if let Ok(device_count) = nvml.device_count() {
         for device_index in 0..device_count {
@@ -540,28 +594,21 @@ fn get_gpu_processes_nvml(nvml: &Nvml) -> (Vec<ProcessInfo>, HashSet<u32>) {
                 let device_uuid = device
                     .uuid()
                     .unwrap_or_else(|_| format!("GPU-{device_index}"));
+                #[cfg(target_os = "windows")]
+                pci_identities.push(cached_pci_identity(&device, &device_uuid));
 
-                // Get compute processes
-                if let Ok(processes) = device.running_compute_processes() {
+                // Compute processes first, then graphics processes.
+                let process_lists = [
+                    device.running_compute_processes(),
+                    device.running_graphics_processes(),
+                ];
+                for processes in process_lists.into_iter().flatten() {
                     for proc in processes {
                         if proc.pid > 0 {
                             gpu_pids.insert(proc.pid);
-                            let process_info = create_base_process_info(
-                                device_index as usize,
-                                device_uuid.clone(),
-                                proc.pid,
-                                proc.used_gpu_memory,
-                            );
-                            merge_nvml_process_entry(&mut gpu_process_map, process_info);
-                        }
-                    }
-                }
-
-                // Also check graphics processes
-                if let Ok(processes) = device.running_graphics_processes() {
-                    for proc in processes {
-                        if proc.pid > 0 {
-                            gpu_pids.insert(proc.pid);
+                            if matches!(proc.used_gpu_memory, UsedGpuMemory::Unavailable) {
+                                unavailable.insert((proc.pid, device_uuid.clone()));
+                            }
                             let process_info = create_base_process_info(
                                 device_index as usize,
                                 device_uuid.clone(),
@@ -576,7 +623,63 @@ fn get_gpu_processes_nvml(nvml: &Nvml) -> (Vec<ProcessInfo>, HashSet<u32>) {
         }
     }
 
-    (gpu_process_map.into_values().collect(), gpu_pids)
+    #[cfg_attr(not(target_os = "windows"), allow(unused_mut))]
+    let mut rows: Vec<ProcessInfo> = gpu_process_map.into_values().collect();
+    // Under WDDM NVML has no per-process memory; Windows does (issue #459).
+    #[cfg(target_os = "windows")]
+    crate::device::readers::nvidia_wddm::supplement_from_pdh(
+        &mut rows,
+        &unavailable,
+        &pci_identities,
+    );
+    #[cfg(not(target_os = "windows"))]
+    let _ = &unavailable;
+
+    (rows, gpu_pids)
+}
+
+/// PCI identity of an NVML device for the WDDM memory supplement, queried
+/// once per device UUID instead of on every poll: name and PCI ids never
+/// change while the device is present.
+#[cfg(target_os = "windows")]
+fn cached_pci_identity(
+    device: &nvml_wrapper::Device,
+    uuid: &str,
+) -> crate::device::readers::nvidia_wddm::NvmlPciIdentity {
+    use crate::device::readers::nvidia_wddm::NvmlPciIdentity;
+
+    static CACHE: OnceLock<Mutex<HashMap<String, NvmlPciIdentity>>> = OnceLock::new();
+    let mut cache = CACHE
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(identity) = cache.get(uuid) {
+        return identity.clone();
+    }
+    let name = device.name();
+    let pci_info = device.pci_info();
+    // A failed query is retried on the next poll rather than cached: a
+    // zero PCI id would keep the device out of the PDH supplement for the
+    // life of the process. A definitive "no PCI identity" (the N1X NPU) is
+    // cached like any other answer. The cache holds one entry per distinct
+    // device UUID, so it is bounded by the hardware seen.
+    let pci_definitive = match &pci_info {
+        Ok(_) => true,
+        Err(err) => matches!(
+            err,
+            NvmlError::NotSupported | NvmlError::FailedToLoadSymbol(_)
+        ),
+    };
+    let complete = name.is_ok() && pci_definitive;
+    let identity = NvmlPciIdentity {
+        uuid: uuid.to_string(),
+        name: name.unwrap_or_default(),
+        pci_device_id: pci_info.map(|p| p.pci_device_id).unwrap_or(0),
+    };
+    if complete {
+        cache.insert(uuid.to_string(), identity.clone());
+    }
+    identity
 }
 
 fn merge_nvml_process_entry(
@@ -647,6 +750,7 @@ fn create_device_detail(
     device: &nvml_wrapper::Device,
     driver_version: &str,
     cuda_version: &str,
+    memory_class: MemoryClass,
 ) -> HashMap<String, String> {
     let builder = DetailBuilder::new()
         .insert("Driver Version", driver_version)
@@ -660,13 +764,16 @@ fn create_device_detail(
     add_detail!(detail, device.brand(), "Brand");
     add_detail!(detail, device.architecture(), "architecture");
 
-    let mem_total = device.memory_info().map(|m| m.total).unwrap_or(0);
-    let uma = is_uma_device_with_mem(device, mem_total);
-
-    // Suppress PCIe metrics for UMA devices — they use internal interconnect
-    if uma {
+    // Suppress PCIe metrics for SoC GPUs: they sit on the SoC fabric, and
+    // N1X answers the PCIe queries with a `Gen 1 x1` stub (issue #459).
+    if memory_class.is_soc() {
         detail.insert("Memory Type".to_string(), "Unified".to_string());
-        detail.insert("Interconnect".to_string(), "Integrated".to_string());
+        let interconnect = if memory_class == MemoryClass::UnifiedCarveOut && c2c_enabled(device) {
+            "NVLink-C2C"
+        } else {
+            "Integrated"
+        };
+        detail.insert("Interconnect".to_string(), interconnect.to_string());
     } else {
         // The exporter's snake_case bare-number convention, which this
         // function already used for the two maximums. The current pair is
@@ -766,6 +873,12 @@ fn create_device_detail(
     detail
 }
 
+/// `power.draw` from `nvidia-smi --format=csv,nounits`, which is already
+/// in watts (`"45.32"`, or `"[N/A]"` when the board does not report it).
+fn parse_csv_power_watts(field: &str) -> f64 {
+    field.trim().parse::<f64>().unwrap_or(0.0)
+}
+
 // Fallback implementation using nvidia-smi
 fn get_gpu_info_nvidia_smi() -> Vec<GpuInfo> {
     let output = match execute_command_default(
@@ -782,68 +895,92 @@ fn get_gpu_info_nvidia_smi() -> Vec<GpuInfo> {
     let time = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
     let hostname = get_hostname();
 
-    output
-        .lines()
-        .filter_map(|line| {
-            let parts = parse_csv_line(line);
-            if parts.len() >= 9 {
-                let mut used_memory = parse_memory_value(&parts[5]);
-                let mut total_memory = parse_memory_value(&parts[6]);
-                let mut detail = HashMap::new();
+    let mut gpu_info = Vec::new();
+    let mut gpu_rows: Vec<(usize, bool)> = Vec::new();
+    let mut dla_readings: Vec<(DlaReading, Option<String>)> = Vec::new();
 
-                // Detect UMA: memory fields are [N/A] and device name suggests UMA
-                if total_memory == 0 && is_uma_device_name(&parts[2]) {
-                    let (sys_total, sys_used) = get_system_memory_for_uma();
+    for line in output.lines() {
+        let parts = parse_csv_line(line);
+        if parts.len() < 9 {
+            continue;
+        }
+        // The N1X NPU is folded into its SoC GPU's row, as on the NVML
+        // path (issue #459).
+        if classify_nvml_device(&parts[2], Some(&parts[1]), None) == NvmlDeviceKind::Dla {
+            dla_readings.push((
+                DlaReading {
+                    utilization: parts[3].parse().ok(),
+                    power_watts: parts[8].parse().ok(),
+                    clock_mhz: parts[7].parse().ok().filter(|&mhz: &u32| mhz > 0),
+                    memory_clock_mhz: None,
+                    temperature: parts[4].parse().ok().filter(|&t: &u32| t > 0),
+                },
+                Some(parts[1].to_string()),
+            ));
+            continue;
+        }
+        let soc = is_uma_device_name(&parts[2]);
+        gpu_rows.push((gpu_info.len(), soc));
+        gpu_info.push({
+            let mut used_memory = parse_memory_value(&parts[5]);
+            let mut total_memory = parse_memory_value(&parts[6]);
+            let mut detail = HashMap::new();
+
+            // SoC GPU: memory fields are [N/A] (GB10) or a carve-out
+            // (N1X); either way the device sits on the SoC fabric.
+            if soc {
+                if total_memory == 0 {
+                    let (sys_total, sys_used) = system_memory_for_uma();
                     total_memory = sys_total;
                     used_memory = sys_used;
-                    detail.insert("Memory Type".to_string(), "Unified".to_string());
-                    detail.insert("Interconnect".to_string(), "Integrated".to_string());
                 }
-
-                Some(GpuInfo {
-                    uuid: parts[1].to_string(),
-                    time: time.clone(),
-                    name: parts[2].to_string(),
-                    device_type: "GPU".to_string(),
-                    host_id: hostname.clone(),
-                    hostname: hostname.clone(),
-                    instance: hostname.clone(),
-                    utilization: parts[3].parse().unwrap_or(0.0),
-                    ane_utilization: 0.0,
-                    dla_utilization: None,
-                    tensorcore_utilization: None,
-                    temperature: parts[4].parse().unwrap_or(0),
-                    used_memory,
-                    total_memory,
-                    frequency: parts[7].parse().unwrap_or(0),
-                    power_consumption: parts[8].replace("[N/A]", "0").parse::<f64>().unwrap_or(0.0)
-                        / 1000.0,
-                    gpu_core_count: None,
-                    // nvidia-smi CSV path does not surface thresholds / P-state;
-                    // they stay unavailable. The NVML path above is the
-                    // preferred source when the library is present.
-                    temperature_threshold_slowdown: None,
-                    temperature_threshold_shutdown: None,
-                    temperature_threshold_max_operating: None,
-                    temperature_threshold_acoustic: None,
-                    performance_state: None,
-                    fan_speed_rpm: None,
-                    // Hardware details (issue #132) are only available via
-                    // NVML — the CSV fallback cannot surface them. Leave
-                    // them at the "unavailable" defaults so downstream
-                    // consumers render them as missing rather than zero.
-                    numa_node_id: None,
-                    gsp_firmware_mode: None,
-                    gsp_firmware_version: None,
-                    nvlink_remote_devices: Vec::new(),
-                    gpm_metrics: None,
-                    detail,
-                })
-            } else {
-                None
+                detail.insert("Memory Type".to_string(), "Unified".to_string());
+                detail.insert("Interconnect".to_string(), "Integrated".to_string());
             }
-        })
-        .collect()
+
+            GpuInfo {
+                uuid: parts[1].to_string(),
+                time: time.clone(),
+                name: parts[2].to_string(),
+                device_type: "GPU".to_string(),
+                host_id: hostname.clone(),
+                hostname: hostname.clone(),
+                instance: hostname.clone(),
+                utilization: parts[3].parse().unwrap_or(0.0),
+                ane_utilization: 0.0,
+                dla_utilization: None,
+                tensorcore_utilization: None,
+                temperature: parts[4].parse().unwrap_or(0),
+                used_memory,
+                total_memory,
+                frequency: parts[7].parse().unwrap_or(0),
+                power_consumption: parse_csv_power_watts(&parts[8]),
+                gpu_core_count: None,
+                // nvidia-smi CSV path does not surface thresholds / P-state;
+                // they stay unavailable. The NVML path above is the
+                // preferred source when the library is present.
+                temperature_threshold_slowdown: None,
+                temperature_threshold_shutdown: None,
+                temperature_threshold_max_operating: None,
+                temperature_threshold_acoustic: None,
+                performance_state: None,
+                fan_speed_rpm: None,
+                // Hardware details (issue #132) are only available via
+                // NVML; the CSV fallback cannot surface them. Leave
+                // them at the "unavailable" defaults so downstream
+                // consumers render them as missing rather than zero.
+                numa_node_id: None,
+                gsp_firmware_mode: None,
+                gsp_firmware_version: None,
+                nvlink_remote_devices: Vec::new(),
+                gpm_metrics: None,
+                detail,
+            }
+        });
+    }
+
+    fold_dla_readings(&mut gpu_info, &gpu_rows, dla_readings);
+    gpu_info
 }
 
 // Get GPU processes using nvidia-smi
@@ -904,6 +1041,15 @@ fn parse_memory_value(value: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn csv_power_draw_is_already_watts() {
+        // `nvidia-smi --query-gpu=power.draw --format=csv,noheader,nounits`
+        // on an RTX Spark N1X prints `0.69` for 0.69 W.
+        assert!((parse_csv_power_watts("0.69") - 0.69).abs() < 1e-9);
+        assert!((parse_csv_power_watts(" 245.10") - 245.10).abs() < 1e-9);
+        assert_eq!(parse_csv_power_watts("[N/A]"), 0.0);
+    }
 
     fn test_process(pid: u32, device_uuid: &str, used_memory: u64) -> ProcessInfo {
         ProcessInfo {

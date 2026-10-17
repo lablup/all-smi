@@ -12,9 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::device::{
-    CoreType, CoreUtilization, CpuInfo, CpuPlatformType, CpuReader, CpuSocketInfo,
-};
+use crate::device::{CoreType, CoreUtilization, CpuInfo, CpuReader, CpuSocketInfo};
 use crate::utils::system::get_hostname;
 use chrono::Local;
 use serde::Deserialize;
@@ -23,7 +21,49 @@ use sysinfo::{CpuRefreshKind, System};
 use wmi::WMIConnection;
 
 // Import the temperature fallback chain
+use super::cpu_windows_arm::{classify_platform, core_types_from_identifiers};
 use super::windows_temp::TemperatureManager;
+
+/// Read `HKLM\HARDWARE\DESCRIPTION\System\CentralProcessor\<index>\Identifier`.
+fn read_processor_identifier(index: usize) -> Option<String> {
+    read_processor_value(index, "Identifier")
+}
+
+/// Read a string value under
+/// `HKLM\HARDWARE\DESCRIPTION\System\CentralProcessor\<index>`.
+fn read_processor_value(index: usize, name: &str) -> Option<String> {
+    use windows::Win32::System::Registry::{HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ, RegGetValueW};
+    use windows::core::HSTRING;
+
+    let subkey = HSTRING::from(format!(
+        "HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\{index}"
+    ));
+    let value = HSTRING::from(name);
+    let mut buffer = [0u16; 256];
+    let mut size = std::mem::size_of_val(&buffer) as u32;
+    // SAFETY: `buffer` is a writable UTF-16 buffer whose byte length is
+    // passed in `size`; RegGetValueW writes at most that many bytes,
+    // NUL-terminated for RRF_RT_REG_SZ, and updates `size` to the bytes
+    // written. The buffer is only read after the call succeeds.
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_LOCAL_MACHINE,
+            &subkey,
+            &value,
+            RRF_RT_REG_SZ,
+            None,
+            Some(buffer.as_mut_ptr().cast()),
+            Some(&mut size),
+        )
+    };
+    if status.is_err() {
+        return None;
+    }
+    let chars = (size as usize / 2).min(buffer.len());
+    let text = String::from_utf16_lossy(&buffer[..chars]);
+    let text = text.trim_end_matches('\0').trim().to_string();
+    (!text.is_empty()).then_some(text)
+}
 
 // WMI structures for processor information
 #[derive(Deserialize, Debug)]
@@ -80,6 +120,12 @@ pub struct WindowsCpuReader {
     cached_socket_count: RwLock<Option<u32>>,
     // Temperature manager with fallback chain
     temperature_manager: TemperatureManager,
+    // Per-logical-processor registry `Identifier` strings, read once:
+    // they name the ARM core design and so the P/E cluster (issue #459).
+    processor_identifiers: Vec<Option<String>>,
+    // Registry `ProcessorNameString` of processor 0, read once: the brand
+    // fallback when sysinfo reports an empty brand (Windows on ARM).
+    processor_name: Option<String>,
 }
 
 impl Default for WindowsCpuReader {
@@ -98,6 +144,10 @@ impl WindowsCpuReader {
         system.refresh_cpu_specifics(CpuRefreshKind::everything());
         std::thread::sleep(std::time::Duration::from_millis(100));
         system.refresh_cpu_specifics(CpuRefreshKind::everything());
+        let processor_identifiers = (0..system.cpus().len())
+            .map(read_processor_identifier)
+            .collect();
+        let processor_name = read_processor_value(0, "ProcessorNameString");
 
         Self {
             system: RwLock::new(system),
@@ -106,25 +156,35 @@ impl WindowsCpuReader {
             cached_cache_size: RwLock::new(None),
             cached_socket_count: RwLock::new(None),
             temperature_manager: TemperatureManager::new(),
+            processor_identifiers,
+            processor_name,
         }
     }
 
     /// Get CPU temperature using the fallback chain.
     ///
     /// Tries multiple temperature sources in order:
-    /// 1. MSAcpi_ThermalZoneTemperature (ACPI thermal zones)
+    /// 1. ACPI thermal zones (MSAcpi_ThermalZoneTemperature)
     /// 2. AMD Ryzen Master SDK (AMD CPUs only)
     /// 3. Intel WMI (Intel CPUs only)
     /// 4. LibreHardwareMonitor WMI (any CPU)
-    /// 5. None (graceful fallback)
+    /// 5. ThermalZoneInformation performance counters (any CPU, no elevation)
+    /// 6. None (graceful fallback)
     fn get_cpu_temperature(&self) -> Option<u32> {
         // Get the root\WMI connection for ACPI thermal zones
-        with_root_wmi_connection(|wmi_conn| {
-            self.temperature_manager.get_temperature(Some(wmi_conn))
+        // The cimv2 connection serves the last fallback
+        // (Win32_PerfFormattedData_Counters_ThermalZoneInformation).
+        with_cimv2_connection(|cimv2| {
+            with_root_wmi_connection(|wmi_conn| {
+                self.temperature_manager
+                    .get_temperature(Some(wmi_conn), Some(cimv2))
+            })
+            .flatten()
+            // If root\WMI connection failed, still try other sources
+            .or_else(|| self.temperature_manager.get_temperature(None, Some(cimv2)))
         })
         .flatten()
-        // If root\WMI connection failed, still try other sources
-        .or_else(|| self.temperature_manager.get_temperature(None))
+        .or_else(|| self.temperature_manager.get_temperature(None, None))
     }
 
     /// Get static CPU info from WMI (max frequency, cache size, socket count)
@@ -226,23 +286,27 @@ impl WindowsCpuReader {
         let cpus = system.cpus();
         let total_threads = cpus.len() as u32;
 
-        // Get CPU model from the first CPU
-        let cpu_model = if !cpus.is_empty() {
-            cpus[0].brand().to_string()
-        } else {
-            "Unknown CPU".to_string()
+        // Get CPU model from the first CPU. sysinfo returns an empty brand
+        // on Windows on ARM (the N1X, issue #459), where the registry's
+        // ProcessorNameString still names the part.
+        let cpu_model = match cpus.first().map(|cpu| cpu.brand().trim()) {
+            Some(brand) if !brand.is_empty() => brand.to_string(),
+            _ => self
+                .processor_name
+                .clone()
+                .unwrap_or_else(|| "Unknown CPU".to_string()),
         };
 
-        // Determine platform type from CPU brand
-        let platform_type = if cpu_model.to_lowercase().contains("intel") {
-            CpuPlatformType::Intel
-        } else if cpu_model.to_lowercase().contains("amd") {
-            CpuPlatformType::Amd
-        } else if cpu_model.to_lowercase().contains("arm") {
-            CpuPlatformType::Arm
-        } else {
-            CpuPlatformType::Other("Unknown".to_string())
-        };
+        // Determine platform type from the CPU brand, the registry core
+        // identifier and the build target (NVIDIA ARM SoCs name neither
+        // "arm" nor a known vendor in the brand string, issue #459).
+        let platform_type = classify_platform(
+            &cpu_model,
+            self.processor_identifiers
+                .first()
+                .and_then(|id| id.as_deref()),
+            cfg!(target_arch = "aarch64"),
+        );
 
         // Get architecture
         let architecture = if cfg!(target_arch = "x86_64") {
@@ -268,12 +332,15 @@ impl WindowsCpuReader {
         // Get overall CPU utilization
         let overall_utilization = system.global_cpu_usage() as f64;
 
-        // Build per-core utilization
+        // Build per-core utilization. Heterogeneous ARM parts get their
+        // P/E split from the registry identifiers; everything else stays
+        // Standard.
+        let core_types = core_types_from_identifiers(&self.processor_identifiers);
         let mut per_core_utilization = Vec::new();
         for (i, cpu) in cpus.iter().enumerate() {
             per_core_utilization.push(CoreUtilization {
                 core_id: i as u32,
-                core_type: CoreType::Standard,
+                core_type: core_types.get(i).cloned().unwrap_or(CoreType::Standard),
                 utilization: cpu.cpu_usage() as f64,
             });
         }

@@ -28,10 +28,18 @@ pub mod cpu_macos;
 pub mod cpu_macos_intel;
 #[cfg(target_os = "windows")]
 pub mod cpu_windows;
+// Windows on ARM core identification (issue #459). Pure parsing, so it is
+// compiled under `test` everywhere to reach the Linux test runner.
+#[cfg(any(target_os = "windows", test))]
+pub mod cpu_windows_arm;
 
 // Windows temperature fallback chain
 #[cfg(target_os = "windows")]
 pub mod windows_temp;
+// ACPI thermal-zone conversion used by `windows_temp`; pure, so compiled
+// under `test` everywhere (issue #459).
+#[cfg(any(target_os = "windows", test))]
+pub mod windows_thermal_zone;
 
 // Container resource support
 #[cfg(target_os = "linux")]
