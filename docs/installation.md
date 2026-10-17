@@ -49,7 +49,7 @@ Download the latest release from the [GitHub releases page](https://github.com/l
 2. Download the appropriate binary for your platform
 3. Extract the archive and place the binary in your `$PATH`. On glibc Linux, keep `liball_smi_amd.so` beside the binary or install it under `/usr/local/lib/all-smi`; the companion provides AMD monitoring without making the main binary depend on libdrm.
 
-> Release binaries are signed: macOS archives are notarized (so Gatekeeper does not block them as coming from an unidentified developer) and Windows binaries are Authenticode code-signed.
+> Release binaries are signed: macOS archives are notarized (so Gatekeeper does not block them as coming from an unidentified developer) and Windows x86_64 binaries are Authenticode code-signed. The Windows ARM64 (`all-smi-windows-aarch64`) binary is built on a GitHub-hosted runner and is not yet code-signed.
 
 ## Option 5: Install from Cargo
 
@@ -129,12 +129,18 @@ all-smi does not ship a container image, and container deployment is not a suppo
 - **CPU Temperature Limitations:**
   - Standard Windows WMI thermal zones (MSAcpi_ThermalZoneTemperature) are not available on all systems
   - The application uses a fallback chain to try multiple temperature sources:
-    1. ACPI Thermal Zones (standard WMI)
+    1. ACPI Thermal Zones (standard WMI `root\WMI:MSAcpi_ThermalZoneTemperature`, then `root\cimv2:Win32_PerfFormattedData_Counters_ThermalZoneInformation`, which needs no Administrator rights)
     2. AMD Ryzen Master SDK (AMD CPUs - requires AMD drivers or Ryzen Master)
     3. Intel WMI (Intel CPUs - if chipset drivers support it)
     4. LibreHardwareMonitor WMI (any CPU - if [LibreHardwareMonitor](https://github.com/LibreHardwareMonitor/LibreHardwareMonitor) is running)
   - If temperature is not available, it will be shown as "N/A" without error messages
   - For best temperature monitoring on Windows, install and run LibreHardwareMonitor in the background
+- **NVIDIA under WDDM:** NVML cannot report per-process GPU memory under the Windows display driver model, so all-smi fills it from the PDH `\GPU Process Memory(*)` counters, the same source the AMD and Intel readers use.
+- **Windows on ARM64 (NVIDIA RTX Spark N1X):**
+  - The integrated NPU, which NVML lists as a second device named `NVIDIA NPU` with a `DLA-` UUID, is shown as a `DLA` gauge and sparkline on the GPU row and exported as `all_smi_dla_utilization`, `all_smi_dla_power_watts`, `all_smi_dla_clock_memory_mhz`, and `all_smi_dla_temperature_celsius`, not as a separate device. The public NVML API exposes no DLA engine clock on this driver, so `all_smi_dla_frequency_mhz` is absent.
+  - The GPU is reported with unified memory over NVLink-C2C, without the PCIe link metrics NVML stubs out as `Gen 1 x1`.
+  - CPU cores are split into Performance (Cortex-X925) and Efficiency (Cortex-A725) from the per-core registry identifiers.
+  - The agentless SSH transport (`view --ssh`) is not available in this build: its crypto backends (aws-lc-rs, ring) cannot be compiled with MSVC alone on ARM64. Use `view --hosts` with `all-smi api` on the targets instead. HTTPS uses the Windows TLS stack (SChannel).
 
 ## Accelerator backends on Linux
 

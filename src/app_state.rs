@@ -307,6 +307,9 @@ pub struct AppState {
     pub temperature_history: VecDeque<f64>,
     pub package_power_history: VecDeque<f64>,
     pub ane_power_history: VecDeque<f64>,
+    /// Mean DLA utilization (%) across GPU rows that carry a DLA (Jetson,
+    /// RTX Spark N1X NPU; issue #459).
+    pub dla_utilization_history: VecDeque<f64>,
     pub cpu_utilization_history: VecDeque<f64>,
     pub system_memory_history: VecDeque<f64>,
     pub cpu_temperature_history: VecDeque<f64>,
@@ -518,6 +521,7 @@ impl AppState {
             temperature_history: VecDeque::new(),
             package_power_history: VecDeque::new(),
             ane_power_history: VecDeque::new(),
+            dla_utilization_history: VecDeque::new(),
             cpu_utilization_history: VecDeque::new(),
             system_memory_history: VecDeque::new(),
             cpu_temperature_history: VecDeque::new(),

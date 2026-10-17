@@ -224,6 +224,43 @@ impl<'a> GpuMetricExporter<'a> {
                 .type_("all_smi_dla_utilization", "gauge")
                 .metric("all_smi_dla_utilization", &base_labels, dla_util);
         }
+
+        // DLA readings the host SoC GPU row carries in `detail` (the RTX
+        // Spark N1X NPU folded into its GPU row, issue #459). Each is
+        // omitted when the key is absent or unparsable.
+        let dla_gauges = [
+            (
+                detail_keys::DLA_POWER_WATTS_DETAIL_KEY,
+                "all_smi_dla_power_watts",
+                "DLA power consumption in watts",
+            ),
+            (
+                detail_keys::DLA_CLOCK_DETAIL_KEY,
+                "all_smi_dla_frequency_mhz",
+                "DLA frequency in MHz",
+            ),
+            (
+                detail_keys::DLA_CLOCK_MEMORY_DETAIL_KEY,
+                "all_smi_dla_clock_memory_mhz",
+                "DLA memory clock in MHz",
+            ),
+            (
+                detail_keys::DLA_TEMPERATURE_DETAIL_KEY,
+                "all_smi_dla_temperature_celsius",
+                "DLA temperature in celsius",
+            ),
+        ];
+        for (key, metric, help) in dla_gauges {
+            if let Some(value) = info.detail.get(key).and_then(|v| v.parse::<f64>().ok())
+                && value.is_finite()
+            {
+                builder.help(metric, help).type_(metric, "gauge").metric(
+                    metric,
+                    &base_labels,
+                    value,
+                );
+            }
+        }
     }
 
     fn export_apple_silicon_metrics(&self, builder: &mut MetricBuilder, row: &GpuRow<'a>) {

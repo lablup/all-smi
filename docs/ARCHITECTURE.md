@@ -202,6 +202,8 @@ pub trait MetricsExporter: Send + Sync {
 - Fallback: `nvidia-smi` command parsing
 - Supports multi-GPU configurations
 - Includes CUDA process tracking
+- SoC handling (`nvidia_soc.rs`): GB10 and RTX Spark N1X GPUs are reported with unified memory and no PCIe stub metrics; the N1X NPU (NVML `DLA-*` handle) is folded into its GPU row as `dla_utilization` plus `dla_*` detail keys instead of getting a device row
+- WDDM per-process memory (`nvidia_wddm.rs`): when NVML reports `UsedGpuMemory::Unavailable`, rows are filled from `windows_gpu_perf` PDH samples, pairing NVML devices with DXGI adapters by PCI ids
 
 #### NVIDIA Jetson (`src/device/readers/nvidia_jetson.rs`)
 - Specialized for Tegra platforms

@@ -90,6 +90,25 @@ pub const PCIE_WIDTH_CURRENT_DETAIL_KEY: &str = "pcie_width_current";
 /// number: the gauge is omitted for anything `parse::<f64>()` rejects.
 pub const CLOCK_MEMORY_CURRENT_DETAIL_KEY: &str = "clock_memory_current";
 
+/// DLA (integrated deep-learning accelerator) power in watts, as a bare
+/// decimal number (`"0.88"`), on the SoC GPU row that hosts the DLA
+/// (issue #459: the RTX Spark N1X NPU3). Travels as the
+/// `all_smi_dla_power_watts` gauge, so it is listed in
+/// [`VOLATILE_DETAIL_KEYS`].
+pub const DLA_POWER_WATTS_DETAIL_KEY: &str = "dla_power_watts";
+
+/// DLA engine clock in MHz, bare number. Exported as
+/// `all_smi_dla_frequency_mhz`.
+pub const DLA_CLOCK_DETAIL_KEY: &str = "dla_clock_mhz";
+
+/// Memory clock the DLA reports, in MHz, bare number. Exported as
+/// `all_smi_dla_clock_memory_mhz`.
+pub const DLA_CLOCK_MEMORY_DETAIL_KEY: &str = "dla_clock_memory_mhz";
+
+/// DLA die temperature in Celsius, bare number. Exported as
+/// `all_smi_dla_temperature_celsius`.
+pub const DLA_TEMPERATURE_DETAIL_KEY: &str = "dla_temperature";
+
 /// Legacy `detail` key every reader used before `GpuInfo::fan_speed_rpm`
 /// existed, and still writes alongside it.
 ///
@@ -375,6 +394,10 @@ pub const VOLATILE_DETAIL_KEYS: &[&str] = &[
     VRAM_USAGE_PROCESS_DETAIL_KEY,
     VRAM_BUDGET_PROCESS_DETAIL_KEY,
     "Power (L0)",
+    DLA_POWER_WATTS_DETAIL_KEY,
+    DLA_CLOCK_DETAIL_KEY,
+    DLA_CLOCK_MEMORY_DETAIL_KEY,
+    DLA_TEMPERATURE_DETAIL_KEY,
 ];
 
 /// [`VOLATILE_DETAIL_KEYS`] as the label names they sanitize to, computed

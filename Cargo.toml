@@ -28,7 +28,10 @@ axum = { version = "0.8.9", optional = true }
 tower-http = { version = "0.7", features = ["cors", "trace"], optional = true }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-reqwest = { version = "0.13", features = ["json"] }
+# TLS backend is chosen per target below. Default features are off so the
+# rustls + aws-lc-rs provider is not pulled in on aarch64-pc-windows-msvc,
+# where aws-lc-sys (and ring) cannot build without clang (issue #459).
+reqwest = { version = "0.13", default-features = false, features = ["json", "charset", "http2", "system-proxy"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
 regex = "1.12.2"
@@ -59,10 +62,24 @@ zstd = "0.14"
 flate2 = "1"
 # Support bundle packaging for the `doctor --bundle` subcommand (issue #188).
 tar = "0.4.46"
+
+# Every target except Windows on ARM64: reqwest keeps its default rustls TLS
+# (aws-lc-rs provider), and the agentless SSH transport is available.
+[target.'cfg(not(all(target_os = "windows", target_arch = "aarch64")))'.dependencies]
+reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 # Pure-Rust SSH client for the agentless view transport (issue #194).
 # Chosen over ssh2/libssh2 so musl static builds do not need a C
 # dependency. russh 0.63 targets edition 2021 with tokio 1.x.
 russh = "0.63.1"
+
+# Windows on ARM64 (issue #459). Both crypto backends russh and rustls can use
+# need clang to build here: aws-lc-sys assembles its ARMv8 `.S` sources with
+# clang-cl, and ring 0.17's build script hard-requires `clang` on
+# aarch64-pc-windows-msvc. MSVC alone cannot build either, so this target
+# uses SChannel through native-tls for HTTPS and builds without the SSH
+# transport (`view --ssh` reports that it is unavailable).
+[target.'cfg(all(target_os = "windows", target_arch = "aarch64"))'.dependencies]
+reqwest = { version = "0.13", default-features = false, features = ["native-tls"] }
 [target.'cfg(target_os = "linux")'.dependencies]
 # Tenstorrent NPU support via the upstream luwen crates (published on crates.io,
 # tracking luwen main). Replaces the former all-smi-luwen-* republished forks.
@@ -91,6 +108,8 @@ windows = { version = "0.62", features = [
     "Win32_Graphics_Dxgi_Common",
     "Win32_System_Performance",
     "Win32_System_Memory",
+    "Win32_System_Registry",
+    "Win32_System_SystemInformation",
 ] }
 # Service Control Manager integration for `all-smi service` (issue #311).
 # Mullvad's crate, MIT OR Apache-2.0, MSRV 1.71 against this project's

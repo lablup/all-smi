@@ -35,6 +35,7 @@
 | macOS (Apple Silicon) | GPU, CPU, memory, ANE power, and thermal metrics; no sudo required |
 | macOS (Intel) | CPU, memory, and chassis metrics; no GPU monitoring |
 | Windows | NVIDIA, AMD, and Intel GPU backends, CPU and memory; sensor coverage depends on drivers and permissions |
+| Windows on ARM64 | NVIDIA RTX Spark N1X: Blackwell GPU with its NPU shown as a DLA gauge, heterogeneous Cortex-X925 / A725 CPU cores; no agentless SSH transport in this build |
 
 Not every device exposes every metric. See [hardware requirements](docs/installation.md#platform-specific-requirements) for drivers, permissions, and limitations.
 

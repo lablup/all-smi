@@ -222,6 +222,7 @@ impl MetricsParser {
                     || metric_name.starts_with("npu_")
                     || metric_name.starts_with("nvlink_")
                     || metric_name == "ane_utilization"
+                    || metric_name.starts_with("dla_")
                 {
                     if gpu_info_map.len() < MAX_DEVICES_PER_TYPE {
                         self.process_gpu_metrics(
@@ -780,6 +781,33 @@ impl MetricsParser {
             "npu_firmware_info" => {
                 // Handle NPU-specific firmware info metric
                 crate::extract_label_to_detail!(labels, "firmware", gpu_info.detail);
+            }
+            // DLA attached to the GPU row (Jetson, RTX Spark N1X NPU; issue
+            // #459). Utilization is a percentage; out-of-range values are
+            // dropped so the TUI gauge never draws a garbled reading.
+            "dla_utilization" if value.is_finite() && (0.0..=100.0).contains(&value) => {
+                gpu_info.dla_utilization = Some(value);
+            }
+            "dla_power_watts" if value.is_finite() && value >= 0.0 => {
+                gpu_info.detail.insert(
+                    crate::device::readers::detail_keys::DLA_POWER_WATTS_DETAIL_KEY.to_string(),
+                    format!("{value:.2}"),
+                );
+            }
+            "dla_frequency_mhz" | "dla_clock_memory_mhz" | "dla_temperature_celsius"
+                if value.is_finite() && value >= 0.0 =>
+            {
+                use crate::device::readers::detail_keys::{
+                    DLA_CLOCK_DETAIL_KEY, DLA_CLOCK_MEMORY_DETAIL_KEY, DLA_TEMPERATURE_DETAIL_KEY,
+                };
+                let key = match metric_name {
+                    "dla_frequency_mhz" => DLA_CLOCK_DETAIL_KEY,
+                    "dla_clock_memory_mhz" => DLA_CLOCK_MEMORY_DETAIL_KEY,
+                    _ => DLA_TEMPERATURE_DETAIL_KEY,
+                };
+                gpu_info
+                    .detail
+                    .insert(key.to_string(), format!("{:.0}", value.round()));
             }
             _ => {}
         }
@@ -1775,6 +1803,83 @@ all_smi_ane_utilization{gpu="NVIDIA H200 141GB HBM3", instance="node-0058", uuid
         assert_eq!(gpu.temperature, 65);
         assert_eq!(gpu.power_consumption, 400.5);
         assert_eq!(gpu.ane_utilization, 15.2);
+    }
+
+    /// Issue #459: the DLA folded into a SoC GPU row (RTX Spark N1X NPU)
+    /// must survive export and re-parse, so the remote view draws the same
+    /// DLA gauge and keeps the DLA power.
+    #[test]
+    fn test_dla_metrics_round_trip_through_the_exporter() {
+        use crate::api::metrics::MetricExporter;
+        use crate::api::metrics::gpu::GpuMetricExporter;
+        use crate::device::readers::detail_keys;
+
+        let parser = create_test_parser();
+        let re = create_test_regex();
+        let mut gpu = parser
+            .parse_metrics(
+                r#"all_smi_gpu_utilization{gpu="NVIDIA RTX Spark N1X", instance="spark", gpu_uuid="GPU-1", gpu_index="0"} 8"#,
+                "spark:9090",
+                &re,
+            )
+            .gpu_info
+            .remove(0);
+        gpu.dla_utilization = Some(12.0);
+        gpu.detail.insert(
+            detail_keys::DLA_POWER_WATTS_DETAIL_KEY.to_string(),
+            "0.88".to_string(),
+        );
+        gpu.detail.insert(
+            detail_keys::DLA_CLOCK_MEMORY_DETAIL_KEY.to_string(),
+            "9400".to_string(),
+        );
+
+        let exposition = GpuMetricExporter::new(&[gpu]).export_metrics();
+        assert!(
+            exposition.contains("all_smi_dla_utilization{"),
+            "{exposition}"
+        );
+        assert!(
+            exposition.contains("all_smi_dla_power_watts{"),
+            "{exposition}"
+        );
+        // DLA readings are series, never identity labels.
+        let info_line = exposition
+            .lines()
+            .find(|l| l.starts_with("all_smi_gpu_info{"))
+            .expect("info series");
+        assert!(!info_line.contains("dla_power_watts"), "{info_line}");
+
+        let parsed = parser.parse_metrics(&exposition, "spark:9090", &re);
+        assert_eq!(parsed.gpu_info.len(), 1);
+        let remote = &parsed.gpu_info[0];
+        assert_eq!(remote.dla_utilization, Some(12.0));
+        assert_eq!(
+            remote
+                .detail
+                .get(detail_keys::DLA_POWER_WATTS_DETAIL_KEY)
+                .map(String::as_str),
+            Some("0.88")
+        );
+        assert_eq!(
+            remote
+                .detail
+                .get(detail_keys::DLA_CLOCK_MEMORY_DETAIL_KEY)
+                .map(String::as_str),
+            Some("9400")
+        );
+    }
+
+    #[test]
+    fn test_out_of_range_dla_utilization_is_dropped() {
+        let parser = create_test_parser();
+        let re = create_test_regex();
+        let parsed = parser.parse_metrics(
+            r#"all_smi_dla_utilization{gpu="Orin", instance="jetson", gpu_uuid="GPU-1", gpu_index="0"} 250"#,
+            "jetson:9090",
+            &re,
+        );
+        assert_eq!(parsed.gpu_info[0].dla_utilization, None);
     }
 
     /// Issue #325: a remote macOS node with no IOReport omits its GPU value

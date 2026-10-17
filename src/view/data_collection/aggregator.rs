@@ -217,6 +217,9 @@ impl DataAggregator {
                     .ane_power_history
                     .push_back(current_ane_power_watts(state));
             }
+            if let Some(dla) = crate::metrics::gpu_readings::mean_dla_utilization(&state.gpu_info) {
+                state.dla_utilization_history.push_back(dla);
+            }
 
             // Keep only last N entries as configured
             if state.utilization_history.len() > AppConfig::HISTORY_MAX_ENTRIES {
@@ -233,6 +236,9 @@ impl DataAggregator {
             }
             if state.ane_power_history.len() > AppConfig::HISTORY_MAX_ENTRIES {
                 state.ane_power_history.pop_front();
+            }
+            if state.dla_utilization_history.len() > AppConfig::HISTORY_MAX_ENTRIES {
+                state.dla_utilization_history.pop_front();
             }
         } else if !state.cpu_info.is_empty() {
             // Fallback to CPU-based statistics when no GPU is available

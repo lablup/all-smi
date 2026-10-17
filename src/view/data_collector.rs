@@ -24,8 +24,10 @@ use crate::ui::alerts::WebhookPayload;
 use crate::ui::notification::NotificationType;
 
 // Re-export for backward compatibility
+#[cfg(all_smi_ssh)]
+pub use super::data_collection::SshStrategy;
 pub use super::data_collection::{
-    CollectionConfig, DataCollectionStrategy, LocalCollector, RemoteCollectorBuilder, SshStrategy,
+    CollectionConfig, DataCollectionStrategy, LocalCollector, RemoteCollectorBuilder,
 };
 
 pub struct DataCollector {
@@ -307,6 +309,7 @@ impl DataCollector {
     /// strategy construction from the loop keeps the runner's CLI
     /// parsing simple and prevents a misconfigured `--ssh-*` flag from
     /// having to be revalidated on every tick.
+    #[cfg(all_smi_ssh)]
     pub async fn run_ssh_mode(&self, args: ViewArgs, strategy: std::sync::Arc<SshStrategy>) {
         let target_count = strategy.target_count();
         loop {

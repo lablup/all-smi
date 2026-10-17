@@ -151,10 +151,15 @@ impl TemperatureManager {
     ///
     /// Tries each temperature source in order until one succeeds.
     /// Caches the availability status to avoid repeated failed queries.
-    pub fn get_temperature(&self, root_wmi_conn: Option<&WMIConnection>) -> Option<u32> {
-        // 1. Try ACPI thermal zones (current method)
+    pub fn get_temperature(
+        &self,
+        root_wmi_conn: Option<&WMIConnection>,
+        cimv2_conn: Option<&WMIConnection>,
+    ) -> Option<u32> {
+        // 1. Try ACPI thermal zones: root\WMI, then the root\cimv2
+        //    performance counters for the same zones.
         if self.is_source_potentially_available(&self.acpi_available) {
-            match self.acpi_source.get_temperature(root_wmi_conn) {
+            match self.acpi_source.get_temperature(root_wmi_conn, cimv2_conn) {
                 TemperatureResult::Success(temp) => {
                     self.mark_available(&self.acpi_available);
                     return Some(temp);

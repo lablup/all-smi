@@ -35,9 +35,11 @@
 //! | GPU Mem   | `memory_history` (%)           | Green   |
 //! | GPU Temp  | `temperature_history`          | Magenta |
 //! | ANE       | `gpu.ane_utilization` (mW)     | Yellow  |
+//! | DLA       | `dla_utilization_history` (%)  | Yellow  |
 //! | Pkg Power | `combined_power_mw` / board pwr| Red     |
 //!
 //! The ANE row is shown on Apple Silicon regardless of current ANE power.
+//! The DLA row is shown whenever a GPU row carries `dla_utilization`.
 //!
 //! ## Rendering model
 //!
@@ -87,8 +89,9 @@ pub fn gpu_content_rows(state: &AppState, terminal_rows: u16) -> usize {
     }
     let ane = show_ane_row(state);
     let npu = show_npu_row(state);
-    // build_rows always emits: GPU Util + GPU Mem + GPU Temp + (ANE?) + (NPU?) + Pkg Power
-    let metric_rows = 3 + usize::from(ane) + usize::from(npu) + 1;
+    let dla = show_dla_row(state);
+    // build_rows always emits: GPU Util + GPU Mem + GPU Temp + (ANE?) + (DLA?) + (NPU?) + Pkg Power
+    let metric_rows = 3 + usize::from(ane) + usize::from(dla) + usize::from(npu) + 1;
 
     if use_multirow_graphs(terminal_rows) {
         // GPU Util is drawn as a GRAPH_ROWS-tall history graph; the remaining
@@ -366,6 +369,38 @@ fn build_rows(state: &AppState, is_apple: bool, has_ane: bool, has_npu: bool) ->
         });
     }
 
+    // 4a. DLA (Jetson, RTX Spark N1X NPU; issue #459) -- percent based,
+    //     shown whenever a GPU row carries a DLA reading.
+    if show_dla_row(state) {
+        let latest_dla = state
+            .dla_utilization_history
+            .back()
+            .copied()
+            .or_else(|| crate::metrics::gpu_readings::mean_dla_utilization(&state.gpu_info))
+            .unwrap_or(0.0);
+        let dla_history: Vec<f64> = if state.dla_utilization_history.is_empty() {
+            vec![latest_dla]
+        } else {
+            state.dla_utilization_history.iter().copied().collect()
+        };
+        let dla_rng = soft_range(
+            &dla_history,
+            PERCENT_SOFT_MIN_SPAN,
+            PERCENT_SOFT_GRID,
+            PERCENT_DOMAIN,
+        );
+        rows.push(SparklineRow {
+            label: "DLA",
+            short_label: "DLA",
+            color: ThemeConfig::accelerator_color(),
+            latest_str: format!("{latest_dla:.1}%"),
+            min_max_str: scale_badge(dla_rng.0, dla_rng.1),
+            history: dla_history,
+            range: Some(dla_rng),
+            badge: None,
+        });
+    }
+
     // 4b. NPU (Intel/Windows -- scaffolding for future NPU reader)
     if has_npu {
         rows.push(SparklineRow {
@@ -618,6 +653,15 @@ fn detect_apple_silicon(state: &AppState) -> bool {
 /// is completely idle.
 fn show_ane_row(state: &AppState) -> bool {
     detect_apple_silicon(state)
+}
+
+/// Whether the DLA row should be shown: some GPU row carries a DLA reading
+/// (Jetson DLA, RTX Spark N1X NPU folded into its GPU row; issue #459).
+fn show_dla_row(state: &AppState) -> bool {
+    state
+        .gpu_info
+        .iter()
+        .any(|gpu| gpu.dla_utilization.is_some())
 }
 
 /// Whether an NPU row should be shown in the GPU Metrics panel.
@@ -940,6 +984,25 @@ mod tests {
         let mut state = make_apple_silicon_state();
         state.gpu_info[0].ane_utilization = 0.0;
         assert!(show_ane_row(&state));
+    }
+
+    /// Issue #459: a GPU row with a DLA reading gains a DLA sparkline row,
+    /// counted by the layout and drawn from the DLA history.
+    #[test]
+    fn test_dla_row_follows_dla_utilization() {
+        let mut state = make_nvidia_state();
+        assert!(!show_dla_row(&state));
+        let without = gpu_content_rows(&state, SHORT_ROWS);
+
+        state.gpu_info[0].dla_utilization = Some(12.0);
+        state.dla_utilization_history.extend([10.0, 12.0]);
+        assert!(show_dla_row(&state));
+        assert_eq!(gpu_content_rows(&state, SHORT_ROWS), without + 1);
+
+        let rows = build_rows(&state, false, false, false);
+        let dla = rows.iter().find(|row| row.label == "DLA").expect("DLA row");
+        assert_eq!(dla.latest_str, "12.0%");
+        assert_eq!(dla.history, vec![10.0, 12.0]);
     }
 
     #[test]

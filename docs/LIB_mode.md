@@ -331,7 +331,7 @@ fn print_gpu_details() -> Result<()> {
 | `device_type` | `String` | Device category ("GPU", "NPU", etc.) |
 | `utilization` | `f64` | GPU utilization percentage (0-100) |
 | `ane_utilization` | `f64` | ANE utilization (Apple Silicon) |
-| `dla_utilization` | `Option<f64>` | DLA utilization (NVIDIA Jetson) |
+| `dla_utilization` | `Option<f64>` | DLA utilization (NVIDIA Jetson, RTX Spark N1X NPU) |
 | `tensorcore_utilization` | `Option<f64>` | TensorCore utilization (TPU) |
 | `temperature` | `u32` | Temperature in Celsius |
 | `used_memory` | `u64` | Used memory in bytes |

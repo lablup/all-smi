@@ -428,11 +428,13 @@ pub fn print_gpu_info<W: Write>(
     let available_width = width.saturating_sub(10); // 5 padding each side
     let is_apple_silicon = info.name.contains("Apple") || info.name.contains("Metal");
     let has_tensorcore = info.device_type == "TPU" && info.tensorcore_utilization.is_some();
-    let num_gauges = if is_apple_silicon || has_tensorcore {
-        3
-    } else {
-        2
-    }; // Util, Mem, (ANE for Apple Silicon, TensorCore for TPU)
+    // DLA attached to the GPU (Jetson, RTX Spark N1X NPU; issue #459).
+    let dla_utilization = info.dla_utilization.filter(|u| u.is_finite());
+    // Util, Mem, then ANE (Apple Silicon), TensorCore (TPU), DLA when present.
+    let num_gauges = 2
+        + usize::from(is_apple_silicon)
+        + usize::from(has_tensorcore)
+        + usize::from(dla_utilization.is_some());
     let gauge_width = (available_width - (num_gauges - 1) * 2) / num_gauges; // 2 spaces between gauges
 
     // Calculate actual space used and dynamic right padding
@@ -514,6 +516,21 @@ pub fn print_gpu_info<W: Write>(
             100.0,
             gauge_width,
             Some(format!("{tc_util:.1}%")),
+        );
+    }
+
+    // DLA gauge, percent based, modeled on the ANE gauge above. Shown only
+    // for a GPU row that carries a DLA reading.
+    if let Some(dla_util) = dla_utilization {
+        print_colored_text(stdout, "  ", Color::White, None, None); // 2 space separator
+        let dla_util = dla_util.clamp(0.0, 100.0);
+        draw_bar(
+            stdout,
+            "DLA",
+            dla_util,
+            100.0,
+            gauge_width,
+            Some(format!("{dla_util:.1}%")),
         );
     }
 
@@ -874,6 +891,19 @@ mod tests {
             out.push(c);
         }
         out
+    }
+
+    /// Issue #459: a GPU row carrying a DLA reading (RTX Spark N1X NPU,
+    /// Jetson DLA) draws a DLA gauge; one without it draws none.
+    #[test]
+    fn dla_gauge_renders_only_when_present() {
+        let mut gpu = make_gpu(44);
+        assert!(!render_row(&gpu).contains("DLA"));
+
+        gpu.dla_utilization = Some(37.5);
+        let rendered = render_row(&gpu);
+        assert!(rendered.contains("DLA"), "{rendered}");
+        assert!(rendered.contains("37.5%"), "{rendered}");
     }
 
     /// Issue #325: with no reading, every live field reads N/A, and the Util

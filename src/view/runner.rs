@@ -252,6 +252,7 @@ pub async fn run_replay_mode(args: &ViewArgs, settings: &Settings) {
 /// `--ssh-fallback`. Returns early with a user-facing error when
 /// neither `--ssh` nor `--ssh-hostfile` produced a non-empty
 /// target list.
+#[cfg(all_smi_ssh)]
 pub async fn run_ssh_mode(args: &ViewArgs, settings: &Settings) {
     use std::time::Duration;
 
@@ -349,6 +350,18 @@ pub async fn run_ssh_mode(args: &ViewArgs, settings: &Settings) {
     if let Err(e) = ui_loop.run(args).await {
         eprintln!("UI loop error: {e}");
     }
+}
+
+/// The agentless SSH transport is not compiled into this build (Windows on
+/// ARM64, issue #459: russh's crypto backends need clang there). Say so
+/// instead of silently doing nothing.
+#[cfg(not(all_smi_ssh))]
+pub async fn run_ssh_mode(_args: &ViewArgs, _settings: &Settings) {
+    eprintln!(
+        "error: the SSH transport (--ssh / --ssh-hostfile) is not available in this build of all-smi for {}-{}; use --hosts with `all-smi api` on the targets instead",
+        std::env::consts::OS,
+        std::env::consts::ARCH
+    );
 }
 
 pub async fn run_view_mode(args: &ViewArgs, settings: &Settings) {
