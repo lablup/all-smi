@@ -18,8 +18,12 @@ runs:
         $ErrorActionPreference = 'Stop'
         $llvmBin = 'C:\Program Files\LLVM\bin'
         if (-not (Get-Command clang -ErrorAction SilentlyContinue) -and -not (Test-Path "$llvmBin\clang.exe")) {
-          Write-Host 'clang not found on the image; installing LLVM with Chocolatey'
-          choco install llvm -y --no-progress
+          # Pinned so a release build never picks up whatever the community
+          # feed published last; bump deliberately.
+          $llvmVersion = '22.1.8'
+          Write-Host "clang not found on the image; installing LLVM $llvmVersion with Chocolatey"
+          choco install llvm --version=$llvmVersion -y --no-progress
+          if ($LASTEXITCODE -ne 0) { throw "choco install llvm $llvmVersion failed" }
         }
         if (Test-Path "$llvmBin\clang.exe") {
           $llvmBin | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8

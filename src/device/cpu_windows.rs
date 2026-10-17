@@ -123,6 +123,9 @@ pub struct WindowsCpuReader {
     // Per-logical-processor registry `Identifier` strings, read once:
     // they name the ARM core design and so the P/E cluster (issue #459).
     processor_identifiers: Vec<Option<String>>,
+    // Registry `ProcessorNameString` of processor 0, read once: the brand
+    // fallback when sysinfo reports an empty brand (Windows on ARM).
+    processor_name: Option<String>,
 }
 
 impl Default for WindowsCpuReader {
@@ -144,6 +147,7 @@ impl WindowsCpuReader {
         let processor_identifiers = (0..system.cpus().len())
             .map(read_processor_identifier)
             .collect();
+        let processor_name = read_processor_value(0, "ProcessorNameString");
 
         Self {
             system: RwLock::new(system),
@@ -153,6 +157,7 @@ impl WindowsCpuReader {
             cached_socket_count: RwLock::new(None),
             temperature_manager: TemperatureManager::new(),
             processor_identifiers,
+            processor_name,
         }
     }
 
@@ -286,7 +291,9 @@ impl WindowsCpuReader {
         // ProcessorNameString still names the part.
         let cpu_model = match cpus.first().map(|cpu| cpu.brand().trim()) {
             Some(brand) if !brand.is_empty() => brand.to_string(),
-            _ => read_processor_value(0, "ProcessorNameString")
+            _ => self
+                .processor_name
+                .clone()
                 .unwrap_or_else(|| "Unknown CPU".to_string()),
         };
 

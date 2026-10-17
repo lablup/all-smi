@@ -652,14 +652,33 @@ fn cached_pci_identity(
         .get_or_init(Default::default)
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    cache
-        .entry(uuid.to_string())
-        .or_insert_with(|| NvmlPciIdentity {
-            uuid: uuid.to_string(),
-            name: device.name().unwrap_or_default(),
-            pci_device_id: device.pci_info().map(|p| p.pci_device_id).unwrap_or(0),
-        })
-        .clone()
+    if let Some(identity) = cache.get(uuid) {
+        return identity.clone();
+    }
+    let name = device.name();
+    let pci_info = device.pci_info();
+    // A failed query is retried on the next poll rather than cached: a
+    // zero PCI id would keep the device out of the PDH supplement for the
+    // life of the process. A definitive "no PCI identity" (the N1X NPU) is
+    // cached like any other answer. The cache holds one entry per distinct
+    // device UUID, so it is bounded by the hardware seen.
+    let pci_definitive = match &pci_info {
+        Ok(_) => true,
+        Err(err) => matches!(
+            err,
+            NvmlError::NotSupported | NvmlError::FailedToLoadSymbol(_)
+        ),
+    };
+    let complete = name.is_ok() && pci_definitive;
+    let identity = NvmlPciIdentity {
+        uuid: uuid.to_string(),
+        name: name.unwrap_or_default(),
+        pci_device_id: pci_info.map(|p| p.pci_device_id).unwrap_or(0),
+    };
+    if complete {
+        cache.insert(uuid.to_string(), identity.clone());
+    }
+    identity
 }
 
 fn merge_nvml_process_entry(

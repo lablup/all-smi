@@ -286,6 +286,26 @@ pub fn is_wmi_not_found_error(error: &wmi::WMIError) -> bool {
         || error_str.contains(&format!("{WBEM_E_NOT_FOUND}"))
 }
 
+/// `WBEM_E_ACCESS_DENIED` (0x80041003).
+const WBEM_E_ACCESS_DENIED: i32 = 0x8004_1003_u32 as i32;
+/// `E_ACCESSDENIED` (0x80070005).
+const E_ACCESSDENIED: i32 = 0x8007_0005_u32 as i32;
+
+/// Check if a WMI error is an access-denied failure.
+///
+/// The process token does not gain rights while all-smi runs, so a source
+/// that is denied once stays denied. Treating it as permanently unavailable
+/// spares every later poll a failing WMI round trip (the RTX Spark N1X
+/// denies `root\WMI:MSAcpi_ThermalZoneTemperature` to a normal user,
+/// issue #459).
+pub fn is_wmi_access_denied_error(error: &wmi::WMIError) -> bool {
+    matches!(
+        error,
+        wmi::WMIError::HResultError { hres }
+            if *hres == WBEM_E_ACCESS_DENIED || *hres == E_ACCESSDENIED
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -317,6 +337,19 @@ mod tests {
             source_order(CpuVendor::Unknown),
             [Acpi, LibreHardwareMonitor, ThermalZoneInfo]
         );
+    }
+
+    #[test]
+    fn access_denied_errors_are_recognised() {
+        for hres in [WBEM_E_ACCESS_DENIED, E_ACCESSDENIED] {
+            assert!(is_wmi_access_denied_error(&wmi::WMIError::HResultError {
+                hres
+            }));
+        }
+        assert!(!is_wmi_access_denied_error(&wmi::WMIError::HResultError {
+            hres: WBEM_E_NOT_FOUND
+        }));
+        assert!(!is_wmi_access_denied_error(&wmi::WMIError::ResultEmpty));
     }
 
     #[test]

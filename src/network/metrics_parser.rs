@@ -788,26 +788,33 @@ impl MetricsParser {
             "dla_utilization" if value.is_finite() && (0.0..=100.0).contains(&value) => {
                 gpu_info.dla_utilization = Some(value);
             }
-            "dla_power_watts" if value.is_finite() && value >= 0.0 => {
+            // Upper bounds keep a hostile or broken exporter from planting
+            // a 300-digit number in `detail` (and so in the TUI): no DLA
+            // draws a kilowatt, clocks past 100 GHz, or runs at 1000 C.
+            "dla_power_watts" if value.is_finite() && (0.0..=1_000.0).contains(&value) => {
                 gpu_info.detail.insert(
                     crate::device::readers::detail_keys::DLA_POWER_WATTS_DETAIL_KEY.to_string(),
                     format!("{value:.2}"),
                 );
             }
-            "dla_frequency_mhz" | "dla_clock_memory_mhz" | "dla_temperature_celsius"
-                if value.is_finite() && value >= 0.0 =>
+            "dla_frequency_mhz" | "dla_clock_memory_mhz"
+                if value.is_finite() && (0.0..=100_000.0).contains(&value) =>
             {
-                use crate::device::readers::detail_keys::{
-                    DLA_CLOCK_DETAIL_KEY, DLA_CLOCK_MEMORY_DETAIL_KEY, DLA_TEMPERATURE_DETAIL_KEY,
-                };
-                let key = match metric_name {
-                    "dla_frequency_mhz" => DLA_CLOCK_DETAIL_KEY,
-                    "dla_clock_memory_mhz" => DLA_CLOCK_MEMORY_DETAIL_KEY,
-                    _ => DLA_TEMPERATURE_DETAIL_KEY,
+                let key = if metric_name == "dla_frequency_mhz" {
+                    crate::device::readers::detail_keys::DLA_CLOCK_DETAIL_KEY
+                } else {
+                    crate::device::readers::detail_keys::DLA_CLOCK_MEMORY_DETAIL_KEY
                 };
                 gpu_info
                     .detail
                     .insert(key.to_string(), format!("{:.0}", value.round()));
+            }
+            "dla_temperature_celsius" if value.is_finite() && (0.0..=1_000.0).contains(&value) =>
+            {
+                gpu_info.detail.insert(
+                    crate::device::readers::detail_keys::DLA_TEMPERATURE_DETAIL_KEY.to_string(),
+                    format!("{:.0}", value.round()),
+                );
             }
             _ => {}
         }
@@ -1880,6 +1887,41 @@ all_smi_ane_utilization{gpu="NVIDIA H200 141GB HBM3", instance="node-0058", uuid
             &re,
         );
         assert_eq!(parsed.gpu_info[0].dla_utilization, None);
+    }
+
+    #[test]
+    fn test_implausible_dla_readings_are_dropped() {
+        use crate::device::readers::detail_keys;
+
+        let parser = create_test_parser();
+        let re = create_test_regex();
+        let labels =
+            r#"{gpu="NVIDIA RTX Spark N1X", instance="spark", gpu_uuid="GPU-1", gpu_index="0"}"#;
+        // The exposition regex only admits digits and dots, so a huge
+        // reading arrives as a long run of digits.
+        let huge = format!("1{}", "0".repeat(300));
+        let text = [
+            format!("all_smi_gpu_utilization{labels} 8"),
+            format!("all_smi_dla_power_watts{labels} {huge}"),
+            format!("all_smi_dla_frequency_mhz{labels} {huge}"),
+            format!("all_smi_dla_clock_memory_mhz{labels} 9400"),
+            format!("all_smi_dla_temperature_celsius{labels} {huge}"),
+        ]
+        .join(
+            "
+",
+        );
+        let parsed = parser.parse_metrics(&text, "spark:9090", &re);
+        let detail = &parsed.gpu_info[0].detail;
+        assert!(!detail.contains_key(detail_keys::DLA_POWER_WATTS_DETAIL_KEY));
+        assert!(!detail.contains_key(detail_keys::DLA_CLOCK_DETAIL_KEY));
+        assert!(!detail.contains_key(detail_keys::DLA_TEMPERATURE_DETAIL_KEY));
+        assert_eq!(
+            detail
+                .get(detail_keys::DLA_CLOCK_MEMORY_DETAIL_KEY)
+                .map(String::as_str),
+            Some("9400")
+        );
     }
 
     /// Issue #325: a remote macOS node with no IOReport omits its GPU value

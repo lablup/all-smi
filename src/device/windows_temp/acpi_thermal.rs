@@ -17,7 +17,7 @@
 //! Queries MSAcpi_ThermalZoneTemperature from root\WMI namespace.
 //! This is the standard Windows method but is not available on all systems.
 
-use super::{TemperatureResult, is_wmi_not_found_error};
+use super::{TemperatureResult, is_wmi_access_denied_error, is_wmi_not_found_error};
 use serde::Deserialize;
 use wmi::WMIConnection;
 
@@ -86,8 +86,10 @@ impl AcpiThermalSource {
                 TemperatureResult::NoValidReading
             }
             Err(e) => {
-                if is_wmi_not_found_error(&e) {
-                    // WBEM_E_NOT_FOUND - class doesn't exist
+                if is_wmi_not_found_error(&e) || is_wmi_access_denied_error(&e) {
+                    // WBEM_E_NOT_FOUND (class doesn't exist) or access
+                    // denied (no elevation): neither changes while the
+                    // process runs, so stop querying on every poll.
                     TemperatureResult::NotFound
                 } else {
                     // Other WMI error - likely transient

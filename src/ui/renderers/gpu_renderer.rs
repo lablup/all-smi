@@ -435,12 +435,14 @@ pub fn print_gpu_info<W: Write>(
         + usize::from(is_apple_silicon)
         + usize::from(has_tensorcore)
         + usize::from(dla_utilization.is_some());
-    let gauge_width = (available_width - (num_gauges - 1) * 2) / num_gauges; // 2 spaces between gauges
+    // Saturating: a third gauge (now common on NVIDIA SoCs with a DLA) on
+    // a very narrow terminal must not underflow the width budget.
+    let gauge_width = available_width.saturating_sub((num_gauges - 1) * 2) / num_gauges; // 2 spaces between gauges
 
     // Calculate actual space used and dynamic right padding
     let total_gauge_width = gauge_width * num_gauges + (num_gauges - 1) * 2;
     let left_padding = 5;
-    let right_padding = width - left_padding - total_gauge_width;
+    let right_padding = width.saturating_sub(left_padding + total_gauge_width);
 
     // Print gauges on one line with proper spacing
     print_colored_text(stdout, "     ", Color::White, None, None); // 5 char left padding
