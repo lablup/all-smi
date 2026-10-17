@@ -212,7 +212,8 @@ fn folded_dla_fills_the_gpu_row_and_keeps_mean_utilization() {
     let reading = DlaReading {
         utilization: Some(0.0),
         power_watts: Some(0.882),
-        clock_mhz: None,
+        clock_mhz: Some(430),
+        max_clock_mhz: Some(1562),
         memory_clock_mhz: Some(9400),
         temperature: Some(46),
     };
@@ -237,7 +238,18 @@ fn folded_dla_fills_the_gpu_row_and_keeps_mean_utilization() {
             .map(String::as_str),
         Some("46")
     );
-    assert!(!gpu.detail.contains_key(detail_keys::DLA_CLOCK_DETAIL_KEY));
+    assert_eq!(
+        gpu.detail
+            .get(detail_keys::DLA_CLOCK_DETAIL_KEY)
+            .map(String::as_str),
+        Some("430")
+    );
+    assert_eq!(
+        gpu.detail
+            .get(detail_keys::DLA_MAX_CLOCK_DETAIL_KEY)
+            .map(String::as_str),
+        Some("1562")
+    );
     assert_eq!(
         gpu.detail
             .get(detail_keys::DLA_UUID_DETAIL_KEY)
@@ -258,6 +270,7 @@ fn dla_readings_merge() {
         utilization: Some(40.0),
         power_watts: Some(1.0),
         clock_mhz: Some(1105),
+        max_clock_mhz: None,
         memory_clock_mhz: None,
         temperature: Some(40),
     };
@@ -265,6 +278,7 @@ fn dla_readings_merge() {
         utilization: Some(20.0),
         power_watts: Some(0.5),
         clock_mhz: Some(1562),
+        max_clock_mhz: Some(1562),
         memory_clock_mhz: Some(9400),
         temperature: None,
     };
@@ -272,6 +286,7 @@ fn dla_readings_merge() {
     assert_eq!(merged.utilization, Some(30.0));
     assert_eq!(merged.power_watts, Some(1.5));
     assert_eq!(merged.clock_mhz, Some(1562));
+    assert_eq!(merged.max_clock_mhz, Some(1562));
     assert_eq!(merged.memory_clock_mhz, Some(9400));
     assert_eq!(merged.temperature, Some(40));
 }
@@ -281,6 +296,7 @@ fn dla_detail_keys_are_volatile() {
     for key in [
         detail_keys::DLA_POWER_WATTS_DETAIL_KEY,
         detail_keys::DLA_CLOCK_DETAIL_KEY,
+        detail_keys::DLA_MAX_CLOCK_DETAIL_KEY,
         detail_keys::DLA_CLOCK_MEMORY_DETAIL_KEY,
         detail_keys::DLA_TEMPERATURE_DETAIL_KEY,
     ] {
@@ -295,4 +311,23 @@ fn memory_status_saturates() {
         (64 * GIB, 24 * GIB)
     );
     assert_eq!(memory_status_to_total_used(1, 2), (1, 0));
+}
+
+#[test]
+fn not_supported_dla_clocks_are_not_polled_again() {
+    // Driver 616.62 on N1X: every engine clock answers NotSupported.
+    let n1x = retain_supported_clocks([
+        (Clock::Graphics, Err(NvmlError::NotSupported)),
+        (Clock::SM, Err(NvmlError::NotSupported)),
+        (Clock::Video, Err(NvmlError::NotSupported)),
+    ]);
+    assert!(n1x.is_empty());
+
+    // A value, or an error that may be transient, keeps the clock type.
+    let mixed = retain_supported_clocks([
+        (Clock::Graphics, Err(NvmlError::NotSupported)),
+        (Clock::SM, Ok(1105)),
+        (Clock::Video, Err(NvmlError::GpuLost)),
+    ]);
+    assert_eq!(mixed, vec![Clock::SM, Clock::Video]);
 }

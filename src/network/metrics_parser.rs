@@ -797,13 +797,14 @@ impl MetricsParser {
                     format!("{value:.2}"),
                 );
             }
-            "dla_frequency_mhz" | "dla_clock_memory_mhz"
+            "dla_frequency_mhz" | "dla_max_frequency_mhz" | "dla_clock_memory_mhz"
                 if value.is_finite() && (0.0..=100_000.0).contains(&value) =>
             {
-                let key = if metric_name == "dla_frequency_mhz" {
-                    crate::device::readers::detail_keys::DLA_CLOCK_DETAIL_KEY
-                } else {
-                    crate::device::readers::detail_keys::DLA_CLOCK_MEMORY_DETAIL_KEY
+                use crate::device::readers::detail_keys;
+                let key = match metric_name {
+                    "dla_frequency_mhz" => detail_keys::DLA_CLOCK_DETAIL_KEY,
+                    "dla_max_frequency_mhz" => detail_keys::DLA_MAX_CLOCK_DETAIL_KEY,
+                    _ => detail_keys::DLA_CLOCK_MEMORY_DETAIL_KEY,
                 };
                 gpu_info
                     .detail
@@ -1840,6 +1841,15 @@ all_smi_ane_utilization{gpu="NVIDIA H200 141GB HBM3", instance="node-0058", uuid
             detail_keys::DLA_CLOCK_MEMORY_DETAIL_KEY.to_string(),
             "9400".to_string(),
         );
+        // Issue #461: engine clock and its maximum from D3DKMT.
+        gpu.detail.insert(
+            detail_keys::DLA_CLOCK_DETAIL_KEY.to_string(),
+            "430".to_string(),
+        );
+        gpu.detail.insert(
+            detail_keys::DLA_MAX_CLOCK_DETAIL_KEY.to_string(),
+            "1562".to_string(),
+        );
 
         let exposition = GpuMetricExporter::new(&[gpu]).export_metrics();
         assert!(
@@ -1856,6 +1866,11 @@ all_smi_ane_utilization{gpu="NVIDIA H200 141GB HBM3", instance="node-0058", uuid
             .find(|l| l.starts_with("all_smi_gpu_info{"))
             .expect("info series");
         assert!(!info_line.contains("dla_power_watts"), "{info_line}");
+        assert!(!info_line.contains("dla_max_frequency_mhz"), "{info_line}");
+        assert!(
+            exposition.contains("all_smi_dla_max_frequency_mhz{"),
+            "{exposition}"
+        );
 
         let parsed = parser.parse_metrics(&exposition, "spark:9090", &re);
         assert_eq!(parsed.gpu_info.len(), 1);
@@ -1874,6 +1889,20 @@ all_smi_ane_utilization{gpu="NVIDIA H200 141GB HBM3", instance="node-0058", uuid
                 .get(detail_keys::DLA_CLOCK_MEMORY_DETAIL_KEY)
                 .map(String::as_str),
             Some("9400")
+        );
+        assert_eq!(
+            remote
+                .detail
+                .get(detail_keys::DLA_CLOCK_DETAIL_KEY)
+                .map(String::as_str),
+            Some("430")
+        );
+        assert_eq!(
+            remote
+                .detail
+                .get(detail_keys::DLA_MAX_CLOCK_DETAIL_KEY)
+                .map(String::as_str),
+            Some("1562")
         );
     }
 
@@ -1904,6 +1933,7 @@ all_smi_ane_utilization{gpu="NVIDIA H200 141GB HBM3", instance="node-0058", uuid
             format!("all_smi_gpu_utilization{labels} 8"),
             format!("all_smi_dla_power_watts{labels} {huge}"),
             format!("all_smi_dla_frequency_mhz{labels} {huge}"),
+            format!("all_smi_dla_max_frequency_mhz{labels} {huge}"),
             format!("all_smi_dla_clock_memory_mhz{labels} 9400"),
             format!("all_smi_dla_temperature_celsius{labels} {huge}"),
         ]
@@ -1915,6 +1945,7 @@ all_smi_ane_utilization{gpu="NVIDIA H200 141GB HBM3", instance="node-0058", uuid
         let detail = &parsed.gpu_info[0].detail;
         assert!(!detail.contains_key(detail_keys::DLA_POWER_WATTS_DETAIL_KEY));
         assert!(!detail.contains_key(detail_keys::DLA_CLOCK_DETAIL_KEY));
+        assert!(!detail.contains_key(detail_keys::DLA_MAX_CLOCK_DETAIL_KEY));
         assert!(!detail.contains_key(detail_keys::DLA_TEMPERATURE_DETAIL_KEY));
         assert_eq!(
             detail

@@ -455,10 +455,11 @@ NVIDIA MIG (Multi-Instance GPU) metrics are emitted only on hosts where at least
 | `all_smi_dla_utilization`         | DLA (Deep Learning Accelerator) utilization                  | percent | `gpu_index`, `gpu_name` |
 | `all_smi_dla_power_watts`         | DLA power consumption                                        | watts   | `gpu_index`, `gpu_name` |
 | `all_smi_dla_frequency_mhz`       | DLA engine clock                                             | MHz     | `gpu_index`, `gpu_name` |
+| `all_smi_dla_max_frequency_mhz`   | DLA maximum engine clock                                     | MHz     | `gpu_index`, `gpu_name` |
 | `all_smi_dla_clock_memory_mhz`    | DLA memory clock                                             | MHz     | `gpu_index`, `gpu_name` |
 | `all_smi_dla_temperature_celsius` | DLA temperature                                              | celsius | `gpu_index`, `gpu_name` |
 
-On the NVIDIA RTX Spark N1X (Windows on ARM64) the NPU that NVML lists as a separate `DLA-` device is folded into the GPU row, so these series carry the GPU's labels instead of a device of their own. Every series except `all_smi_dla_utilization` is omitted when the driver does not report it; the N1X driver exposes no DLA engine clock, so `all_smi_dla_frequency_mhz` is absent there.
+On the NVIDIA RTX Spark N1X (Windows on ARM64) the NPU that NVML lists as a separate `DLA-` device is folded into the GPU row, so these series carry the GPU's labels instead of a device of their own. Every series except `all_smi_dla_utilization` is omitted when the driver does not report it. NVML exposes no DLA engine clock on N1X, so `all_smi_dla_frequency_mhz` and `all_smi_dla_max_frequency_mhz` come from the NPU adapter's D3DKMT node performance data, the source `nvidia-smi -q` uses for its `DLA Clocks` section; the remote view parses both back and drops values above 100000 MHz.
 
 ### AMD GPU Specific Metrics
 

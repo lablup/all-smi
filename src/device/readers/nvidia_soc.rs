@@ -37,9 +37,9 @@
 
 use std::os::raw::c_uint;
 
-use nvml_wrapper::enum_wrappers::device::Clock;
+use nvml_wrapper::enum_wrappers::device::{Clock, ClockId};
 use nvml_wrapper::enums::device::SampleValue;
-use nvml_wrapper::error::nvml_try;
+use nvml_wrapper::error::{NvmlError, nvml_try};
 use nvml_wrapper::struct_wrappers::device::FieldValueSample;
 use nvml_wrapper::structs::device::FieldId;
 
@@ -188,10 +188,12 @@ pub(crate) struct DlaReading {
     pub utilization: Option<f64>,
     /// Instantaneous power in watts.
     pub power_watts: Option<f64>,
-    /// Engine clock in MHz. Public NVML exposes no DLA engine clock type
-    /// on N1X (driver 616.62 answers `NotSupported` for graphics, SM and
-    /// video), so this stays `None` there until a driver reports one.
+    /// Engine clock in MHz. NVML exposes no DLA engine clock on N1X
+    /// (driver 616.62 answers `NotSupported` for graphics, SM and video);
+    /// on Windows the D3DKMT node clock fills it in (issue #461).
     pub clock_mhz: Option<u32>,
+    /// Maximum engine clock in MHz, from the same D3DKMT node data.
+    pub max_clock_mhz: Option<u32>,
     /// Memory clock in MHz, the one clock NVML answers for the NPU.
     pub memory_clock_mhz: Option<u32>,
     /// Die temperature in Celsius.
@@ -212,24 +214,51 @@ impl DlaReading {
             utilization: either(self.utilization, other.utilization, |a, b| (a + b) / 2.0),
             power_watts: either(self.power_watts, other.power_watts, |a, b| a + b),
             clock_mhz: either(self.clock_mhz, other.clock_mhz, u32::max),
+            max_clock_mhz: either(self.max_clock_mhz, other.max_clock_mhz, u32::max),
             memory_clock_mhz: either(self.memory_clock_mhz, other.memory_clock_mhz, u32::max),
             temperature: either(self.temperature, other.temperature, u32::max),
         }
     }
 }
 
-/// Read a DLA handle. Every query is best-effort.
-pub(crate) fn read_dla(device: &nvml_wrapper::Device) -> DlaReading {
-    use nvml_wrapper::enum_wrappers::device::{ClockId, TemperatureSensor};
+/// NVML engine clock types tried for a DLA, in preference order.
+const DLA_ENGINE_CLOCKS: [Clock; 3] = [Clock::Graphics, Clock::SM, Clock::Video];
 
-    let clock_mhz = [Clock::Graphics, Clock::SM, Clock::Video]
+/// Drop the clock types whose probe answered `NotSupported`. Any other
+/// outcome, a value or a transient error, keeps the type in the per-poll
+/// set, so only a definite "this handle has no such clock" is cached.
+pub(crate) fn retain_supported_clocks(
+    probes: impl IntoIterator<Item = (Clock, Result<u32, NvmlError>)>,
+) -> Vec<Clock> {
+    probes
         .into_iter()
-        .find_map(|clock| {
-            device
-                .clock(clock, ClockId::Current)
-                .ok()
-                .filter(|&mhz| mhz > 0)
-        });
+        .filter(|(_, result)| !matches!(result, Err(NvmlError::NotSupported)))
+        .map(|(clock, _)| clock)
+        .collect()
+}
+
+/// Probe a DLA handle once for the engine clock types NVML answers, so
+/// [`read_dla`] does not repeat calls the driver always refuses. Empty on
+/// N1X with driver 616.62.
+pub(crate) fn dla_engine_clocks(device: &nvml_wrapper::Device) -> Vec<Clock> {
+    retain_supported_clocks(
+        DLA_ENGINE_CLOCKS
+            .into_iter()
+            .map(|clock| (clock, device.clock(clock, ClockId::Current))),
+    )
+}
+
+/// Read a DLA handle. Every query is best-effort. `engine_clocks` is the
+/// set [`dla_engine_clocks`] found supported.
+pub(crate) fn read_dla(device: &nvml_wrapper::Device, engine_clocks: &[Clock]) -> DlaReading {
+    use nvml_wrapper::enum_wrappers::device::TemperatureSensor;
+
+    let clock_mhz = engine_clocks.iter().copied().find_map(|clock| {
+        device
+            .clock(clock, ClockId::Current)
+            .ok()
+            .filter(|&mhz| mhz > 0)
+    });
     let memory_clock_mhz = device
         .clock(Clock::Memory, ClockId::Current)
         .ok()
@@ -249,6 +278,7 @@ pub(crate) fn read_dla(device: &nvml_wrapper::Device) -> DlaReading {
         utilization: device.utilization_rates().ok().map(|u| f64::from(u.gpu)),
         power_watts,
         clock_mhz,
+        max_clock_mhz: None,
         memory_clock_mhz,
         temperature: device
             .temperature(TemperatureSensor::Gpu)
@@ -296,6 +326,12 @@ pub(crate) fn apply_dla_reading(gpu: &mut GpuInfo, reading: &DlaReading, dla_uui
     if let Some(mhz) = reading.clock_mhz {
         gpu.detail.insert(
             detail_keys::DLA_CLOCK_DETAIL_KEY.to_string(),
+            mhz.to_string(),
+        );
+    }
+    if let Some(mhz) = reading.max_clock_mhz {
+        gpu.detail.insert(
+            detail_keys::DLA_MAX_CLOCK_DETAIL_KEY.to_string(),
             mhz.to_string(),
         );
     }

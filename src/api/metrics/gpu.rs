@@ -240,6 +240,11 @@ impl<'a> GpuMetricExporter<'a> {
                 "DLA frequency in MHz",
             ),
             (
+                detail_keys::DLA_MAX_CLOCK_DETAIL_KEY,
+                "all_smi_dla_max_frequency_mhz",
+                "DLA maximum frequency in MHz",
+            ),
+            (
                 detail_keys::DLA_CLOCK_MEMORY_DETAIL_KEY,
                 "all_smi_dla_clock_memory_mhz",
                 "DLA memory clock in MHz",
@@ -1986,5 +1991,29 @@ mod tests {
         assert!(!output.contains("all_smi_dla_temperature_celsius"));
         assert!(!output.contains("all_smi_dla_clock_memory_mhz"));
         assert!(!output.contains("all_smi_dla_frequency_mhz"));
+        assert!(!output.contains("all_smi_dla_max_frequency_mhz"));
+    }
+
+    #[test]
+    fn exporter_emits_dla_engine_clock_and_maximum() {
+        let mut gpu = make_nvidia_gpu();
+        gpu.detail
+            .insert("dla_clock_mhz".to_string(), "430".to_string());
+        gpu.detail
+            .insert("dla_max_frequency_mhz".to_string(), "1562".to_string());
+        let output = GpuMetricExporter::new(&[gpu]).export_metrics();
+
+        assert!(
+            output.contains("# TYPE all_smi_dla_max_frequency_mhz gauge"),
+            "{output}"
+        );
+        let line = |metric: &str| {
+            output
+                .lines()
+                .find(|l| l.starts_with(&format!("{metric}{{")))
+                .map(str::to_string)
+        };
+        assert!(line("all_smi_dla_frequency_mhz").is_some_and(|l| l.ends_with(" 430")));
+        assert!(line("all_smi_dla_max_frequency_mhz").is_some_and(|l| l.ends_with(" 1562")));
     }
 }

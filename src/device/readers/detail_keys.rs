@@ -101,6 +101,11 @@ pub const DLA_POWER_WATTS_DETAIL_KEY: &str = "dla_power_watts";
 /// `all_smi_dla_frequency_mhz`.
 pub const DLA_CLOCK_DETAIL_KEY: &str = "dla_clock_mhz";
 
+/// DLA maximum engine clock in MHz, bare number (issue #461: 1562 on the
+/// RTX Spark N1X NPU, from D3DKMT node perf data). Exported as
+/// `all_smi_dla_max_frequency_mhz`.
+pub const DLA_MAX_CLOCK_DETAIL_KEY: &str = "dla_max_frequency_mhz";
+
 /// Memory clock the DLA reports, in MHz, bare number. Exported as
 /// `all_smi_dla_clock_memory_mhz`.
 pub const DLA_CLOCK_MEMORY_DETAIL_KEY: &str = "dla_clock_memory_mhz";
@@ -400,6 +405,7 @@ pub const VOLATILE_DETAIL_KEYS: &[&str] = &[
     "Power (L0)",
     DLA_POWER_WATTS_DETAIL_KEY,
     DLA_CLOCK_DETAIL_KEY,
+    DLA_MAX_CLOCK_DETAIL_KEY,
     DLA_CLOCK_MEMORY_DETAIL_KEY,
     DLA_TEMPERATURE_DETAIL_KEY,
 ];

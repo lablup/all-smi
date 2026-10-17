@@ -34,6 +34,10 @@ pub mod gaudi;
 #[cfg(target_os = "linux")]
 pub mod google_tpu;
 pub mod nvidia;
+// N1X DLA engine clock from D3DKMT (#461); compiled under `test` everywhere
+// for the same reason as `windows_gpu_perf` below.
+#[cfg(any(target_os = "windows", test))]
+pub(crate) mod nvidia_dla_clock;
 pub mod nvidia_hardware;
 pub mod nvidia_jetson;
 pub mod nvidia_mig;
