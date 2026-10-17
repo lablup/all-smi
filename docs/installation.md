@@ -49,7 +49,7 @@ Download the latest release from the [GitHub releases page](https://github.com/l
 2. Download the appropriate binary for your platform
 3. Extract the archive and place the binary in your `$PATH`. On glibc Linux, keep `liball_smi_amd.so` beside the binary or install it under `/usr/local/lib/all-smi`; the companion provides AMD monitoring without making the main binary depend on libdrm.
 
-> Release binaries are signed: macOS archives are notarized (so Gatekeeper does not block them as coming from an unidentified developer) and Windows x86_64 binaries are Authenticode code-signed. The Windows ARM64 (`all-smi-windows-aarch64`) binary is built on a GitHub-hosted runner and is not yet code-signed.
+> Release binaries are signed: macOS archives are notarized (so Gatekeeper does not block them as coming from an unidentified developer) and Windows x86_64 binaries are Authenticode code-signed. The Windows ARM64 (`all-smi-windows-aarch64`) binary is built on a GitHub-hosted runner and then Authenticode code-signed on the x86_64 signing runner.
 
 ## Option 5: Install from Cargo
 
