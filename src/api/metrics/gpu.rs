@@ -1969,4 +1969,22 @@ mod tests {
         assert!(slowdown_line.contains("gpu_uuid=\"GPU-ABC\""));
         assert!(slowdown_line.contains("gpu_index=\"0\""));
     }
+
+    #[test]
+    fn exporter_emits_only_parsable_dla_detail_gauges() {
+        let mut gpu = make_nvidia_gpu();
+        gpu.detail
+            .insert("dla_power_watts".to_string(), "3.5".to_string());
+        gpu.detail
+            .insert("dla_temperature".to_string(), "not-a-number".to_string());
+        gpu.detail
+            .insert("dla_clock_memory_mhz".to_string(), "NaN".to_string());
+        let gpus = vec![gpu];
+        let output = GpuMetricExporter::new(&gpus).export_metrics();
+
+        assert!(output.contains("all_smi_dla_power_watts{"), "{output}");
+        assert!(!output.contains("all_smi_dla_temperature_celsius"));
+        assert!(!output.contains("all_smi_dla_clock_memory_mhz"));
+        assert!(!output.contains("all_smi_dla_frequency_mhz"));
+    }
 }
