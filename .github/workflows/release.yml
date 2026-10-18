@@ -511,8 +511,8 @@ jobs:
       #
       # Only the x86_64 build runs on that signing box. The aarch64 build
       # (issue #459) runs on a GitHub-hosted `windows-11-arm` runner, which
-      # has no access to the KMS-backed key, so its binary is published
-      # unsigned until ARM64 signing is set up.
+      # has no access to the KMS-backed key, so it hands its unsigned binary
+      # to the sign-windows-arm64 job below instead of packaging it here.
       - name: Sign Windows binary with signtool
         if: runner.os == 'Windows' && matrix.target == 'x86_64-pc-windows-msvc'
         shell: pwsh
@@ -528,8 +528,21 @@ jobs:
         run: |
           ./scripts/sign-windows.ps1 "target/${{ matrix.target }}/release/${{ matrix.artifact_name }}"
 
+      # Authenticode signing hashes the PE file and never runs it, so the x64
+      # signtool on the signing box can sign this ARM64 binary. Packaging,
+      # checksum and release upload happen there, after signing, so no
+      # unsigned ARM64 archive is ever uploaded to a release.
+      - name: Hand off unsigned Windows ARM64 binary for signing
+        if: matrix.target == 'aarch64-pc-windows-msvc'
+        uses: actions/upload-artifact@v7
+        with:
+          name: unsigned-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/${{ matrix.artifact_name }}
+          if-no-files-found: error
+          retention-days: 1
+
       - name: Package Windows binary (zip)
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && matrix.target != 'aarch64-pc-windows-msvc'
         shell: pwsh
         run: |
           $BIN = "target/${{ matrix.target }}/release/${{ matrix.artifact_name }}"
@@ -550,7 +563,7 @@ jobs:
           fi
 
       - name: Generate checksum (Windows)
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && matrix.target != 'aarch64-pc-windows-msvc'
         shell: pwsh
         run: |
           $FILE = "${{ matrix.asset_name }}${{ matrix.archive_ext }}"
@@ -559,7 +572,7 @@ jobs:
 
       # 11) Upload release artifacts and checksum
       - name: Upload release artifacts
-        if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
+        if: (github.event_name == 'release' || github.event_name == 'workflow_dispatch') && matrix.target != 'aarch64-pc-windows-msvc'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.release.tag_name || github.event.inputs.release_tag }}
@@ -568,11 +581,104 @@ jobs:
             ${{ matrix.asset_name }}${{ matrix.archive_ext }}.sha256
 
   # ============================================================================
+  # Sign, package and upload the Windows ARM64 binary on the signing box
+  # ============================================================================
+  sign-windows-arm64:
+    name: Sign aarch64-pc-windows-msvc
+    needs: [setup, build]
+    # !cancelled() so a failed leg of another platform does not hold back the
+    # ARM64 asset; each build leg uploads independently, and so does this one.
+    # If the ARM64 leg itself failed, the artifact download below fails.
+    if: ${{ !cancelled() && contains(needs.setup.outputs.includes, 'aarch64-pc-windows-msvc') }}
+    runs-on: windows-on-macmini02-x64
+    environment: packaging
+
+    env:
+      TARGET: aarch64-pc-windows-msvc
+      ASSET: all-smi-windows-aarch64.zip
+
+    steps:
+      # Only the signing script is needed, taken from the ref that supplied
+      # this workflow (as with .workflow-actions in the build job), so a tag
+      # that predates this job can still be signed through a dispatch.
+      - name: Checkout signing script
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          sparse-checkout: scripts/sign-windows.ps1
+          sparse-checkout-cone-mode: false
+
+      - name: Download unsigned binary
+        uses: actions/download-artifact@v8
+        with:
+          name: unsigned-${{ env.TARGET }}
+          path: unsigned
+
+      # Refuse anything that is not an ARM64 PE, so a mixed-up artifact can
+      # never be signed and shipped under the aarch64 asset name.
+      - name: Check PE machine type
+        shell: pwsh
+        run: |
+          $bin = "unsigned/all-smi.exe"
+          $bytes = [IO.File]::ReadAllBytes($bin)
+          $pe = [BitConverter]::ToInt32($bytes, 0x3C)
+          if ([BitConverter]::ToUInt32($bytes, $pe) -ne 0x00004550) {
+            throw "$bin is not a PE file"
+          }
+          $machine = [BitConverter]::ToUInt16($bytes, $pe + 4)
+          if ($machine -ne 0xAA64) {
+            throw ("$bin has PE machine type 0x{0:X4}, expected 0xAA64 (ARM64)" -f $machine)
+          }
+          Write-Host "PE machine type: ARM64"
+
+      - name: Sign Windows ARM64 binary with signtool
+        shell: pwsh
+        env:
+          WINDOWS_SIGN_CERT_PATH: ${{ secrets.WINDOWS_SIGN_CERT_PATH }}
+          WINDOWS_SIGN_CA_CERT_PATH: ${{ secrets.WINDOWS_SIGN_CA_CERT_PATH }}
+          WINDOWS_SIGN_KEY_CONTAINER: ${{ secrets.WINDOWS_SIGN_KEY_CONTAINER }}
+          WINDOWS_SIGNTOOL_PATH: ${{ secrets.WINDOWS_SIGNTOOL_PATH }}
+          WINDOWS_SIGN_CSP: ${{ secrets.WINDOWS_SIGN_CSP }}
+          WINDOWS_SIGN_TIMESTAMP_URL: ${{ secrets.WINDOWS_SIGN_TIMESTAMP_URL }}
+        run: |
+          ./scripts/sign-windows.ps1 "unsigned/all-smi.exe"
+
+      # sign-windows.ps1 only warns when verification fails. This job exists
+      # to ship a signed binary, so an invalid signature fails it here and the
+      # release stays a pre-release (promote-release checks for the asset).
+      - name: Verify signature
+        shell: pwsh
+        run: |
+          $sig = Get-AuthenticodeSignature -LiteralPath "unsigned/all-smi.exe"
+          if ($sig.Status -ne 'Valid') {
+            throw "Authenticode signature is $($sig.Status): $($sig.StatusMessage)"
+          }
+          Write-Host "Signed by: $($sig.SignerCertificate.Subject)"
+
+      - name: Package Windows ARM64 binary (zip)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path package | Out-Null
+          Copy-Item "unsigned/all-smi.exe" -Destination package/
+          Compress-Archive -Path package/* -DestinationPath $env:ASSET -Force
+          $hash = (Get-FileHash -Path $env:ASSET -Algorithm SHA256).Hash.ToLower()
+          "$hash  $env:ASSET" | Out-File -FilePath "$env:ASSET.sha256" -Encoding ASCII -NoNewline
+
+      - name: Upload release artifacts
+        if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.release.tag_name || github.event.inputs.release_tag }}
+          files: |
+            ${{ env.ASSET }}
+            ${{ env.ASSET }}.sha256
+
+  # ============================================================================
   # Microsoft Teams release notification (Power Automate Workflows webhook)
   # ============================================================================
   notify-teams:
     name: Notify Teams on release
-    needs: build
+    needs: [build, sign-windows-arm64]
     if: github.event_name == 'release'
     runs-on: ubuntu-latest
     permissions: {}
@@ -624,16 +730,24 @@ jobs:
   promote-release:
     name: Promote pre-release to release
     runs-on: ubuntu-latest
-    needs: [setup, build]
+    needs: [setup, build, sign-windows-arm64]
     # A dispatch has to be able to finish a release too, not only build one.
     # The recovery path this workflow documents (dispatch a fixed release.yml
     # at an old tag) previously stopped at "artifacts uploaded": promotion ran
     # only for `release` events, so a rescued release stayed a pre-release
     # forever. That also silently stalls Homebrew, which resolves the version
     # through `releases/latest` and therefore never sees a pre-release.
+    #
+    # sign-windows-arm64 is skipped when a dispatch does not build the windows
+    # family. A skipped need would skip this job too, so its result is checked
+    # explicitly: skipped is fine (the asset check below still decides), a
+    # failed ARM64 signing keeps the release a pre-release.
     if: >-
-      (github.event_name == 'release' && github.event.release.prerelease) ||
-      (github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag != '')
+      !cancelled() &&
+      needs.build.result == 'success' &&
+      (needs.sign-windows-arm64.result == 'success' || needs.sign-windows-arm64.result == 'skipped') &&
+      ((github.event_name == 'release' && github.event.release.prerelease) ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag != ''))
     steps:
       - name: Promote to full release
         env:
