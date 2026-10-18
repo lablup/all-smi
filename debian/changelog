@@ -10,6 +10,7 @@ all-smi (0.28.0-0) jammy; urgency=medium
   * Fixed false 100% Intel Xe utilization from frozen GT idle counters (#458).
   * Fixed nvidia-smi CSV fallback power scaling (#460).
   * Added Windows ARM64 CI and release builds (#460).
+  * Signed the Windows ARM64 release binary (#464).
 
  -- Jeongkyu Shin <inureyes@gmail.com>  Sat, 17 Oct 2026 00:00:00 +0900
 

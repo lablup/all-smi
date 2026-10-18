@@ -15,6 +15,7 @@
 - Fixed the nvidia-smi CSV fallback dividing power draw by 1000 (#460).
 - Stopped retrying the `root\WMI` temperature query every poll after an access-denied error (#460).
 - Added a `windows-11-arm` CI job and a Windows ARM64 release build (#460).
+- Signed the Windows ARM64 release binary on the x86_64 signing runner, so `all-smi-windows-aarch64` ships Authenticode-signed (#464).
 
 [Full changelog](https://github.com/lablup/all-smi/compare/v0.27.1...v0.28.0)
 
