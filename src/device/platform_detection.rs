@@ -526,22 +526,30 @@ pub fn has_gaudi() -> bool {
     *CACHE.get_or_init(detect_gaudi)
 }
 
+/// Habana Labs' PCI vendor ID as sysfs prints it.
+const HABANA_SYSFS_VENDOR_ID: &str = "0x1da3";
+
+/// Is an accel node with this sysfs `vendor` a Gaudi?
+///
+/// `/dev/accel/accel*` is the kernel's generic compute-accelerator class, not
+/// a Gaudi path: Google TPUs and Rebellions REBEL cards register there too.
+/// Treating every non-Google node as Gaudi made a REBEL100 host report Intel
+/// Gaudi, so only Habana's own vendor ID counts.
+fn accel_vendor_is_habana(vendor: &str) -> bool {
+    vendor.trim().eq_ignore_ascii_case(HABANA_SYSFS_VENDOR_ID)
+}
+
 fn detect_gaudi() -> bool {
-    // First check if device files exist (typical Gaudi device paths)
-    // Intel Gaudi uses /dev/accel/accel* device files
-    if std::path::Path::new("/dev/accel/accel0").exists() {
-        // Make sure it's not a Google TPU by checking vendor ID
-        let sysfs_path = "/sys/class/accel/accel0/device/vendor";
-        if let Ok(vendor) = std::fs::read_to_string(sysfs_path) {
-            // Google vendor ID is 0x1ae0, Habana is 0x1da3
-            if vendor.trim() == "0x1ae0" {
-                // This is a Google TPU, not Gaudi
-                // Fall through to check for hl-smi
-            } else {
+    // Intel Gaudi uses /dev/accel/accel* device files; check every node's
+    // vendor, since another accelerator may own accel0.
+    if let Ok(entries) = std::fs::read_dir("/sys/class/accel") {
+        for entry in entries.flatten() {
+            if entry.file_name().to_string_lossy().starts_with("accel")
+                && std::fs::read_to_string(entry.path().join("device/vendor"))
+                    .is_ok_and(|vendor| accel_vendor_is_habana(&vendor))
+            {
                 return true;
             }
-        } else {
-            return true;
         }
     }
 
@@ -687,6 +695,18 @@ mod tests {
 
     /// Verbatim `lspci -nn` line from a live 8x RBLN-CA22 (ATOM Plus) node.
     const REBELLIONS_LSPCI_LINE: &str = "03:00.0 Processing accelerators [1200]: Rebellions Inc. RBLN-CA22 (PF) [1eff:1220] (rev 03)";
+
+    /// Regression: any accel node that was not a Google TPU was taken for a
+    /// Gaudi, so a REBEL100 host reported Intel Gaudi next to Rebellions.
+    #[test]
+    fn only_habana_accel_nodes_are_gaudi() {
+        assert!(accel_vendor_is_habana("0x1da3\n"));
+        assert!(accel_vendor_is_habana("0x1DA3"));
+        // Rebellions REBEL and Google TPU accel nodes are not Gaudi.
+        assert!(!accel_vendor_is_habana("0x1eff\n"));
+        assert!(!accel_vendor_is_habana("0x1ae0\n"));
+        assert!(!accel_vendor_is_habana(""));
+    }
 
     /// Regression: detection looked for vendor ID `1f3f`, which is not
     /// Rebellions. It only appeared to work because the same line also carries
