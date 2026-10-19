@@ -76,23 +76,14 @@ fn check_devices(_ctx: &CheckCtx) -> CheckResult {
     #[cfg(target_os = "linux")]
     {
         // Accept both the legacy /dev/hl* layout and the newer /dev/accel/accel*.
-        let accel = std::path::Path::new("/dev/accel");
-        if accel.exists()
-            && let Ok(iter) = std::fs::read_dir(accel)
-        {
-            let nodes: Vec<String> = iter
-                .filter_map(|e| e.ok())
-                .filter_map(|e| e.file_name().into_string().ok())
-                .filter(|n| n.starts_with("accel"))
-                .collect();
-            // Verify the vendor ID so we don't mistakenly flag Google TPUs.
-            let is_habana = nodes.iter().any(|n| {
-                let sysfs = format!("/sys/class/accel/{n}/device/vendor");
-                matches!(std::fs::read_to_string(&sysfs).map(|s| s.trim().to_string()), Ok(v) if v == "0x1da3")
-            });
-            if is_habana {
-                return CheckResult::Pass(format!("{} Habana accel node(s)", nodes.len()));
-            }
+        // Same rule as detection: only nodes with Habana's vendor ID count,
+        // so a TPU or REBEL card on the same host is neither flagged nor
+        // added to the count.
+        let habana_nodes = crate::device::platform_detection::habana_accel_node_count(
+            std::path::Path::new(crate::device::platform_detection::ACCEL_SYSFS_CLASS_DIR),
+        );
+        if habana_nodes > 0 {
+            return CheckResult::Pass(format!("{habana_nodes} Habana accel node(s)"));
         }
         // Legacy layout:
         if std::path::Path::new("/dev/hl0").exists() {

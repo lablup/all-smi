@@ -539,18 +539,41 @@ fn accel_vendor_is_habana(vendor: &str) -> bool {
     vendor.trim().eq_ignore_ascii_case(HABANA_SYSFS_VENDOR_ID)
 }
 
+/// Sysfs class directory of the kernel's compute-accelerator nodes.
+pub(crate) const ACCEL_SYSFS_CLASS_DIR: &str = "/sys/class/accel";
+
+/// Number of Habana device nodes (`accel<N>`) under an accel class directory,
+/// normally [`ACCEL_SYSFS_CLASS_DIR`].
+///
+/// Every node is checked, since another accelerator may own accel0, and a
+/// node whose vendor cannot be read does not count. Habana's control nodes
+/// (`accel_controlD<N>`) are skipped so each card counts once. Detection and
+/// the `gaudi.devices` doctor check both use this, so they cannot disagree.
+pub(crate) fn habana_accel_node_count(class_dir: &std::path::Path) -> usize {
+    let Ok(entries) = std::fs::read_dir(class_dir) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .and_then(|name| name.strip_prefix("accel"))
+                .is_some_and(|index| !index.is_empty() && index.bytes().all(|b| b.is_ascii_digit()))
+        })
+        .filter(|entry| {
+            std::fs::read_to_string(entry.path().join("device/vendor"))
+                .is_ok_and(|vendor| accel_vendor_is_habana(&vendor))
+        })
+        .count()
+}
+
 fn detect_gaudi() -> bool {
-    // Intel Gaudi uses /dev/accel/accel* device files; check every node's
-    // vendor, since another accelerator may own accel0.
-    if let Ok(entries) = std::fs::read_dir("/sys/class/accel") {
-        for entry in entries.flatten() {
-            if entry.file_name().to_string_lossy().starts_with("accel")
-                && std::fs::read_to_string(entry.path().join("device/vendor"))
-                    .is_ok_and(|vendor| accel_vendor_is_habana(&vendor))
-            {
-                return true;
-            }
-        }
+    // Intel Gaudi uses /dev/accel/accel* device files, but so do other
+    // accelerators, so only nodes with Habana's vendor ID count.
+    if habana_accel_node_count(std::path::Path::new(ACCEL_SYSFS_CLASS_DIR)) > 0 {
+        return true;
     }
 
     // Also check /dev/hl* device files (older naming convention)
@@ -706,6 +729,33 @@ mod tests {
         assert!(!accel_vendor_is_habana("0x1eff\n"));
         assert!(!accel_vendor_is_habana("0x1ae0\n"));
         assert!(!accel_vendor_is_habana(""));
+    }
+
+    /// Regression: only accel0 was checked, and an unreadable vendor counted
+    /// as Gaudi. A Habana card behind a REBEL card on accel0 must still be
+    /// found, and nothing else under the accel class may count.
+    #[test]
+    fn habana_accel_nodes_are_counted_across_the_class() {
+        let class = tempfile::tempdir().expect("tempdir");
+        let node = |name: &str, vendor: Option<&str>| {
+            let device = class.path().join(name).join("device");
+            std::fs::create_dir_all(&device).expect("node dir");
+            if let Some(vendor) = vendor {
+                std::fs::write(device.join("vendor"), vendor).expect("vendor file");
+            }
+        };
+
+        node("accel0", Some("0x1eff\n")); // Rebellions REBEL
+        node("accel1", Some("0x1ae0\n")); // Google TPU
+        node("accel2", None); // vendor unreadable
+        assert_eq!(habana_accel_node_count(class.path()), 0);
+
+        node("accel3", Some("0x1da3\n"));
+        node("accel_controlD3", Some("0x1da3\n")); // same card's control node
+        node("accelerator", Some("0x1da3\n"));
+        assert_eq!(habana_accel_node_count(class.path()), 1);
+
+        assert_eq!(habana_accel_node_count(&class.path().join("missing")), 0);
     }
 
     /// Regression: detection looked for vendor ID `1f3f`, which is not
