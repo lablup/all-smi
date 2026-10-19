@@ -43,6 +43,30 @@ pub fn is_rebellions_device(info: &GpuInfo) -> bool {
     name.starts_with("RBLN") || name.contains("REBELLIONS")
 }
 
+/// `model` label of `all_smi_rebellions_device_info` for a device name.
+///
+/// Real hardware reports the SKU (`RBLN-CA22`), never a marketing name, so the
+/// SKU prefix picks the product line: `RBLN-CA*` is ATOM and `RBLN-CR*` is
+/// REBEL, the line that succeeds ATOM. Known SKUs map to their product; an
+/// unknown SKU still lands in the right line. The marketing-name checks keep
+/// the mock server's "Rebellions ATOM ..." names working.
+fn model_label(name: &str) -> &'static str {
+    let name = name.trim().to_ascii_uppercase();
+    if name.starts_with("RBLN-CR") || name.contains("REBEL100") {
+        if name == "RBLN-CR13" || name.contains("REBEL100") {
+            "REBEL100"
+        } else {
+            "REBEL"
+        }
+    } else if name == "RBLN-CA25" || name.contains("ATOM MAX") {
+        "ATOM-Max"
+    } else if name == "RBLN-CA22" || name.contains("ATOM+") {
+        "ATOM-Plus"
+    } else {
+        "ATOM"
+    }
+}
+
 /// Rebellions NPU-specific metric exporter
 pub struct RebellionsExporter;
 
@@ -91,13 +115,7 @@ impl RebellionsExporter {
 
     fn export_device_info(&self, builder: &mut MetricBuilder, info: &GpuInfo, index: usize) {
         if let Some(sid) = info.detail.get("Serial ID") {
-            let model_type = if info.name.contains("ATOM Max") {
-                "ATOM-Max"
-            } else if info.name.contains("ATOM+") {
-                "ATOM-Plus"
-            } else {
-                "ATOM"
-            };
+            let model_type = model_label(&info.name);
 
             // Real slot index from the driver; "unknown" rather than a made-up
             // constant when the device did not report one.
@@ -305,6 +323,25 @@ mod tests {
         // Reported by the driver, not the constant the label used to carry.
         assert!(output.contains("location=\"5\""));
         assert!(output.contains("status=\"normal\""));
+    }
+
+    /// Regression: the label matched marketing names no card reports, so every
+    /// real device, ATOM Plus and REBEL100 alike, was labelled "ATOM".
+    #[test]
+    fn model_label_follows_the_sku_prefix() {
+        assert_eq!(model_label("RBLN-CA22"), "ATOM-Plus");
+        assert_eq!(model_label("RBLN-CA25"), "ATOM-Max");
+        assert_eq!(model_label("RBLN-CA12"), "ATOM");
+        assert_eq!(model_label("RBLN-CR13"), "REBEL100");
+        // A REBEL SKU without a known product is still REBEL, not ATOM.
+        assert_eq!(model_label("RBLN-CR99"), "REBEL");
+        assert_eq!(model_label("Rebellions ATOM Max"), "ATOM-Max");
+        assert_eq!(model_label("Rebellions ATOM+"), "ATOM-Plus");
+        assert_eq!(model_label("Rebellions ATOM"), "ATOM");
+
+        let mut builder = MetricBuilder::new();
+        RebellionsExporter::new().export_vendor_metrics(&mut builder, &atom_plus_device(), 0, "0");
+        assert!(builder.build().contains("model=\"ATOM-Plus\""));
     }
 
     #[test]

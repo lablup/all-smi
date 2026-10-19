@@ -61,31 +61,47 @@ fn check_rblnstat(_ctx: &CheckCtx) -> CheckResult {
 }
 
 fn check_driver(_ctx: &CheckCtx) -> CheckResult {
-    // Probe rbln-stat -j (JSON output) — same call the reader uses.
+    // Probe `rbln-stat --json` — the same call the reader uses.
     for cmd in &["rbln-stat", "rbln-smi"] {
-        if let Some(out) = try_exec(cmd, &["-j"], Duration::from_millis(2_000))
+        if let Some(out) = try_exec(cmd, &["--json"], Duration::from_millis(2_000))
             && out.success()
         {
-            // Try to pull a driver_version field out of the JSON without
-            // decoding the whole payload.
-            for line in out.stdout.lines() {
-                let trimmed = line.trim();
-                if let Some(idx) = trimmed.find("\"driver_version\"") {
-                    let tail = &trimmed[idx..];
-                    if let Some(start) = tail.find(':')
-                        && let Some(rest) = tail.get(start + 1..)
-                    {
-                        let v = rest
-                            .trim()
-                            .trim_matches(|c: char| c == '"' || c == ',' || c.is_whitespace());
-                        if !v.is_empty() {
-                            return CheckResult::Pass(format!("driver {v}"));
-                        }
-                    }
-                }
-            }
-            return CheckResult::Pass(format!("{cmd} -j succeeded (no driver_version field)"));
+            return match kmd_version(&out.stdout) {
+                Some(version) => CheckResult::Pass(format!("KMD {version}")),
+                None => CheckResult::Pass(format!("{cmd} --json succeeded (no KMD_version field)")),
+            };
         }
     }
     CheckResult::Skip("rbln-stat not available".to_string())
+}
+
+/// The driver version from `rbln-stat --json`, which reports it as the
+/// top-level `KMD_version`. The tool has no `driver_version` key, which is
+/// what this check used to look for.
+fn kmd_version(json: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(json).ok()?;
+    let version = value.get("KMD_version")?.as_str()?.trim();
+    (!version.is_empty()).then(|| version.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn kmd_version_is_read_from_real_output() {
+        let rebel100 = include_str!("../../../tests/fixtures/rbln-stat-rebel100.json");
+        assert_eq!(kmd_version(rebel100).as_deref(), Some("3.5.1"));
+
+        let atom_plus = include_str!("../../../tests/fixtures/rbln-stat-loaded.json");
+        assert!(kmd_version(atom_plus).is_some());
+    }
+
+    #[test]
+    fn missing_or_malformed_version_is_none() {
+        assert_eq!(kmd_version(r#"{"devices": []}"#), None);
+        assert_eq!(kmd_version(r#"{"KMD_version": ""}"#), None);
+        assert_eq!(kmd_version(r#"{"KMD_version": 3}"#), None);
+        assert_eq!(kmd_version("not json"), None);
+    }
 }

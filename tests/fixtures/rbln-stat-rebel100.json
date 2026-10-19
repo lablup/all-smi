@@ -1,0 +1,122 @@
+{
+  "KMD_version": "3.5.1",
+  "devices": [
+    {
+      "npu": 0,
+      "name": "RBLN-CR13",
+      "sid": "0000000052639097",
+      "uuid": "4ab3624a-2f13-8dfb-ba5c-c213cfae4f14",
+      "device": "rbln0",
+      "status": "normal",
+      "fw_ver": "3.5.1",
+      "pci": {
+        "dev": "0x2130",
+        "bus_id": "0000:f3:00.0",
+        "numa_node": "0",
+        "link_speed": "32.0GT/s",
+        "link_width": "16"
+      },
+      "temperature": "36C",
+      "card_power": "99934000uW",
+      "pstate": "P10",
+      "memory": {
+        "used": "0",
+        "total": "150323855360"
+      },
+      "util": "0.0",
+      "board_info": "00000009",
+      "location": 0
+    },
+    {
+      "npu": 1,
+      "name": "RBLN-CR13",
+      "sid": "0000000052639022",
+      "uuid": "ba933c81-51bd-8d1e-90eb-25ca1467c003",
+      "device": "rbln1",
+      "status": "normal",
+      "fw_ver": "3.5.1",
+      "pci": {
+        "dev": "0x2130",
+        "bus_id": "0000:f4:00.0",
+        "numa_node": "0",
+        "link_speed": "32.0GT/s",
+        "link_width": "16"
+      },
+      "temperature": "36C",
+      "card_power": "102729000uW",
+      "pstate": "P10",
+      "memory": {
+        "used": "0",
+        "total": "150323855360"
+      },
+      "util": "0.0",
+      "board_info": "00000009",
+      "location": 0
+    },
+    {
+      "npu": 2,
+      "name": "RBLN-CR13",
+      "sid": "0000000052639179",
+      "uuid": "1d8c518d-edd9-8633-8b0f-7149e8fbc96b",
+      "device": "rbln2",
+      "status": "normal",
+      "fw_ver": "3.5.1",
+      "pci": {
+        "dev": "0x2130",
+        "bus_id": "0000:fd:00.0",
+        "numa_node": "0",
+        "link_speed": "32.0GT/s",
+        "link_width": "16"
+      },
+      "temperature": "36C",
+      "card_power": "97434000uW",
+      "pstate": "P10",
+      "memory": {
+        "used": "0",
+        "total": "150323855360"
+      },
+      "util": "0.0",
+      "board_info": "00000009",
+      "location": 0
+    },
+    {
+      "npu": 3,
+      "name": "RBLN-CR13",
+      "sid": "0000000052639035",
+      "uuid": "2bcd1dad-80d7-8a41-9f05-5906bd39a5a1",
+      "device": "rbln3",
+      "status": "normal",
+      "fw_ver": "3.5.1",
+      "pci": {
+        "dev": "0x2130",
+        "bus_id": "0000:fe:00.0",
+        "numa_node": "0",
+        "link_speed": "32.0GT/s",
+        "link_width": "16"
+      },
+      "temperature": "36C",
+      "card_power": "102328000uW",
+      "pstate": "P10",
+      "memory": {
+        "used": "0",
+        "total": "150323855360"
+      },
+      "util": "0.0",
+      "board_info": "00000009",
+      "location": 0
+    }
+  ],
+  "contexts": [
+    {
+      "ctx_id": "10001",
+      "npu": 0,
+      "process": "VLLM::EngineCor",
+      "pid": "3781789",
+      "priority": "normal",
+      "ptid": "1",
+      "memalloc": "0",
+      "status": "idle",
+      "util_info": "0.0"
+    }
+  ]
+}

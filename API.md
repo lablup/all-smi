@@ -590,10 +590,15 @@ The same convention now covers the static details and the health registers. The 
 | `all_smi_rebellions_status`            | Device operational status               | gauge | `npu`, `instance`, `npu_uuid`, `npu_index`, `status`                   |
 | `all_smi_gpu_card_power_watts`         | Power of the card this die sits on, for display only. **Do not sum.** | gauge | `gpu`, `instance`, `gpu_uuid`, `gpu_index` |
 
-Note: Rebellions NPUs come as ATOM, ATOM+ and ATOM Max boards. On ATOM Max a single
+Note: Rebellions NPUs come as ATOM, ATOM+ and ATOM Max boards, and as REBEL100
+(`RBLN-CR13`) in the REBEL line that succeeds ATOM. On ATOM Max a single
 physical card carries four dies, and `rbln-stat` enumerates dies rather than cards --
 group by the `sid` label to recover cards. Both ATOM+ (`RBLN-CA22`) and ATOM Max
 (`RBLN-CA25`) report a PCIe 32.0 GT/s x16 link, i.e. Gen5 x16.
+
+The `model` label of `all_smi_rebellions_device_info` follows the SKU the card reports:
+`RBLN-CA22` is `ATOM-Plus`, `RBLN-CA25` is `ATOM-Max`, any other `RBLN-CA*` is `ATOM`,
+`RBLN-CR13` is `REBEL100`, and any other `RBLN-CR*` is `REBEL`.
 
 Power on ATOM Max: `rbln-stat` reports one power figure per card and repeats it on
 every die. `all_smi_gpu_power_consumption_watts` is therefore emitted once per card,
@@ -609,7 +614,7 @@ times the node's real draw, which is exactly the overcount that the one-series-p
 rule above exists to prevent. Use it per device, or with `max by (sid)`, and sum
 `all_smi_gpu_power_consumption_watts` when you want a total. ATOM+ is one die per card,
 so every ATOM+ device reports its own power and publishes no
-`all_smi_gpu_card_power_watts` series.
+`all_smi_gpu_card_power_watts` series. REBEL100 is one die per card as well.
 
 ### Furiosa NPU Metrics
 

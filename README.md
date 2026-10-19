@@ -31,7 +31,7 @@
 | Platform | Hardware / coverage |
 |---|---|
 | Linux | NVIDIA, AMD Radeon/Instinct, Intel Arc/Iris Xe/Xe, NVIDIA Jetson |
-| Linux accelerators | Intel Gaudi, Google Cloud TPU, Tenstorrent Wormhole/Blackhole, Rebellions ATOM family, Furiosa RNGD, AWS Trainium/Inferentia |
+| Linux accelerators | Intel Gaudi, Google Cloud TPU, Tenstorrent Wormhole/Blackhole, Rebellions ATOM/REBEL, Furiosa RNGD, AWS Trainium/Inferentia |
 | macOS (Apple Silicon) | GPU, CPU, memory, ANE power, and thermal metrics; no sudo required |
 | macOS (Intel) | CPU, memory, and chassis metrics; no GPU monitoring |
 | Windows | NVIDIA, AMD, and Intel GPU backends, CPU and memory; sensor coverage depends on drivers and permissions |
