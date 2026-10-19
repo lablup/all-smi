@@ -125,11 +125,16 @@ struct RblnContext {
     /// PID, emitted as a quoted string by `rbln-stat` 3.0.0.
     #[serde(deserialize_with = "deserialize_string_or_u32")]
     pid: u32,
-    /// Device memory held by this context, as a human-readable string such as
-    /// "3.5GiB" or "72.0MiB" -- unlike the device-level memory fields, which
-    /// are bare byte counts.
+    /// Device memory held by this context. KMD 3.0.0 on ATOM prints it with a
+    /// unit ("3.5GiB", "72.0MiB"); KMD 3.5.1 on REBEL prints a bare byte count
+    /// ("69489131520"), like the device-level memory fields.
     #[serde(alias = "memory")]
     memalloc: String,
+    /// Utilization of the device by this context, in percent ("26.4").
+    /// Emitted by KMD 3.0.0 on ATOM and 3.5.1 on REBEL; optional so a build
+    /// that omits it still yields its processes.
+    #[serde(default)]
+    util_info: Option<String>,
 }
 
 /// Deserialize process contexts independently so one malformed or newly
@@ -616,6 +621,13 @@ fn create_process_info_from_context(
         .cloned()
         .unwrap_or_else(|| format!("rbln{}", ctx.npu));
 
+    let gpu_utilization = ctx
+        .util_info
+        .as_deref()
+        .and_then(parse_utilization)
+        .filter(|util| util.is_finite() && *util >= 0.0)
+        .unwrap_or(0.0);
+
     ProcessInfo {
         device_id: ctx.npu as usize,
         device_uuid,
@@ -636,7 +648,7 @@ fn create_process_info_from_context(
         uses_gpu: true,
         priority: 0,
         nice_value: 0,
-        gpu_utilization: 0.0,
+        gpu_utilization,
     }
 }
 
@@ -1136,8 +1148,149 @@ mod loaded_node_tests {
             .expect("vLLM engine process");
         assert_eq!(engine.process_name, "VLLM::EngineCore");
         assert_eq!(engine.used_memory, 3_758_096_384);
+        // Per-context `util_info` ("1.1") used to be dropped for 0.
+        assert_eq!(engine.gpu_utilization, 1.1);
         assert_eq!(engine.device_id, 0);
         assert_eq!(engine.device_uuid, expected_uuid);
         assert!(engine.uses_gpu);
+    }
+}
+
+#[cfg(test)]
+mod rebel100_tests {
+    use super::*;
+
+    /// Verbatim `rbln-stat --json` from a 4-card REBEL100 (`RBLN-CR13`) node
+    /// running KMD 3.5.1 with one idle vLLM context. REBEL is the product line
+    /// after ATOM; the JSON shape is the same as ATOM's.
+    const REBEL100: &str = include_str!("../../../tests/fixtures/rbln-stat-rebel100.json");
+
+    fn parse() -> RblnResponse {
+        serde_json::from_str(REBEL100).expect("REBEL100 output must deserialize")
+    }
+
+    #[test]
+    fn every_card_is_read_with_its_own_power() {
+        let rows = RebellionsNpuReader::new().gpu_info_from_response(parse(), "t", "rebel-01");
+
+        assert_eq!(rows.len(), 4);
+        // One die per card: every `sid` differs, so every row keeps its power
+        // and no row carries a shared card value.
+        let expected = [99.934, 102.729, 97.434, 102.328];
+        for (row, watts) in rows.iter().zip(expected) {
+            assert!(
+                (row.power_consumption - watts).abs() < 1e-9,
+                "{}: {} W, expected {watts} W",
+                row.uuid,
+                row.power_consumption
+            );
+        }
+        assert!(
+            rows.iter()
+                .all(|row| !row.detail.contains_key(CARD_POWER_WATTS_DETAIL_KEY))
+        );
+
+        let first = &rows[0];
+        assert_eq!(first.name, "RBLN-CR13");
+        assert_eq!(first.temperature, 36);
+        assert_eq!(first.total_memory, 150_323_855_360); // 140 GiB
+        assert_eq!(first.used_memory, 0);
+        assert_eq!(first.detail["KMD Version"], "3.5.1");
+        assert_eq!(first.detail["Performance State"], "P10");
+    }
+
+    /// REBEL prints context memory as a bare byte count: "0" when idle, and
+    /// "69489131520" (64.7 GiB) for a vLLM engine under load on this node.
+    #[test]
+    fn context_memory_is_a_bare_byte_count() {
+        assert_eq!(parse_rbln_memory_bytes("69489131520"), Some(69_489_131_520));
+        assert_eq!(parse_rbln_memory_bytes("0"), Some(0));
+    }
+
+    /// Verbatim capture from the same node with a vLLM model loaded on all
+    /// four cards, one engine process per card, between requests.
+    const REBEL100_LOADED: &str =
+        include_str!("../../../tests/fixtures/rbln-stat-rebel100-loaded.json");
+
+    /// Each engine holds its whole card's memory: `memalloc` equals the
+    /// device's `memory.used` to the byte, so the process row and the device
+    /// row must agree.
+    #[test]
+    fn loaded_engines_hold_their_card_memory() {
+        let parse = || -> RblnResponse {
+            serde_json::from_str(REBEL100_LOADED).expect("loaded REBEL100 output must deserialize")
+        };
+        let response = parse();
+        let uuid_by_npu: HashMap<u32, String> = response
+            .devices
+            .iter()
+            .map(|device| (device.npu, device.uuid.clone()))
+            .collect();
+        let processes: Vec<ProcessInfo> = response
+            .contexts
+            .into_iter()
+            .map(|ctx| create_process_info_from_context(ctx, &uuid_by_npu))
+            .collect();
+        let rows = RebellionsNpuReader::new().gpu_info_from_response(parse(), "t", "rebel-01");
+
+        assert_eq!(rows.len(), 4);
+        assert_eq!(processes.len(), 4);
+        assert_eq!(rows[0].used_memory, 70_447_529_984); // 65.6 GiB
+        for row in &rows {
+            let owners: Vec<_> = processes
+                .iter()
+                .filter(|process| process.device_uuid == row.uuid)
+                .collect();
+            assert_eq!(owners.len(), 1, "{} must have one engine", row.uuid);
+            assert_eq!(owners[0].used_memory, row.used_memory);
+            assert_eq!(owners[0].process_name, "VLLM::EngineCor");
+        }
+    }
+
+    #[test]
+    fn idle_context_becomes_a_process() {
+        let response = parse();
+        let uuid_by_npu: HashMap<u32, String> = response
+            .devices
+            .iter()
+            .map(|device| (device.npu, device.uuid.clone()))
+            .collect();
+
+        let processes: Vec<ProcessInfo> = response
+            .contexts
+            .into_iter()
+            .map(|ctx| create_process_info_from_context(ctx, &uuid_by_npu))
+            .collect();
+
+        assert_eq!(processes.len(), 1);
+        let engine = &processes[0];
+        assert_eq!(engine.pid, 3781789);
+        assert_eq!(engine.process_name, "VLLM::EngineCor");
+        assert_eq!(engine.device_id, 0);
+        assert_eq!(engine.device_uuid, "4ab3624a-2f13-8dfb-ba5c-c213cfae4f14");
+        assert_eq!(engine.used_memory, 0);
+        assert_eq!(engine.gpu_utilization, 0.0);
+    }
+
+    #[test]
+    fn context_utilization_is_read_from_util_info() {
+        let context = |util_info: Option<&str>| RblnContext {
+            ctx_id: "1".to_string(),
+            npu: 0,
+            process: "python".to_string(),
+            pid: 1,
+            memalloc: "0".to_string(),
+            util_info: util_info.map(str::to_string),
+        };
+        let utilization = |util_info| {
+            create_process_info_from_context(context(util_info), &HashMap::new()).gpu_utilization
+        };
+
+        assert_eq!(utilization(Some("37.5")), 37.5);
+        assert_eq!(utilization(Some("37.5%")), 37.5);
+        // Builds without the field, and values that do not parse, read as 0.
+        assert_eq!(utilization(None), 0.0);
+        assert_eq!(utilization(Some("N/A")), 0.0);
+        assert_eq!(utilization(Some("NaN")), 0.0);
     }
 }
