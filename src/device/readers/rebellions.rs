@@ -57,6 +57,24 @@ where
     deserializer.deserialize_any(StringOrU32Visitor)
 }
 
+/// Deserialize a context's `util_info` percentage without ever failing.
+///
+/// `rbln-stat` quotes it ("26.4"); a bare number is read too. Anything else
+/// (an object, a bool, text that is not a number, `NaN`, a negative value)
+/// reads as `None` instead of an error, because an error here would drop the
+/// whole context and hide its process along with its memory.
+fn deserialize_utilization_lossy<'de, D>(deserializer: D) -> Result<Option<f64>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let utilization = match serde_json::Value::deserialize(deserializer)? {
+        serde_json::Value::String(text) => parse_utilization(&text),
+        serde_json::Value::Number(number) => number.as_f64(),
+        _ => None,
+    };
+    Ok(utilization.filter(|util| util.is_finite() && *util >= 0.0))
+}
+
 /// JSON structures for Rebellions device information
 #[derive(Debug, Deserialize)]
 struct RblnPciInfo {
@@ -131,10 +149,11 @@ struct RblnContext {
     #[serde(alias = "memory")]
     memalloc: String,
     /// Utilization of the device by this context, in percent ("26.4").
-    /// Emitted by KMD 3.0.0 on ATOM and 3.5.1 on REBEL; optional so a build
-    /// that omits it still yields its processes.
-    #[serde(default)]
-    util_info: Option<String>,
+    /// Emitted by KMD 3.0.0 on ATOM and 3.5.1 on REBEL; optional and lossy so
+    /// a build that omits it or prints it in another shape still yields its
+    /// processes.
+    #[serde(default, deserialize_with = "deserialize_utilization_lossy")]
+    util_info: Option<f64>,
 }
 
 /// Deserialize process contexts independently so one malformed or newly
@@ -621,13 +640,6 @@ fn create_process_info_from_context(
         .cloned()
         .unwrap_or_else(|| format!("rbln{}", ctx.npu));
 
-    let gpu_utilization = ctx
-        .util_info
-        .as_deref()
-        .and_then(parse_utilization)
-        .filter(|util| util.is_finite() && *util >= 0.0)
-        .unwrap_or(0.0);
-
     ProcessInfo {
         device_id: ctx.npu as usize,
         device_uuid,
@@ -648,7 +660,7 @@ fn create_process_info_from_context(
         uses_gpu: true,
         priority: 0,
         nice_value: 0,
-        gpu_utilization,
+        gpu_utilization: ctx.util_info.unwrap_or(0.0),
     }
 }
 
@@ -1272,25 +1284,31 @@ mod rebel100_tests {
         assert_eq!(engine.gpu_utilization, 0.0);
     }
 
+    /// Regression: a `util_info` that was not a string failed the context, and
+    /// a failed context is skipped, so the process vanished from the list.
     #[test]
     fn context_utilization_is_read_from_util_info() {
-        let context = |util_info: Option<&str>| RblnContext {
-            ctx_id: "1".to_string(),
-            npu: 0,
-            process: "python".to_string(),
-            pid: 1,
-            memalloc: "0".to_string(),
-            util_info: util_info.map(str::to_string),
-        };
-        let utilization = |util_info| {
-            create_process_info_from_context(context(util_info), &HashMap::new()).gpu_utilization
+        let utilization = |util_info: Option<&str>| {
+            let field = util_info.map_or(String::new(), |value| format!(r#","util_info":{value}"#));
+            let json = format!(
+                r#"{{"ctx_id":"1","npu":0,"process":"python","pid":"1","memalloc":"0"{field}}}"#
+            );
+            let context: RblnContext =
+                serde_json::from_str(&json).expect("context must deserialize");
+            create_process_info_from_context(context, &HashMap::new()).gpu_utilization
         };
 
+        assert_eq!(utilization(Some(r#""37.5""#)), 37.5);
+        assert_eq!(utilization(Some(r#""37.5%""#)), 37.5);
         assert_eq!(utilization(Some("37.5")), 37.5);
-        assert_eq!(utilization(Some("37.5%")), 37.5);
-        // Builds without the field, and values that do not parse, read as 0.
+        // Builds without the field, and values that are not a percentage, read
+        // as 0 and keep the process.
         assert_eq!(utilization(None), 0.0);
-        assert_eq!(utilization(Some("N/A")), 0.0);
-        assert_eq!(utilization(Some("NaN")), 0.0);
+        assert_eq!(utilization(Some("null")), 0.0);
+        assert_eq!(utilization(Some(r#""N/A""#)), 0.0);
+        assert_eq!(utilization(Some(r#""NaN""#)), 0.0);
+        assert_eq!(utilization(Some(r#""-3""#)), 0.0);
+        assert_eq!(utilization(Some(r#"{"busy":1}"#)), 0.0);
+        assert_eq!(utilization(Some("true")), 0.0);
     }
 }
