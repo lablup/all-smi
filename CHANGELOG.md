@@ -2,6 +2,18 @@
 
 [Home](README.md) · [Release downloads](https://github.com/lablup/all-smi/releases)
 
+## v0.28.1 (2026/10/20)
+
+- Added Rebellions REBEL100 (`RBLN-CR13`) support, verified against captures from a 4-card KMD 3.5.1 node; README, the man page, and API.md list the REBEL line (#466).
+- Added per-process NPU utilization for Rebellions from each context's `util_info`, shown in the local TUI GPU% column (#466).
+- Fixed the `model` label of `all_smi_rebellions_device_info` reading `ATOM` for every real card; it now follows the SKU (`ATOM`, `ATOM-Plus`, `ATOM-Max`, `REBEL100`, `REBEL`) (#466).
+- Fixed the `rebellions.driver` doctor check never finding a driver version; it now reports `KMD_version` from `rbln-stat --json` (#466).
+- Fixed Intel Gaudi detection on hosts whose `/dev/accel` nodes belong to another vendor, such as Rebellions REBEL; every accel node is checked and only Habana's vendor ID counts (#465).
+- Fixed the `gaudi.devices` doctor check counting non-Habana accel nodes as Habana nodes (#465).
+- Updated russh to 0.64.1 and the luwen crates to 0.10.0, with a semver-compatible lockfile refresh (#467).
+
+[Full changelog](https://github.com/lablup/all-smi/compare/v0.28.0...v0.28.1)
+
 ## v0.28.0 (2026/10/17)
 
 - Added NVIDIA RTX Spark N1X support: the integrated NPU folds into the SoC GPU row as a DLA gauge and sparkline instead of a separate device, and the GPU reports unified memory over NVLink-C2C without PCIe gauges (#460).
@@ -37,6 +49,8 @@
 [Full changelog](https://github.com/lablup/all-smi/compare/v0.27.0...v0.27.1)
 
 ## Release history
+- **v0.28.1 (2026/10/20):** Added Rebellions REBEL100 support with per-process NPU utilization and SKU-based model labels, stopped reporting non-Habana accel nodes as Intel Gaudi, and updated russh and luwen.
+- **v0.28.0 (2026/10/17):** Added NVIDIA RTX Spark N1X and native Windows ARM64 support with DLA metrics on the GPU row, read the N1X DLA engine clock, and fixed false 100% Intel Xe utilization from frozen GT idle counters.
 - **v0.27.1 (2026/10/11):** Added storage hiding, fixed remote host tabs and energy accounting, hardened HTTP collection, repaired Launchpad AMD packaging, refreshed documentation, and updated dependencies.
 - **v0.27.0 (2026/10/02):** Added AWS Neuron (Trainium and Inferentia) monitoring, cut per-tick collection cost on macOS and Linux, fixed Apple Silicon and Rebellions power over-counts, and stopped all_smi_gpu_info label churn
 - **v0.26.3 (2026/09/01):** Fixed local TUI wrapping and duplicated metrics in narrow terminals, accepted comma-separated `--hosts` lists with startup validation, corrected user-facing CLI and doc text, and updated Rust dependencies including nvml-wrapper 0.13
