@@ -274,7 +274,13 @@ impl AmdGpuReader {
     /// Get cached ROCm version, initializing if needed
     fn get_rocm_version(&self) -> Option<String> {
         self.rocm_version
-            .get_or_init(libamdgpu_top::get_rocm_version)
+            .get_or_init(|| {
+                // librocm-core first; libamdgpu_top only knows the pre-7.x
+                // `<root>/.info/version` file, which ROCm 7.x no longer ships.
+                all_smi::device::readers::amd_rocm::detect_rocm_version()
+                    .map(|rocm| rocm.version)
+                    .or_else(libamdgpu_top::get_rocm_version)
+            })
             .clone()
     }
 
