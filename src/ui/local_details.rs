@@ -98,6 +98,11 @@ pub fn print_gpu_details<W: Write>(stdout: &mut W, info: &GpuInfo, width: usize)
         };
         push_field(stdout, &mut used, width, "Freq ", Color::Magenta, &display);
     }
+    // The Activity panel shows only a memory percentage, so this row is the
+    // one place the absolute VRAM usage appears in local mode.
+    if let Some(vram) = format_gpu_vram(info) {
+        push_field(stdout, &mut used, width, "VRAM ", Color::Blue, &vram);
+    }
 
     if let (Some(name), Some(version)) =
         (info.detail.get("lib_name"), info.detail.get("lib_version"))
@@ -297,6 +302,24 @@ fn push_field<W: Write>(
     *used += required;
 }
 
+/// `used/total` in GiB-based units labelled `GB`, matching the remote GPU
+/// row; `None` when the reader has no memory reading.
+fn format_gpu_vram(info: &GpuInfo) -> Option<String> {
+    if info.total_memory == 0
+        || info.detail.get("metrics_available").map(String::as_str) == Some("false")
+    {
+        return None;
+    }
+    const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+    let used_gb = info.used_memory as f64 / GIB;
+    let total_gb = info.total_memory as f64 / GIB;
+    Some(if total_gb < 1.0 {
+        format!("{used_gb:.1}/{total_gb:.1}GB")
+    } else {
+        format!("{used_gb:.1}/{total_gb:.0}GB")
+    })
+}
+
 fn format_cpu_cores(info: &CpuInfo) -> String {
     if let Some(apple) = &info.apple_silicon_info {
         if apple.s_core_count > 0 {
@@ -449,6 +472,31 @@ mod tests {
     }
 
     #[test]
+    fn gpu_vram_is_shown_as_used_over_total() {
+        let mut info = gpu();
+        info.used_memory = 35_182_944_256;
+        info.total_memory = 205_822_885_888; // MI300X: 191.69 GiB usable
+        assert_eq!(format_gpu_vram(&info).as_deref(), Some("32.8/192GB"));
+
+        info.total_memory = 512 * 1024 * 1024;
+        info.used_memory = 256 * 1024 * 1024;
+        assert_eq!(format_gpu_vram(&info).as_deref(), Some("0.2/0.5GB"));
+    }
+
+    #[test]
+    fn gpu_vram_is_omitted_without_a_reading() {
+        let mut info = gpu();
+        info.total_memory = 0;
+        assert_eq!(format_gpu_vram(&info), None);
+
+        let mut info = gpu();
+        info.total_memory = 16 * 1024 * 1024 * 1024;
+        info.detail
+            .insert("metrics_available".to_string(), "false".to_string());
+        assert_eq!(format_gpu_vram(&info), None);
+    }
+
+    #[test]
     fn local_gpu_details_omit_summary_metrics() {
         let mut rendered = Vec::new();
         print_gpu_details(&mut rendered, &gpu(), 120);
@@ -456,7 +504,9 @@ mod tests {
 
         assert!(visible.contains("Freq"));
         assert!(visible.contains("CUDA"));
-        for repeated in ["Util:", "VRAM:", "Temp:", "Pwr:"] {
+        // Absolute VRAM is not repeated elsewhere (the panel shows only %).
+        assert!(visible.contains("VRAM"));
+        for repeated in ["Util:", "Temp:", "Pwr:"] {
             assert!(
                 !visible.contains(repeated),
                 "unexpected {repeated}: {visible}"

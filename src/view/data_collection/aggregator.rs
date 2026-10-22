@@ -146,17 +146,19 @@ impl DataAggregator {
             .iter()
             .filter_map(|cpu| cpu.temperature.map(|t| t as f64))
             .collect();
-        let avg_cpu_temperature = if !cpu_temps.is_empty() {
-            cpu_temps.iter().sum::<f64>() / cpu_temps.len() as f64
-        } else {
-            0.0
-        };
-
         state.cpu_utilization_history.push_back(avg_cpu_utilization);
         state
             .system_memory_history
             .push_back(avg_system_memory_usage);
-        state.cpu_temperature_history.push_back(avg_cpu_temperature);
+        if cpu_temps.is_empty() {
+            // No CPU exposes a sensor (common on VMs): leave the history empty
+            // so every reader shows N/A instead of a fabricated 0°C, and drop
+            // stale readings if the sensor disappeared mid-session.
+            state.cpu_temperature_history.clear();
+        } else {
+            let avg_cpu_temperature = cpu_temps.iter().sum::<f64>() / cpu_temps.len() as f64;
+            state.cpu_temperature_history.push_back(avg_cpu_temperature);
+        }
 
         // Keep only last N entries
         if state.cpu_utilization_history.len() > AppConfig::HISTORY_MAX_ENTRIES {
@@ -414,6 +416,52 @@ mod tests {
 
     use super::*;
     use crate::device::ChassisInfo;
+
+    fn cpu_with_temperature(temperature: Option<u32>) -> crate::device::CpuInfo {
+        crate::device::CpuInfo {
+            index: 0,
+            host_id: "localhost".to_string(),
+            hostname: "testhost".to_string(),
+            instance: "testhost".to_string(),
+            cpu_model: "Test CPU".to_string(),
+            architecture: "x86_64".to_string(),
+            platform_type: crate::device::CpuPlatformType::Intel,
+            socket_count: 1,
+            total_cores: 4,
+            total_threads: 4,
+            base_frequency_mhz: 2400,
+            max_frequency_mhz: 3600,
+            cache_size_mb: 16,
+            utilization: 10.0,
+            temperature,
+            power_consumption: None,
+            per_socket_info: Vec::new(),
+            apple_silicon_info: None,
+            per_core_utilization: Vec::new(),
+            time: String::new(),
+        }
+    }
+
+    #[test]
+    fn cpu_temperature_history_stays_empty_without_a_sensor() {
+        let mut state = AppState::new();
+        let aggregator = DataAggregator::new();
+
+        state.cpu_info = vec![cpu_with_temperature(Some(55))];
+        aggregator.update_cpu_history(&mut state);
+        assert_eq!(state.cpu_temperature_history.back().copied(), Some(55.0));
+
+        // A sensor-less host (e.g. a VM) must read N/A, not 0°C, and must not
+        // keep showing the last real reading.
+        state.cpu_info = vec![cpu_with_temperature(None)];
+        aggregator.update_cpu_history(&mut state);
+        assert!(state.cpu_temperature_history.is_empty());
+        assert_eq!(
+            state.cpu_utilization_history.len(),
+            2,
+            "other CPU histories keep advancing"
+        );
+    }
 
     #[test]
     fn remote_chassis_energy_uses_endpoint_identity_for_duplicate_hostnames() {
