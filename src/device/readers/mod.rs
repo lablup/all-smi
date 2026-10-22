@@ -72,6 +72,8 @@ pub mod neuron;
 pub mod amd;
 #[cfg(all(target_os = "linux", not(target_env = "musl")))]
 pub mod amd_plugin_api;
+#[cfg(target_os = "linux")]
+pub mod amd_rocm;
 
 #[cfg(target_os = "windows")]
 pub mod amd_windows;

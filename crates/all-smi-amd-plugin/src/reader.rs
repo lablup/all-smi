@@ -78,6 +78,49 @@ fn hwmon_power_watts(value: u32) -> f64 {
     f64::from(value).clamp(0.0, MAX_GPU_POWER_WATTS)
 }
 
+/// Pick the reported temperature from the edge sensor, falling back to the
+/// junction (hotspot) sensor only when no edge reading exists at all.
+///
+/// Instinct MI300-series boards expose no edge sensor, neither in
+/// `gpu_metrics` nor in hwmon (only `temp2` junction and `temp3` mem), so
+/// edge-only selection reported 0 °C for them. Cards that do report an edge
+/// temperature keep using it unchanged.
+fn select_temperature_celsius(
+    metrics_edge: Option<u32>,
+    hwmon_edge: Option<u32>,
+    hwmon_junction: Option<u32>,
+) -> u32 {
+    metrics_edge
+        .filter(|&t| t != 0)
+        .or(hwmon_edge.filter(|&t| t != 0))
+        .or_else(|| {
+            if metrics_edge.is_none() && hwmon_edge.is_none() {
+                hwmon_junction
+            } else {
+                None
+            }
+        })
+        .unwrap_or(0)
+        .min(MAX_GPU_TEMP_CELSIUS)
+}
+
+/// Read the kernel's `gpu_busy_percent` sysfs attribute.
+///
+/// Used only when `gpu_metrics` carries no GFX activity, e.g. a table revision
+/// newer than `libamdgpu_top` can parse (MI300X on driver 6.19 emits v1.9).
+fn read_gpu_busy_percent(sysfs_path: &std::path::Path) -> Option<f64> {
+    std::fs::read_to_string(sysfs_path.join("gpu_busy_percent"))
+        .ok()
+        .and_then(|raw| parse_gpu_busy_percent(&raw))
+}
+
+fn parse_gpu_busy_percent(raw: &str) -> Option<f64> {
+    raw.trim()
+        .parse::<u32>()
+        .ok()
+        .map(|value| f64::from(value).clamp(0.0, MAX_GPU_UTILIZATION))
+}
+
 /// Write the plugin's three per-poll sensor readings into `detail` in the
 /// shared reader conventions, returning the clamped tachometer value for
 /// `GpuInfo::fan_speed_rpm`.
@@ -231,7 +274,13 @@ impl AmdGpuReader {
     /// Get cached ROCm version, initializing if needed
     fn get_rocm_version(&self) -> Option<String> {
         self.rocm_version
-            .get_or_init(libamdgpu_top::get_rocm_version)
+            .get_or_init(|| {
+                // librocm-core first; libamdgpu_top only knows the pre-7.x
+                // `<root>/.info/version` file, which ROCm 7.x no longer ships.
+                all_smi::device::readers::amd_rocm::detect_rocm_version()
+                    .map(|rocm| rocm.version)
+                    .or_else(libamdgpu_top::get_rocm_version)
+            })
             .clone()
     }
 

@@ -535,7 +535,9 @@ fn draw_sparkline_row<W: Write>(stdout: &mut W, row: &SparklineRow, panel_width:
 const COMPACT_LABEL_WIDTH: usize = 4;
 /// Latest-value column width in a compact half-cell (fits `1400.0W`, `100.0%`).
 const COMPACT_VALUE_WIDTH: usize = 7;
-/// Scale-badge column width in a compact half-cell (fits `0-100`, `0-350`).
+/// Minimum scale-badge column width in a compact half-cell (fits `0-100`,
+/// `0-350`). Wider badges such as an MI300X's `150-750` W axis widen the
+/// column and take the extra columns from the sparkline.
 const COMPACT_BADGE_WIDTH: usize = 5;
 
 /// Render the GPU Util metric as a stacked multi-row history graph on a fixed
@@ -597,7 +599,8 @@ fn draw_compact_cell<W: Write>(stdout: &mut W, row: Option<&SparklineRow>, budge
     };
 
     // label + " " + spark + " " + value + badge
-    let fixed = COMPACT_LABEL_WIDTH + 1 + 1 + COMPACT_VALUE_WIDTH + COMPACT_BADGE_WIDTH;
+    let badge_width = row.min_max_str.chars().count().max(COMPACT_BADGE_WIDTH);
+    let fixed = COMPACT_LABEL_WIDTH + 1 + 1 + COMPACT_VALUE_WIDTH + badge_width;
     let spark_width = budget.saturating_sub(fixed).max(1);
     let spark = sparkline_braille(&row.history, spark_width, row.range);
 
@@ -608,7 +611,7 @@ fn draw_compact_cell<W: Write>(stdout: &mut W, row: Option<&SparklineRow>, budge
         (&spark, spark_width, row.color),
         (" ", 1, Color::White),
         (&row.latest_str, COMPACT_VALUE_WIDTH, Color::White),
-        (&row.min_max_str, COMPACT_BADGE_WIDTH, Color::DarkGrey),
+        (&row.min_max_str, badge_width, Color::DarkGrey),
     ];
     for (text, width, color) in segments {
         if remaining == 0 {
@@ -1175,6 +1178,37 @@ mod tests {
                         );
                     }
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn test_compact_badge_is_not_truncated_for_high_power_gpus() {
+        // Regression: an MI300X idles near 140 W and peaks at 750 W, so its
+        // Pkg axis badge (e.g. `150-750`) is wider than the 5-column minimum
+        // and used to render as `150-7`.
+        let mut state = make_nvidia_state();
+        state.package_power_history.clear();
+        for i in 0..20 {
+            state
+                .package_power_history
+                .push_back(140.0 + i as f64 * 32.0);
+        }
+        let badge = build_rows(&state, false, false, false)
+            .into_iter()
+            .find(|row| row.short_label == "Pkg")
+            .expect("Pkg row")
+            .min_max_str;
+        assert!(badge.chars().count() > COMPACT_BADGE_WIDTH, "{badge}");
+
+        for &w in &[60usize, 80, 110] {
+            let lines = render_gpu_lines(&state, w, TALL_ROWS);
+            assert!(
+                lines.iter().any(|line| line.contains(&badge)),
+                "badge {badge} must render whole at width {w}"
+            );
+            for line in &lines {
+                assert_eq!(visible_width(line), w);
             }
         }
     }

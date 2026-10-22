@@ -46,6 +46,17 @@ pub use refresh_linux::refresh_processes;
 #[cfg(target_os = "linux")]
 pub use sampler_linux::ProcessSampler;
 
+/// Share of system memory held by a process, in percent.
+///
+/// Returns 0 when `total_memory` is unknown (a `System` whose memory was never
+/// refreshed reports 0), instead of a NaN that serde_json serializes as `null`.
+fn memory_percent(process_memory: u64, total_memory: u64) -> f64 {
+    if total_memory == 0 {
+        return 0.0;
+    }
+    (process_memory as f64 / total_memory as f64) * 100.0
+}
+
 /// Get all system processes with GPU usage information
 pub fn get_all_processes(system: &System, gpu_pids: &HashSet<u32>) -> Vec<ProcessInfo> {
     let mut processes = Vec::new();
@@ -70,7 +81,7 @@ pub fn get_all_processes(system: &System, gpu_pids: &HashSet<u32>) -> Vec<Proces
             process_name: process.name().to_string_lossy().to_string(),
             used_memory: 0, // GPU memory, will be set by GPU-specific code
             cpu_percent: process.cpu_usage() as f64,
-            memory_percent: (process.memory() as f64 / system.total_memory() as f64) * 100.0,
+            memory_percent: memory_percent(process.memory(), system.total_memory()),
             memory_rss: process.memory(),         // Already in bytes
             memory_vms: process.virtual_memory(), // Already in bytes
             user: get_process_user(process),
@@ -160,7 +171,7 @@ fn new_entry_from_sysinfo(
         process_name: process.name().to_string_lossy().to_string(),
         used_memory: 0,
         cpu_percent: process.cpu_usage() as f64,
-        memory_percent: (process.memory() as f64 / total_memory as f64) * 100.0,
+        memory_percent: memory_percent(process.memory(), total_memory),
         memory_rss: process.memory(),
         memory_vms: process.virtual_memory(),
         user: get_process_user(process),
@@ -184,7 +195,7 @@ fn refresh_entry_from_sysinfo(
     total_memory: u64,
 ) {
     cached.cpu_percent = process.cpu_usage() as f64;
-    cached.memory_percent = (process.memory() as f64 / total_memory as f64) * 100.0;
+    cached.memory_percent = memory_percent(process.memory(), total_memory);
     cached.memory_rss = process.memory();
     cached.memory_vms = process.virtual_memory();
     cached.state = convert_process_state(process.status());
@@ -373,6 +384,12 @@ pub fn merge_gpu_processes(
 #[cfg(test)]
 pub(super) mod tests {
     use super::*;
+
+    #[test]
+    fn memory_percent_is_zero_when_total_is_unknown() {
+        assert_eq!(memory_percent(1024, 0), 0.0);
+        assert_eq!(memory_percent(512, 2048), 25.0);
+    }
 
     pub(in crate::device::process_list) fn process(
         pid: u32,
