@@ -244,4 +244,36 @@ mod tests {
         assert_eq!(metrics_socket_power_watts(0, 148), None);
         assert_eq!(metrics_socket_power_watts(4, 148), None);
     }
+
+    /// Cards with an edge sensor keep reporting it exactly as before,
+    /// whatever the junction sensor reads.
+    #[test]
+    fn temperature_prefers_edge_when_present() {
+        assert_eq!(select_temperature_celsius(Some(45), Some(50), Some(70)), 45);
+        assert_eq!(select_temperature_celsius(None, Some(50), Some(70)), 50);
+        assert_eq!(select_temperature_celsius(Some(0), Some(50), Some(70)), 50);
+        // An edge sensor that exists but reads 0 is not replaced by junction.
+        assert_eq!(select_temperature_celsius(Some(0), None, Some(70)), 0);
+        assert_eq!(select_temperature_celsius(None, Some(0), Some(70)), 0);
+    }
+
+    /// MI300-series boards expose no edge sensor at all; report junction.
+    #[test]
+    fn temperature_falls_back_to_junction_without_edge_sensor() {
+        assert_eq!(select_temperature_celsius(None, None, Some(38)), 38);
+        assert_eq!(select_temperature_celsius(None, None, None), 0);
+        assert_eq!(
+            select_temperature_celsius(None, None, Some(400)),
+            MAX_GPU_TEMP_CELSIUS
+        );
+    }
+
+    #[test]
+    fn gpu_busy_percent_parses_sysfs_value() {
+        assert_eq!(parse_gpu_busy_percent("37\n"), Some(37.0));
+        assert_eq!(parse_gpu_busy_percent("0"), Some(0.0));
+        assert_eq!(parse_gpu_busy_percent("250"), Some(MAX_GPU_UTILIZATION));
+        assert_eq!(parse_gpu_busy_percent(""), None);
+        assert_eq!(parse_gpu_busy_percent("-1"), None);
+    }
 }
