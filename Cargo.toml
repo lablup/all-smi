@@ -9,7 +9,7 @@ readme = "README.md"
 keywords = ["cli", "rust"]
 categories = ["command-line-utilities"]
 edition = "2024"
-rust-version = "1.96"
+rust-version = "1.97"
 
 [workspace]
 members = [".", "crates/all-smi-amd-plugin"]
@@ -98,7 +98,7 @@ windows = { version = "0.62", features = [
 ] }
 # Service Control Manager integration for `all-smi service` (issue #311).
 # Mullvad's crate, MIT OR Apache-2.0, MSRV 1.71 against this project's
-# rust-version = 1.96. Chosen over shelling to sc.exe so failures arrive
+# rust-version = 1.97. Chosen over shelling to sc.exe so failures arrive
 # as Win32 error codes we can translate instead of localized text we
 # would have to scrape, and over a WinSW/NSSM wrapper so the signed
 # release archive still ships a single binary.

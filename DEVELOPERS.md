@@ -21,7 +21,7 @@ This guide provides comprehensive information for developers and contributors wo
 ### Prerequisites
 
 #### Required Tools
-- **Rust**: 1.96 or later (the minimum is declared in `Cargo.toml`) (install via [rustup](https://rustup.rs/))
+- **Rust**: 1.97 or later (the minimum is declared in `Cargo.toml`) (install via [rustup](https://rustup.rs/))
 - **Cargo**: Comes with Rust installation
 - **Git**: For version control
 - **protoc**: Protocol buffer compiler (only required for Linux builds, which compile the Google TPU gRPC client)
