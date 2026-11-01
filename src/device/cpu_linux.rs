@@ -73,7 +73,7 @@ impl Default for LinuxCpuReader {
 impl LinuxCpuReader {
     pub fn new() -> Self {
         // Create system with minimal initialization - delay CPU refresh until needed
-        let system = System::new();
+        let system = crate::utils::system::new_system();
 
         Self {
             cached_lscpu_cache_size: RwLock::new(None),
@@ -183,7 +183,7 @@ impl LinuxCpuReader {
             for (idx, &core_id) in active_cores.iter().take(max_cores_to_display).enumerate() {
                 // Get utilization from sysinfo which handles delta calculation properly
                 let core_util = if (core_id as usize) < cpus.len() {
-                    cpus[core_id as usize].cpu_usage() as f64
+                    cpus[core_id as usize].usage() as f64
                 } else {
                     0.0
                 };
@@ -592,7 +592,7 @@ impl LinuxCpuReader {
         let cpus = system.cpus();
 
         for (core_id, cpu) in cpus.iter().enumerate() {
-            let utilization = cpu.cpu_usage() as f64;
+            let utilization = cpu.usage() as f64;
 
             // Check if this is a P-core or E-core based on CPU topology
             // For now, we'll use Standard type for all Linux cores

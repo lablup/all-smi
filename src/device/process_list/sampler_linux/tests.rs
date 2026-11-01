@@ -374,7 +374,7 @@ fn static_fields_match_sysinfo_for_this_process() {
 
     let own_pid = std::process::id();
     let pid = sysinfo::Pid::from_u32(own_pid);
-    let mut system = System::new();
+    let mut system = System::new().unwrap();
     system.refresh_processes_specifics(
         ProcessesToUpdate::Some(&[pid]),
         true,

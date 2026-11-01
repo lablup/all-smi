@@ -32,7 +32,10 @@ reqwest = { version = "0.13", features = ["json"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
 regex = "1.12.2"
-sysinfo = "0.39"
+# The `gpu` default added in 0.40 is left out on purpose: it makes
+# `ProcessRefreshKind::everything()` scan per-process GPU state on every
+# refresh, and nothing reads the result (readers have their own GPU sources).
+sysinfo = { version = "0.40", default-features = false, features = ["component", "disk", "network", "system", "user"] }
 anyhow = { version = "1.0.100", optional = true }
 hyper = { version = "1.9.0", features = ["full"], optional = true }
 hyper-util = { version = "0.1.18", features = ["full"], optional = true }
@@ -61,8 +64,8 @@ flate2 = "1"
 tar = "0.4.46"
 # Pure-Rust SSH client for the agentless view transport (issue #194).
 # Chosen over ssh2/libssh2 so musl static builds do not need a C
-# dependency. russh 0.64 targets edition 2024 with tokio 1.x.
-russh = "0.64.1"
+# dependency. russh 0.65 targets edition 2024 with tokio 1.x.
+russh = "0.65.0"
 [target.'cfg(target_os = "linux")'.dependencies]
 # Tenstorrent NPU support via the upstream luwen crates (published on crates.io,
 # tracking luwen main). Replaces the former all-smi-luwen-* republished forks.

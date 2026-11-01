@@ -129,7 +129,10 @@ fn check_runtime(_ctx: &CheckCtx) -> CheckResult {
 }
 
 fn check_cpu(_ctx: &CheckCtx) -> CheckResult {
-    let mut sys = sysinfo::System::new();
+    let mut sys = match sysinfo::System::new() {
+        Ok(sys) => sys,
+        Err(err) => return CheckResult::Skip(format!("sysinfo unavailable: {err}")),
+    };
     sys.refresh_cpu_all();
     let cpus = sys.cpus();
     if cpus.is_empty() {
@@ -153,7 +156,10 @@ fn check_cpu(_ctx: &CheckCtx) -> CheckResult {
 }
 
 fn check_memory(_ctx: &CheckCtx) -> CheckResult {
-    let mut sys = sysinfo::System::new();
+    let mut sys = match sysinfo::System::new() {
+        Ok(sys) => sys,
+        Err(err) => return CheckResult::Skip(format!("sysinfo unavailable: {err}")),
+    };
     sys.refresh_memory();
     let total_kib = sys.total_memory() / 1024;
     if total_kib == 0 {
@@ -218,10 +224,10 @@ fn check_hardware(_ctx: &CheckCtx) -> CheckResult {
 }
 
 fn check_uptime(_ctx: &CheckCtx) -> CheckResult {
-    let secs = sysinfo::System::uptime();
-    if secs == 0 {
-        return CheckResult::Skip("uptime unavailable on this platform".to_string());
-    }
+    let secs = match sysinfo::System::uptime() {
+        Ok(secs) if secs > 0 => secs,
+        _ => return CheckResult::Skip("uptime unavailable on this platform".to_string()),
+    };
     let days = secs / 86_400;
     let hours = (secs % 86_400) / 3_600;
     let mins = (secs % 3_600) / 60;

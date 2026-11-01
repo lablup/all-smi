@@ -412,13 +412,14 @@ fn print_enumeration_costs() {
         std::thread::sleep(Duration::from_secs(1));
         let started = Instant::now();
         let disks =
-            Disks::new_with_refreshed_list_specifics(DiskRefreshKind::nothing().with_storage());
+            Disks::new_with_refreshed_list_specifics(DiskRefreshKind::nothing().with_storage())
+                .unwrap();
         list_refresh.push(started.elapsed());
         drop(disks);
 
         std::thread::sleep(Duration::from_millis(500));
         let started = Instant::now();
-        let disks = Disks::new_with_refreshed_list();
+        let disks = Disks::new_with_refreshed_list().unwrap();
         old_per_tick.push(started.elapsed());
         drop(disks);
     }

@@ -109,7 +109,7 @@ fn network_filesystems_are_recognized() {
 
 /// The rows the storage panel showed before this cache existed.
 fn reference_rows(hostname: &str) -> Vec<StorageInfo> {
-    let disks = Disks::new_with_refreshed_list();
+    let disks = Disks::new_with_refreshed_list().unwrap();
     let mut filtered = filter_docker_aware_disks(&disks);
     filtered.sort_by(|a, b| {
         a.mount_point()

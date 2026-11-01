@@ -71,7 +71,7 @@ impl MacOsCpuReader {
         // Take the first CPU usage sample now: utilization is a delta between
         // two samples, and starting the clock at construction lets the first
         // tick pay only the remainder of `CPU_WARM_UP` instead of all of it.
-        let mut system = System::new();
+        let mut system = crate::utils::system::new_system();
         system.refresh_cpu_usage();
         let first_sample_at = Instant::now();
 
@@ -940,7 +940,7 @@ impl MacOsCpuReader {
         let has_super = s_core_count > 0;
 
         for (core_id, cpu) in cpus.iter().enumerate() {
-            let utilization = cpu.cpu_usage() as f64;
+            let utilization = cpu.usage() as f64;
 
             // Determine core type based on index and chip architecture
             let core_type = if self.is_apple_silicon {

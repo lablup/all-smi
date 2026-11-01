@@ -31,7 +31,7 @@ impl Default for WindowsMemoryReader {
 
 impl WindowsMemoryReader {
     pub fn new() -> Self {
-        let mut system = System::new();
+        let mut system = crate::utils::system::new_system();
         // Initial refresh to populate memory information
         system.refresh_memory();
 

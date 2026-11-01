@@ -20,14 +20,20 @@ use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
 /// Global System instance for process collection
 /// This avoids creating new System instances on every collection cycle
-static GLOBAL_SYSTEM: Lazy<Mutex<System>> = Lazy::new(|| {
-    let system = System::new();
-    Mutex::new(system)
-});
+static GLOBAL_SYSTEM: Lazy<Mutex<System>> = Lazy::new(|| Mutex::new(new_system()));
 
 /// Cached hostname - fetched once and reused to avoid repeated system calls
 static CACHED_HOSTNAME: Lazy<String> =
-    Lazy::new(|| System::host_name().unwrap_or_else(|| "unknown".to_string()));
+    Lazy::new(|| System::host_name().unwrap_or_else(|_| "unknown".to_string()));
+
+/// Create an empty `System`.
+///
+/// `System::new` only fails on operating systems sysinfo does not support.
+/// On Linux, macOS and Windows, the only targets all-smi ships for, it always
+/// succeeds, so callers that cannot report an error use this.
+pub fn new_system() -> System {
+    System::new().expect("sysinfo supports every target all-smi ships for")
+}
 
 pub fn get_hostname() -> String {
     CACHED_HOSTNAME.clone()

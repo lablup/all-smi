@@ -79,9 +79,9 @@ pub fn get_cpu_vendor() -> CpuVendor {
 
 /// Detect the CPU vendor from the processor brand string.
 fn detect_cpu_vendor() -> CpuVendor {
-    use sysinfo::{CpuRefreshKind, System};
+    use sysinfo::CpuRefreshKind;
 
-    let mut system = System::new();
+    let mut system = crate::utils::system::new_system();
     system.refresh_cpu_specifics(CpuRefreshKind::everything());
 
     let cpus = system.cpus();

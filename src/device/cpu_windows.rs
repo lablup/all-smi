@@ -136,7 +136,7 @@ impl Default for WindowsCpuReader {
 
 impl WindowsCpuReader {
     pub fn new() -> Self {
-        let mut system = System::new();
+        let mut system = crate::utils::system::new_system();
 
         // Perform initial CPU refresh during construction to establish baseline.
         // This moves the 100ms blocking delay from the first get_cpu_info() call
@@ -341,7 +341,7 @@ impl WindowsCpuReader {
             per_core_utilization.push(CoreUtilization {
                 core_id: i as u32,
                 core_type: core_types.get(i).cloned().unwrap_or(CoreType::Standard),
-                utilization: cpu.cpu_usage() as f64,
+                utilization: cpu.usage() as f64,
             });
         }
 

@@ -180,7 +180,7 @@ mod tests {
             .map(|row| row.mount_point)
             .collect();
 
-        let disks = Disks::new_with_refreshed_list();
+        let disks = Disks::new_with_refreshed_list().unwrap();
         let mut expected: Vec<String> = filter_docker_aware_disks(&disks)
             .iter()
             .map(|disk| disk.mount_point().to_string_lossy().into_owned())
