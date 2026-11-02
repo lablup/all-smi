@@ -71,7 +71,7 @@ impl MetricsAggregator {
             .iter()
             .map(|cpu| {
                 if let Some(apple_info) = &cpu.apple_silicon_info {
-                    apple_info.p_core_count + apple_info.e_core_count
+                    apple_info.total_cores()
                 } else {
                     cpu.total_cores
                 }

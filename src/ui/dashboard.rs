@@ -125,7 +125,9 @@ pub fn draw_system_view<W: Write>(stdout: &mut W, state: &AppState, cols: u16) {
         .iter()
         .map(|cpu| {
             if let Some(apple_info) = &cpu.apple_silicon_info {
-                apple_info.p_core_count + apple_info.e_core_count
+                // All three Apple Silicon tiers are physical cores; the old
+                // P+E sum dropped the Super cluster on M5 Pro/Max and base M5.
+                apple_info.total_cores()
             } else {
                 cpu.total_cores
             }

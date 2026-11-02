@@ -353,16 +353,17 @@ fn draw_panel_top_border<W: Write>(
         CollapseStrategy::PECluster => {
             if let Some(apple) = info.apple_silicon_info.as_ref() {
                 let avg = average_utilization(&info.per_core_utilization);
-                if apple.s_core_count > 0 {
-                    format!(
-                        "CPU Cores ({}S+{}P, {avg:.1}% avg)",
-                        apple.s_core_count, apple.p_core_count,
-                    )
+                let tiers = apple.core_tiers();
+                if tiers.is_empty() {
+                    let core_count = info.per_core_utilization.len();
+                    format!("CPU Cores ({core_count} cores, {avg:.1}% avg)")
                 } else {
-                    format!(
-                        "CPU Cores ({}P+{}E, {avg:.1}% avg)",
-                        apple.p_core_count, apple.e_core_count,
-                    )
+                    let summary = tiers
+                        .iter()
+                        .map(|tier| format!("{}{}", apple.core_count_of(*tier), tier.short_label()))
+                        .collect::<Vec<_>>()
+                        .join("+");
+                    format!("CPU Cores ({summary}, {avg:.1}% avg)")
                 }
             } else {
                 let core_count = info.per_core_utilization.len();
@@ -553,75 +554,43 @@ fn draw_pe_cluster_bars<W: Write>(
 
     let content_width = panel_width.saturating_sub(4);
 
-    // Collect per-core utilization blocks for each cluster
-    let s_cores: Vec<&CoreUtilization> = info
-        .per_core_utilization
+    let cores_for = |tier: CoreType| -> Vec<&CoreUtilization> {
+        info.per_core_utilization
+            .iter()
+            .filter(|core| core.core_type == tier)
+            .collect()
+    };
+
+    // Render the two fastest present tiers: S+P, P+E or S+E. One shared bar
+    // width keeps the gauges ending at the same column.
+    let shown: Vec<(CoreType, Vec<&CoreUtilization>)> = apple
+        .core_tiers()
         .iter()
-        .filter(|c| c.core_type == CoreType::Super)
-        .collect();
-    let p_cores: Vec<&CoreUtilization> = info
-        .per_core_utilization
-        .iter()
-        .filter(|c| c.core_type == CoreType::Performance)
-        .collect();
-    let e_cores: Vec<&CoreUtilization> = info
-        .per_core_utilization
-        .iter()
-        .filter(|c| c.core_type == CoreType::Efficiency)
+        .take(2)
+        .map(|tier| (*tier, cores_for(*tier)))
         .collect();
 
-    if apple.s_core_count > 0 {
-        // M5 Pro/Max: S-CPU + P-CPU gauges
-        let shared_block_width =
-            bounded_block_width(s_cores.len().max(p_cores.len()), content_width);
-        let shared_bar_width = content_width.saturating_sub(shared_block_width + 1);
+    if shown.is_empty() {
+        return;
+    }
 
-        // S-cluster line: bar + utilization blocks
+    let shared_block_width = bounded_block_width(
+        shown
+            .iter()
+            .map(|(_, cores)| cores.len())
+            .max()
+            .unwrap_or(0),
+        content_width,
+    );
+    let shared_bar_width = content_width.saturating_sub(shared_block_width + 1);
+
+    for (tier, cores) in &shown {
+        let label = format!("{}-CPU", tier.short_label());
         draw_cluster_line(
             stdout,
-            "S-CPU",
-            apple.s_core_utilization,
-            &s_cores,
-            shared_bar_width,
-            shared_block_width,
-            panel_width,
-        );
-
-        // P-cluster line: bar + utilization blocks
-        draw_cluster_line(
-            stdout,
-            "P-CPU",
-            apple.p_core_utilization,
-            &p_cores,
-            shared_bar_width,
-            shared_block_width,
-            panel_width,
-        );
-    } else {
-        // M1-M4: P-CPU + E-CPU gauges
-        // Compute one shared bar_width using the larger block section so that
-        // P-CPU and E-CPU gauges end at the same column.
-        let shared_block_width =
-            bounded_block_width(p_cores.len().max(e_cores.len()), content_width);
-        let shared_bar_width = content_width.saturating_sub(shared_block_width + 1);
-
-        // P-cluster line: bar + utilization blocks
-        draw_cluster_line(
-            stdout,
-            "P-CPU",
-            apple.p_core_utilization,
-            &p_cores,
-            shared_bar_width,
-            shared_block_width,
-            panel_width,
-        );
-
-        // E-cluster line: bar + utilization blocks
-        draw_cluster_line(
-            stdout,
-            "E-CPU",
-            apple.e_core_utilization,
-            &e_cores,
+            &label,
+            apple.core_utilization_of(*tier),
+            cores,
             shared_bar_width,
             shared_block_width,
             panel_width,

@@ -416,12 +416,24 @@ pub struct CoreUtilization {
     pub utilization: f64,    // Core utilization percentage (0-100)
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq)]
 pub enum CoreType {
     Super,       // S-cores (Apple Silicon M5 Pro/Max Super cores)
     Performance, // P-cores (Apple Silicon) or Performance cores (Intel/AMD)
     Efficiency,  // E-cores (Apple Silicon) or Efficiency cores (Intel/AMD)
     Standard,    // Regular cores (no P/E distinction)
+}
+
+impl CoreType {
+    /// Single-letter label used by the TUI core topology rows and gauges.
+    pub fn short_label(self) -> &'static str {
+        match self {
+            CoreType::Super => "S",
+            CoreType::Performance => "P",
+            CoreType::Efficiency => "E",
+            CoreType::Standard => "C",
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
@@ -459,6 +471,65 @@ pub struct AppleSiliconCpuInfo {
     pub s_core_l2_cache_mb: Option<u32>,      // S-core L2 cache size in MB (M5 Pro/Max)
     pub p_core_l2_cache_mb: Option<u32>,      // P-core L2 cache size in MB
     pub e_core_l2_cache_mb: Option<u32>,      // E-core L2 cache size in MB
+}
+
+impl AppleSiliconCpuInfo {
+    /// Core tiers present on this chip, fastest first.
+    ///
+    /// M1-M4 yield `[Performance, Efficiency]`, M5 Pro/Max yield
+    /// `[Super, Performance]`, and base M5 yields `[Super, Efficiency]`.
+    /// Display code must iterate this instead of testing `s_core_count > 0`,
+    /// which cannot distinguish a Super + Performance chip from a Super +
+    /// Efficiency one.
+    pub fn core_tiers(&self) -> Vec<CoreType> {
+        [CoreType::Super, CoreType::Performance, CoreType::Efficiency]
+            .into_iter()
+            .filter(|tier| self.core_count_of(*tier) > 0)
+            .collect()
+    }
+
+    /// Number of cores across every tier the chip has.
+    pub fn total_cores(&self) -> u32 {
+        self.s_core_count + self.p_core_count + self.e_core_count
+    }
+
+    /// Number of cores in `tier`. `Standard` has no Apple Silicon field and
+    /// reports zero.
+    pub fn core_count_of(&self, tier: CoreType) -> u32 {
+        match tier {
+            CoreType::Super => self.s_core_count,
+            CoreType::Performance => self.p_core_count,
+            CoreType::Efficiency => self.e_core_count,
+            CoreType::Standard => 0,
+        }
+    }
+
+    pub fn core_utilization_of(&self, tier: CoreType) -> f64 {
+        match tier {
+            CoreType::Super => self.s_core_utilization,
+            CoreType::Performance => self.p_core_utilization,
+            CoreType::Efficiency => self.e_core_utilization,
+            CoreType::Standard => 0.0,
+        }
+    }
+
+    pub fn cluster_frequency_of(&self, tier: CoreType) -> Option<u32> {
+        match tier {
+            CoreType::Super => self.s_cluster_frequency_mhz,
+            CoreType::Performance => self.p_cluster_frequency_mhz,
+            CoreType::Efficiency => self.e_cluster_frequency_mhz,
+            CoreType::Standard => None,
+        }
+    }
+
+    pub fn core_l2_cache_of(&self, tier: CoreType) -> Option<u32> {
+        match tier {
+            CoreType::Super => self.s_core_l2_cache_mb,
+            CoreType::Performance => self.p_core_l2_cache_mb,
+            CoreType::Efficiency => self.e_core_l2_cache_mb,
+            CoreType::Standard => None,
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
