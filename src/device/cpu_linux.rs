@@ -1025,6 +1025,14 @@ impl CpuReader for LinuxCpuReader {
                     socket_info.frequency_mhz = cpu_info.base_frequency_mhz;
                 }
 
+                // A quota-only container detects tiers across the whole host
+                // but emits only the cores it may use, so recount from the
+                // cores this payload actually carries (issue #473). Done here,
+                // in the reader, so every consumer sees the reconciled list:
+                // the local TUI and API loop call this trait method directly
+                // rather than going through `AllSmi::get_cpu_info`.
+                cpu_info.reconcile_cpu_tiers();
+
                 vec![cpu_info]
             }
             Err(e) => {

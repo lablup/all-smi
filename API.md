@@ -772,6 +772,8 @@ The whole family is absent for a homogeneous CPU or when topology detection coul
 
 Detection runs once per reader construction, never per scrape: Intel hybrid `cpu_core`/`cpu_atom` PMU cpumasks, arm64 `MIDR_EL1` part numbers, and the `cpu_capacity` firmware table on Linux; registry `Identifier` part numbers on Windows ARM; `hw.perflevelN` on Apple Silicon. Unreadable or ambiguous sources leave the affected cores untiered rather than guessing.
 
+A quota-only container (a CPU quota without a cpuset) detects tiers across the whole host but emits only the cores it may use. Its reader recounts every tier from the cores actually present, drops tiers that have no core, remaps `tier_index`, and reports no list when fewer than two tiers remain, so the tier counts and the per-core series describe the same set of cores.
+
 ### Memory Metrics (All Platforms)
 
 | Metric                           | Description                   | Unit    | Labels |

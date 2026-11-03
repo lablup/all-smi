@@ -253,7 +253,7 @@ pub trait MetricsExporter: Send + Sync {
 - `/proc` filesystem parsing
 - `lscpu` integration for topology
 - Per-core utilization tracking
-- CPU tier detection runs once per reader construction, never per tick, from three sysfs sources in precedence order: Intel hybrid PMU cpumasks (`bus/event_source/devices/cpu_core/cpus` for P, `cpu_atom/cpus` for E), arm64 `MIDR_EL1` part numbers under `devices/system/cpu/cpuN/regs/identification/`, and the firmware `cpu_capacity` table grouped by distinct value. Container cpusets restrict which CPUs participate. Unreadable or ambiguous sources leave the affected cores untiered, and a single confirmed tier produces no tier list.
+- CPU tier detection runs once per reader construction, never per tick, from three sysfs sources in precedence order: Intel hybrid PMU cpumasks (`bus/event_source/devices/cpu_core/cpus` for P, `cpu_atom/cpus` for E), arm64 `MIDR_EL1` part numbers under `devices/system/cpu/cpuN/regs/identification/`, and the firmware `cpu_capacity` table grouped by distinct value. Container cpusets restrict which CPUs participate. Unreadable or ambiguous sources leave the affected cores untiered, and a single confirmed tier produces no tier list. A quota-only container sees every host tier but emits only the cores its quota allows, so the reader recounts the tiers from the cores it actually carries and drops empty ones.
 
 #### macOS
 - `system_profiler` for hardware info
