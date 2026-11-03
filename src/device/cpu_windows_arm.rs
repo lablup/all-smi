@@ -31,40 +31,42 @@
 //! Everything here is pure string handling so it is tested on every
 //! platform; the registry read lives in `cpu_windows`.
 
-use crate::device::{CoreType, CpuPlatformType};
+use crate::device::cpu_topology::{self, CoreTier, tier_of};
+use crate::device::{CoreType, CpuPlatformType, CpuTier};
 
-/// Relative tier of a known ARM core design. Higher is faster.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum CoreTier {
-    /// Little cores (Cortex-A5xx).
-    Little,
-    /// Mid cores (Cortex-A7xx).
-    Mid,
-    /// Big cores (Cortex-X).
-    Big,
+/// Static, ordered tier topology for a Windows on ARM part.
+///
+/// `tiers` is empty for a homogeneous part, an x86 CPU, or an unknown part
+/// number, and carries `P`/`M`/`E` fastest first otherwise. `per_core` keeps
+/// the raw per-logical-processor tier so a reader can refresh counters
+/// without re-parsing the registry strings.
+#[derive(Debug, Clone, Default)]
+pub struct WindowsTierTopology {
+    /// Raw tier of each logical processor. `Some` even when the part is
+    /// homogeneous; `tiers` is what decides whether the CPU is heterogeneous.
+    pub per_core: Vec<Option<CoreTier>>,
+    /// Ordered, fastest-first tiers. Empty unless at least two tiers have
+    /// cores.
+    pub tiers: Vec<CpuTier>,
 }
 
-/// ARM part numbers (`MIDR_EL1.PartNum`) of big.LITTLE / DynamIQ cores and
-/// their tier. Extend this table for new designs; an unknown part number
-/// stays [`CoreType::Standard`].
-const ARM_PART_TIERS: &[(u32, CoreTier)] = &[
-    (0xD05, CoreTier::Little), // Cortex-A55
-    (0xD46, CoreTier::Little), // Cortex-A510
-    (0xD80, CoreTier::Little), // Cortex-A520
-    (0xD0D, CoreTier::Mid),    // Cortex-A77
-    (0xD41, CoreTier::Mid),    // Cortex-A78
-    (0xD4B, CoreTier::Mid),    // Cortex-A78C
-    (0xD47, CoreTier::Mid),    // Cortex-A710
-    (0xD4D, CoreTier::Mid),    // Cortex-A715
-    (0xD81, CoreTier::Mid),    // Cortex-A720
-    (0xD87, CoreTier::Mid),    // Cortex-A725
-    (0xD44, CoreTier::Big),    // Cortex-X1
-    (0xD4C, CoreTier::Big),    // Cortex-X1C
-    (0xD48, CoreTier::Big),    // Cortex-X2
-    (0xD4E, CoreTier::Big),    // Cortex-X3
-    (0xD82, CoreTier::Big),    // Cortex-X4
-    (0xD85, CoreTier::Big),    // Cortex-X925
-];
+impl WindowsTierTopology {
+    /// Tier position for each logical processor: the index into [`Self::tiers`]
+    /// for the core's raw tier, or `None` for an untiered core.
+    pub fn tier_index_by_core(&self) -> Vec<Option<u8>> {
+        self.per_core
+            .iter()
+            .map(|tier| {
+                tier.and_then(|tier| {
+                    self.tiers
+                        .iter()
+                        .position(|entry| entry.label == tier.label())
+                        .map(|position| position as u8)
+                })
+            })
+            .collect()
+    }
+}
 
 /// Parse the `Model` part number out of a `CentralProcessor\N\Identifier`
 /// string. Returns `None` for x86 identifiers and malformed input.
@@ -82,11 +84,49 @@ pub fn parse_arm_part_number(identifier: &str) -> Option<u32> {
     u32::from_str_radix(model, 16).ok()
 }
 
-fn tier_of(part: u32) -> Option<CoreTier> {
-    ARM_PART_TIERS
+/// Build the ordered tier topology from the per-processor registry
+/// identifiers (issue #473).
+///
+/// `Big` maps to `P`, `Mid` to `M` and `Little` to `E`. Only when at least two
+/// distinct tiers have cores does the list become non-empty; a homogeneous
+/// part stays `Standard`.
+pub fn tier_topology_from_identifiers(identifiers: &[Option<String>]) -> WindowsTierTopology {
+    let per_core: Vec<Option<CoreTier>> = identifiers
         .iter()
-        .find(|(known, _)| *known == part)
-        .map(|(_, tier)| *tier)
+        .map(|id| {
+            id.as_deref()
+                .and_then(parse_arm_part_number)
+                .and_then(tier_of)
+        })
+        .collect();
+
+    let present: Vec<CoreTier> = [CoreTier::Big, CoreTier::Mid, CoreTier::Little]
+        .into_iter()
+        .filter(|tier| per_core.contains(&Some(*tier)))
+        .collect();
+
+    if present.len() < 2 {
+        return WindowsTierTopology {
+            per_core,
+            tiers: Vec::new(),
+        };
+    }
+
+    let total = present.len();
+    let tiers: Vec<CpuTier> = present
+        .iter()
+        .enumerate()
+        .map(|(position, tier)| CpuTier {
+            label: tier.label().to_string(),
+            core_type: cpu_topology::coarse_core_type(position, total),
+            core_count: per_core.iter().filter(|core| **core == Some(*tier)).count() as u32,
+            utilization: 0.0,
+            frequency_mhz: None,
+            l2_cache_mb: None,
+        })
+        .collect();
+
+    WindowsTierTopology { per_core, tiers }
 }
 
 /// Map each logical processor's `Identifier` to a [`CoreType`].
@@ -192,6 +232,36 @@ mod tests {
         }
     }
 
+    /// The N1X is a two-cluster part (Big + Mid), so the coarse P/E result is
+    /// unchanged while the exact tier list separates `P` from `M`.
+    #[test]
+    fn n1x_two_tier_topology_is_unchanged() {
+        let identifiers: Vec<Option<String>> = (0..20)
+            .map(|core| {
+                let x925 = (5..10).contains(&core) || (15..20).contains(&core);
+                Some(if x925 { X925 } else { A725 }.to_string())
+            })
+            .collect();
+        let topology = tier_topology_from_identifiers(&identifiers);
+        assert_eq!(topology.tiers.len(), 2);
+        assert_eq!(topology.tiers[0].label, "P");
+        assert_eq!(topology.tiers[0].core_count, 10);
+        assert_eq!(topology.tiers[1].label, "M");
+        assert_eq!(topology.tiers[1].core_count, 10);
+        assert_eq!(
+            core_types_from_identifiers(&identifiers),
+            topology
+                .per_core
+                .iter()
+                .map(|tier| match tier {
+                    Some(CoreTier::Big) => CoreType::Performance,
+                    Some(_) => CoreType::Efficiency,
+                    None => CoreType::Standard,
+                })
+                .collect::<Vec<_>>()
+        );
+    }
+
     #[test]
     fn three_cluster_parts_split_top_tier_from_the_rest() {
         let ids = [
@@ -208,6 +278,43 @@ mod tests {
                 CoreType::Efficiency
             ]
         );
+
+        // The exact tier list keeps all three tiers (issue #473).
+        let topology = tier_topology_from_identifiers(&ids);
+        assert_eq!(
+            topology
+                .tiers
+                .iter()
+                .map(|tier| (tier.label.as_str(), tier.core_count))
+                .collect::<Vec<_>>(),
+            vec![("P", 1), ("M", 1), ("E", 1)]
+        );
+        assert_eq!(
+            topology.tier_index_by_core(),
+            vec![Some(0), Some(1), Some(2)]
+        );
+        assert_eq!(
+            topology.per_core,
+            vec![
+                Some(CoreTier::Big),
+                Some(CoreTier::Mid),
+                Some(CoreTier::Little)
+            ]
+        );
+    }
+
+    #[test]
+    fn homogeneous_parts_have_no_tier_list() {
+        for identifiers in [
+            vec![Some(A725.to_string()); 4],
+            vec![Some("ARMv8 (64-bit) Family 8 Model 1 Revision 201".to_string()); 4],
+            vec![Some("Intel64 Family 6 Model 183 Stepping 1".to_string()); 4],
+            vec![None; 4],
+        ] {
+            let topology = tier_topology_from_identifiers(&identifiers);
+            assert!(topology.tiers.is_empty());
+            assert!(topology.tier_index_by_core().iter().all(Option::is_none));
+        }
     }
 
     #[test]

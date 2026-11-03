@@ -12,8 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
+use std::path::Path;
 use std::sync::RwLock;
 use sysinfo::System;
 
@@ -21,8 +22,12 @@ use chrono::Local;
 use once_cell::sync::Lazy;
 
 use crate::device::container_info::{ContainerInfo, parse_cpu_stat_with_container_limits};
+use crate::device::cpu_topology::{
+    self, CoreTier, decode_midr, group_cpus_by_capacity, parse_cpumask_list, tier_label_for_rank,
+    tier_of, tier_utilization,
+};
 use crate::device::{
-    CoreType, CoreUtilization, CpuInfo, CpuPlatformType, CpuReader, CpuSocketInfo,
+    CoreType, CoreUtilization, CpuInfo, CpuPlatformType, CpuReader, CpuSocketInfo, CpuTier,
 };
 use crate::utils::command::new_command;
 use crate::utils::system::get_hostname;
@@ -49,6 +54,245 @@ type CpuStatParseResult =
 // Cache container detection result globally to avoid repeated filesystem operations
 static CONTAINER_INFO: Lazy<ContainerInfo> = Lazy::new(ContainerInfo::detect);
 
+/// Static CPU tier topology detected once per reader (issue #473).
+///
+/// `tiers` carries labels and core counts; only the per-tick utilization is
+/// refreshed. `tier_by_cpu` maps a **host** CPU id to its tier position, which
+/// is what the container path needs before it renumbers `core_id`
+/// sequentially.
+#[derive(Debug, Clone, Default)]
+struct CpuTopology {
+    tiers: Vec<CpuTier>,
+    tier_by_cpu: Vec<Option<u8>>,
+}
+
+/// Upper bound on detected tiers. Positions are stored as `u8` and the remote
+/// parser caps at the same value, so a machine with more distinct firmware
+/// capacities than this is truncated rather than risk an index overflow.
+const MAX_DETECTED_TIERS: usize = 64;
+
+/// Highest CPU id the tier map tracks.
+///
+/// `tier_by_cpu` is indexed by CPU id, so a single implausible id would size the
+/// vector to that id. A real machine numbers its logical CPUs in the low
+/// thousands, and this matches the cpumask expansion bound, so anything above
+/// it is treated as untiered instead of sizing an allocation from a file that a
+/// corrupted or attacker-controlled sysfs could supply.
+const MAX_TRACKED_CPU_ID: u32 = 8191;
+
+impl CpuTopology {
+    fn tier_index_for(&self, cpu_id: u32) -> Option<u8> {
+        self.tier_by_cpu.get(cpu_id as usize).copied().flatten()
+    }
+}
+
+/// Detect the CPU tier topology from sysfs.
+///
+/// Precedence, each step falling through when it cannot confirm at least two
+/// tiers:
+/// 1. Intel hybrid PMU cpumasks (`cpu_core/cpus` -> `P`, `cpu_atom/cpus` -> `E`).
+/// 2. arm64 `MIDR_EL1` part numbers mapped through [`tier_of`].
+/// 3. Firmware `cpu_capacity`, grouped descending and labelled through
+///    [`tier_label_for_rank`].
+/// 4. Empty (homogeneous or undetected).
+///
+/// `root` is `/sys` in production and a fixture directory in tests. `allowed`
+/// is the container cpuset; `None` means every CPU on the host participates.
+/// The function never fails: an unreadable source is skipped and the affected
+/// cores stay untiered.
+fn detect_cpu_tiers(root: &Path, allowed: Option<&[u32]>) -> CpuTopology {
+    let mut cpu_ids = enumerate_cpu_ids(root);
+    if let Some(allowed) = allowed {
+        let allowed: HashSet<u32> = allowed.iter().copied().collect();
+        cpu_ids.retain(|id| allowed.contains(id));
+    }
+    if cpu_ids.is_empty() {
+        return CpuTopology::default();
+    }
+
+    detect_intel_hybrid(root, &cpu_ids)
+        .or_else(|| detect_arm_midr(root, &cpu_ids))
+        .or_else(|| detect_capacity(root, &cpu_ids))
+        .unwrap_or_default()
+}
+
+/// Enumerate logical CPU ids from `devices/system/cpu/cpuN` directories,
+/// falling back to the kernel `possible` cpumask when the directory listing is
+/// unavailable.
+fn enumerate_cpu_ids(root: &Path) -> Vec<u32> {
+    let cpu_dir = root.join("devices/system/cpu");
+    let mut ids = Vec::new();
+
+    if let Ok(entries) = fs::read_dir(&cpu_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if let Some(suffix) = name.strip_prefix("cpu")
+                && let Ok(id) = suffix.parse::<u32>()
+            {
+                ids.push(id);
+            }
+        }
+    }
+
+    if ids.is_empty()
+        && let Ok(mask) = fs::read_to_string(cpu_dir.join("possible"))
+    {
+        ids = parse_cpumask_list(&mask);
+    }
+
+    // A directory entry or cpumask may name `cpuN` with an arbitrary `N`; the
+    // per-CPU tier map is indexed by id, so ignore ids beyond the tracked range
+    // rather than let one entry size an allocation proportional to it.
+    ids.retain(|id| *id <= MAX_TRACKED_CPU_ID);
+    ids.sort_unstable();
+    ids.dedup();
+    ids
+}
+
+/// Intel hybrid: map the `cpu_core` PMU cpumask to `P` and `cpu_atom` to `E`.
+///
+/// The kernel registers exactly two hybrid classes, so there is no third tier
+/// to invent. Requires at least one core in each class.
+fn detect_intel_hybrid(root: &Path, cpu_ids: &[u32]) -> Option<CpuTopology> {
+    let base = root.join("bus/event_source/devices");
+    let p_mask = fs::read_to_string(base.join("cpu_core/cpus")).ok()?;
+    let e_mask = fs::read_to_string(base.join("cpu_atom/cpus")).ok()?;
+
+    let allowed: HashSet<u32> = cpu_ids.iter().copied().collect();
+    let mut performance: Vec<u32> = parse_cpumask_list(&p_mask)
+        .into_iter()
+        .filter(|id| allowed.contains(id))
+        .collect();
+    let mut efficiency: Vec<u32> = parse_cpumask_list(&e_mask)
+        .into_iter()
+        .filter(|id| allowed.contains(id))
+        .collect();
+
+    if performance.is_empty() || efficiency.is_empty() {
+        return None;
+    }
+
+    performance.sort_unstable();
+    efficiency.sort_unstable();
+    Some(topology_from_labeled_groups(vec![
+        ("P".to_string(), performance),
+        ("E".to_string(), efficiency),
+    ]))
+}
+
+/// arm64: classify each CPU by its `MIDR_EL1` part number.
+///
+/// `Big` becomes `P`, `Mid` becomes `M` and `Little` becomes `E`. Unknown or
+/// unreadable parts stay untiered; fewer than two confirmed tiers falls
+/// through to the capacity fallback.
+fn detect_arm_midr(root: &Path, cpu_ids: &[u32]) -> Option<CpuTopology> {
+    let mut by_tier: BTreeMap<CoreTier, Vec<u32>> = BTreeMap::new();
+
+    for &cpu_id in cpu_ids {
+        let path = root.join(format!(
+            "devices/system/cpu/cpu{cpu_id}/regs/identification/midr_el1"
+        ));
+        let Ok(text) = fs::read_to_string(&path) else {
+            continue;
+        };
+        let Some(part) = decode_midr(&text) else {
+            continue;
+        };
+        let Some(tier) = tier_of(part) else {
+            continue;
+        };
+        by_tier.entry(tier).or_default().push(cpu_id);
+    }
+
+    if by_tier.len() < 2 {
+        return None;
+    }
+
+    // `BTreeMap` orders `Little < Mid < Big`; the tier list must be fastest
+    // first, so pull them explicitly.
+    let groups = [CoreTier::Big, CoreTier::Mid, CoreTier::Little]
+        .into_iter()
+        .filter_map(|tier| {
+            by_tier
+                .remove(&tier)
+                .map(|cores| (tier.label().to_string(), cores))
+        })
+        .collect();
+    Some(topology_from_labeled_groups(groups))
+}
+
+/// Firmware capacity fallback: group CPUs by `cpu_capacity`, order the groups
+/// by capacity descending, and emit them only when at least two distinct
+/// values exist.
+fn detect_capacity(root: &Path, cpu_ids: &[u32]) -> Option<CpuTopology> {
+    let mut capacities = Vec::new();
+    for &cpu_id in cpu_ids {
+        let path = root.join(format!("devices/system/cpu/cpu{cpu_id}/cpu_capacity"));
+        if let Ok(text) = fs::read_to_string(&path)
+            && let Ok(capacity) = text.trim().parse::<u32>()
+            && capacity > 0
+        {
+            capacities.push((cpu_id, capacity));
+        }
+    }
+
+    let mut groups = group_cpus_by_capacity(&capacities);
+    if groups.len() < 2 {
+        return None;
+    }
+    // Keep the fastest groups; cores in a truncated group stay untiered.
+    groups.truncate(MAX_DETECTED_TIERS);
+
+    Some(topology_from_labeled_groups(
+        groups
+            .into_iter()
+            .enumerate()
+            .map(|(position, (_, cores))| (tier_label_for_rank(position), cores))
+            .collect(),
+    ))
+}
+
+/// Build a topology from ordered `(label, cpu ids)` groups, fastest first.
+///
+/// The list is capped at [`MAX_DETECTED_TIERS`] so tier positions always fit
+/// a `u8`; callers pass groups already ordered fastest first, so the cap keeps
+/// the fastest ones.
+fn topology_from_labeled_groups(mut groups: Vec<(String, Vec<u32>)>) -> CpuTopology {
+    groups.truncate(MAX_DETECTED_TIERS);
+    // Defense in depth: an id beyond the tracked range would size `tier_by_cpu`
+    // to that id, so it is dropped here as well as in `enumerate_cpu_ids`.
+    for (_, cores) in &mut groups {
+        cores.retain(|id| *id <= MAX_TRACKED_CPU_ID);
+    }
+    let total = groups.len();
+    let max_cpu_id = groups
+        .iter()
+        .flat_map(|(_, cores)| cores.iter().copied())
+        .max()
+        .unwrap_or(0);
+    let mut tier_by_cpu = vec![None; max_cpu_id as usize + 1];
+    let mut tiers = Vec::with_capacity(total);
+
+    for (position, (label, cores)) in groups.into_iter().enumerate() {
+        for cpu_id in &cores {
+            if let Some(slot) = tier_by_cpu.get_mut(*cpu_id as usize) {
+                *slot = Some(position as u8);
+            }
+        }
+        tiers.push(CpuTier {
+            label,
+            core_type: cpu_topology::coarse_core_type(position, total),
+            core_count: cores.len() as u32,
+            utilization: 0.0,
+            frequency_mhz: None,
+            l2_cache_mb: None,
+        });
+    }
+
+    CpuTopology { tiers, tier_by_cpu }
+}
+
 pub struct LinuxCpuReader {
     // Use Option<Option<u32>> to distinguish:
     // - None: not cached yet
@@ -62,6 +306,9 @@ pub struct LinuxCpuReader {
     system: RwLock<System>,
     // Track if we've done the first refresh
     first_refresh_done: RwLock<bool>,
+    /// Static tier topology, read from sysfs once at construction and never
+    /// per tick (issue #473).
+    topology: CpuTopology,
 }
 
 impl Default for LinuxCpuReader {
@@ -75,13 +322,27 @@ impl LinuxCpuReader {
         // Create system with minimal initialization - delay CPU refresh until needed
         let system = crate::utils::system::new_system();
 
+        // Topology is static for the process lifetime, so it is read once here
+        // and never from the per-tick paths (issue #473).
+        let topology = detect_cpu_tiers(Path::new("/sys"), CONTAINER_INFO.cpuset_cpus.as_deref());
+
         Self {
             cached_lscpu_cache_size: RwLock::new(None),
             cached_lscpu_output: RwLock::new(None),
             container_info: &*CONTAINER_INFO,
             system: RwLock::new(system),
             first_refresh_done: RwLock::new(false),
+            topology,
         }
+    }
+
+    /// Clone the static topology and refresh only the per-tick utilization.
+    fn resolved_tiers(&self, per_core: &[CoreUtilization]) -> Vec<CpuTier> {
+        let mut tiers = self.topology.tiers.clone();
+        for (position, tier) in tiers.iter_mut().enumerate() {
+            tier.utilization = tier_utilization(per_core, position);
+        }
+        tiers
     }
 
     fn get_lscpu_output(&self) -> Option<String> {
@@ -192,6 +453,9 @@ impl LinuxCpuReader {
                     core_id: idx as u32, // Use sequential IDs for display, but read from actual core_id
                     core_type: CoreType::Standard,
                     utilization: core_util,
+                    // Look up the real host CPU id before the display id is
+                    // renumbered (issue #473).
+                    tier_index: self.topology.tier_index_for(core_id),
                 });
             }
 
@@ -218,6 +482,8 @@ impl LinuxCpuReader {
         // Power consumption is not readily available on most Linux systems
         let power_consumption = None;
 
+        let cpu_tiers = self.resolved_tiers(&per_core_utilization);
+
         Ok(CpuInfo {
             index: 0,                  // Overwritten by AllSmi::get_cpu_info when flattening readers
             host_id: hostname.clone(), // For local mode, host_id is just the hostname
@@ -237,6 +503,7 @@ impl LinuxCpuReader {
             power_consumption,
             per_socket_info,
             apple_silicon_info: None, // Not applicable for Linux
+            cpu_tiers,
             per_core_utilization,
             time,
         })
@@ -602,6 +869,8 @@ impl LinuxCpuReader {
                 core_id: core_id as u32,
                 core_type,
                 utilization,
+                // The host path's `core_id` is the host CPU id.
+                tier_index: self.topology.tier_index_for(core_id as u32),
             });
         }
 
@@ -755,6 +1024,14 @@ impl CpuReader for LinuxCpuReader {
                     socket_info.threads = threads_per_socket;
                     socket_info.frequency_mhz = cpu_info.base_frequency_mhz;
                 }
+
+                // A quota-only container detects tiers across the whole host
+                // but emits only the cores it may use, so recount from the
+                // cores this payload actually carries (issue #473). Done here,
+                // in the reader, so every consumer sees the reconciled list:
+                // the local TUI and API loop call this trait method directly
+                // rather than going through `AllSmi::get_cpu_info`.
+                cpu_info.reconcile_cpu_tiers();
 
                 vec![cpu_info]
             }

@@ -273,38 +273,10 @@ pub fn print_cpu_info<W: Write>(
         None,
         None,
     );
-    // Show S/P/E-Core counts for Apple Silicon, regular core count for others
-    if let Some(apple_info) = &info.apple_silicon_info {
-        print_colored_text(stdout, " Cores:", Color::Green, None, None);
-        let tiers = apple_info.core_tiers();
-        if tiers.is_empty() {
-            print_colored_text(
-                stdout,
-                &format!("{:>2}", info.total_cores),
-                Color::White,
-                None,
-                None,
-            );
-        } else {
-            for (index, tier) in tiers.iter().enumerate() {
-                if index > 0 {
-                    print_colored_text(stdout, "+", Color::White, None, None);
-                }
-                print_colored_text(
-                    stdout,
-                    &format!(
-                        "{:>2}{}",
-                        apple_info.core_count_of(*tier),
-                        tier.short_label()
-                    ),
-                    Color::White,
-                    None,
-                    None,
-                );
-            }
-        }
-    } else {
-        print_colored_text(stdout, " Cores:", Color::Green, None, None);
+    // Show per-tier core counts, regular core count when homogeneous.
+    print_colored_text(stdout, " Cores:", Color::Green, None, None);
+    let tiers = info.display_cpu_tiers();
+    if tiers.is_empty() {
         print_colored_text(
             stdout,
             &format!("{:>2}", info.total_cores),
@@ -312,50 +284,35 @@ pub fn print_cpu_info<W: Write>(
             None,
             None,
         );
-    }
-
-    // Display frequency - S+P or P+E format for Apple Silicon, regular for others
-    print_colored_text(stdout, " Freq:", Color::Magenta, None, None);
-    if let Some(apple_info) = &info.apple_silicon_info {
-        // The two fastest present tiers: S+P, P+E or S+E.
-        let tiers = apple_info.core_tiers();
-        let high_freq = tiers
-            .first()
-            .and_then(|tier| apple_info.cluster_frequency_of(*tier));
-        let low_freq = tiers
-            .get(1)
-            .and_then(|tier| apple_info.cluster_frequency_of(*tier));
-
-        if let (Some(hi), Some(lo)) = (high_freq, low_freq) {
-            let freq_display = if hi >= 1000 && lo >= 1000 {
-                format!("{:.2}+{:.2}GHz", hi as f64 / 1000.0, lo as f64 / 1000.0)
-            } else if hi >= 1000 {
-                format!("{:.2}GHz+{lo}MHz", hi as f64 / 1000.0)
-            } else if lo >= 1000 {
-                format!("{hi}MHz+{:.2}GHz", lo as f64 / 1000.0)
-            } else {
-                format!("{hi}+{lo}MHz")
-            };
+    } else {
+        for (index, tier) in tiers.iter().enumerate() {
+            if index > 0 {
+                print_colored_text(stdout, "+", Color::White, None, None);
+            }
             print_colored_text(
                 stdout,
-                &format!("{freq_display:>13}"),
-                Color::White,
-                None,
-                None,
-            );
-        } else {
-            // Fallback to max frequency if cluster frequencies not available
-            let freq_ghz = info.max_frequency_mhz as f64 / 1000.0;
-            print_colored_text(
-                stdout,
-                &format!("{freq_ghz:>6.1}GHz"),
+                &format!("{:>2}{}", tier.core_count, tier.label),
                 Color::White,
                 None,
                 None,
             );
         }
+    }
+
+    // Display frequency across every tier that reports one. Two tiers keep
+    // the legacy `hi+lo` composite format byte-for-byte; three or more join
+    // each individually formatted value.
+    print_colored_text(stdout, " Freq:", Color::Magenta, None, None);
+    let tier_frequencies: Vec<u32> = tiers.iter().filter_map(|tier| tier.frequency_mhz).collect();
+    if tier_frequencies.len() >= 2 {
+        print_colored_text(
+            stdout,
+            &format!("{:>13}", format_tier_frequencies(&tier_frequencies)),
+            Color::White,
+            None,
+            None,
+        );
     } else {
-        // Regular frequency display for non-Apple Silicon
         let freq_ghz = info.max_frequency_mhz as f64 / 1000.0;
         print_colored_text(
             stdout,
@@ -371,41 +328,26 @@ pub fn print_cpu_info<W: Write>(
         print_colored_text(stdout, &format!("{temp:>3}°C"), Color::White, None, None);
     }
 
-    // Display cache based on platform type
-    if let Some(apple_info) = &info.apple_silicon_info {
-        // The two fastest present tiers: S+P, P+E or S+E.
-        let tiers = apple_info.core_tiers();
-        let high_cache = tiers
-            .first()
-            .and_then(|tier| apple_info.core_l2_cache_of(*tier));
-        let low_cache = tiers
-            .get(1)
-            .and_then(|tier| apple_info.core_l2_cache_of(*tier));
-
-        if let (Some(hi_cache), Some(lo_cache)) = (high_cache, low_cache) {
-            // Apple Silicon: Display L2 cache as two-tier format
-            print_colored_text(stdout, " L2 Cache:", Color::Red, None, None);
-            print_colored_text(
-                stdout,
-                &format!("{hi_cache}MB+{lo_cache}MB"),
-                Color::White,
-                None,
-                None,
-            );
-        } else if info.cache_size_mb > 0 {
-            // Fallback to total cache
-            print_colored_text(stdout, " L2 Cache:", Color::Red, None, None);
-            print_colored_text(
-                stdout,
-                &format!("{:>5}MB", info.cache_size_mb),
-                Color::White,
-                None,
-                None,
-            );
-        }
+    // Display cache: per-tier L2 where the platform reports it, otherwise the
+    // global cache size.
+    let tier_caches: Vec<u32> = tiers.iter().filter_map(|tier| tier.l2_cache_mb).collect();
+    if tier_caches.len() >= 2 {
+        print_colored_text(stdout, " L2 Cache:", Color::Red, None, None);
+        print_colored_text(
+            stdout,
+            &format_tier_caches(&tier_caches),
+            Color::White,
+            None,
+            None,
+        );
     } else if info.cache_size_mb > 0 {
-        // Non-Apple Silicon: display L3 cache (Intel Mac and Linux)
-        print_colored_text(stdout, " L3 Cache:", Color::Red, None, None);
+        // Non-Apple Silicon and legacy paths: display the global cache.
+        let label = if info.apple_silicon_info.is_some() {
+            " L2 Cache:"
+        } else {
+            " L3 Cache:"
+        };
+        print_colored_text(stdout, label, Color::Red, None, None);
         print_colored_text(
             stdout,
             &format!("{:>5}MB", info.cache_size_mb),
@@ -426,43 +368,36 @@ pub fn print_cpu_info<W: Write>(
     // Calculate gauge widths with 5 char padding on each side and 2 space separation
     let available_width = width.saturating_sub(10); // 5 padding each side
 
-    if let Some(apple_info) = &info.apple_silicon_info {
-        // Apple Silicon: Two gauges for the two core tiers
-        let num_gauges = 2;
-        let gauge_width = (available_width - 2) / 2; // 2 spaces between gauges
+    if tiers.len() >= 2 {
+        // One gauge per detected tier.
+        let num_gauges = tiers.len();
+        let gauge_width = available_width.saturating_sub((num_gauges - 1) * 2) / num_gauges;
 
         // Calculate actual space used and dynamic right padding
         let total_gauge_width = gauge_width * num_gauges + (num_gauges - 1) * 2;
         let left_padding = 5;
-        let right_padding = width - left_padding - total_gauge_width;
+        let right_padding = width.saturating_sub(left_padding + total_gauge_width);
 
         print_colored_text(stdout, "     ", Color::White, None, None); // 5 char left padding
 
-        for (index, tier) in apple_info.core_tiers().iter().take(2).enumerate() {
+        for (index, tier) in tiers.iter().enumerate() {
             if index > 0 {
                 print_colored_text(stdout, "  ", Color::White, None, None);
             }
-            let label = format!("{}-CPU", tier.short_label());
-            draw_bar(
-                stdout,
-                &label,
-                apple_info.core_utilization_of(*tier),
-                100.0,
-                gauge_width,
-                None,
-            );
+            let label = format!("{}-CPU", tier.label);
+            draw_bar(stdout, &label, tier.utilization, 100.0, gauge_width, None);
         }
 
         print_colored_text(stdout, &" ".repeat(right_padding), Color::White, None, None);
     // dynamic right padding
     } else {
-        // Other CPUs: Single CPU utilization gauge
+        // Homogeneous CPU: single utilization gauge
         let gauge_width = available_width;
 
         // Calculate actual space used and dynamic right padding
         let total_gauge_width = gauge_width;
         let left_padding = 5;
-        let right_padding = width - left_padding - total_gauge_width;
+        let right_padding = width.saturating_sub(left_padding + total_gauge_width);
 
         print_colored_text(stdout, "     ", Color::White, None, None); // 5 char left padding
 
@@ -652,10 +587,55 @@ pub fn print_cpu_info<W: Write>(
     }
 }
 
+/// Format per-tier frequencies.
+///
+/// Two tiers keep the legacy Apple composite form (`4.20+2.80GHz`,
+/// `4.20GHz+2420MHz`, ...); three or more join each individually formatted
+/// value with `+`.
+fn format_tier_frequencies(values: &[u32]) -> String {
+    if values.len() == 2 {
+        let (hi, lo) = (values[0], values[1]);
+        return if hi >= 1000 && lo >= 1000 {
+            format!("{:.2}+{:.2}GHz", hi as f64 / 1000.0, lo as f64 / 1000.0)
+        } else if hi >= 1000 {
+            format!("{:.2}GHz+{lo}MHz", hi as f64 / 1000.0)
+        } else if lo >= 1000 {
+            format!("{hi}MHz+{:.2}GHz", lo as f64 / 1000.0)
+        } else {
+            format!("{hi}+{lo}MHz")
+        };
+    }
+
+    values
+        .iter()
+        .map(|mhz| {
+            if *mhz >= 1000 {
+                format!("{:.2}GHz", *mhz as f64 / 1000.0)
+            } else {
+                format!("{mhz}MHz")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("+")
+}
+
+/// Format per-tier L2 cache sizes. Two tiers keep the legacy
+/// `16MB+4MB` form; three or more join each size with `+`.
+fn format_tier_caches(values: &[u32]) -> String {
+    if values.len() == 2 {
+        return format!("{}MB+{}MB", values[0], values[1]);
+    }
+    values
+        .iter()
+        .map(|mb| format!("{mb}MB"))
+        .collect::<Vec<_>>()
+        .join("+")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::device::{AppleSiliconCpuInfo, CoreType, CoreUtilization, CpuPlatformType};
+    use crate::device::{AppleSiliconCpuInfo, CoreType, CoreUtilization, CpuPlatformType, CpuTier};
 
     fn make_standard_cpu(hostname: &str, core_count: usize) -> CpuInfo {
         let per_core: Vec<CoreUtilization> = (0..core_count)
@@ -663,6 +643,7 @@ mod tests {
                 core_id: i as u32,
                 core_type: CoreType::Standard,
                 utilization: (i as f64 * 10.0) % 100.0,
+                tier_index: None,
             })
             .collect();
 
@@ -685,6 +666,7 @@ mod tests {
             power_consumption: Some(95.0),
             per_socket_info: Vec::new(),
             apple_silicon_info: None,
+            cpu_tiers: Vec::new(),
             per_core_utilization: per_core,
             time: String::new(),
         }
@@ -697,6 +679,7 @@ mod tests {
                 core_id: i as u32,
                 core_type: CoreType::Efficiency,
                 utilization: 20.0 + i as f64 * 5.0,
+                tier_index: None,
             });
         }
         for i in 0..8 {
@@ -704,6 +687,7 @@ mod tests {
                 core_id: (4 + i) as u32,
                 core_type: CoreType::Performance,
                 utilization: 40.0 + i as f64 * 5.0,
+                tier_index: None,
             });
         }
         CpuInfo {
@@ -740,6 +724,7 @@ mod tests {
                 p_core_l2_cache_mb: Some(16),
                 e_core_l2_cache_mb: Some(4),
             }),
+            cpu_tiers: Vec::new(),
             per_core_utilization: per_core,
             time: String::new(),
         }
@@ -752,6 +737,7 @@ mod tests {
                 core_id: i as u32,
                 core_type: CoreType::Super,
                 utilization: 40.0 + i as f64 * 5.0,
+                tier_index: None,
             });
         }
         for i in 0..6 {
@@ -759,6 +745,7 @@ mod tests {
                 core_id: (4 + i) as u32,
                 core_type: CoreType::Efficiency,
                 utilization: 20.0 + i as f64 * 5.0,
+                tier_index: None,
             });
         }
         CpuInfo {
@@ -795,6 +782,7 @@ mod tests {
                 p_core_l2_cache_mb: None,
                 e_core_l2_cache_mb: Some(8),
             }),
+            cpu_tiers: Vec::new(),
             per_core_utilization: per_core,
             time: String::new(),
         }
@@ -889,5 +877,148 @@ mod tests {
             format_hostname_with_scroll(long, scroll_len),
             format_hostname_with_scroll(long, 0)
         );
+    }
+    // --- N-tier CPU topology (issue #473) ---
+
+    fn make_three_tier_cpu(hostname: &str) -> CpuInfo {
+        let mut cpu = make_standard_cpu(hostname, 6);
+        cpu.cpu_tiers = vec![
+            CpuTier {
+                label: "P".to_string(),
+                core_type: CoreType::Performance,
+                core_count: 2,
+                utilization: 50.0,
+                frequency_mhz: Some(3200),
+                l2_cache_mb: Some(2),
+            },
+            CpuTier {
+                label: "M".to_string(),
+                core_type: CoreType::Efficiency,
+                core_count: 2,
+                utilization: 30.0,
+                frequency_mhz: Some(3000),
+                l2_cache_mb: Some(1),
+            },
+            CpuTier {
+                label: "E".to_string(),
+                core_type: CoreType::Efficiency,
+                core_count: 2,
+                utilization: 10.0,
+                frequency_mhz: Some(2400),
+                l2_cache_mb: Some(1),
+            },
+        ];
+        cpu.per_core_utilization = (0..6)
+            .map(|index| CoreUtilization {
+                core_id: index,
+                core_type: CoreType::Standard,
+                utilization: 20.0,
+                tier_index: Some((index / 2) as u8),
+            })
+            .collect();
+        cpu
+    }
+
+    #[test]
+    fn three_tier_cpu_renders_every_tier_in_every_field() {
+        let info = make_three_tier_cpu("linux-host");
+        let mut buf: Vec<u8> = Vec::new();
+        print_cpu_info(&mut buf, 0, &info, 140, false, 0, 0, false);
+        let output = String::from_utf8_lossy(&buf);
+
+        // The count segments are emitted separately, each with its own ANSI
+        // sequence, so assert on the tokens rather than the joined string.
+        assert!(output.contains("2P"), "{output}");
+        assert!(output.contains("2M"), "{output}");
+        assert!(output.contains("2E"), "{output}");
+        assert!(output.contains("3.20GHz+3.00GHz+2.40GHz"), "{output}");
+        assert!(output.contains("2MB+1MB+1MB"), "{output}");
+        assert!(output.contains("P-CPU"), "{output}");
+        assert!(output.contains("M-CPU"), "{output}");
+        assert!(output.contains("E-CPU"), "{output}");
+    }
+
+    fn make_macos_populated_tiers_cpu(hostname: &str) -> CpuInfo {
+        let mut cpu = make_standard_cpu(hostname, 12);
+        cpu.cpu_tiers = vec![
+            CpuTier {
+                label: "S".to_string(),
+                core_type: CoreType::Performance,
+                core_count: 4,
+                utilization: 45.0,
+                frequency_mhz: Some(4200),
+                l2_cache_mb: Some(16),
+            },
+            CpuTier {
+                label: "P".to_string(),
+                core_type: CoreType::Efficiency,
+                core_count: 6,
+                utilization: 35.0,
+                frequency_mhz: Some(3500),
+                l2_cache_mb: Some(8),
+            },
+            CpuTier {
+                label: "E".to_string(),
+                core_type: CoreType::Efficiency,
+                core_count: 2,
+                utilization: 15.0,
+                frequency_mhz: Some(2800),
+                l2_cache_mb: Some(4),
+            },
+        ];
+        cpu.per_core_utilization = (0..12)
+            .map(|index| CoreUtilization {
+                core_id: index,
+                core_type: CoreType::Standard,
+                utilization: 20.0,
+                tier_index: Some(match index {
+                    0..=3 => 0,
+                    4..=9 => 1,
+                    _ => 2,
+                }),
+            })
+            .collect();
+        cpu
+    }
+
+    #[test]
+    fn populated_macos_tiers_render_every_count_frequency_and_gauge() {
+        let info = make_macos_populated_tiers_cpu("mac-host");
+        assert!(!info.cpu_tiers.is_empty());
+
+        let mut buf: Vec<u8> = Vec::new();
+        print_cpu_info(&mut buf, 0, &info, 140, false, 0, 0, false);
+        let output = String::from_utf8_lossy(&buf);
+
+        assert!(output.contains("4S"), "{output}");
+        assert!(output.contains("6P"), "{output}");
+        assert!(output.contains("2E"), "{output}");
+        assert!(output.contains("4.20GHz+3.50GHz+2.80GHz"), "{output}");
+        assert!(output.contains("16MB+8MB+4MB"), "{output}");
+        assert!(output.contains("S-CPU"), "{output}");
+        assert!(output.contains("P-CPU"), "{output}");
+        assert!(output.contains("E-CPU"), "{output}");
+    }
+
+    #[test]
+    fn two_tier_frequency_and_cache_formatting_is_unchanged() {
+        assert_eq!(format_tier_frequencies(&[4200, 2800]), "4.20+2.80GHz");
+        assert_eq!(format_tier_frequencies(&[4200, 800]), "4.20GHz+800MHz");
+        assert_eq!(format_tier_frequencies(&[800, 4200]), "800MHz+4.20GHz");
+        assert_eq!(format_tier_frequencies(&[800, 900]), "800+900MHz");
+        assert_eq!(format_tier_caches(&[16, 4]), "16MB+4MB");
+    }
+
+    #[test]
+    fn three_tier_frequency_and_cache_formatting_joins_each_value() {
+        assert_eq!(
+            format_tier_frequencies(&[3200, 3000, 2400]),
+            "3.20GHz+3.00GHz+2.40GHz"
+        );
+        assert_eq!(
+            format_tier_frequencies(&[3200, 800, 2400]),
+            "3.20GHz+800MHz+2.40GHz"
+        );
+        assert_eq!(format_tier_caches(&[8, 4, 2]), "8MB+4MB+2MB");
     }
 }

@@ -747,6 +747,33 @@ Note: Google Cloud TPUs (v2-v7/Ironwood) are monitored via the `tpu-info` comman
 
 Apple Silicon exposes two `hw.perflevelN` clusters whose tier names differ by chip: M1-M4 report Performance + Efficiency (`8P+4E`), base M5 reports Super + Efficiency (`4S+6E`), and M5 Pro/Max report Super + Performance (`6S+12P`). The `s_core_*` series are published only when the chip has Super cores, a tier the chip lacks reports zero cores and zero utilization, and its cluster frequency is omitted. `all_smi_cpu_core_utilization` labels each core with the tier (`core_type` is `S`, `P`, `E`, or `C`) that the perflevel name assigns, so base M5 E-cores appear as `E`.
 
+### Heterogeneous CPU Tier Metrics
+
+Every heterogeneous CPU exposes one ordered, fastest-first tier list, regardless of how the platform discovered it: Apple Silicon perflevels, Intel hybrid PMUs, arm64 `MIDR_EL1` part numbers, or a firmware capacity split. The tier label is the `cpu_tier` value.
+
+| Label | Meaning |
+|-------|---------|
+| `S` | Apple Silicon Super core |
+| `P` | Fastest tier on every platform (Intel P-core, ARM Cortex-X, highest firmware capacity) |
+| `M` | ARM mid cluster (Cortex-A7xx) or the second capacity group |
+| `E` | Efficiency / little tier (Cortex-A5xx, Intel E-core) |
+| `E4`, `E5`, ... | Additional capacity groups beyond three, numbered from the fixed `E` rank |
+
+| Metric | Description | Unit | Labels |
+|--------|-------------|------|--------|
+| `all_smi_cpu_tier_core_count` | Number of cores in a tier | count | `cpu_model`, `instance`, `hostname`, `index`, `cpu_tier` |
+| `all_smi_cpu_tier_utilization` | Tier utilization percentage | percent | `cpu_model`, `instance`, `hostname`, `index`, `cpu_tier` |
+| `all_smi_cpu_tier_frequency_mhz` | Tier frequency (when reported) | MHz | `cpu_model`, `instance`, `hostname`, `index`, `cpu_tier` |
+| `all_smi_cpu_tier_l2_cache_mb` | Tier L2 cache size (when reported) | MB | `cpu_model`, `instance`, `hostname`, `index`, `cpu_tier` |
+
+The whole family is absent for a homogeneous CPU or when topology detection could not confirm at least two tiers. Frequency and cache are emitted only where the platform reports a per-tier value: Apple Silicon does, while Linux and Windows report neither, so `all_smi_cpu_tier_frequency_mhz` and `all_smi_cpu_tier_l2_cache_mb` are absent there while core count and utilization are present.
+
+`all_smi_cpu_core_utilization` carries both the existing `core_type` label (`S`, `P`, `E`, or `C`) and a `cpu_tier` label. `cpu_tier` is the exact tier when the core's index resolves, otherwise the `core_type` short label, so every core line keeps the same label set.
+
+Detection runs once per reader construction, never per scrape: Intel hybrid `cpu_core`/`cpu_atom` PMU cpumasks, arm64 `MIDR_EL1` part numbers, and the `cpu_capacity` firmware table on Linux; registry `Identifier` part numbers on Windows ARM; `hw.perflevelN` on Apple Silicon. Unreadable or ambiguous sources leave the affected cores untiered rather than guessing.
+
+A quota-only container (a CPU quota without a cpuset) detects tiers across the whole host but emits only the cores it may use. Its reader recounts every tier from the cores actually present, drops tiers that have no core, remaps `tier_index`, and reports no list when fewer than two tiers remain, so the tier counts and the per-core series describe the same set of cores.
+
 ### Memory Metrics (All Platforms)
 
 | Metric                           | Description                   | Unit    | Labels |

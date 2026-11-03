@@ -303,6 +303,74 @@ impl<'a> CpuMetricExporter<'a> {
         }
     }
 
+    /// Export one series per detected CPU tier (issue #473).
+    ///
+    /// Every series carries the canonical `cpu_tier` label. Frequency and L2
+    /// cache appear only where the platform reports a per-tier value (Apple
+    /// Silicon); Linux and Windows omit them while still exporting count and
+    /// utilization.
+    fn export_tier_metrics(&self, builder: &mut MetricBuilder, info: &CpuInfo, index: usize) {
+        if info.cpu_tiers.is_empty() {
+            return;
+        }
+
+        builder
+            .help(
+                "all_smi_cpu_tier_core_count",
+                "Number of cores in a CPU tier",
+            )
+            .type_("all_smi_cpu_tier_core_count", "gauge")
+            .help(
+                "all_smi_cpu_tier_utilization",
+                "CPU tier utilization percentage",
+            )
+            .type_("all_smi_cpu_tier_utilization", "gauge");
+
+        // Frequency and cache are emitted only where the platform reports a
+        // per-tier value, and the HELP/TYPE lines follow the samples so a
+        // family with no value is entirely absent.
+        if info
+            .cpu_tiers
+            .iter()
+            .any(|tier| tier.frequency_mhz.is_some())
+        {
+            builder
+                .help(
+                    "all_smi_cpu_tier_frequency_mhz",
+                    "CPU tier frequency in MHz (when the platform reports it)",
+                )
+                .type_("all_smi_cpu_tier_frequency_mhz", "gauge");
+        }
+        if info.cpu_tiers.iter().any(|tier| tier.l2_cache_mb.is_some()) {
+            builder
+                .help(
+                    "all_smi_cpu_tier_l2_cache_mb",
+                    "CPU tier L2 cache in MB (when the platform reports it)",
+                )
+                .type_("all_smi_cpu_tier_l2_cache_mb", "gauge");
+        }
+
+        let index_label = index.to_string();
+        for tier in &info.cpu_tiers {
+            let labels = [
+                ("cpu_model", info.cpu_model.as_str()),
+                ("instance", info.instance.as_str()),
+                ("hostname", info.hostname.as_str()),
+                ("index", index_label.as_str()),
+                ("cpu_tier", tier.label.as_str()),
+            ];
+
+            builder.metric("all_smi_cpu_tier_core_count", &labels, tier.core_count);
+            builder.metric("all_smi_cpu_tier_utilization", &labels, tier.utilization);
+            if let Some(frequency) = tier.frequency_mhz {
+                builder.metric("all_smi_cpu_tier_frequency_mhz", &labels, frequency);
+            }
+            if let Some(cache) = tier.l2_cache_mb {
+                builder.metric("all_smi_cpu_tier_l2_cache_mb", &labels, cache);
+            }
+        }
+    }
+
     fn export_per_core_metrics(&self, builder: &mut MetricBuilder, info: &CpuInfo, _index: usize) {
         if !info.per_core_utilization.is_empty() {
             // Help and type for per-core utilization
@@ -321,12 +389,20 @@ impl<'a> CpuMetricExporter<'a> {
                     crate::device::CoreType::Standard => "C",
                 };
 
+                // Exact tier when the index resolves; the coarse core class
+                // otherwise, so the label set stays uniform for every core.
+                let cpu_tier = core
+                    .tier_index
+                    .and_then(|index| info.cpu_tiers.get(usize::from(index)))
+                    .map_or_else(|| core.core_type.short_label(), |tier| tier.label.as_str());
+
                 let core_labels = [
                     ("cpu_model", info.cpu_model.as_str()),
                     ("instance", info.instance.as_str()),
                     ("hostname", info.hostname.as_str()),
                     ("core_id", &core.core_id.to_string()),
                     ("core_type", core_type_str),
+                    ("cpu_tier", cpu_tier),
                 ];
 
                 builder.metric(
@@ -347,9 +423,185 @@ impl<'a> MetricExporter for CpuMetricExporter<'a> {
             self.export_basic_metrics(&mut builder, info, i);
             self.export_socket_metrics(&mut builder, info, i);
             self.export_apple_silicon_metrics(&mut builder, info, i);
+            self.export_tier_metrics(&mut builder, info, i);
             self.export_per_core_metrics(&mut builder, info, i);
         }
 
         builder.build()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::device::{CoreType, CoreUtilization, CpuPlatformType, CpuTier};
+
+    fn cpu_with_tiers(tiers: Vec<CpuTier>, cores: Vec<CoreUtilization>) -> CpuInfo {
+        CpuInfo {
+            index: 0,
+            host_id: "host".to_string(),
+            hostname: "host".to_string(),
+            instance: "host".to_string(),
+            cpu_model: "Test CPU".to_string(),
+            architecture: "arm64".to_string(),
+            platform_type: CpuPlatformType::Arm,
+            socket_count: 1,
+            total_cores: cores.len() as u32,
+            total_threads: cores.len() as u32,
+            base_frequency_mhz: 2000,
+            max_frequency_mhz: 3000,
+            cache_size_mb: 20,
+            utilization: 30.0,
+            temperature: None,
+            power_consumption: None,
+            per_socket_info: Vec::new(),
+            apple_silicon_info: None,
+            cpu_tiers: tiers,
+            per_core_utilization: cores,
+            time: String::new(),
+        }
+    }
+
+    fn tier(label: &str, core_type: CoreType, core_count: u32, utilization: f64) -> CpuTier {
+        CpuTier {
+            label: label.to_string(),
+            core_type,
+            core_count,
+            utilization,
+            frequency_mhz: None,
+            l2_cache_mb: None,
+        }
+    }
+
+    fn core(id: u32, tier_index: Option<u8>) -> CoreUtilization {
+        CoreUtilization {
+            core_id: id,
+            core_type: CoreType::Standard,
+            utilization: 10.0,
+            tier_index,
+        }
+    }
+
+    #[test]
+    fn exports_tier_series_with_the_cpu_tier_label() {
+        let cpu = cpu_with_tiers(
+            vec![
+                tier("P", CoreType::Performance, 2, 20.0),
+                tier("M", CoreType::Efficiency, 2, 30.0),
+                tier("E", CoreType::Efficiency, 2, 40.0),
+            ],
+            vec![core(0, Some(0)), core(1, Some(2))],
+        );
+
+        let output = CpuMetricExporter::new(std::slice::from_ref(&cpu)).export_metrics();
+
+        assert!(output.contains("all_smi_cpu_tier_core_count"), "{output}");
+        assert!(output.contains("all_smi_cpu_tier_utilization"), "{output}");
+        assert!(output.contains("cpu_tier=\"P\""), "{output}");
+        assert!(output.contains("cpu_tier=\"M\""), "{output}");
+        assert!(output.contains("cpu_tier=\"E\""), "{output}");
+        // Linux/Windows report no per-tier frequency or cache, so those
+        // families must be absent.
+        assert!(
+            !output.contains("all_smi_cpu_tier_frequency_mhz"),
+            "{output}"
+        );
+        assert!(!output.contains("all_smi_cpu_tier_l2_cache_mb"), "{output}");
+        // The per-core series carries the exact tier from tier_index.
+        let core_zero = output
+            .lines()
+            .find(|line| {
+                line.starts_with("all_smi_cpu_core_utilization{") && line.contains("core_id=\"0\"")
+            })
+            .unwrap_or_default();
+        assert!(core_zero.contains("cpu_tier=\"P\""), "{output}");
+        let core_one = output
+            .lines()
+            .find(|line| {
+                line.starts_with("all_smi_cpu_core_utilization{") && line.contains("core_id=\"1\"")
+            })
+            .unwrap_or_default();
+        assert!(core_one.contains("cpu_tier=\"E\""), "{output}");
+    }
+
+    #[test]
+    fn exports_tier_frequency_and_cache_only_when_present() {
+        let mut first = tier("S", CoreType::Performance, 4, 15.0);
+        first.frequency_mhz = Some(4200);
+        first.l2_cache_mb = Some(16);
+        let second = tier("P", CoreType::Efficiency, 6, 25.0);
+        let cpu = cpu_with_tiers(vec![first, second], vec![core(0, Some(0))]);
+
+        let output = CpuMetricExporter::new(std::slice::from_ref(&cpu)).export_metrics();
+        assert!(
+            output.contains("all_smi_cpu_tier_frequency_mhz"),
+            "{output}"
+        );
+        assert!(output.contains("all_smi_cpu_tier_l2_cache_mb"), "{output}");
+        // Exactly one sample per family: only the S tier reports a value.
+        assert_eq!(
+            output
+                .lines()
+                .filter(|line| line.starts_with("all_smi_cpu_tier_frequency_mhz{"))
+                .count(),
+            1,
+            "{output}"
+        );
+        assert_eq!(
+            output
+                .lines()
+                .filter(|line| line.starts_with("all_smi_cpu_tier_l2_cache_mb{"))
+                .count(),
+            1,
+            "{output}"
+        );
+    }
+
+    #[test]
+    fn homogeneous_cpu_emits_no_tier_series_and_keeps_the_core_label_set() {
+        let cpu = cpu_with_tiers(Vec::new(), vec![core(0, None)]);
+        let output = CpuMetricExporter::new(std::slice::from_ref(&cpu)).export_metrics();
+
+        assert!(!output.contains("all_smi_cpu_tier_core_count"), "{output}");
+        assert!(!output.contains("all_smi_cpu_tier_utilization"), "{output}");
+        // Falls back to the coarse class so the label set stays uniform.
+        let core_line = output
+            .lines()
+            .find(|line| line.starts_with("all_smi_cpu_core_utilization{"))
+            .unwrap_or_default();
+        assert!(core_line.contains("core_type=\"C\""), "{output}");
+        assert!(core_line.contains("cpu_tier=\"C\""), "{output}");
+    }
+
+    #[test]
+    fn apple_series_remain_alongside_the_tier_series() {
+        let mut cpu = cpu_with_tiers(
+            vec![tier("S", CoreType::Performance, 4, 15.0)],
+            vec![core(0, Some(0))],
+        );
+        cpu.apple_silicon_info = Some(crate::device::AppleSiliconCpuInfo {
+            s_core_count: 4,
+            p_core_count: 0,
+            e_core_count: 6,
+            gpu_core_count: 10,
+            s_core_utilization: 15.0,
+            p_core_utilization: 0.0,
+            e_core_utilization: 25.0,
+            ane_ops_per_second: None,
+            s_cluster_frequency_mhz: None,
+            p_cluster_frequency_mhz: None,
+            e_cluster_frequency_mhz: None,
+            s_core_l2_cache_mb: None,
+            p_core_l2_cache_mb: None,
+            e_core_l2_cache_mb: None,
+        });
+
+        let output = CpuMetricExporter::new(std::slice::from_ref(&cpu)).export_metrics();
+        assert!(output.contains("all_smi_cpu_s_core_count"), "{output}");
+        assert!(
+            output.contains("all_smi_cpu_e_core_utilization"),
+            "{output}"
+        );
+        assert!(output.contains("all_smi_cpu_tier_core_count"), "{output}");
     }
 }

@@ -206,7 +206,7 @@ impl MacOsCpuReader {
         };
 
         // Get per-core utilization (no refresh needed - already done above)
-        let per_core_utilization = self.get_per_core_utilization_no_refresh(&core_layout);
+        let mut per_core_utilization = self.get_per_core_utilization_no_refresh(&core_layout);
 
         // Get CPU temperature from cached native metrics (SMC sensor reading).
         // Falls back to None if SMC didn't return a usable value.
@@ -305,6 +305,20 @@ impl MacOsCpuReader {
             e_core_l2_cache_mb,
         });
 
+        // Mirror the perflevel topology into the platform-neutral tier list
+        // (issue #473) and index each core into it. The exact Apple core type
+        // is already carried on every core, so the index follows that label.
+        let cpu_tiers = apple_silicon_info
+            .as_ref()
+            .map(AppleSiliconCpuInfo::to_cpu_tiers)
+            .unwrap_or_default();
+        for core in &mut per_core_utilization {
+            core.tier_index = cpu_tiers
+                .iter()
+                .position(|tier| tier.label == core.core_type.short_label())
+                .map(|position| position as u8);
+        }
+
         // Create per-socket info (Apple Silicon typically has 1 socket)
         let per_socket_info = vec![CpuSocketInfo {
             socket_id: 0,
@@ -336,6 +350,7 @@ impl MacOsCpuReader {
             power_consumption,
             per_socket_info,
             apple_silicon_info,
+            cpu_tiers,
             per_core_utilization,
             time,
         })
@@ -396,6 +411,7 @@ impl MacOsCpuReader {
             power_consumption,
             per_socket_info,
             apple_silicon_info: None,
+            cpu_tiers: Vec::new(), // Intel Macs are homogeneous
             per_core_utilization,
             time,
         })
@@ -908,6 +924,7 @@ impl MacOsCpuReader {
                 core_id: core_id as u32,
                 core_type,
                 utilization,
+                tier_index: None,
             });
         }
 

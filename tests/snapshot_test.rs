@@ -136,6 +136,7 @@ fn mock_cpu() -> CpuInfo {
         power_consumption: Some(65.0),
         per_socket_info: Vec::new(),
         apple_silicon_info: None,
+        cpu_tiers: Vec::new(),
         per_core_utilization: Vec::new(),
         time: "2026-04-20T00:00:00Z".to_string(),
     }

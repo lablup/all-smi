@@ -1553,11 +1553,13 @@ mod tests {
             power_consumption: Some(18.0),
             per_socket_info: Vec::new(),
             apple_silicon_info: None,
+            cpu_tiers: Vec::new(),
             per_core_utilization: (0..4)
                 .map(|i| CoreUtilization {
                     core_id: i,
                     core_type: CoreType::Standard,
                     utilization: f64::from(i) * 20.0,
+                    tier_index: None,
                 })
                 .collect(),
             time: String::new(),

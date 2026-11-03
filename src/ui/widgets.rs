@@ -17,11 +17,43 @@ use std::io::Write;
 use crossterm::style::Color;
 
 use crate::common::config::ThemeConfig;
-use crate::ui::text::print_colored_text;
+use crate::ui::text::{display_width, print_colored_text, truncate_to_width};
 
 /// Minimum width at which [`draw_bar`] can render its full label, frame, and
 /// eight-column value overlay.
 pub const MIN_BAR_WIDTH: usize = 17;
+
+/// Fit a gauge label into the fixed five-column label field.
+///
+/// Labels are no longer always compile-time ASCII: the CPU tier label comes
+/// straight from a remote `cpu_tier` Prometheus label (issue #473) and may hold
+/// multi-byte characters. Slicing the byte string at index 5 can land inside a
+/// code point and panic, so long labels are cut on a character boundary and
+/// padded to the same display width.
+fn format_gauge_label(label: &str) -> String {
+    if label.is_ascii() {
+        return if label.len() > 5 {
+            label[..5].to_string()
+        } else {
+            format!("{label:<5}")
+        };
+    }
+
+    let fitted = truncate_to_width(label, 5);
+    let padding = 5usize.saturating_sub(display_width(&fitted));
+    format!("{fitted}{}", " ".repeat(padding))
+}
+
+/// Fit an optional value overlay into its fixed eight-column field.
+///
+/// ASCII input keeps the historical output byte for byte. Non-ASCII input is
+/// truncated on a character boundary instead of a byte boundary.
+fn format_gauge_value(text: Option<String>, percentage: f64) -> String {
+    match text {
+        Some(text) => format!("{:>8}", truncate_to_width(&text, 8)),
+        None => format!("{percentage:>7.1}%"),
+    }
+}
 
 pub struct BarSegment {
     pub value: f64,
@@ -71,14 +103,8 @@ pub fn draw_bar<W: Write>(
         return;
     }
 
-    // Format label to exactly 5 characters for consistent alignment
-    let formatted_label = if label.len() > 5 {
-        // Trim to 5 characters if too long
-        label[..5].to_string()
-    } else {
-        // Pad with spaces if too short
-        format!("{label:<5}")
-    };
+    // Format label to exactly 5 columns for consistent alignment.
+    let formatted_label = format_gauge_label(label);
     let available_bar_width = width.saturating_sub(9); // 9 for "LABEL: [" and "] " (5 + 4)
 
     // Calculate the filled portion
@@ -88,16 +114,8 @@ pub fn draw_bar<W: Write>(
     let color = ThemeConfig::progress_bar_color(fill_ratio);
 
     // Prepare text to display inside the bar with fixed width
-    let display_text = if let Some(text) = show_text {
-        // Ensure consistent width for value text (8 characters)
-        if text.len() > 8 {
-            text[..8].to_string()
-        } else {
-            format!("{text:>8}") // Right-align in 8-character field
-        }
-    } else {
-        format!("{:>7.1}%", fill_ratio * 100.0) // Right-align percentage in 8-character field
-    };
+    // Right-align the value in its eight-column field.
+    let display_text = format_gauge_value(show_text, fill_ratio * 100.0);
 
     // Print label
     print_colored_text(stdout, &formatted_label, Color::White, None, None);
@@ -165,12 +183,8 @@ pub fn draw_bar_multi<W: Write>(
     width: usize,
     show_text: Option<String>,
 ) {
-    // Format label to exactly 5 characters for consistent alignment
-    let formatted_label = if label.len() > 5 {
-        label[..5].to_string()
-    } else {
-        format!("{label:<5}")
-    };
+    // Format label to exactly 5 columns for consistent alignment.
+    let formatted_label = format_gauge_label(label);
     let available_bar_width = width.saturating_sub(9); // 9 for "LABEL: [" and "] " (5 + 4)
 
     // Calculate total value
@@ -179,12 +193,8 @@ pub fn draw_bar_multi<W: Write>(
 
     // Prepare text to display inside the bar
     let display_text = if let Some(text) = show_text {
-        // Ensure consistent width for value text (8 characters)
-        if text.len() > 8 {
-            text[..8].to_string()
-        } else {
-            format!("{text:>8}")
-        }
+        // Right-align the value in its eight-column field.
+        format_gauge_value(Some(text), total_ratio * 100.0)
     } else {
         format!("{:>7.1}%", total_ratio * 100.0)
     };
@@ -446,6 +456,54 @@ mod tests {
             !visible.contains("TOOLONG"),
             "Full untrimmed label should not appear; got: {visible:?}"
         );
+    }
+
+    #[test]
+    fn test_draw_bar_fits_a_multibyte_label_without_panicking() {
+        // A remote `cpu_tier` label can hold multi-byte characters. The fixed
+        // five-column field used to slice at byte index 5, which panics when
+        // that index lands inside a code point (issue #473).
+        for label in [
+            "\u{2107}\u{2107}-CPU",
+            "\u{65e5}\u{672c}\u{8a9e}",
+            "\u{1f600}\u{1f600}",
+        ] {
+            let mut bw = BufferWriter::new();
+            draw_bar(&mut bw, label, 50.0, 100.0, 40, None);
+            let visible = strip_ansi(bw.get_buffer());
+            assert!(
+                visible.starts_with('\u{2107}')
+                    || visible.starts_with('\u{65e5}')
+                    || visible.starts_with('\u{1f600}'),
+                "label should survive truncation; got: {visible:?}"
+            );
+            assert!(
+                display_width(visible.split(": [").next().unwrap_or_default()) <= 5,
+                "label field must stay five columns; got: {visible:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_draw_bar_multi_fits_a_multibyte_label_without_panicking() {
+        let segments = [BarSegment::new(50.0, Color::Red)];
+        let mut bw = BufferWriter::new();
+        draw_bar_multi(&mut bw, "\u{2107}\u{2107}-CPU", &segments, 100.0, 40, None);
+        assert!(!bw.get_buffer().is_empty());
+    }
+
+    #[test]
+    fn test_draw_bar_multibyte_show_text_does_not_panic() {
+        let mut bw = BufferWriter::new();
+        draw_bar(
+            &mut bw,
+            "CPU",
+            50.0,
+            100.0,
+            40,
+            Some("\u{2107}\u{2107}\u{2107}\u{2107}".to_string()),
+        );
+        assert!(!bw.get_buffer().is_empty());
     }
 
     #[test]
