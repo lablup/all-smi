@@ -12,8 +12,7 @@ Rules-Requires-Root: no
 Package: all-smi
 Architecture: amd64 arm64
 Depends: ${shlibs:Depends}, ${misc:Depends}
-Recommends: nvidia-utils | nvidia-driver
-Suggests: tenstorrent-driver, rebellions-driver, furiosa-driver, aws-neuronx-tools
+Suggests: nvidia-utils | nvidia-driver, tenstorrent-driver, rebellions-driver, furiosa-driver, aws-neuronx-tools
 Description: Command-line utility for monitoring GPU/NPU hardware
  all-smi is a real-time monitoring tool for GPU/NPU hardware that provides:
  .

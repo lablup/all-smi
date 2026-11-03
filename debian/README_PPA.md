@@ -78,6 +78,8 @@ sudo apt update
 sudo apt install all-smi
 ```
 
+all-smi does not install, require, or replace an NVIDIA driver. The driver is a `Suggests` relation, which apt does not install by default, so an existing driver from any repository is left untouched and a host with no driver still installs cleanly. Install your driver first, from whichever repository you prefer (the Ubuntu archive or NVIDIA's CUDA repository), then install all-smi.
+
 ## Updating Changelog
 
 To update the changelog from GitHub releases:
