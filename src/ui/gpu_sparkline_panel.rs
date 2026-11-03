@@ -813,6 +813,7 @@ mod tests {
                 core_id: i as u32,
                 core_type: CoreType::Standard,
                 utilization: (i as f64 * 10.0) % 100.0,
+                tier_index: None,
             })
             .collect();
 
@@ -835,6 +836,7 @@ mod tests {
             power_consumption: Some(95.0),
             per_socket_info: Vec::new(),
             apple_silicon_info: None,
+            cpu_tiers: Vec::new(),
             per_core_utilization: per_core,
             time: String::new(),
         }
@@ -847,6 +849,7 @@ mod tests {
                 core_id: i as u32,
                 core_type: CoreType::Efficiency,
                 utilization: 20.0 + i as f64 * 5.0,
+                tier_index: None,
             });
         }
         for i in 0..8 {
@@ -854,6 +857,7 @@ mod tests {
                 core_id: (4 + i) as u32,
                 core_type: CoreType::Performance,
                 utilization: 40.0 + i as f64 * 5.0,
+                tier_index: None,
             });
         }
         CpuInfo {
@@ -890,13 +894,14 @@ mod tests {
                 p_core_l2_cache_mb: Some(16),
                 e_core_l2_cache_mb: Some(4),
             }),
+            cpu_tiers: Vec::new(),
             per_core_utilization: per_core,
             time: String::new(),
         }
     }
 
     /// A 24-core Apple Silicon CPU (16P + 8E). At width 120 the core count
-    /// exceeds the collapse threshold (16), so the panel uses the PECluster
+    /// exceeds the collapse threshold (16), so the panel uses the TierCluster
     /// strategy -- the scenario the multirow "no growth" target is written for.
     fn make_apple_cpu_many_cores() -> CpuInfo {
         let mut per_core = Vec::new();
@@ -905,6 +910,7 @@ mod tests {
                 core_id: i as u32,
                 core_type: CoreType::Efficiency,
                 utilization: 20.0 + i as f64 * 3.0,
+                tier_index: None,
             });
         }
         for i in 0..16 {
@@ -912,6 +918,7 @@ mod tests {
                 core_id: (8 + i) as u32,
                 core_type: CoreType::Performance,
                 utilization: 40.0 + i as f64 * 2.0,
+                tier_index: None,
             });
         }
         let mut cpu = make_apple_cpu();
@@ -1264,7 +1271,7 @@ mod tests {
         // multirow graphs consume the space the CPU half left blank, so there
         // is no net growth versus the fallback layout).
         let mut apple = make_apple_silicon_state();
-        // 24-core Apple Silicon -> PECluster at width 120.
+        // 24-core Apple Silicon -> TierCluster at width 120.
         let cpu = vec![make_apple_cpu_many_cores()];
         apple.cpu_info = cpu.clone();
         assert_eq!(combined_line_count(&apple, &cpu, 120, SHORT_ROWS), 7);

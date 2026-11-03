@@ -253,6 +253,7 @@ pub trait MetricsExporter: Send + Sync {
 - `/proc` filesystem parsing
 - `lscpu` integration for topology
 - Per-core utilization tracking
+- CPU tier detection runs once per reader construction, never per tick, from three sysfs sources in precedence order: Intel hybrid PMU cpumasks (`bus/event_source/devices/cpu_core/cpus` for P, `cpu_atom/cpus` for E), arm64 `MIDR_EL1` part numbers under `devices/system/cpu/cpuN/regs/identification/`, and the firmware `cpu_capacity` table grouped by distinct value. Container cpusets restrict which CPUs participate. Unreadable or ambiguous sources leave the affected cores untiered, and a single confirmed tier produces no tier list.
 
 #### macOS
 - `system_profiler` for hardware info
@@ -270,6 +271,7 @@ pub trait MetricsExporter: Send + Sync {
 - Graceful fallback: Returns `None` silently when all sources unavailable
 - Availability caching: OnceCell/RwLock pattern to avoid repeated failed queries
 - No error spam: WBEM_E_NOT_FOUND (0x8004100C) handled silently
+- Windows on ARM tier detection reads the per-processor registry `Identifier` (`HKLM\HARDWARE\DESCRIPTION\System\CentralProcessor\N`) once at reader construction. The MIDR part number maps to `P` (Cortex-X), `M` (Cortex-A7xx), or `E` (Cortex-A5xx); a part with fewer than two tiers reports none, and Windows x86 stays homogeneous.
 
 ### Conditional Compilation
 

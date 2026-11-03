@@ -405,8 +405,47 @@ pub struct CpuInfo {
     pub power_consumption: Option<f64>,      // Power consumption in watts (if available)
     pub per_socket_info: Vec<CpuSocketInfo>, // Per-socket information
     pub apple_silicon_info: Option<AppleSiliconCpuInfo>, // Apple Silicon specific info
+    /// Ordered CPU tiers, fastest first (issue #473).
+    ///
+    /// `[S, P]` on M5 Pro/Max, `[S, E]` on base M5, `[P, M, E]` on a
+    /// three-cluster ARM part, `[P, E]` on an Intel hybrid part. An empty list
+    /// means the CPU is homogeneous or the topology could not be detected, and
+    /// consumers treat every core as `Standard`.
+    ///
+    /// The platform readers populate this once per reader; only the
+    /// `utilization` field is refreshed per tick. `#[serde(default)]` keeps
+    /// snapshots and remote payloads written before the field existed
+    /// deserializing cleanly, and the skip keeps them byte-identical.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cpu_tiers: Vec<CpuTier>,
     pub per_core_utilization: Vec<CoreUtilization>, // Per-core utilization data
-    pub time: String,                        // Timestamp
+    pub time: String,                               // Timestamp
+}
+
+/// One CPU tier in a heterogeneous topology (issue #473).
+///
+/// `label` is the display token and the Prometheus `cpu_tier` value. The
+/// canonical fastest-first vocabulary is `S` (Apple Super), `P` (fastest on
+/// every platform), `M` (ARM mid cluster), `E` (efficiency / little), then
+/// `E4`, `E5`, ... for capacity groups beyond three.
+///
+/// `core_type` is the coarse legacy class (`Performance` for the fastest tier,
+/// `Efficiency` below it, `Standard` for a one-tier list). The exact tier is
+/// `label` plus the per-core [`CoreUtilization::tier_index`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CpuTier {
+    pub label: String,
+    pub core_type: CoreType,
+    pub core_count: u32,
+    pub utilization: f64,
+    /// Per-tier frequency in MHz. Populated only where the platform reports
+    /// it (Apple Silicon); `None` on Linux and Windows.
+    #[serde(default)]
+    pub frequency_mhz: Option<u32>,
+    /// Per-tier L2 cache in MB. Populated only where the platform reports it
+    /// (Apple Silicon); `None` on Linux and Windows.
+    #[serde(default)]
+    pub l2_cache_mb: Option<u32>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -414,6 +453,48 @@ pub struct CoreUtilization {
     pub core_id: u32,        // Core identifier (0-based)
     pub core_type: CoreType, // Type of core (Performance, Efficiency, Standard)
     pub utilization: f64,    // Core utilization percentage (0-100)
+    /// Index into [`CpuInfo::cpu_tiers`], when the core belongs to a detected
+    /// tier. `None` on a homogeneous CPU and in snapshots written before
+    /// tiers existed. `#[serde(default)]` keeps those payloads
+    /// deserializing cleanly.
+    #[serde(default)]
+    pub tier_index: Option<u8>,
+}
+
+impl CpuInfo {
+    /// Tiers to display: [`CpuInfo::cpu_tiers`] when populated, otherwise
+    /// synthesized from [`CpuInfo::apple_silicon_info`].
+    ///
+    /// The fallback covers snapshots and older remote servers that predate
+    /// tier export. Display consumers (the Activity panel, the CPU renderer
+    /// and local details) use this; the Prometheus exporter and the remote
+    /// parser read `cpu_tiers` directly because both run against the data
+    /// they just produced.
+    pub fn display_cpu_tiers(&self) -> Vec<CpuTier> {
+        if !self.cpu_tiers.is_empty() {
+            return self.cpu_tiers.clone();
+        }
+        self.apple_silicon_info
+            .as_ref()
+            .map(AppleSiliconCpuInfo::to_cpu_tiers)
+            .unwrap_or_default()
+    }
+
+    /// Cores that belong to the tier at `position` in
+    /// [`CpuInfo::display_cpu_tiers`].
+    ///
+    /// `tier_index` is authoritative when present. Legacy Apple payloads carry
+    /// no index, so their cores are matched by the exact `CoreType` label
+    /// (`S`, `P`, `E`) instead.
+    pub fn cores_of_display_tier(&self, position: usize, tier: &CpuTier) -> Vec<&CoreUtilization> {
+        self.per_core_utilization
+            .iter()
+            .filter(|core| match core.tier_index {
+                Some(index) => usize::from(index) == position,
+                None => core.core_type.short_label() == tier.label,
+            })
+            .collect()
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq)]
@@ -529,6 +610,29 @@ impl AppleSiliconCpuInfo {
             CoreType::Efficiency => self.e_core_l2_cache_mb,
             CoreType::Standard => None,
         }
+    }
+
+    /// Build the ordered [`CpuTier`] list for this chip, fastest first.
+    ///
+    /// Used by `cpu_macos` to populate [`CpuInfo::cpu_tiers`] and by
+    /// [`CpuInfo::display_cpu_tiers`] to synthesize tiers for legacy
+    /// snapshots. `core_type` follows the shared coarse rule; `label` carries
+    /// the exact tier.
+    pub fn to_cpu_tiers(&self) -> Vec<CpuTier> {
+        let tiers = self.core_tiers();
+        let total = tiers.len();
+        tiers
+            .iter()
+            .enumerate()
+            .map(|(position, tier)| CpuTier {
+                label: tier.short_label().to_string(),
+                core_type: crate::device::cpu_topology::coarse_core_type(position, total),
+                core_count: self.core_count_of(*tier),
+                utilization: self.core_utilization_of(*tier),
+                frequency_mhz: self.cluster_frequency_of(*tier),
+                l2_cache_mb: self.core_l2_cache_of(*tier),
+            })
+            .collect()
     }
 }
 
@@ -750,4 +854,174 @@ pub enum PsuStatus {
     Degraded,   // Operating but with issues
     Failed,     // PSU has failed
     NotPresent, // PSU not installed
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn apple(s: u32, p: u32, e: u32) -> AppleSiliconCpuInfo {
+        AppleSiliconCpuInfo {
+            s_core_count: s,
+            p_core_count: p,
+            e_core_count: e,
+            gpu_core_count: 10,
+            s_core_utilization: 10.0,
+            p_core_utilization: 20.0,
+            e_core_utilization: 30.0,
+            ane_ops_per_second: None,
+            s_cluster_frequency_mhz: Some(4200),
+            p_cluster_frequency_mhz: Some(3800),
+            e_cluster_frequency_mhz: Some(2800),
+            s_core_l2_cache_mb: Some(16),
+            p_core_l2_cache_mb: Some(8),
+            e_core_l2_cache_mb: Some(4),
+        }
+    }
+
+    fn cpu_with(tiers: Vec<CpuTier>, cores: Vec<CoreUtilization>) -> CpuInfo {
+        CpuInfo {
+            index: 0,
+            host_id: "localhost".to_string(),
+            hostname: "localhost".to_string(),
+            instance: "localhost".to_string(),
+            cpu_model: "CPU".to_string(),
+            architecture: "arm64".to_string(),
+            platform_type: CpuPlatformType::AppleSilicon,
+            socket_count: 1,
+            total_cores: cores.len() as u32,
+            total_threads: cores.len() as u32,
+            base_frequency_mhz: 0,
+            max_frequency_mhz: 0,
+            cache_size_mb: 0,
+            utilization: 0.0,
+            temperature: None,
+            power_consumption: None,
+            per_socket_info: Vec::new(),
+            apple_silicon_info: None,
+            cpu_tiers: tiers,
+            per_core_utilization: cores,
+            time: String::new(),
+        }
+    }
+
+    #[test]
+    fn apple_tiers_are_fastest_first() {
+        let m5_max = apple(6, 12, 0).to_cpu_tiers();
+        assert_eq!(
+            m5_max
+                .iter()
+                .map(|tier| (tier.label.as_str(), tier.core_count))
+                .collect::<Vec<_>>(),
+            vec![("S", 6), ("P", 12)]
+        );
+        assert_eq!(m5_max[0].core_type, CoreType::Performance);
+        assert_eq!(m5_max[1].core_type, CoreType::Efficiency);
+
+        let base_m5 = apple(4, 0, 6).to_cpu_tiers();
+        assert_eq!(
+            base_m5
+                .iter()
+                .map(|tier| (tier.label.as_str(), tier.core_count))
+                .collect::<Vec<_>>(),
+            vec![("S", 4), ("E", 6)]
+        );
+
+        let m2 = apple(0, 8, 4).to_cpu_tiers();
+        assert_eq!(
+            m2.iter()
+                .map(|tier| tier.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["P", "E"]
+        );
+        assert_eq!(m2[0].frequency_mhz, Some(3800));
+        assert_eq!(m2[1].l2_cache_mb, Some(4));
+    }
+
+    #[test]
+    fn a_single_apple_tier_uses_the_standard_coarse_class() {
+        let tiers = apple(4, 0, 0).to_cpu_tiers();
+        assert_eq!(tiers.len(), 1);
+        assert_eq!(tiers[0].label, "S");
+        assert_eq!(tiers[0].core_type, CoreType::Standard);
+    }
+
+    #[test]
+    fn display_tiers_fall_back_to_apple_info_for_legacy_payloads() {
+        let mut cpu = cpu_with(Vec::new(), Vec::new());
+        cpu.apple_silicon_info = Some(apple(0, 8, 4));
+        assert_eq!(
+            cpu.display_cpu_tiers()
+                .iter()
+                .map(|tier| tier.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["P", "E"]
+        );
+    }
+
+    #[test]
+    fn display_tiers_prefer_the_explicit_list() {
+        let mut cpu = cpu_with(
+            vec![CpuTier {
+                label: "P".to_string(),
+                core_type: CoreType::Performance,
+                core_count: 2,
+                utilization: 50.0,
+                frequency_mhz: None,
+                l2_cache_mb: None,
+            }],
+            Vec::new(),
+        );
+        cpu.apple_silicon_info = Some(apple(0, 8, 4));
+        assert_eq!(cpu.display_cpu_tiers().len(), 1);
+    }
+
+    #[test]
+    fn cores_of_display_tier_prefers_tier_index_over_core_type() {
+        let tier = CpuTier {
+            label: "P".to_string(),
+            core_type: CoreType::Performance,
+            core_count: 2,
+            utilization: 0.0,
+            frequency_mhz: None,
+            l2_cache_mb: None,
+        };
+        let cpu = cpu_with(
+            vec![tier.clone()],
+            vec![
+                CoreUtilization {
+                    core_id: 0,
+                    core_type: CoreType::Standard,
+                    utilization: 1.0,
+                    tier_index: Some(0),
+                },
+                CoreUtilization {
+                    core_id: 1,
+                    core_type: CoreType::Performance,
+                    utilization: 2.0,
+                    tier_index: None,
+                },
+                CoreUtilization {
+                    core_id: 2,
+                    core_type: CoreType::Efficiency,
+                    utilization: 3.0,
+                    tier_index: None,
+                },
+            ],
+        );
+
+        let cores = cpu.cores_of_display_tier(0, &tier);
+        assert_eq!(
+            cores.iter().map(|core| core.core_id).collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+    }
+
+    #[test]
+    fn legacy_core_utilization_deserializes_without_a_tier_index() {
+        let json = r#"{"core_id":0,"core_type":"Performance","utilization":12.5}"#;
+        let core: CoreUtilization = serde_json::from_str(json).unwrap();
+        assert_eq!(core.tier_index, None);
+        assert_eq!(core.core_type, CoreType::Performance);
+    }
 }

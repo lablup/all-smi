@@ -411,6 +411,7 @@ mod tests {
                 p_core_l2_cache_mb: None,
                 e_core_l2_cache_mb: Some(8),
             }),
+            cpu_tiers: Vec::new(),
             per_core_utilization: Vec::new(),
             time: String::new(),
         }

@@ -159,3 +159,300 @@ fn test_get_cache_size_from_lscpu() {
         None => println!("No cache size found (lscpu not available or failed)"),
     }
 }
+
+// ---------------------------------------------------------------------------
+// N-tier topology detection against fixture sysfs roots (issue #473)
+// ---------------------------------------------------------------------------
+
+fn write_fixture(root: &std::path::Path, relative: &str, content: &str) {
+    let path = root.join(relative);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).unwrap();
+    }
+    std::fs::write(path, content).unwrap();
+}
+
+fn add_cpu(root: &std::path::Path, cpu_id: u32) {
+    std::fs::create_dir_all(root.join(format!("devices/system/cpu/cpu{cpu_id}"))).unwrap();
+}
+
+/// `MIDR_EL1` value carrying `part` in the PartNum field, as the arm64 kernel
+/// prints it (`0x%016llx`).
+fn midr(part: u32) -> String {
+    format!("0x{:016x}", 0x410f_0000u64 | (u64::from(part) << 4) | 0x3)
+}
+
+/// Every core assigned a tier must be counted exactly once across the tier
+/// core counts.
+fn assert_counts_match_assignments(topology: &super::CpuTopology) {
+    let assigned = topology
+        .tier_by_cpu
+        .iter()
+        .filter(|index| index.is_some())
+        .count() as u32;
+    let counted: u32 = topology.tiers.iter().map(|tier| tier.core_count).sum();
+    assert_eq!(assigned, counted);
+}
+
+#[test]
+fn detects_intel_hybrid_p_and_e_from_pmu_cpumasks() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    for cpu_id in 0..6 {
+        add_cpu(root, cpu_id);
+    }
+    write_fixture(root, "bus/event_source/devices/cpu_core/cpus", "0-3\n");
+    write_fixture(root, "bus/event_source/devices/cpu_atom/cpus", "4-5\n");
+
+    let topology = super::detect_cpu_tiers(root, None);
+    assert_eq!(
+        topology
+            .tiers
+            .iter()
+            .map(|tier| (tier.label.as_str(), tier.core_count))
+            .collect::<Vec<_>>(),
+        vec![("P", 4), ("E", 2)]
+    );
+    assert_eq!(topology.tier_index_for(0), Some(0));
+    assert_eq!(topology.tier_index_for(3), Some(0));
+    assert_eq!(topology.tier_index_for(4), Some(1));
+    assert_eq!(topology.tier_index_for(5), Some(1));
+    assert_counts_match_assignments(&topology);
+}
+
+#[test]
+fn hybrid_precedence_wins_over_midr_and_capacity() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    for cpu_id in 0..4 {
+        add_cpu(root, cpu_id);
+    }
+    write_fixture(root, "bus/event_source/devices/cpu_core/cpus", "0-1\n");
+    write_fixture(root, "bus/event_source/devices/cpu_atom/cpus", "2-3\n");
+    // Contradictory lower-priority sources must be ignored.
+    write_fixture(
+        root,
+        "devices/system/cpu/cpu0/regs/identification/midr_el1",
+        &midr(0xD82),
+    );
+    write_fixture(root, "devices/system/cpu/cpu0/cpu_capacity", "1024\n");
+    write_fixture(root, "devices/system/cpu/cpu2/cpu_capacity", "256\n");
+
+    let topology = super::detect_cpu_tiers(root, None);
+    assert_eq!(
+        topology
+            .tiers
+            .iter()
+            .map(|tier| tier.label.as_str())
+            .collect::<Vec<_>>(),
+        vec!["P", "E"]
+    );
+}
+
+#[test]
+fn detects_three_cluster_arm_midr_as_p_m_e() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    for cpu_id in 0..6 {
+        add_cpu(root, cpu_id);
+    }
+    for cpu_id in 0..2 {
+        write_fixture(
+            root,
+            &format!("devices/system/cpu/cpu{cpu_id}/regs/identification/midr_el1"),
+            &midr(0xD82), // Cortex-X4 -> Big
+        );
+    }
+    for cpu_id in 2..4 {
+        write_fixture(
+            root,
+            &format!("devices/system/cpu/cpu{cpu_id}/regs/identification/midr_el1"),
+            &midr(0xD81), // Cortex-A720 -> Mid
+        );
+    }
+    for cpu_id in 4..6 {
+        write_fixture(
+            root,
+            &format!("devices/system/cpu/cpu{cpu_id}/regs/identification/midr_el1"),
+            &midr(0xD80), // Cortex-A520 -> Little
+        );
+    }
+
+    let topology = super::detect_cpu_tiers(root, None);
+    assert_eq!(
+        topology
+            .tiers
+            .iter()
+            .map(|tier| (tier.label.as_str(), tier.core_count))
+            .collect::<Vec<_>>(),
+        vec![("P", 2), ("M", 2), ("E", 2)]
+    );
+    assert_eq!(topology.tier_index_for(0), Some(0));
+    assert_eq!(topology.tier_index_for(2), Some(1));
+    assert_eq!(topology.tier_index_for(4), Some(2));
+    assert_counts_match_assignments(&topology);
+}
+
+#[test]
+fn unknown_and_single_tier_midr_fall_through_to_capacity() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    for cpu_id in 0..4 {
+        add_cpu(root, cpu_id);
+    }
+    // Only one known tier, plus one unknown part.
+    write_fixture(
+        root,
+        "devices/system/cpu/cpu0/regs/identification/midr_el1",
+        &midr(0xD82),
+    );
+    write_fixture(
+        root,
+        "devices/system/cpu/cpu1/regs/identification/midr_el1",
+        &midr(0xD82),
+    );
+    write_fixture(
+        root,
+        "devices/system/cpu/cpu2/regs/identification/midr_el1",
+        &midr(0x123),
+    );
+    write_fixture(
+        root,
+        "devices/system/cpu/cpu3/regs/identification/midr_el1",
+        "0x0000000000000000\n",
+    );
+
+    // Distinct capacities are the only source that can split all four CPUs.
+    write_fixture(root, "devices/system/cpu/cpu0/cpu_capacity", "1024\n");
+    write_fixture(root, "devices/system/cpu/cpu1/cpu_capacity", "1024\n");
+    write_fixture(root, "devices/system/cpu/cpu2/cpu_capacity", "512\n");
+    write_fixture(root, "devices/system/cpu/cpu3/cpu_capacity", "512\n");
+
+    let topology = super::detect_cpu_tiers(root, None);
+    assert_eq!(
+        topology
+            .tiers
+            .iter()
+            .map(|tier| (tier.label.as_str(), tier.core_count))
+            .collect::<Vec<_>>(),
+        vec![("P", 2), ("M", 2)]
+    );
+    assert_counts_match_assignments(&topology);
+}
+
+#[test]
+fn capacity_only_part_orders_groups_descending() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    for cpu_id in 0..6 {
+        add_cpu(root, cpu_id);
+    }
+    for cpu_id in 0..2 {
+        write_fixture(
+            root,
+            &format!("devices/system/cpu/cpu{cpu_id}/cpu_capacity"),
+            "1024\n",
+        );
+    }
+    for cpu_id in 2..4 {
+        write_fixture(
+            root,
+            &format!("devices/system/cpu/cpu{cpu_id}/cpu_capacity"),
+            "768\n",
+        );
+    }
+    for cpu_id in 4..6 {
+        write_fixture(
+            root,
+            &format!("devices/system/cpu/cpu{cpu_id}/cpu_capacity"),
+            "512\n",
+        );
+    }
+
+    let topology = super::detect_cpu_tiers(root, None);
+    assert_eq!(
+        topology
+            .tiers
+            .iter()
+            .map(|tier| (tier.label.as_str(), tier.core_count))
+            .collect::<Vec<_>>(),
+        vec![("P", 2), ("M", 2), ("E", 2)]
+    );
+    assert_eq!(topology.tier_index_for(0), Some(0));
+    assert_eq!(topology.tier_index_for(4), Some(2));
+}
+
+#[test]
+fn equal_capacities_produce_no_tiers() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    for cpu_id in 0..4 {
+        add_cpu(root, cpu_id);
+        write_fixture(
+            root,
+            &format!("devices/system/cpu/cpu{cpu_id}/cpu_capacity"),
+            "1024\n",
+        );
+    }
+
+    let topology = super::detect_cpu_tiers(root, None);
+    assert!(topology.tiers.is_empty());
+    assert!(topology.tier_by_cpu.is_empty());
+}
+
+#[test]
+fn cpuset_excludes_untiered_cores_and_renumbers_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    for cpu_id in 0..6 {
+        add_cpu(root, cpu_id);
+    }
+    write_fixture(root, "bus/event_source/devices/cpu_core/cpus", "0-3\n");
+    write_fixture(root, "bus/event_source/devices/cpu_atom/cpus", "4-5\n");
+
+    // The cpuset keeps two P cores and one E core; the rest must not count.
+    let topology = super::detect_cpu_tiers(root, Some(&[0, 1, 4]));
+    assert_eq!(
+        topology
+            .tiers
+            .iter()
+            .map(|tier| (tier.label.as_str(), tier.core_count))
+            .collect::<Vec<_>>(),
+        vec![("P", 2), ("E", 1)]
+    );
+    assert_eq!(topology.tier_index_for(2), None);
+    assert_eq!(topology.tier_index_for(5), None);
+    assert_counts_match_assignments(&topology);
+}
+
+#[test]
+fn missing_sources_leave_the_cpu_untiered() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    for cpu_id in 0..4 {
+        add_cpu(root, cpu_id);
+    }
+
+    let topology = super::detect_cpu_tiers(root, None);
+    assert!(topology.tiers.is_empty());
+    assert!(topology.tier_by_cpu.iter().all(Option::is_none));
+}
+
+#[test]
+fn empty_and_malformed_sources_never_panic() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    for cpu_id in 0..4 {
+        add_cpu(root, cpu_id);
+        write_fixture(
+            root,
+            &format!("devices/system/cpu/cpu{cpu_id}/cpu_capacity"),
+            "not-a-number\n",
+        );
+    }
+    write_fixture(root, "bus/event_source/devices/cpu_core/cpus", "0-\n");
+    write_fixture(root, "bus/event_source/devices/cpu_atom/cpus", "\n");
+
+    let topology = super::detect_cpu_tiers(root, None);
+    assert!(topology.tiers.is_empty());
+}

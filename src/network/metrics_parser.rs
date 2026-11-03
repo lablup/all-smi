@@ -18,10 +18,11 @@ use crate::parsing::common::sanitize_label_value;
 use chrono::Local;
 use regex::Regex;
 
+use crate::device::cpu_topology::{coarse_core_type, tier_rank};
 use crate::device::types::{GPU_METRIC_UNAVAILABLE, MAX_GPU_FAN_RPM};
 use crate::device::{
-    AppleSiliconCpuInfo, CpuInfo, CpuPlatformType, GpmMetrics, GpuInfo, MemoryInfo, MigGpuInfo,
-    MigInstanceInfo, NvLinkRemoteDevice, NvLinkRemoteType, VgpuHostInfo, VgpuInfo,
+    AppleSiliconCpuInfo, CpuInfo, CpuPlatformType, CpuTier, GpmMetrics, GpuInfo, MemoryInfo,
+    MigGpuInfo, MigInstanceInfo, NvLinkRemoteDevice, NvLinkRemoteType, VgpuHostInfo, VgpuInfo,
 };
 use crate::storage::info::StorageInfo;
 
@@ -189,6 +190,9 @@ impl MetricsParser {
         let mut process_info_map: HashMap<(u32, u32), ParsedProcessRow> =
             HashMap::with_capacity(32);
         let mut host_instance_name: Option<String> = None;
+        // Tier series + per-core `cpu_tier` labels, resolved after the loop
+        // because Prometheus line order is not guaranteed (issue #473).
+        let mut cpu_tier_state = CpuTierParseState::new();
 
         for line in text.lines() {
             if let Some((metric_name, labels_str, value)) = parse_prometheus!(line, re) {
@@ -241,6 +245,7 @@ impl MetricsParser {
                             &labels,
                             value,
                             host,
+                            &mut cpu_tier_state,
                         );
                     }
                 } else if metric_name.starts_with("memory_") || metric_name.starts_with("swap_") {
@@ -297,6 +302,10 @@ impl MetricsParser {
                 &instance_name,
             );
         }
+
+        // Resolve tier labels now that every line has been read. This must
+        // run before the maps are flattened into vectors.
+        cpu_tier_state.finish(&mut cpu_info_map);
 
         ParsedRemoteMetrics {
             chassis_info: chassis_state.finish(),
@@ -828,12 +837,18 @@ impl MetricsParser {
         labels: &HashMap<String, String>,
         value: f64,
         host: &str,
+        tier_state: &mut CpuTierParseState,
     ) {
         let cpu_model = crate::get_label_or_default!(labels, "cpu_model");
         // Keep the full host address including port
         let cpu_index = crate::get_label_or_default!(labels, "index", "0");
 
         let cpu_key = format!("{host}:{cpu_index}");
+
+        // Tier series and per-core tier labels are accumulated separately and
+        // resolved in `CpuTierParseState::finish` once the whole scrape has
+        // been read.
+        tier_state.process(&cpu_key, metric_name, labels, value);
 
         let cpu_info = cpu_info_map.entry(cpu_key).or_insert_with(|| {
             let platform_type = if cpu_model.contains("Apple") {
@@ -865,6 +880,7 @@ impl MetricsParser {
                 power_consumption: None,
                 per_socket_info: Vec::new(),
                 apple_silicon_info: None,
+                cpu_tiers: Vec::new(),
                 per_core_utilization: Vec::new(),
                 time: Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
             }
@@ -985,6 +1001,7 @@ impl MetricsParser {
                                 core_id: cpu_info.per_core_utilization.len() as u32,
                                 core_type: crate::device::CoreType::Standard,
                                 utilization: 0.0,
+                                tier_index: None,
                             });
                     }
 
@@ -994,6 +1011,7 @@ impl MetricsParser {
                             core_id,
                             core_type,
                             utilization: value,
+                            tier_index: None,
                         };
                 }
             }
@@ -1209,6 +1227,157 @@ fn saturating_i32(value: f64) -> Option<i32> {
 /// exposes more than a few hundred cores; 1024 provides generous headroom
 /// while preventing OOM from a malicious upstream sending core_id=4294967295.
 const MAX_CPU_CORES: usize = 1024;
+
+/// Maximum CPU tiers accepted per CPU from a remote scrape. The canonical
+/// vocabulary has few entries; 64 is far beyond any real machine and safely
+/// inside `u8`, so the resolved `tier_index` can never overflow.
+const MAX_CPU_TIERS: usize = 64;
+
+/// Per-scrape accumulator for the tier families and the per-core `cpu_tier`
+/// label (issue #473).
+///
+/// Prometheus metric order is not guaranteed: a `cpu_core_utilization` line
+/// can arrive before the `cpu_tier_*` series that names its tier. The parse
+/// loop only records raw values here; [`CpuTierParseState::finish`] resolves
+/// labels into [`CoreUtilization::tier_index`](crate::device::CoreUtilization)
+/// once every line has been read.
+struct CpuTierParseState {
+    /// `(cpu_key, label)` -> tier fields accumulated from the four series.
+    tiers: HashMap<(String, String), CpuTier>,
+    /// `(cpu_key, core_id)` -> `cpu_tier` label from the core line.
+    core_labels: HashMap<(String, u32), String>,
+}
+
+impl CpuTierParseState {
+    fn new() -> Self {
+        Self {
+            tiers: HashMap::new(),
+            core_labels: HashMap::new(),
+        }
+    }
+
+    fn process(
+        &mut self,
+        cpu_key: &str,
+        metric_name: &str,
+        labels: &HashMap<String, String>,
+        value: f64,
+    ) {
+        match metric_name {
+            "cpu_tier_core_count"
+            | "cpu_tier_utilization"
+            | "cpu_tier_frequency_mhz"
+            | "cpu_tier_l2_cache_mb" => {
+                let Some(label) = labels.get("cpu_tier").filter(|label| !label.is_empty()) else {
+                    return;
+                };
+                let label = label.clone();
+
+                // Reject values the exporter could not have produced before
+                // an entry is created, so a garbage line cannot allocate a
+                // tier on its own.
+                let accepted = match metric_name {
+                    "cpu_tier_core_count" => {
+                        value.is_finite() && (0.0..=MAX_CPU_CORES as f64).contains(&value)
+                    }
+                    "cpu_tier_utilization" => value.is_finite() && (0.0..=100.0).contains(&value),
+                    "cpu_tier_frequency_mhz" => {
+                        value.is_finite() && (0.0..=100_000.0).contains(&value)
+                    }
+                    _ => value.is_finite() && (0.0..=1_000_000.0).contains(&value),
+                };
+                if !accepted {
+                    return;
+                }
+
+                let key = (cpu_key.to_string(), label.clone());
+                if !self.tiers.contains_key(&key) {
+                    let count = self.tiers.keys().filter(|(key, _)| key == cpu_key).count();
+                    if count >= MAX_CPU_TIERS {
+                        return;
+                    }
+                    self.tiers.insert(
+                        key.clone(),
+                        CpuTier {
+                            label,
+                            core_type: crate::device::CoreType::Standard,
+                            core_count: 0,
+                            utilization: 0.0,
+                            frequency_mhz: None,
+                            l2_cache_mb: None,
+                        },
+                    );
+                }
+
+                let Some(tier) = self.tiers.get_mut(&key) else {
+                    return;
+                };
+                match metric_name {
+                    "cpu_tier_core_count" => tier.core_count = value as u32,
+                    "cpu_tier_utilization" => tier.utilization = value,
+                    "cpu_tier_frequency_mhz" => tier.frequency_mhz = Some(value as u32),
+                    _ => tier.l2_cache_mb = Some(value as u32),
+                }
+            }
+            "cpu_core_utilization" => {
+                let Some(label) = labels.get("cpu_tier").filter(|label| !label.is_empty()) else {
+                    return;
+                };
+                let Some(core_id) = labels
+                    .get("core_id")
+                    .and_then(|raw| raw.parse::<u32>().ok())
+                    .filter(|core_id| (*core_id as usize) < MAX_CPU_CORES)
+                else {
+                    return;
+                };
+                self.core_labels
+                    .insert((cpu_key.to_string(), core_id), label.clone());
+            }
+            _ => {}
+        }
+    }
+
+    /// Resolve accumulated labels against each parsed CPU.
+    ///
+    /// Tiers are sorted into canonical fastest-first order and assigned the
+    /// coarse legacy `core_type`. A core whose label does not resolve keeps
+    /// `tier_index = None`.
+    fn finish(self, cpu_info_map: &mut HashMap<String, CpuInfo>) {
+        if self.tiers.is_empty() {
+            return;
+        }
+
+        for (cpu_key, cpu_info) in cpu_info_map.iter_mut() {
+            let mut tiers: Vec<CpuTier> = self
+                .tiers
+                .iter()
+                .filter(|((key, _), _)| key == cpu_key)
+                .map(|(_, tier)| tier.clone())
+                .collect();
+            if tiers.is_empty() {
+                continue;
+            }
+
+            tiers.sort_by_key(|tier| tier_rank(&tier.label));
+            tiers.truncate(MAX_CPU_TIERS);
+            let total = tiers.len();
+            for (position, tier) in tiers.iter_mut().enumerate() {
+                tier.core_type = coarse_core_type(position, total);
+            }
+
+            for core in &mut cpu_info.per_core_utilization {
+                if let Some(label) = self.core_labels.get(&(cpu_key.clone(), core.core_id)) {
+                    core.tier_index = tiers
+                        .iter()
+                        .position(|tier| &tier.label == label)
+                        .map(|position| position as u8);
+                }
+            }
+
+            cpu_info.cpu_tiers = tiers;
+        }
+    }
+}
 
 /// Maximum NvLinks per GPU accepted from a remote scrape. Current NVIDIA
 /// hardware caps at 18 physical links; 32 leaves headroom for future
@@ -3405,5 +3574,283 @@ all_smi_nvlink_remote_device_type{gpu="NVIDIA H100", instance="node-1", gpu_uuid
         let links = &parsed.gpu_info[0].nvlink_remote_devices;
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].bandwidth_mb_s, Some(50_000));
+    }
+    // --- N-tier CPU topology (issue #473) ---
+
+    fn tier_series(cpu_tier: &str, count: u32, utilization: f64) -> String {
+        format!(
+            "all_smi_cpu_tier_core_count{{cpu_model=\"ARM\", instance=\"node\", hostname=\"node\", index=\"0\", cpu_tier=\"{cpu_tier}\"}} {count}\n\
+             all_smi_cpu_tier_utilization{{cpu_model=\"ARM\", instance=\"node\", hostname=\"node\", index=\"0\", cpu_tier=\"{cpu_tier}\"}} {utilization}"
+        )
+    }
+
+    #[test]
+    fn parser_resolves_cpu_tiers_regardless_of_line_order() {
+        let parser = create_test_parser();
+        let re = create_test_regex();
+        let host = "10.0.0.1:9090";
+
+        // Core lines arrive before the tier series that name them, and the
+        // tier families themselves are out of canonical order.
+        let text = format!(
+            "\
+all_smi_cpu_core_utilization{{cpu_model=\"ARM\", instance=\"node\", hostname=\"node\", index=\"0\", core_id=\"0\", core_type=\"C\", cpu_tier=\"E\"}} 10\n\
+all_smi_cpu_core_utilization{{cpu_model=\"ARM\", instance=\"node\", hostname=\"node\", index=\"0\", core_id=\"1\", core_type=\"C\", cpu_tier=\"P\"}} 50\n\
+all_smi_cpu_core_utilization{{cpu_model=\"ARM\", instance=\"node\", hostname=\"node\", index=\"0\", core_id=\"2\", core_type=\"C\", cpu_tier=\"M\"}} 30\n\
+{}\n{}\n{}",
+            tier_series("M", 1, 30.0),
+            tier_series("E", 1, 10.0),
+            tier_series("P", 1, 50.0),
+        );
+
+        let parsed = parser.parse_metrics(&text, host, &re);
+        assert_eq!(parsed.cpu_info.len(), 1);
+        let cpu = &parsed.cpu_info[0];
+
+        assert_eq!(
+            cpu.cpu_tiers
+                .iter()
+                .map(|tier| tier.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["P", "M", "E"]
+        );
+        assert_eq!(
+            cpu.cpu_tiers
+                .iter()
+                .map(|tier| tier.utilization)
+                .collect::<Vec<_>>(),
+            vec![50.0, 30.0, 10.0]
+        );
+        assert_eq!(
+            cpu.cpu_tiers[0].core_type,
+            crate::device::CoreType::Performance
+        );
+        assert_eq!(
+            cpu.cpu_tiers[1].core_type,
+            crate::device::CoreType::Efficiency
+        );
+
+        let by_id: Vec<_> = cpu
+            .per_core_utilization
+            .iter()
+            .map(|core| (core.core_id, core.tier_index))
+            .collect();
+        assert_eq!(by_id, vec![(0, Some(2)), (1, Some(0)), (2, Some(1))]);
+    }
+
+    #[test]
+    fn parser_keeps_frequency_and_cache_only_when_reported() {
+        let parser = create_test_parser();
+        let re = create_test_regex();
+        let host = "10.0.0.2:9090";
+
+        let text = "\
+all_smi_cpu_tier_core_count{cpu_model=\"Apple M5 Max\", instance=\"mac\", hostname=\"mac\", index=\"0\", cpu_tier=\"S\"} 8\n\
+all_smi_cpu_tier_utilization{cpu_model=\"Apple M5 Max\", instance=\"mac\", hostname=\"mac\", index=\"0\", cpu_tier=\"S\"} 40\n\
+all_smi_cpu_tier_frequency_mhz{cpu_model=\"Apple M5 Max\", instance=\"mac\", hostname=\"mac\", index=\"0\", cpu_tier=\"S\"} 4200\n\
+all_smi_cpu_tier_l2_cache_mb{cpu_model=\"Apple M5 Max\", instance=\"mac\", hostname=\"mac\", index=\"0\", cpu_tier=\"S\"} 16\n\
+all_smi_cpu_tier_core_count{cpu_model=\"Apple M5 Max\", instance=\"mac\", hostname=\"mac\", index=\"0\", cpu_tier=\"P\"} 6\n\
+all_smi_cpu_tier_utilization{cpu_model=\"Apple M5 Max\", instance=\"mac\", hostname=\"mac\", index=\"0\", cpu_tier=\"P\"} 20";
+
+        let parsed = parser.parse_metrics(text, host, &re);
+        let cpu = &parsed.cpu_info[0];
+        assert_eq!(cpu.cpu_tiers.len(), 2);
+        assert_eq!(cpu.cpu_tiers[0].label, "S");
+        assert_eq!(cpu.cpu_tiers[0].frequency_mhz, Some(4200));
+        assert_eq!(cpu.cpu_tiers[0].l2_cache_mb, Some(16));
+        assert_eq!(cpu.cpu_tiers[1].label, "P");
+        assert_eq!(cpu.cpu_tiers[1].frequency_mhz, None);
+        assert_eq!(cpu.cpu_tiers[1].l2_cache_mb, None);
+    }
+
+    #[test]
+    fn parser_leaves_cores_unresolved_for_unknown_tier_labels() {
+        let parser = create_test_parser();
+        let re = create_test_regex();
+        let host = "10.0.0.3:9090";
+
+        let text = "\
+all_smi_cpu_tier_core_count{cpu_model=\"ARM\", instance=\"node\", hostname=\"node\", index=\"0\", cpu_tier=\"P\"} 2\n\
+all_smi_cpu_tier_utilization{cpu_model=\"ARM\", instance=\"node\", hostname=\"node\", index=\"0\", cpu_tier=\"P\"} 10\n\
+all_smi_cpu_core_utilization{cpu_model=\"ARM\", instance=\"node\", hostname=\"node\", index=\"0\", core_id=\"0\", core_type=\"C\", cpu_tier=\"P\"} 10\n\
+all_smi_cpu_core_utilization{cpu_model=\"ARM\", instance=\"node\", hostname=\"node\", index=\"0\", core_id=\"1\", core_type=\"C\", cpu_tier=\"Q\"} 20";
+
+        let parsed = parser.parse_metrics(text, host, &re);
+        let cpu = &parsed.cpu_info[0];
+        assert_eq!(cpu.cpu_tiers.len(), 1);
+        assert_eq!(
+            cpu.cpu_tiers[0].core_type,
+            crate::device::CoreType::Standard
+        );
+        assert_eq!(cpu.per_core_utilization[0].tier_index, Some(0));
+        assert_eq!(cpu.per_core_utilization[1].tier_index, None);
+        assert_eq!(
+            cpu.per_core_utilization[1].core_type,
+            crate::device::CoreType::Standard
+        );
+    }
+
+    #[test]
+    fn parser_accepts_legacy_payload_without_tier_series() {
+        let parser = create_test_parser();
+        let re = create_test_regex();
+        let host = "10.0.0.4:9090";
+
+        let text = "\
+all_smi_cpu_core_utilization{cpu_model=\"Apple M2\", instance=\"mac\", hostname=\"mac\", index=\"0\", core_id=\"0\", core_type=\"P\"} 40\n\
+all_smi_cpu_core_utilization{cpu_model=\"Apple M2\", instance=\"mac\", hostname=\"mac\", index=\"0\", core_id=\"1\", core_type=\"E\"} 10";
+
+        let parsed = parser.parse_metrics(text, host, &re);
+        let cpu = &parsed.cpu_info[0];
+        assert!(cpu.cpu_tiers.is_empty());
+        assert!(
+            cpu.per_core_utilization
+                .iter()
+                .all(|core| core.tier_index.is_none())
+        );
+        assert_eq!(
+            cpu.per_core_utilization[0].core_type,
+            crate::device::CoreType::Performance
+        );
+    }
+
+    #[test]
+    fn parser_caps_tiers_per_cpu_from_a_hostile_upstream() {
+        let parser = create_test_parser();
+        let re = create_test_regex();
+        let host = "10.0.0.5:9090";
+
+        let mut text = String::new();
+        for index in 0..100 {
+            text.push_str(&format!(
+                "all_smi_cpu_tier_core_count{{cpu_model=\"ARM\", instance=\"node\", hostname=\"node\", index=\"0\", cpu_tier=\"E{}\"}} 1\n",
+                index + 4
+            ));
+        }
+
+        let parsed = parser.parse_metrics(&text, host, &re);
+        assert_eq!(parsed.cpu_info[0].cpu_tiers.len(), MAX_CPU_TIERS);
+    }
+
+    #[test]
+    fn parser_drops_out_of_range_tier_values_before_creating_a_tier() {
+        let parser = create_test_parser();
+        let re = create_test_regex();
+        let host = "10.0.0.6:9090";
+
+        let text = "\
+all_smi_cpu_tier_utilization{cpu_model=\"ARM\", instance=\"node\", hostname=\"node\", index=\"0\", cpu_tier=\"P\"} 500\n\
+all_smi_cpu_tier_core_count{cpu_model=\"ARM\", instance=\"node\", hostname=\"node\", index=\"0\", cpu_tier=\"E\"} 4000";
+
+        let parsed = parser.parse_metrics(text, host, &re);
+        assert!(parsed.cpu_info.is_empty() || parsed.cpu_info[0].cpu_tiers.is_empty());
+    }
+    #[test]
+    fn exporter_and_parser_round_trip_the_tier_topology() {
+        use crate::api::metrics::MetricExporter;
+        use crate::api::metrics::cpu::CpuMetricExporter;
+        use crate::device::{CoreUtilization, CpuPlatformType, CpuTier};
+
+        let tiers = vec![
+            CpuTier {
+                label: "P".to_string(),
+                core_type: crate::device::CoreType::Performance,
+                core_count: 2,
+                utilization: 40.0,
+                frequency_mhz: None,
+                l2_cache_mb: None,
+            },
+            CpuTier {
+                label: "M".to_string(),
+                core_type: crate::device::CoreType::Efficiency,
+                core_count: 1,
+                utilization: 20.0,
+                frequency_mhz: None,
+                l2_cache_mb: None,
+            },
+            CpuTier {
+                label: "E".to_string(),
+                core_type: crate::device::CoreType::Efficiency,
+                core_count: 1,
+                utilization: 10.0,
+                frequency_mhz: None,
+                l2_cache_mb: None,
+            },
+        ];
+        let cores = vec![
+            CoreUtilization {
+                core_id: 0,
+                core_type: crate::device::CoreType::Standard,
+                utilization: 40.0,
+                tier_index: Some(0),
+            },
+            CoreUtilization {
+                core_id: 1,
+                core_type: crate::device::CoreType::Standard,
+                utilization: 20.0,
+                tier_index: Some(1),
+            },
+            CoreUtilization {
+                core_id: 2,
+                core_type: crate::device::CoreType::Standard,
+                utilization: 10.0,
+                tier_index: Some(2),
+            },
+        ];
+        let cpu = crate::device::CpuInfo {
+            index: 0,
+            host_id: "10.0.0.7:9090".to_string(),
+            hostname: "node".to_string(),
+            instance: "node".to_string(),
+            cpu_model: "Three Tier CPU".to_string(),
+            architecture: "arm64".to_string(),
+            platform_type: CpuPlatformType::Arm,
+            socket_count: 1,
+            total_cores: 3,
+            total_threads: 3,
+            base_frequency_mhz: 2400,
+            max_frequency_mhz: 3200,
+            cache_size_mb: 8,
+            utilization: 30.0,
+            temperature: None,
+            power_consumption: None,
+            per_socket_info: Vec::new(),
+            apple_silicon_info: None,
+            cpu_tiers: tiers,
+            per_core_utilization: cores,
+            time: String::new(),
+        };
+
+        let text = CpuMetricExporter::new(std::slice::from_ref(&cpu)).export_metrics();
+        let parser = create_test_parser();
+        let re = create_test_regex();
+        let parsed = parser.parse_metrics(&text, "10.0.0.7:9090", &re);
+
+        assert_eq!(parsed.cpu_info.len(), 1);
+        let round_tripped = &parsed.cpu_info[0];
+        assert_eq!(
+            round_tripped
+                .cpu_tiers
+                .iter()
+                .map(|tier| (tier.label.as_str(), tier.core_count))
+                .collect::<Vec<_>>(),
+            vec![("P", 2), ("M", 1), ("E", 1)]
+        );
+        assert_eq!(
+            round_tripped
+                .cpu_tiers
+                .iter()
+                .map(|tier| tier.utilization)
+                .collect::<Vec<_>>(),
+            vec![40.0, 20.0, 10.0]
+        );
+        assert_eq!(
+            round_tripped
+                .per_core_utilization
+                .iter()
+                .map(|core| core.tier_index)
+                .collect::<Vec<_>>(),
+            vec![Some(0), Some(1), Some(2)]
+        );
     }
 }
