@@ -48,8 +48,24 @@ pub struct WindowsTierTopology {
     /// Ordered, fastest-first tiers. Empty unless at least two tiers have
     /// cores.
     pub tiers: Vec<CpuTier>,
-    /// Index into `tiers` for each logical processor.
-    pub tier_index_by_core: Vec<Option<u8>>,
+}
+
+impl WindowsTierTopology {
+    /// Tier position for each logical processor: the index into [`Self::tiers`]
+    /// for the core's raw tier, or `None` for an untiered core.
+    pub fn tier_index_by_core(&self) -> Vec<Option<u8>> {
+        self.per_core
+            .iter()
+            .map(|tier| {
+                tier.and_then(|tier| {
+                    self.tiers
+                        .iter()
+                        .position(|entry| entry.label == tier.label())
+                        .map(|position| position as u8)
+                })
+            })
+            .collect()
+    }
 }
 
 /// Parse the `Model` part number out of a `CentralProcessor\N\Identifier`
@@ -93,7 +109,6 @@ pub fn tier_topology_from_identifiers(identifiers: &[Option<String>]) -> Windows
         return WindowsTierTopology {
             per_core,
             tiers: Vec::new(),
-            tier_index_by_core: vec![None; identifiers.len()],
         };
     }
 
@@ -111,23 +126,7 @@ pub fn tier_topology_from_identifiers(identifiers: &[Option<String>]) -> Windows
         })
         .collect();
 
-    let tier_index_by_core = per_core
-        .iter()
-        .map(|tier| {
-            tier.and_then(|tier| {
-                tiers
-                    .iter()
-                    .position(|entry| entry.label == tier.label())
-                    .map(|position| position as u8)
-            })
-        })
-        .collect();
-
-    WindowsTierTopology {
-        per_core,
-        tiers,
-        tier_index_by_core,
-    }
+    WindowsTierTopology { per_core, tiers }
 }
 
 /// Map each logical processor's `Identifier` to a [`CoreType`].
@@ -290,7 +289,10 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![("P", 1), ("M", 1), ("E", 1)]
         );
-        assert_eq!(topology.tier_index_by_core, vec![Some(0), Some(1), Some(2)]);
+        assert_eq!(
+            topology.tier_index_by_core(),
+            vec![Some(0), Some(1), Some(2)]
+        );
         assert_eq!(
             topology.per_core,
             vec![
@@ -311,7 +313,7 @@ mod tests {
         ] {
             let topology = tier_topology_from_identifiers(&identifiers);
             assert!(topology.tiers.is_empty());
-            assert!(topology.tier_index_by_core.iter().all(Option::is_none));
+            assert!(topology.tier_index_by_core().iter().all(Option::is_none));
         }
     }
 

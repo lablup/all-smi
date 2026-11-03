@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::device::cpu_topology::tier_utilization;
-use crate::device::{CoreType, CoreUtilization, CpuInfo, CpuReader, CpuSocketInfo};
+use crate::device::{CoreType, CoreUtilization, CpuInfo, CpuReader, CpuSocketInfo, CpuTier};
 use crate::utils::system::get_hostname;
 use chrono::Local;
 use serde::Deserialize;
@@ -23,8 +23,7 @@ use wmi::WMIConnection;
 
 // Import the temperature fallback chain
 use super::cpu_windows_arm::{
-    WindowsTierTopology, classify_platform, core_types_from_identifiers,
-    tier_topology_from_identifiers,
+    classify_platform, core_types_from_identifiers, tier_topology_from_identifiers,
 };
 use super::windows_temp::TemperatureManager;
 
@@ -129,7 +128,8 @@ pub struct WindowsCpuReader {
     processor_identifiers: Vec<Option<String>>,
     // Static tier topology derived from those identifiers once, never per
     // tick (issue #473).
-    tier_topology: WindowsTierTopology,
+    cpu_tiers: Vec<CpuTier>,
+    tier_index_by_core: Vec<Option<u8>>,
     // Registry `ProcessorNameString` of processor 0, read once: the brand
     // fallback when sysinfo reports an empty brand (Windows on ARM).
     processor_name: Option<String>,
@@ -155,6 +155,8 @@ impl WindowsCpuReader {
             .map(read_processor_identifier)
             .collect();
         let tier_topology = tier_topology_from_identifiers(&processor_identifiers);
+        let tier_index_by_core = tier_topology.tier_index_by_core();
+        let cpu_tiers = tier_topology.tiers;
         let processor_name = read_processor_value(0, "ProcessorNameString");
 
         Self {
@@ -165,7 +167,8 @@ impl WindowsCpuReader {
             cached_socket_count: RwLock::new(None),
             temperature_manager: TemperatureManager::new(),
             processor_identifiers,
-            tier_topology,
+            cpu_tiers,
+            tier_index_by_core,
             processor_name,
         }
     }
@@ -352,18 +355,13 @@ impl WindowsCpuReader {
                 core_id: i as u32,
                 core_type: core_types.get(i).copied().unwrap_or(CoreType::Standard),
                 utilization: cpu.usage() as f64,
-                tier_index: self
-                    .tier_topology
-                    .tier_index_by_core
-                    .get(i)
-                    .copied()
-                    .flatten(),
+                tier_index: self.tier_index_by_core.get(i).copied().flatten(),
             });
         }
 
         // Only utilization changes per tick; labels, counts and the index map
         // were fixed at construction.
-        let mut cpu_tiers = self.tier_topology.tiers.clone();
+        let mut cpu_tiers = self.cpu_tiers.clone();
         for (position, tier) in cpu_tiers.iter_mut().enumerate() {
             tier.utilization = tier_utilization(&per_core_utilization, position);
         }
