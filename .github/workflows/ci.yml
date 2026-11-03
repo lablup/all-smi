@@ -261,6 +261,35 @@ jobs:
           done
           exit "$fail"
 
+      # apt installs Recommends by default, and the Ubuntu archive's virtual
+      # NVIDIA utility and driver package names resolve to its *-server driver
+      # stack. A driver in an automatically installed field therefore makes
+      # `apt install all-smi` replace a working CUDA-repo driver, which is
+      # issue #475. all-smi loads NVML at runtime, so the driver belongs in
+      # Suggests only, and all three build paths must agree on the relation.
+      - name: Driver relation stays out of Depends, Pre-Depends, and Recommends
+        run: |
+          set -eu
+          fail=0
+          for f in debian/control debian/control.source debian/control.binary; do
+            if grep -E '^(Depends|Pre-Depends|Recommends):' "$f" \
+              | grep -Eq 'nvidia-(utils|driver)'; then
+              echo "::error file=${f}::${f} declares an NVIDIA driver in an apt-automatic field; move it to Suggests (issue #475)"
+              fail=1
+            fi
+          done
+          ref=""
+          for f in debian/control debian/control.source debian/control.binary; do
+            got=$(grep -E '^(Depends|Recommends|Suggests):' "$f" | sed 's/[[:space:]]\+/ /g')
+            if [ -z "$ref" ]; then
+              ref="$got"
+            elif [ "$got" != "$ref" ]; then
+              echo "::error file=${f}::${f} disagrees with debian/control on Depends, Recommends, or Suggests; keep those three fields identical across all three build paths"
+              fail=1
+            fi
+          done
+          exit "$fail"
+
   # ═══════════════════════════════════════════════════════════════
   # Job: systemd service lifecycle smoke test (issue #309)
   # ═══════════════════════════════════════════════════════════════
