@@ -537,3 +537,41 @@ fn topology_builder_truncates_oversized_group_lists() {
     assert_eq!(topology.tier_by_cpu.len(), super::MAX_DETECTED_TIERS);
     assert_counts_match_assignments(&topology);
 }
+
+#[test]
+fn impossible_cpu_ids_do_not_size_the_tier_map() {
+    // A corrupted or attacker-controlled sysfs can name `cpuN` with an
+    // arbitrary `N`. The tier map is indexed by CPU id, so an unbounded id
+    // would size the allocation to that id (about 8 GB at u32::MAX).
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    add_cpu(root, 0);
+    add_cpu(root, u32::MAX);
+    write_fixture(root, "devices/system/cpu/cpu0/cpu_capacity", "1024\n");
+    write_fixture(
+        root,
+        &format!("devices/system/cpu/cpu{}/cpu_capacity", u32::MAX),
+        "512\n",
+    );
+
+    // Filtering the id out leaves one capacity group, so the host reads as
+    // homogeneous rather than trying to allocate the map.
+    let topology = super::detect_cpu_tiers(root, None);
+    assert!(topology.tiers.is_empty());
+    assert!(topology.tier_by_cpu.is_empty());
+}
+
+#[test]
+fn topology_builder_drops_implausible_cpu_ids() {
+    let groups = vec![
+        ("P".to_string(), vec![0, 1]),
+        ("E".to_string(), vec![u32::MAX]),
+    ];
+
+    let topology = super::topology_from_labeled_groups(groups);
+    assert!(topology.tier_by_cpu.len() <= super::MAX_TRACKED_CPU_ID as usize + 1);
+    assert_eq!(topology.tier_index_for(0), Some(0));
+    assert_eq!(topology.tier_index_for(1), Some(0));
+    assert_eq!(topology.tier_index_for(u32::MAX), None);
+    assert_counts_match_assignments(&topology);
+}

@@ -71,6 +71,15 @@ struct CpuTopology {
 /// capacities than this is truncated rather than risk an index overflow.
 const MAX_DETECTED_TIERS: usize = 64;
 
+/// Highest CPU id the tier map tracks.
+///
+/// `tier_by_cpu` is indexed by CPU id, so a single implausible id would size the
+/// vector to that id. A real machine numbers its logical CPUs in the low
+/// thousands, and this matches the cpumask expansion bound, so anything above
+/// it is treated as untiered instead of sizing an allocation from a file that a
+/// corrupted or attacker-controlled sysfs could supply.
+const MAX_TRACKED_CPU_ID: u32 = 8191;
+
 impl CpuTopology {
     fn tier_index_for(&self, cpu_id: u32) -> Option<u8> {
         self.tier_by_cpu.get(cpu_id as usize).copied().flatten()
@@ -132,6 +141,10 @@ fn enumerate_cpu_ids(root: &Path) -> Vec<u32> {
         ids = parse_cpumask_list(&mask);
     }
 
+    // A directory entry or cpumask may name `cpuN` with an arbitrary `N`; the
+    // per-CPU tier map is indexed by id, so ignore ids beyond the tracked range
+    // rather than let one entry size an allocation proportional to it.
+    ids.retain(|id| *id <= MAX_TRACKED_CPU_ID);
     ids.sort_unstable();
     ids.dedup();
     ids
@@ -247,6 +260,11 @@ fn detect_capacity(root: &Path, cpu_ids: &[u32]) -> Option<CpuTopology> {
 /// the fastest ones.
 fn topology_from_labeled_groups(mut groups: Vec<(String, Vec<u32>)>) -> CpuTopology {
     groups.truncate(MAX_DETECTED_TIERS);
+    // Defense in depth: an id beyond the tracked range would size `tier_by_cpu`
+    // to that id, so it is dropped here as well as in `enumerate_cpu_ids`.
+    for (_, cores) in &mut groups {
+        cores.retain(|id| *id <= MAX_TRACKED_CPU_ID);
+    }
     let total = groups.len();
     let max_cpu_id = groups
         .iter()
@@ -258,7 +276,9 @@ fn topology_from_labeled_groups(mut groups: Vec<(String, Vec<u32>)>) -> CpuTopol
 
     for (position, (label, cores)) in groups.into_iter().enumerate() {
         for cpu_id in &cores {
-            tier_by_cpu[*cpu_id as usize] = Some(position as u8);
+            if let Some(slot) = tier_by_cpu.get_mut(*cpu_id as usize) {
+                *slot = Some(position as u8);
+            }
         }
         tiers.push(CpuTier {
             label,
