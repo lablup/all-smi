@@ -110,10 +110,11 @@ impl CoreLayout {
             layout.set(index, *level, counts.get(level).copied().unwrap_or(0));
         }
 
-        // One unnamed level can be inferred from its named sibling: base M5
+        // One unassigned level can be inferred from its named sibling: base M5
         // with a missing second name is Super + unnamed (Efficiency), and a
         // legacy chip with a Performance name and an unnamed sibling is
-        // Performance + Efficiency.
+        // Performance + Efficiency. The sibling may carry an unrecognized
+        // name, so look past every assigned level rather than only named ones.
         let inferred_index =
             if layout.levels[SUPER_SLOT].is_some() || layout.levels[PERFORMANCE_SLOT].is_some() {
                 EFFICIENCY_SLOT
@@ -121,13 +122,17 @@ impl CoreLayout {
                 PERFORMANCE_SLOT
             };
 
+        let assigned_levels: Vec<u32> = assigned.iter().map(|(level, _)| *level).collect();
         if layout.levels[inferred_index].is_none()
-            && let Some(level) = counts.keys().find(|level| !names.contains_key(level))
+            && let Some(level) = counts
+                .keys()
+                .copied()
+                .find(|level| !assigned_levels.contains(level))
         {
             layout.set(
                 inferred_index,
-                *level,
-                counts.get(level).copied().unwrap_or(0),
+                level,
+                counts.get(&level).copied().unwrap_or(0),
             );
         }
 
@@ -219,6 +224,12 @@ mod tests {
             layout.l2_cache_key(CoreType::Performance).as_deref(),
             Some("hw.perflevel0.l2cachesize")
         );
+        assert!(layout.has(CoreType::Performance));
+        assert!(layout.has(CoreType::Efficiency));
+        assert!(!layout.has(CoreType::Super));
+        assert!(!layout.has(CoreType::Standard));
+        assert_eq!(layout.count(CoreType::Performance), 8);
+        assert_eq!(layout.count(CoreType::Standard), 0);
     }
 
     #[test]
@@ -242,6 +253,12 @@ mod tests {
             Some("hw.perflevel1.l2cachesize")
         );
         assert_eq!(layout.l2_cache_key(CoreType::Performance), None);
+        assert!(layout.has(CoreType::Super));
+        assert!(layout.has(CoreType::Efficiency));
+        assert!(!layout.has(CoreType::Performance));
+        assert_eq!(layout.count(CoreType::Super), 4);
+        assert_eq!(layout.count(CoreType::Efficiency), 6);
+        assert_eq!(layout.count(CoreType::Performance), 0);
     }
 
     #[test]
@@ -284,6 +301,27 @@ mod tests {
         assert_eq!(layout.performance_cores(), 0);
         assert_eq!(layout.efficiency_cores(), 6);
         assert_eq!(layout.level(CoreType::Efficiency), Some(1));
+    }
+
+    #[test]
+    fn super_with_unrecognized_sibling_is_efficiency() {
+        // A name `tier_from_name` does not know still occupies its level; it
+        // must not block inference of the missing E tier.
+        let layout = layout(
+            "hw.perflevel0.name: Super\n\
+             hw.perflevel0.physicalcpu: 4\n\
+             hw.perflevel1.name: Something\n\
+             hw.perflevel1.physicalcpu: 6\n",
+        );
+
+        assert_eq!(layout.super_cores(), 4);
+        assert_eq!(layout.performance_cores(), 0);
+        assert_eq!(layout.efficiency_cores(), 6);
+        assert_eq!(layout.level(CoreType::Efficiency), Some(1));
+        assert_eq!(
+            layout.l2_cache_key(CoreType::Efficiency).as_deref(),
+            Some("hw.perflevel1.l2cachesize")
+        );
     }
 
     #[test]
