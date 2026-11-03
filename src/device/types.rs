@@ -495,6 +495,70 @@ impl CpuInfo {
             })
             .collect()
     }
+
+    /// Restore the invariant that the tier core counts sum to the number of
+    /// cores carrying a [`CoreUtilization::tier_index`].
+    ///
+    /// A reader can detect host-wide topology while displaying only a subset
+    /// of cores: a quota-only container (`docker run --cpus=4` with no cpuset)
+    /// sees every host tier but emits only `effective_cpu_count` cores, so the
+    /// header would otherwise read `4P+8E` for four displayed cores.
+    ///
+    /// Drop tiers that have no core in `per_core_utilization`, recount every
+    /// remaining tier from the cores actually present, and remap `tier_index`
+    /// so positions stay contiguous. Tiers keep their relative order. Fewer
+    /// than two remaining tiers is homogeneous, so the whole list and every
+    /// index are cleared.
+    pub fn reconcile_cpu_tiers(&mut self) {
+        if self.cpu_tiers.is_empty() {
+            for core in &mut self.per_core_utilization {
+                core.tier_index = None;
+            }
+            return;
+        }
+
+        let tier_count = self.cpu_tiers.len();
+        let mut counts = vec![0u32; tier_count];
+        for core in &mut self.per_core_utilization {
+            match core.tier_index {
+                Some(index) if usize::from(index) < tier_count => {
+                    counts[usize::from(index)] += 1;
+                }
+                Some(_) => core.tier_index = None,
+                None => {}
+            }
+        }
+
+        let kept: Vec<usize> = (0..tier_count)
+            .filter(|&position| counts[position] > 0)
+            .collect();
+        if kept.len() < 2 {
+            self.cpu_tiers.clear();
+            for core in &mut self.per_core_utilization {
+                core.tier_index = None;
+            }
+            return;
+        }
+
+        let total = kept.len();
+        let mut remap = vec![None; tier_count];
+        let mut tiers = Vec::with_capacity(total);
+        for (new_position, &old_position) in kept.iter().enumerate() {
+            remap[old_position] = Some(new_position as u8);
+            let mut tier = self.cpu_tiers[old_position].clone();
+            tier.core_count = counts[old_position];
+            tier.core_type = crate::device::cpu_topology::coarse_core_type(new_position, total);
+            tiers.push(tier);
+        }
+
+        for core in &mut self.per_core_utilization {
+            if let Some(index) = core.tier_index {
+                core.tier_index = remap[usize::from(index)];
+            }
+        }
+
+        self.cpu_tiers = tiers;
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq)]
@@ -1023,5 +1087,190 @@ mod tests {
         let core: CoreUtilization = serde_json::from_str(json).unwrap();
         assert_eq!(core.tier_index, None);
         assert_eq!(core.core_type, CoreType::Performance);
+    }
+
+    fn tier(label: &str, core_count: u32, core_type: CoreType) -> CpuTier {
+        CpuTier {
+            label: label.to_string(),
+            core_type,
+            core_count,
+            utilization: 0.0,
+            frequency_mhz: None,
+            l2_cache_mb: None,
+        }
+    }
+
+    fn core_with_tier(core_id: u32, tier_index: Option<u8>) -> CoreUtilization {
+        CoreUtilization {
+            core_id,
+            core_type: CoreType::Standard,
+            utilization: f64::from(core_id),
+            tier_index,
+        }
+    }
+
+    #[test]
+    fn reconcile_drops_detected_tiers_absent_from_the_displayed_cores() {
+        // Quota-only container: host topology is 2P+8E, but only two P and two
+        // E cores are displayed.
+        let mut cpu = cpu_with(
+            vec![
+                tier("P", 2, CoreType::Performance),
+                tier("E", 8, CoreType::Efficiency),
+            ],
+            vec![
+                core_with_tier(0, Some(0)),
+                core_with_tier(1, Some(0)),
+                core_with_tier(2, Some(1)),
+                core_with_tier(3, Some(1)),
+            ],
+        );
+
+        cpu.reconcile_cpu_tiers();
+
+        assert_eq!(
+            cpu.cpu_tiers
+                .iter()
+                .map(|tier| (tier.label.as_str(), tier.core_count))
+                .collect::<Vec<_>>(),
+            vec![("P", 2), ("E", 2)]
+        );
+        assert_eq!(cpu.cpu_tiers[0].core_type, CoreType::Performance);
+        assert_eq!(cpu.cpu_tiers[1].core_type, CoreType::Efficiency);
+        assert_eq!(
+            cpu.per_core_utilization
+                .iter()
+                .map(|core| core.tier_index)
+                .collect::<Vec<_>>(),
+            vec![Some(0), Some(0), Some(1), Some(1)]
+        );
+    }
+
+    #[test]
+    fn reconcile_clears_a_displayed_subset_with_only_one_tier() {
+        let mut cpu = cpu_with(
+            vec![
+                tier("P", 2, CoreType::Performance),
+                tier("E", 8, CoreType::Efficiency),
+            ],
+            vec![
+                core_with_tier(0, Some(0)),
+                core_with_tier(1, Some(0)),
+                core_with_tier(2, Some(0)),
+            ],
+        );
+
+        cpu.reconcile_cpu_tiers();
+
+        assert!(cpu.cpu_tiers.is_empty());
+        assert!(
+            cpu.per_core_utilization
+                .iter()
+                .all(|core| core.tier_index.is_none())
+        );
+    }
+
+    #[test]
+    fn reconcile_remaps_indices_when_a_middle_tier_is_dropped() {
+        let mut cpu = cpu_with(
+            vec![
+                tier("P", 2, CoreType::Performance),
+                tier("M", 4, CoreType::Efficiency),
+                tier("E", 2, CoreType::Efficiency),
+            ],
+            vec![
+                core_with_tier(0, Some(0)),
+                core_with_tier(1, Some(0)),
+                core_with_tier(2, Some(2)),
+                core_with_tier(3, Some(2)),
+            ],
+        );
+
+        cpu.reconcile_cpu_tiers();
+
+        assert_eq!(
+            cpu.cpu_tiers
+                .iter()
+                .map(|tier| (tier.label.as_str(), tier.core_count))
+                .collect::<Vec<_>>(),
+            vec![("P", 2), ("E", 2)]
+        );
+        assert_eq!(
+            cpu.per_core_utilization
+                .iter()
+                .map(|core| core.tier_index)
+                .collect::<Vec<_>>(),
+            vec![Some(0), Some(0), Some(1), Some(1)]
+        );
+    }
+
+    #[test]
+    fn reconcile_keeps_the_core_count_sum_invariant() {
+        let mut cpu = cpu_with(
+            vec![
+                tier("S", 4, CoreType::Performance),
+                tier("P", 8, CoreType::Efficiency),
+                tier("E", 6, CoreType::Efficiency),
+            ],
+            (0..18)
+                .map(|index| core_with_tier(index, Some((index / 6) as u8)))
+                .collect(),
+        );
+
+        cpu.reconcile_cpu_tiers();
+
+        let counted: u32 = cpu.cpu_tiers.iter().map(|tier| tier.core_count).sum();
+        let assigned = cpu
+            .per_core_utilization
+            .iter()
+            .filter(|core| core.tier_index.is_some())
+            .count() as u32;
+        assert_eq!(counted, assigned);
+        assert_eq!(counted, 18);
+    }
+
+    #[test]
+    fn reconcile_leaves_a_complete_apple_topology_unchanged() {
+        // macOS assigns every core to a tier, so reconciliation must not
+        // change the list (the two-tier UI output depends on it).
+        let tiers = apple(0, 8, 4).to_cpu_tiers();
+        let mut cpu = cpu_with(
+            tiers.clone(),
+            (0..12)
+                .map(|core_id| CoreUtilization {
+                    core_id,
+                    core_type: if core_id < 8 {
+                        CoreType::Performance
+                    } else {
+                        CoreType::Efficiency
+                    },
+                    utilization: 10.0,
+                    tier_index: Some(if core_id < 8 { 0 } else { 1 }),
+                })
+                .collect(),
+        );
+
+        cpu.reconcile_cpu_tiers();
+
+        assert_eq!(cpu.cpu_tiers, tiers);
+        assert_eq!(cpu.per_core_utilization[0].tier_index, Some(0));
+        assert_eq!(cpu.per_core_utilization[11].tier_index, Some(1));
+    }
+
+    #[test]
+    fn reconcile_clears_stray_indices_with_an_empty_tier_list() {
+        let mut cpu = cpu_with(
+            Vec::new(),
+            vec![core_with_tier(0, Some(3)), core_with_tier(1, None)],
+        );
+
+        cpu.reconcile_cpu_tiers();
+
+        assert!(cpu.cpu_tiers.is_empty());
+        assert!(
+            cpu.per_core_utilization
+                .iter()
+                .all(|core| core.tier_index.is_none())
+        );
     }
 }

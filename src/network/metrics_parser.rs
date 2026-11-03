@@ -1244,6 +1244,9 @@ const MAX_CPU_TIERS: usize = 64;
 struct CpuTierParseState {
     /// `(cpu_key, label)` -> tier fields accumulated from the four series.
     tiers: HashMap<(String, String), CpuTier>,
+    /// `cpu_key` -> number of tiers already recorded, so the cap check is O(1)
+    /// instead of a scan of `tiers` per incoming line.
+    tier_counts: HashMap<String, usize>,
     /// `(cpu_key, core_id)` -> `cpu_tier` label from the core line.
     core_labels: HashMap<(String, u32), String>,
 }
@@ -1252,6 +1255,7 @@ impl CpuTierParseState {
     fn new() -> Self {
         Self {
             tiers: HashMap::new(),
+            tier_counts: HashMap::new(),
             core_labels: HashMap::new(),
         }
     }
@@ -1292,10 +1296,11 @@ impl CpuTierParseState {
 
                 let key = (cpu_key.to_string(), label.clone());
                 if !self.tiers.contains_key(&key) {
-                    let count = self.tiers.keys().filter(|(key, _)| key == cpu_key).count();
+                    let count = self.tier_counts.get(cpu_key).copied().unwrap_or(0);
                     if count >= MAX_CPU_TIERS {
                         return;
                     }
+                    *self.tier_counts.entry(cpu_key.to_string()).or_insert(0) += 1;
                     self.tiers.insert(
                         key.clone(),
                         CpuTier {
@@ -1358,15 +1363,28 @@ impl CpuTierParseState {
                 continue;
             }
 
-            tiers.sort_by_key(|tier| tier_rank(&tier.label));
+            tiers.sort_by(|a, b| {
+                tier_rank(&a.label)
+                    .cmp(&tier_rank(&b.label))
+                    .then_with(|| a.label.cmp(&b.label))
+            });
             tiers.truncate(MAX_CPU_TIERS);
             let total = tiers.len();
             for (position, tier) in tiers.iter_mut().enumerate() {
                 tier.core_type = coarse_core_type(position, total);
             }
 
+            // One `core_id -> label` view per CPU instead of cloning the CPU
+            // key for every core lookup.
+            let core_labels: HashMap<u32, &str> = self
+                .core_labels
+                .iter()
+                .filter(|((key, _), _)| key == cpu_key)
+                .map(|((_, core_id), label)| (*core_id, label.as_str()))
+                .collect();
+
             for core in &mut cpu_info.per_core_utilization {
-                if let Some(label) = self.core_labels.get(&(cpu_key.clone(), core.core_id)) {
+                if let Some(label) = core_labels.get(&core.core_id) {
                     core.tier_index = tiers
                         .iter()
                         .position(|tier| &tier.label == label)
@@ -3636,6 +3654,32 @@ all_smi_cpu_core_utilization{{cpu_model=\"ARM\", instance=\"node\", hostname=\"n
             .map(|core| (core.core_id, core.tier_index))
             .collect();
         assert_eq!(by_id, vec![(0, Some(2)), (1, Some(0)), (2, Some(1))]);
+    }
+
+    #[test]
+    fn parser_orders_equal_rank_tiers_deterministically() {
+        // Unknown labels share one rank, so the label tiebreak decides their
+        // order. HashMap iteration order changes per map, so the same scrape
+        // must still resolve to the same sequence every time.
+        let parser = create_test_parser();
+        let re = create_test_regex();
+        let host = "10.0.0.8:9090";
+        let text = format!(
+            "{}\n{}\n{}",
+            tier_series("R", 1, 10.0),
+            tier_series("Q", 1, 20.0),
+            tier_series("P", 2, 30.0),
+        );
+
+        for _ in 0..200 {
+            let parsed = parser.parse_metrics(&text, host, &re);
+            let labels: Vec<&str> = parsed.cpu_info[0]
+                .cpu_tiers
+                .iter()
+                .map(|tier| tier.label.as_str())
+                .collect();
+            assert_eq!(labels, vec!["P", "Q", "R"]);
+        }
     }
 
     #[test]

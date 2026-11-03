@@ -501,6 +501,10 @@ impl AllSmi {
         // when refreshing a previously held [`CpuInfo`].
         for (idx, cpu) in all_cpus.iter_mut().enumerate() {
             cpu.index = idx as u32;
+            // A quota-limited container detects host-wide tiers but displays
+            // only the cores it is allowed to use; recount so the tier header
+            // and the per-core indices describe the same set of cores.
+            cpu.reconcile_cpu_tiers();
         }
         all_cpus
     }

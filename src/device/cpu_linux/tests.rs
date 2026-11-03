@@ -456,3 +456,84 @@ fn empty_and_malformed_sources_never_panic() {
     let topology = super::detect_cpu_tiers(root, None);
     assert!(topology.tiers.is_empty());
 }
+
+#[test]
+fn enumerate_cpu_ids_falls_back_to_the_possible_mask() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    // No `cpuN` directories, only the kernel cpumask.
+    std::fs::create_dir_all(root.join("devices/system/cpu")).unwrap();
+    write_fixture(root, "devices/system/cpu/possible", "0-3,8\n");
+
+    assert_eq!(super::enumerate_cpu_ids(root), vec![0, 1, 2, 3, 8]);
+}
+
+#[test]
+fn an_empty_allowed_set_yields_no_topology() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    for cpu_id in 0..4 {
+        add_cpu(root, cpu_id);
+    }
+    write_fixture(root, "bus/event_source/devices/cpu_core/cpus", "0-1\n");
+    write_fixture(root, "bus/event_source/devices/cpu_atom/cpus", "2-3\n");
+
+    let topology = super::detect_cpu_tiers(root, Some(&[]));
+    assert!(topology.tiers.is_empty());
+    assert!(topology.tier_by_cpu.is_empty());
+}
+
+#[test]
+fn capacity_detection_truncates_to_the_fastest_groups() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    // 70 distinct capacities: cpu0 has the highest, cpu69 the lowest.
+    for cpu_id in 0..70 {
+        add_cpu(root, cpu_id);
+        write_fixture(
+            root,
+            &format!("devices/system/cpu/cpu{cpu_id}/cpu_capacity"),
+            &format!("{}\n", 700 - cpu_id),
+        );
+    }
+
+    let topology = super::detect_cpu_tiers(root, None);
+    assert_eq!(topology.tiers.len(), super::MAX_DETECTED_TIERS);
+    assert_eq!(topology.tiers[0].label, "P");
+    assert_eq!(topology.tiers[1].label, "M");
+    assert_eq!(topology.tiers[2].label, "E");
+    assert_eq!(
+        topology.tiers.last().unwrap().label,
+        format!("E{}", super::MAX_DETECTED_TIERS)
+    );
+    assert_eq!(topology.tier_index_for(0), Some(0));
+    assert_eq!(
+        topology.tier_index_for(63),
+        Some((super::MAX_DETECTED_TIERS - 1) as u8)
+    );
+    assert_eq!(topology.tier_index_for(64), None);
+    assert_eq!(topology.tier_index_for(69), None);
+    assert_counts_match_assignments(&topology);
+}
+
+#[test]
+fn topology_builder_truncates_oversized_group_lists() {
+    let groups: Vec<(String, Vec<u32>)> = (0..70)
+        .map(|position| {
+            (
+                crate::device::cpu_topology::tier_label_for_rank(position),
+                vec![position as u32],
+            )
+        })
+        .collect();
+
+    let topology = super::topology_from_labeled_groups(groups);
+    assert_eq!(topology.tiers.len(), super::MAX_DETECTED_TIERS);
+    assert_eq!(topology.tiers[0].label, "P");
+    assert_eq!(
+        topology.tiers.last().unwrap().label,
+        format!("E{}", super::MAX_DETECTED_TIERS)
+    );
+    assert_eq!(topology.tier_by_cpu.len(), super::MAX_DETECTED_TIERS);
+    assert_counts_match_assignments(&topology);
+}

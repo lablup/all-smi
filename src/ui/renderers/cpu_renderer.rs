@@ -938,6 +938,68 @@ mod tests {
         assert!(output.contains("E-CPU"), "{output}");
     }
 
+    fn make_macos_populated_tiers_cpu(hostname: &str) -> CpuInfo {
+        let mut cpu = make_standard_cpu(hostname, 12);
+        cpu.cpu_tiers = vec![
+            CpuTier {
+                label: "S".to_string(),
+                core_type: CoreType::Performance,
+                core_count: 4,
+                utilization: 45.0,
+                frequency_mhz: Some(4200),
+                l2_cache_mb: Some(16),
+            },
+            CpuTier {
+                label: "P".to_string(),
+                core_type: CoreType::Efficiency,
+                core_count: 6,
+                utilization: 35.0,
+                frequency_mhz: Some(3500),
+                l2_cache_mb: Some(8),
+            },
+            CpuTier {
+                label: "E".to_string(),
+                core_type: CoreType::Efficiency,
+                core_count: 2,
+                utilization: 15.0,
+                frequency_mhz: Some(2800),
+                l2_cache_mb: Some(4),
+            },
+        ];
+        cpu.per_core_utilization = (0..12)
+            .map(|index| CoreUtilization {
+                core_id: index,
+                core_type: CoreType::Standard,
+                utilization: 20.0,
+                tier_index: Some(match index {
+                    0..=3 => 0,
+                    4..=9 => 1,
+                    _ => 2,
+                }),
+            })
+            .collect();
+        cpu
+    }
+
+    #[test]
+    fn populated_macos_tiers_render_every_count_frequency_and_gauge() {
+        let info = make_macos_populated_tiers_cpu("mac-host");
+        assert!(!info.cpu_tiers.is_empty());
+
+        let mut buf: Vec<u8> = Vec::new();
+        print_cpu_info(&mut buf, 0, &info, 140, false, 0, 0, false);
+        let output = String::from_utf8_lossy(&buf);
+
+        assert!(output.contains("4S"), "{output}");
+        assert!(output.contains("6P"), "{output}");
+        assert!(output.contains("2E"), "{output}");
+        assert!(output.contains("4.20GHz+3.50GHz+2.80GHz"), "{output}");
+        assert!(output.contains("16MB+8MB+4MB"), "{output}");
+        assert!(output.contains("S-CPU"), "{output}");
+        assert!(output.contains("P-CPU"), "{output}");
+        assert!(output.contains("E-CPU"), "{output}");
+    }
+
     #[test]
     fn two_tier_frequency_and_cache_formatting_is_unchanged() {
         assert_eq!(format_tier_frequencies(&[4200, 2800]), "4.20+2.80GHz");

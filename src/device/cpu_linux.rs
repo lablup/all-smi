@@ -241,7 +241,12 @@ fn detect_capacity(root: &Path, cpu_ids: &[u32]) -> Option<CpuTopology> {
 }
 
 /// Build a topology from ordered `(label, cpu ids)` groups, fastest first.
-fn topology_from_labeled_groups(groups: Vec<(String, Vec<u32>)>) -> CpuTopology {
+///
+/// The list is capped at [`MAX_DETECTED_TIERS`] so tier positions always fit
+/// a `u8`; callers pass groups already ordered fastest first, so the cap keeps
+/// the fastest ones.
+fn topology_from_labeled_groups(mut groups: Vec<(String, Vec<u32>)>) -> CpuTopology {
+    groups.truncate(MAX_DETECTED_TIERS);
     let total = groups.len();
     let max_cpu_id = groups
         .iter()
