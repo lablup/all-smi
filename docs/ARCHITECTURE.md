@@ -257,7 +257,7 @@ pub trait MetricsExporter: Send + Sync {
 #### macOS
 - `system_profiler` for hardware info
 - `sysctl` for runtime metrics
-- P/E-core detection for Apple Silicon
+- S/P/E-core detection for Apple Silicon from `hw.perflevelN.name`
 
 #### Windows (`src/device/cpu_windows.rs`, `src/device/windows_temp/`)
 - WMI for processor information (MaxClockSpeed, cache sizes, socket count)

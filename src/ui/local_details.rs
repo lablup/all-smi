@@ -299,24 +299,27 @@ fn push_field<W: Write>(
 
 fn format_cpu_cores(info: &CpuInfo) -> String {
     if let Some(apple) = &info.apple_silicon_info {
-        if apple.s_core_count > 0 {
-            format!("{}S+{}P", apple.s_core_count, apple.p_core_count)
-        } else {
-            format!("{}P+{}E", apple.p_core_count, apple.e_core_count)
+        let tiers = apple.core_tiers();
+        if !tiers.is_empty() {
+            return tiers
+                .iter()
+                .map(|tier| format!("{}{}", apple.core_count_of(*tier), tier.short_label()))
+                .collect::<Vec<_>>()
+                .join("+");
         }
-    } else {
-        info.total_cores.to_string()
     }
+    info.total_cores.to_string()
 }
 
 fn format_cpu_frequency(info: &CpuInfo) -> Option<String> {
     if let Some(apple) = &info.apple_silicon_info {
-        let (high, low) = if apple.s_core_count > 0 {
-            (apple.s_cluster_frequency_mhz, apple.p_cluster_frequency_mhz)
-        } else {
-            (apple.p_cluster_frequency_mhz, apple.e_cluster_frequency_mhz)
-        };
-        if let (Some(high), Some(low)) = (high, low) {
+        let tiers = apple.core_tiers();
+        if let (Some(first), Some(second)) = (tiers.first(), tiers.get(1))
+            && let (Some(high), Some(low)) = (
+                apple.cluster_frequency_of(*first),
+                apple.cluster_frequency_of(*second),
+            )
+        {
             return Some(format_frequency_pair(high, low));
         }
     }
@@ -338,12 +341,13 @@ fn format_frequency_pair(high: u32, low: u32) -> String {
 
 fn format_cpu_cache(info: &CpuInfo) -> Option<String> {
     if let Some(apple) = &info.apple_silicon_info {
-        let (high, low) = if apple.s_core_count > 0 {
-            (apple.s_core_l2_cache_mb, apple.p_core_l2_cache_mb)
-        } else {
-            (apple.p_core_l2_cache_mb, apple.e_core_l2_cache_mb)
-        };
-        if let (Some(high), Some(low)) = (high, low) {
+        let tiers = apple.core_tiers();
+        if let (Some(first), Some(second)) = (tiers.first(), tiers.get(1))
+            && let (Some(high), Some(low)) = (
+                apple.core_l2_cache_of(*first),
+                apple.core_l2_cache_of(*second),
+            )
+        {
             return Some(format!("L2 {high}+{low}MB"));
         }
     }
@@ -360,7 +364,7 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
-    use crate::device::{CpuPlatformType, GPU_METRIC_UNAVAILABLE};
+    use crate::device::{AppleSiliconCpuInfo, CpuPlatformType, GPU_METRIC_UNAVAILABLE};
     use crate::ui::text::ansi_display_width;
 
     fn gpu() -> GpuInfo {
@@ -433,6 +437,31 @@ mod tests {
             .collect()
     }
 
+    /// Base M5: Super + Efficiency, no Performance cluster (issue #471).
+    fn base_m5() -> CpuInfo {
+        let mut info = cpu();
+        info.cpu_model = "Apple M5".to_string();
+        info.total_cores = 10;
+        info.max_frequency_mhz = 4200;
+        info.apple_silicon_info = Some(AppleSiliconCpuInfo {
+            s_core_count: 4,
+            p_core_count: 0,
+            e_core_count: 6,
+            gpu_core_count: 10,
+            s_core_utilization: 40.0,
+            p_core_utilization: 0.0,
+            e_core_utilization: 20.0,
+            ane_ops_per_second: None,
+            s_cluster_frequency_mhz: Some(4200),
+            p_cluster_frequency_mhz: None,
+            e_cluster_frequency_mhz: Some(2800),
+            s_core_l2_cache_mb: Some(16),
+            p_core_l2_cache_mb: None,
+            e_core_l2_cache_mb: Some(8),
+        });
+        info
+    }
+
     #[test]
     fn detail_rows_never_exceed_their_width() {
         for width in [20, 40, 80, 120] {
@@ -462,5 +491,45 @@ mod tests {
                 "unexpected {repeated}: {visible}"
             );
         }
+    }
+
+    #[test]
+    fn base_m5_details_use_super_and_efficiency_tiers() {
+        let info = base_m5();
+
+        assert_eq!(format_cpu_cores(&info), "4S+6E");
+        assert_eq!(
+            format_cpu_frequency(&info).as_deref(),
+            Some("4.20GHz+2.80GHz")
+        );
+        assert_eq!(format_cpu_cache(&info).as_deref(), Some("L2 16+8MB"));
+
+        let mut rendered = Vec::new();
+        print_cpu_details(&mut rendered, &info, 160);
+        let visible = String::from_utf8_lossy(&rendered);
+        assert!(visible.contains("4S+6E"), "{visible}");
+        assert!(visible.contains("4.20GHz+2.80GHz"), "{visible}");
+        assert!(visible.contains("L2 16+8MB"), "{visible}");
+    }
+
+    #[test]
+    fn m5_max_details_keep_super_and_performance_tiers() {
+        let mut info = base_m5();
+        let apple = info.apple_silicon_info.as_mut().unwrap();
+        apple.s_core_count = 6;
+        apple.p_core_count = 12;
+        apple.e_core_count = 0;
+        apple.p_cluster_frequency_mhz = Some(4000);
+        apple.e_cluster_frequency_mhz = None;
+        apple.p_core_l2_cache_mb = Some(8);
+        apple.e_core_l2_cache_mb = None;
+        info.total_cores = 18;
+
+        assert_eq!(format_cpu_cores(&info), "6S+12P");
+        assert_eq!(
+            format_cpu_frequency(&info).as_deref(),
+            Some("4.20GHz+4.00GHz")
+        );
+        assert_eq!(format_cpu_cache(&info).as_deref(), Some("L2 16+8MB"));
     }
 }

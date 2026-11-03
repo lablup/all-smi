@@ -454,24 +454,26 @@ fn print_cpu_info() -> Result<()> {
 
         // Per-core utilization
         for core in &cpu.per_core_utilization {
-            let core_type_str = match core.core_type {
-                CoreType::Performance => "P",
-                CoreType::Efficiency => "E",
-                CoreType::Standard => "S",
-            };
             println!("  Core {} ({}): {:.1}%",
-                core.core_id, core_type_str, core.utilization);
+                core.core_id, core.core_type.short_label(), core.utilization);
         }
 
         // Apple Silicon specific
         if let Some(ref apple) = cpu.apple_silicon_info {
             println!("\nApple Silicon Details:");
+            if apple.s_core_count > 0 {
+                println!("  S-cores: {} ({:.1}% util)",
+                    apple.s_core_count, apple.s_core_utilization);
+            }
             println!("  P-cores: {} ({:.1}% util)",
                 apple.p_core_count, apple.p_core_utilization);
             println!("  E-cores: {} ({:.1}% util)",
                 apple.e_core_count, apple.e_core_utilization);
             println!("  GPU Cores: {}", apple.gpu_core_count);
 
+            if let Some(freq) = apple.s_cluster_frequency_mhz {
+                println!("  S-cluster Frequency: {} MHz", freq);
+            }
             if let Some(freq) = apple.p_cluster_frequency_mhz {
                 println!("  P-cluster Frequency: {} MHz", freq);
             }
@@ -711,7 +713,7 @@ fn print_chassis_info() -> Result<()> {
 
 #### Apple Silicon (macOS)
 - GPU/ANE utilization via IOReport
-- Per-core utilization (P-cores/E-cores)
+- Per-core utilization with S, P, and E core tiers
 - Thermal pressure monitoring
 - Unified memory metrics
 
@@ -1199,10 +1201,10 @@ fn main() -> Result<()> {
     let smi = AllSmi::new()?;
 
     for cpu in smi.get_cpu_info() {
-        // Apple Silicon has special info
+        // Apple Silicon has special info: S+P, P+E, or S+E depending on the chip
         if let Some(ref apple) = cpu.apple_silicon_info {
-            println!("P-cores: {}, E-cores: {}",
-                apple.p_core_count, apple.e_core_count);
+            println!("S-cores: {}, P-cores: {}, E-cores: {}",
+                apple.s_core_count, apple.p_core_count, apple.e_core_count);
         }
 
         // Generic info works everywhere

@@ -115,10 +115,22 @@ fn bar_line_count(info: &CpuInfo, strategy: &CollapseStrategy, width: usize) -> 
             let core_count = info.per_core_utilization.len();
             core_count.div_ceil(cores_per_line)
         }
-        // P-cluster bar + E-cluster bar (or S+P on M-series Pro/Max) = 2 lines.
-        CollapseStrategy::PECluster => 2,
+        // One row per present tier: S+P, P+E or S+E is 2 lines, but a layout
+        // with fewer tiers renders fewer rows.
+        CollapseStrategy::PECluster => pe_cluster_line_count(info),
         CollapseStrategy::SocketGroup => info.socket_count.max(1) as usize,
     }
+}
+
+/// Number of cluster rows [`draw_pe_cluster_bars`] emits: the two fastest
+/// present tiers, or fewer when the chip exposes fewer tiers.
+///
+/// The renderer and this height calculation must agree, otherwise the panel
+/// reserves rows it never fills and the content area below it drifts.
+fn pe_cluster_line_count(info: &CpuInfo) -> usize {
+    info.apple_silicon_info
+        .as_ref()
+        .map_or(2, |apple| apple.core_tiers().len().min(2))
 }
 
 /// Calculate the number of terminal rows the Activity panel will consume.
@@ -353,16 +365,17 @@ fn draw_panel_top_border<W: Write>(
         CollapseStrategy::PECluster => {
             if let Some(apple) = info.apple_silicon_info.as_ref() {
                 let avg = average_utilization(&info.per_core_utilization);
-                if apple.s_core_count > 0 {
-                    format!(
-                        "CPU Cores ({}S+{}P, {avg:.1}% avg)",
-                        apple.s_core_count, apple.p_core_count,
-                    )
+                let tiers = apple.core_tiers();
+                if tiers.is_empty() {
+                    let core_count = info.per_core_utilization.len();
+                    format!("CPU Cores ({core_count} cores, {avg:.1}% avg)")
                 } else {
-                    format!(
-                        "CPU Cores ({}P+{}E, {avg:.1}% avg)",
-                        apple.p_core_count, apple.e_core_count,
-                    )
+                    let summary = tiers
+                        .iter()
+                        .map(|tier| format!("{}{}", apple.core_count_of(*tier), tier.short_label()))
+                        .collect::<Vec<_>>()
+                        .join("+");
+                    format!("CPU Cores ({summary}, {avg:.1}% avg)")
                 }
             } else {
                 let core_count = info.per_core_utilization.len();
@@ -553,75 +566,43 @@ fn draw_pe_cluster_bars<W: Write>(
 
     let content_width = panel_width.saturating_sub(4);
 
-    // Collect per-core utilization blocks for each cluster
-    let s_cores: Vec<&CoreUtilization> = info
-        .per_core_utilization
+    let cores_for = |tier: CoreType| -> Vec<&CoreUtilization> {
+        info.per_core_utilization
+            .iter()
+            .filter(|core| core.core_type == tier)
+            .collect()
+    };
+
+    // Render the two fastest present tiers: S+P, P+E or S+E. One shared bar
+    // width keeps the gauges ending at the same column.
+    let shown: Vec<(CoreType, Vec<&CoreUtilization>)> = apple
+        .core_tiers()
         .iter()
-        .filter(|c| c.core_type == CoreType::Super)
-        .collect();
-    let p_cores: Vec<&CoreUtilization> = info
-        .per_core_utilization
-        .iter()
-        .filter(|c| c.core_type == CoreType::Performance)
-        .collect();
-    let e_cores: Vec<&CoreUtilization> = info
-        .per_core_utilization
-        .iter()
-        .filter(|c| c.core_type == CoreType::Efficiency)
+        .take(2)
+        .map(|tier| (*tier, cores_for(*tier)))
         .collect();
 
-    if apple.s_core_count > 0 {
-        // M5 Pro/Max: S-CPU + P-CPU gauges
-        let shared_block_width =
-            bounded_block_width(s_cores.len().max(p_cores.len()), content_width);
-        let shared_bar_width = content_width.saturating_sub(shared_block_width + 1);
+    if shown.is_empty() {
+        return;
+    }
 
-        // S-cluster line: bar + utilization blocks
+    let shared_block_width = bounded_block_width(
+        shown
+            .iter()
+            .map(|(_, cores)| cores.len())
+            .max()
+            .unwrap_or(0),
+        content_width,
+    );
+    let shared_bar_width = content_width.saturating_sub(shared_block_width + 1);
+
+    for (tier, cores) in &shown {
+        let label = format!("{}-CPU", tier.short_label());
         draw_cluster_line(
             stdout,
-            "S-CPU",
-            apple.s_core_utilization,
-            &s_cores,
-            shared_bar_width,
-            shared_block_width,
-            panel_width,
-        );
-
-        // P-cluster line: bar + utilization blocks
-        draw_cluster_line(
-            stdout,
-            "P-CPU",
-            apple.p_core_utilization,
-            &p_cores,
-            shared_bar_width,
-            shared_block_width,
-            panel_width,
-        );
-    } else {
-        // M1-M4: P-CPU + E-CPU gauges
-        // Compute one shared bar_width using the larger block section so that
-        // P-CPU and E-CPU gauges end at the same column.
-        let shared_block_width =
-            bounded_block_width(p_cores.len().max(e_cores.len()), content_width);
-        let shared_bar_width = content_width.saturating_sub(shared_block_width + 1);
-
-        // P-cluster line: bar + utilization blocks
-        draw_cluster_line(
-            stdout,
-            "P-CPU",
-            apple.p_core_utilization,
-            &p_cores,
-            shared_bar_width,
-            shared_block_width,
-            panel_width,
-        );
-
-        // E-cluster line: bar + utilization blocks
-        draw_cluster_line(
-            stdout,
-            "E-CPU",
-            apple.e_core_utilization,
-            &e_cores,
+            &label,
+            apple.core_utilization_of(*tier),
+            cores,
             shared_bar_width,
             shared_block_width,
             panel_width,
@@ -871,6 +852,59 @@ mod tests {
         }
     }
 
+    /// Base M5: Super + Efficiency, no Performance cluster (issue #471).
+    fn make_base_m5_cpu() -> CpuInfo {
+        let mut cpu = make_apple_silicon_cpu(0, 6);
+        cpu.cpu_model = "Apple M5".to_string();
+        cpu.total_cores = 10;
+        cpu.total_threads = 10;
+        cpu.per_core_utilization = (0..4)
+            .map(|i| CoreUtilization {
+                core_id: i,
+                core_type: CoreType::Super,
+                utilization: 50.0 + i as f64 * 5.0,
+            })
+            .chain((4..10).map(|i| CoreUtilization {
+                core_id: i,
+                core_type: CoreType::Efficiency,
+                utilization: 20.0,
+            }))
+            .collect();
+
+        let apple = cpu.apple_silicon_info.as_mut().unwrap();
+        apple.s_core_count = 4;
+        apple.p_core_count = 0;
+        apple.e_core_count = 6;
+        apple.s_core_utilization = 55.0;
+        apple.p_core_utilization = 0.0;
+        apple.e_core_utilization = 25.0;
+        apple.s_cluster_frequency_mhz = Some(4200);
+        apple.p_cluster_frequency_mhz = None;
+        apple.e_cluster_frequency_mhz = Some(2800);
+        apple.s_core_l2_cache_mb = Some(16);
+        apple.p_core_l2_cache_mb = None;
+        apple.e_core_l2_cache_mb = Some(8);
+        cpu
+    }
+
+    #[test]
+    fn test_pe_cluster_base_m5_shows_super_and_efficiency() {
+        let cpu = make_base_m5_cpu();
+
+        let mut title = Vec::new();
+        draw_panel_top_border(&mut title, 60, &CollapseStrategy::PECluster, &cpu);
+        let title = String::from_utf8(title).unwrap();
+        assert!(title.contains("4S+6E"), "{title}");
+        assert!(!title.contains("6P"), "{title}");
+
+        let mut bars = Vec::new();
+        draw_pe_cluster_bars(&mut bars, &cpu, 60, 120);
+        let bars = String::from_utf8(bars).unwrap();
+        assert!(bars.contains("S-CPU"), "{bars}");
+        assert!(bars.contains("E-CPU"), "{bars}");
+        assert!(!bars.contains("P-CPU"), "{bars}");
+    }
+
     #[test]
     fn test_strategy_individual_small_core_count() {
         let cpu = make_standard_cpu(8);
@@ -1022,6 +1056,28 @@ mod tests {
             let expected = panel_height(&cpu, 120, rows) as usize;
             let actual = cpu_rendered_lines(&cpu, &history, 120, rows);
             assert_eq!(actual, expected, "pe-cluster mismatch at rows={rows}");
+        }
+    }
+
+    #[test]
+    fn test_render_line_count_matches_height_pe_cluster_partial_tiers() {
+        // A layout with one tier (or none) must reserve exactly the rows the
+        // renderer emits; `draw_pe_cluster_bars` draws one line per present
+        // tier, not a fixed two.
+        let history = ramp_history(40);
+        let single_tier = vec![make_apple_silicon_cpu(24, 0)];
+        let mut no_tiers = make_apple_silicon_cpu(24, 0);
+        if let Some(apple) = no_tiers.apple_silicon_info.as_mut() {
+            apple.p_core_count = 0;
+            apple.e_core_count = 0;
+            apple.s_core_count = 0;
+        }
+        for cpu in [single_tier, vec![no_tiers]] {
+            for &rows in &[SHORT_ROWS, TALL_ROWS] {
+                let expected = panel_height(&cpu, 120, rows) as usize;
+                let actual = cpu_rendered_lines(&cpu, &history, 120, rows);
+                assert_eq!(actual, expected, "partial-tier mismatch at rows={rows}");
+            }
         }
     }
 

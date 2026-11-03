@@ -276,38 +276,32 @@ pub fn print_cpu_info<W: Write>(
     // Show S/P/E-Core counts for Apple Silicon, regular core count for others
     if let Some(apple_info) = &info.apple_silicon_info {
         print_colored_text(stdout, " Cores:", Color::Green, None, None);
-        if apple_info.s_core_count > 0 {
-            // M5 Pro/Max: Super + Performance
+        let tiers = apple_info.core_tiers();
+        if tiers.is_empty() {
             print_colored_text(
                 stdout,
-                &format!("{:>2}S+", apple_info.s_core_count),
-                Color::White,
-                None,
-                None,
-            );
-            print_colored_text(
-                stdout,
-                &format!("{:>2}P", apple_info.p_core_count),
+                &format!("{:>2}", info.total_cores),
                 Color::White,
                 None,
                 None,
             );
         } else {
-            // M1-M4: Performance + Efficiency
-            print_colored_text(
-                stdout,
-                &format!("{:>2}P+", apple_info.p_core_count),
-                Color::White,
-                None,
-                None,
-            );
-            print_colored_text(
-                stdout,
-                &format!("{:>2}E", apple_info.e_core_count),
-                Color::White,
-                None,
-                None,
-            );
+            for (index, tier) in tiers.iter().enumerate() {
+                if index > 0 {
+                    print_colored_text(stdout, "+", Color::White, None, None);
+                }
+                print_colored_text(
+                    stdout,
+                    &format!(
+                        "{:>2}{}",
+                        apple_info.core_count_of(*tier),
+                        tier.short_label()
+                    ),
+                    Color::White,
+                    None,
+                    None,
+                );
+            }
         }
     } else {
         print_colored_text(stdout, " Cores:", Color::Green, None, None);
@@ -323,20 +317,14 @@ pub fn print_cpu_info<W: Write>(
     // Display frequency - S+P or P+E format for Apple Silicon, regular for others
     print_colored_text(stdout, " Freq:", Color::Magenta, None, None);
     if let Some(apple_info) = &info.apple_silicon_info {
-        // Determine which two frequency tiers to display
-        let (high_freq, low_freq) = if apple_info.s_core_count > 0 {
-            // M5 Pro/Max: S-cluster + P-cluster
-            (
-                apple_info.s_cluster_frequency_mhz,
-                apple_info.p_cluster_frequency_mhz,
-            )
-        } else {
-            // M1-M4: P-cluster + E-cluster
-            (
-                apple_info.p_cluster_frequency_mhz,
-                apple_info.e_cluster_frequency_mhz,
-            )
-        };
+        // The two fastest present tiers: S+P, P+E or S+E.
+        let tiers = apple_info.core_tiers();
+        let high_freq = tiers
+            .first()
+            .and_then(|tier| apple_info.cluster_frequency_of(*tier));
+        let low_freq = tiers
+            .get(1)
+            .and_then(|tier| apple_info.cluster_frequency_of(*tier));
 
         if let (Some(hi), Some(lo)) = (high_freq, low_freq) {
             let freq_display = if hi >= 1000 && lo >= 1000 {
@@ -385,14 +373,14 @@ pub fn print_cpu_info<W: Write>(
 
     // Display cache based on platform type
     if let Some(apple_info) = &info.apple_silicon_info {
-        // Determine which cache tiers to display
-        let (high_cache, low_cache) = if apple_info.s_core_count > 0 {
-            // M5 Pro/Max: S-cache + P-cache
-            (apple_info.s_core_l2_cache_mb, apple_info.p_core_l2_cache_mb)
-        } else {
-            // M1-M4: P-cache + E-cache
-            (apple_info.p_core_l2_cache_mb, apple_info.e_core_l2_cache_mb)
-        };
+        // The two fastest present tiers: S+P, P+E or S+E.
+        let tiers = apple_info.core_tiers();
+        let high_cache = tiers
+            .first()
+            .and_then(|tier| apple_info.core_l2_cache_of(*tier));
+        let low_cache = tiers
+            .get(1)
+            .and_then(|tier| apple_info.core_l2_cache_of(*tier));
 
         if let (Some(hi_cache), Some(lo_cache)) = (high_cache, low_cache) {
             // Apple Silicon: Display L2 cache as two-tier format
@@ -450,42 +438,15 @@ pub fn print_cpu_info<W: Write>(
 
         print_colored_text(stdout, "     ", Color::White, None, None); // 5 char left padding
 
-        if apple_info.s_core_count > 0 {
-            // M5 Pro/Max: S-CPU + P-CPU gauges
+        for (index, tier) in apple_info.core_tiers().iter().take(2).enumerate() {
+            if index > 0 {
+                print_colored_text(stdout, "  ", Color::White, None, None);
+            }
+            let label = format!("{}-CPU", tier.short_label());
             draw_bar(
                 stdout,
-                "S-CPU",
-                apple_info.s_core_utilization,
-                100.0,
-                gauge_width,
-                None,
-            );
-            print_colored_text(stdout, "  ", Color::White, None, None);
-
-            draw_bar(
-                stdout,
-                "P-CPU",
-                apple_info.p_core_utilization,
-                100.0,
-                gauge_width,
-                None,
-            );
-        } else {
-            // M1-M4: P-CPU + E-CPU gauges
-            draw_bar(
-                stdout,
-                "P-CPU",
-                apple_info.p_core_utilization,
-                100.0,
-                gauge_width,
-                None,
-            );
-            print_colored_text(stdout, "  ", Color::White, None, None);
-
-            draw_bar(
-                stdout,
-                "E-CPU",
-                apple_info.e_core_utilization,
+                &label,
+                apple_info.core_utilization_of(*tier),
                 100.0,
                 gauge_width,
                 None,
@@ -782,6 +743,77 @@ mod tests {
             per_core_utilization: per_core,
             time: String::new(),
         }
+    }
+
+    fn make_base_m5_cpu(hostname: &str) -> CpuInfo {
+        let mut per_core = Vec::new();
+        for i in 0..4 {
+            per_core.push(CoreUtilization {
+                core_id: i as u32,
+                core_type: CoreType::Super,
+                utilization: 40.0 + i as f64 * 5.0,
+            });
+        }
+        for i in 0..6 {
+            per_core.push(CoreUtilization {
+                core_id: (4 + i) as u32,
+                core_type: CoreType::Efficiency,
+                utilization: 20.0 + i as f64 * 5.0,
+            });
+        }
+        CpuInfo {
+            index: 0,
+            host_id: "localhost".to_string(),
+            hostname: hostname.to_string(),
+            instance: String::new(),
+            cpu_model: "Apple M5".to_string(),
+            architecture: "arm64".to_string(),
+            platform_type: CpuPlatformType::AppleSilicon,
+            socket_count: 1,
+            total_cores: 10,
+            total_threads: 10,
+            base_frequency_mhz: 4200,
+            max_frequency_mhz: 4200,
+            cache_size_mb: 24,
+            utilization: 35.0,
+            temperature: None,
+            power_consumption: None,
+            per_socket_info: Vec::new(),
+            apple_silicon_info: Some(AppleSiliconCpuInfo {
+                s_core_count: 4,
+                p_core_count: 0,
+                e_core_count: 6,
+                gpu_core_count: 10,
+                s_core_utilization: 45.0,
+                p_core_utilization: 0.0,
+                e_core_utilization: 25.0,
+                ane_ops_per_second: None,
+                s_cluster_frequency_mhz: Some(4200),
+                p_cluster_frequency_mhz: None,
+                e_cluster_frequency_mhz: Some(2800),
+                s_core_l2_cache_mb: Some(16),
+                p_core_l2_cache_mb: None,
+                e_core_l2_cache_mb: Some(8),
+            }),
+            per_core_utilization: per_core,
+            time: String::new(),
+        }
+    }
+
+    #[test]
+    fn test_print_cpu_info_base_m5_uses_super_and_efficiency() {
+        let info = make_base_m5_cpu("mac-host");
+        let mut buf: Vec<u8> = Vec::new();
+        print_cpu_info(&mut buf, 0, &info, 120, false, 0, 0, false);
+        let output = String::from_utf8_lossy(&buf);
+
+        assert!(output.contains("4S"), "{output}");
+        assert!(output.contains("6E"), "{output}");
+        assert!(output.contains("4.20+2.80GHz"), "{output}");
+        assert!(output.contains("16MB+8MB"), "{output}");
+        assert!(output.contains("S-CPU"), "{output}");
+        assert!(output.contains("E-CPU"), "{output}");
+        assert!(!output.contains("P-CPU"), "{output}");
     }
 
     #[test]
