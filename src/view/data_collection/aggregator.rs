@@ -437,6 +437,7 @@ mod tests {
             power_consumption: None,
             per_socket_info: Vec::new(),
             apple_silicon_info: None,
+            cpu_tiers: Vec::new(),
             per_core_utilization: Vec::new(),
             time: String::new(),
         }

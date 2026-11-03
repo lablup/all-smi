@@ -79,7 +79,12 @@ fn hwmon_power_watts(value: u32) -> f64 {
 }
 
 /// Pick the reported temperature from the edge sensor, falling back to the
-/// junction (hotspot) sensor only when no edge reading exists at all.
+/// junction (hotspot) sensor only when neither source exposes an edge sensor
+/// at all.
+///
+/// The test is sensor presence, not a usable reading: a card that has an edge
+/// sensor reporting 0 keeps that 0 rather than silently substituting the
+/// junction value.
 ///
 /// Instinct MI300-series boards expose no edge sensor, neither in
 /// `gpu_metrics` nor in hwmon (only `temp2` junction and `temp3` mem), so
