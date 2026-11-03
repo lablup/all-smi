@@ -852,6 +852,59 @@ mod tests {
         }
     }
 
+    /// Base M5: Super + Efficiency, no Performance cluster (issue #471).
+    fn make_base_m5_cpu() -> CpuInfo {
+        let mut cpu = make_apple_silicon_cpu(0, 6);
+        cpu.cpu_model = "Apple M5".to_string();
+        cpu.total_cores = 10;
+        cpu.total_threads = 10;
+        cpu.per_core_utilization = (0..4)
+            .map(|i| CoreUtilization {
+                core_id: i,
+                core_type: CoreType::Super,
+                utilization: 50.0 + i as f64 * 5.0,
+            })
+            .chain((4..10).map(|i| CoreUtilization {
+                core_id: i,
+                core_type: CoreType::Efficiency,
+                utilization: 20.0,
+            }))
+            .collect();
+
+        let apple = cpu.apple_silicon_info.as_mut().unwrap();
+        apple.s_core_count = 4;
+        apple.p_core_count = 0;
+        apple.e_core_count = 6;
+        apple.s_core_utilization = 55.0;
+        apple.p_core_utilization = 0.0;
+        apple.e_core_utilization = 25.0;
+        apple.s_cluster_frequency_mhz = Some(4200);
+        apple.p_cluster_frequency_mhz = None;
+        apple.e_cluster_frequency_mhz = Some(2800);
+        apple.s_core_l2_cache_mb = Some(16);
+        apple.p_core_l2_cache_mb = None;
+        apple.e_core_l2_cache_mb = Some(8);
+        cpu
+    }
+
+    #[test]
+    fn test_pe_cluster_base_m5_shows_super_and_efficiency() {
+        let cpu = make_base_m5_cpu();
+
+        let mut title = Vec::new();
+        draw_panel_top_border(&mut title, 60, &CollapseStrategy::PECluster, &cpu);
+        let title = String::from_utf8(title).unwrap();
+        assert!(title.contains("4S+6E"), "{title}");
+        assert!(!title.contains("6P"), "{title}");
+
+        let mut bars = Vec::new();
+        draw_pe_cluster_bars(&mut bars, &cpu, 60, 120);
+        let bars = String::from_utf8(bars).unwrap();
+        assert!(bars.contains("S-CPU"), "{bars}");
+        assert!(bars.contains("E-CPU"), "{bars}");
+        assert!(!bars.contains("P-CPU"), "{bars}");
+    }
+
     #[test]
     fn test_strategy_individual_small_core_count() {
         let cpu = make_standard_cpu(8);

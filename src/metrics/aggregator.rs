@@ -267,7 +267,71 @@ pub struct HostMetrics {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::device::{AppleSiliconCpuInfo, CpuPlatformType};
     use std::collections::HashMap;
+
+    fn apple_cpu(s: u32, p: u32, e: u32) -> CpuInfo {
+        CpuInfo {
+            index: 0,
+            host_id: "localhost".to_string(),
+            hostname: "localhost".to_string(),
+            instance: String::new(),
+            cpu_model: "Apple M5".to_string(),
+            architecture: "arm64".to_string(),
+            platform_type: CpuPlatformType::AppleSilicon,
+            socket_count: 1,
+            total_cores: s + p + e,
+            total_threads: s + p + e,
+            base_frequency_mhz: 0,
+            max_frequency_mhz: 4200,
+            cache_size_mb: 0,
+            utilization: 10.0,
+            temperature: None,
+            power_consumption: None,
+            per_socket_info: Vec::new(),
+            apple_silicon_info: Some(AppleSiliconCpuInfo {
+                s_core_count: s,
+                p_core_count: p,
+                e_core_count: e,
+                gpu_core_count: 10,
+                s_core_utilization: 40.0,
+                p_core_utilization: 0.0,
+                e_core_utilization: 20.0,
+                ane_ops_per_second: None,
+                s_cluster_frequency_mhz: Some(4200),
+                p_cluster_frequency_mhz: None,
+                e_cluster_frequency_mhz: Some(2800),
+                s_core_l2_cache_mb: Some(16),
+                p_core_l2_cache_mb: None,
+                e_core_l2_cache_mb: Some(8),
+            }),
+            per_core_utilization: Vec::new(),
+            time: String::new(),
+        }
+    }
+
+    /// Every Apple Silicon tier is a physical core. The old P+E sum dropped
+    /// the Super cluster, so M5 Pro/Max reported 12 and base M5 reported 6.
+    #[test]
+    fn test_aggregate_cpu_cores_include_super_tier() {
+        let base_m5 = vec![apple_cpu(4, 0, 6)];
+        assert_eq!(
+            MetricsAggregator::aggregate_cpu_metrics(&base_m5).total_cores,
+            10
+        );
+
+        let m5_max = vec![apple_cpu(6, 12, 0)];
+        assert_eq!(
+            MetricsAggregator::aggregate_cpu_metrics(&m5_max).total_cores,
+            18
+        );
+
+        let m1 = vec![apple_cpu(0, 8, 4)];
+        assert_eq!(
+            MetricsAggregator::aggregate_cpu_metrics(&m1).total_cores,
+            12
+        );
+    }
 
     fn create_test_gpu() -> GpuInfo {
         GpuInfo {

@@ -373,8 +373,96 @@ fn print_dashboard_row<W: Write>(
 mod tests {
     use super::*;
     use crate::app_state::{AppState, ConnectionStatus};
-    use crate::device::GpuInfo;
+    use crate::device::{AppleSiliconCpuInfo, CpuPlatformType, GpuInfo};
     use std::collections::HashMap;
+
+    fn make_apple_silicon_cpu(s: u32, p: u32, e: u32) -> crate::device::CpuInfo {
+        crate::device::CpuInfo {
+            index: 0,
+            host_id: "localhost".to_string(),
+            hostname: "localhost".to_string(),
+            instance: String::new(),
+            cpu_model: "Apple M5".to_string(),
+            architecture: "arm64".to_string(),
+            platform_type: CpuPlatformType::AppleSilicon,
+            socket_count: 1,
+            total_cores: s + p + e,
+            total_threads: s + p + e,
+            base_frequency_mhz: 0,
+            max_frequency_mhz: 4200,
+            cache_size_mb: 0,
+            utilization: 10.0,
+            temperature: None,
+            power_consumption: None,
+            per_socket_info: Vec::new(),
+            apple_silicon_info: Some(AppleSiliconCpuInfo {
+                s_core_count: s,
+                p_core_count: p,
+                e_core_count: e,
+                gpu_core_count: 10,
+                s_core_utilization: 40.0,
+                p_core_utilization: 0.0,
+                e_core_utilization: 20.0,
+                ane_ops_per_second: None,
+                s_cluster_frequency_mhz: Some(4200),
+                p_cluster_frequency_mhz: None,
+                e_cluster_frequency_mhz: Some(2800),
+                s_core_l2_cache_mb: Some(16),
+                p_core_l2_cache_mb: None,
+                e_core_l2_cache_mb: Some(8),
+            }),
+            per_core_utilization: Vec::new(),
+            time: String::new(),
+        }
+    }
+
+    fn strip_ansi(s: &str) -> String {
+        let mut out = String::with_capacity(s.len());
+        let mut in_escape = false;
+        for c in s.chars() {
+            if in_escape {
+                if c == 'm' {
+                    in_escape = false;
+                }
+            } else if c == '\u{1b}' {
+                in_escape = true;
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    }
+
+    /// Read the value printed in the `CPU Cores` dashboard cell.
+    fn cpu_cores_cell(state: &AppState) -> String {
+        let rendered = strip_ansi(&render_system_view(state));
+        let lines: Vec<&str> = rendered.split("\r\n").collect();
+        let label_row = lines
+            .iter()
+            .position(|line| line.contains("CPU Cores"))
+            .expect("CPU Cores label row");
+        lines[label_row + 1]
+            .split('│')
+            .map(str::trim)
+            .nth(1)
+            .expect("CPU Cores value cell")
+            .to_string()
+    }
+
+    /// The host summary counts every physical core. The old P+E sum dropped
+    /// the Super cluster on M5 Pro/Max and base M5.
+    #[test]
+    fn cpu_cores_include_super_tier() {
+        let mut state = make_local_state();
+        state.cpu_info.push(make_apple_silicon_cpu(4, 0, 6));
+        assert_eq!(cpu_cores_cell(&state), "10");
+
+        state.cpu_info[0] = make_apple_silicon_cpu(6, 12, 0);
+        assert_eq!(cpu_cores_cell(&state), "18");
+
+        state.cpu_info[0] = make_apple_silicon_cpu(0, 8, 4);
+        assert_eq!(cpu_cores_cell(&state), "12");
+    }
 
     fn make_local_state() -> AppState {
         let mut state = AppState::new();
