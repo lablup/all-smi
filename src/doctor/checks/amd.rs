@@ -486,18 +486,10 @@ fn check_adl_sensors(_ctx: &CheckCtx) -> CheckResult {
 fn check_rocm(_ctx: &CheckCtx) -> CheckResult {
     #[cfg(target_os = "linux")]
     {
-        // Check canonical install locations first.
-        for path in &[
-            "/opt/rocm/.info/version",
-            "/opt/rocm/.info/version-dev",
-            "/opt/rocm/lib/rocm-release-info/version",
-        ] {
-            if let Ok(s) = std::fs::read_to_string(path) {
-                let v = s.trim();
-                if !v.is_empty() {
-                    return CheckResult::Pass(format!("ROCm {v} ({path})"));
-                }
-            }
+        // librocm-core's getROCmVersion() (what `amd-smi version` reports),
+        // then the legacy and ROCm 7.x `core-*` version files.
+        if let Some(rocm) = crate::device::readers::amd_rocm::detect_rocm_version() {
+            return CheckResult::Pass(format!("ROCm {} ({})", rocm.version, rocm.source));
         }
         // Fall back to `rocminfo`.
         if let Some(out) = try_exec("rocminfo", &[], Duration::from_millis(2_500))
