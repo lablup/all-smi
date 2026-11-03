@@ -151,7 +151,7 @@ impl WindowsCpuReader {
         system.refresh_cpu_specifics(CpuRefreshKind::everything());
         std::thread::sleep(std::time::Duration::from_millis(100));
         system.refresh_cpu_specifics(CpuRefreshKind::everything());
-        let processor_identifiers = (0..system.cpus().len())
+        let processor_identifiers: Vec<Option<String>> = (0..system.cpus().len())
             .map(read_processor_identifier)
             .collect();
         let tier_topology = tier_topology_from_identifiers(&processor_identifiers);
