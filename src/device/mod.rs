@@ -19,11 +19,20 @@ pub use readers::nvidia::get_nvml_status_message;
 #[cfg(target_os = "linux")]
 pub use readers::tenstorrent::get_tenstorrent_status_message;
 
+// N-tier CPU topology helpers (issue #473). Pure parsing and aggregation, so
+// it is compiled on every target: the remote metrics parser uses it on macOS
+// and Windows too.
+pub mod cpu_topology;
+
 // CPU reader modules
 #[cfg(target_os = "linux")]
 pub mod cpu_linux;
 #[cfg(target_os = "macos")]
 pub mod cpu_macos;
+// Apple Silicon perflevel topology (issue #471). Pure parsing, so it is
+// compiled under `test` everywhere to reach the Linux test runner.
+#[cfg(any(target_os = "macos", test))]
+pub mod apple_core_layout;
 #[cfg(target_os = "macos")]
 pub mod cpu_macos_intel;
 #[cfg(target_os = "windows")]

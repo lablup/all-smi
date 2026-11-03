@@ -52,7 +52,7 @@ struct Harness {
 impl Harness {
     fn new() -> Self {
         Self {
-            system: System::new(),
+            system: System::new().unwrap(),
             sampler: ProcessSampler::new(),
             cache: HashMap::new(),
         }
@@ -181,7 +181,7 @@ fn sampler_matches_sysinfo_for_the_same_instant() {
     };
     let child_pid = child.pid();
     let own_pid = std::process::id();
-    let mut system = System::new();
+    let mut system = System::new().unwrap();
     let mut sampler = ProcessSampler::new();
 
     // Let the child finish loading, so its memory is not still moving
@@ -200,7 +200,7 @@ fn sampler_matches_sysinfo_for_the_same_instant() {
     let samples = sampler.sample([child_pid, own_pid]);
     // A second sysinfo read brackets the sample: when sysinfo's own memory
     // reading did not move across the sample, the sampler's must equal it.
-    let mut after = System::new();
+    let mut after = System::new().unwrap();
     after.refresh_processes_specifics(ProcessesToUpdate::All, true, refresh_kind());
 
     for (index, pid) in [child_pid, own_pid].into_iter().enumerate() {
@@ -333,7 +333,7 @@ fn sysinfo_inflates_untracked_processes_on_a_full_refresh() {
         return;
     };
     let pid = Pid::from_u32(busy.pid());
-    let mut system = System::new();
+    let mut system = System::new().unwrap();
     let reading = |system: &System| system.process(pid).map(|p| p.cpu_usage()).unwrap_or(-1.0);
 
     system.refresh_processes_specifics(ProcessesToUpdate::All, true, refresh_kind());
@@ -377,7 +377,7 @@ fn sysinfo_inflates_untracked_processes_on_a_full_refresh() {
 #[test]
 #[ignore = "hardware A/B against sysinfo; run with --ignored --nocapture"]
 fn sampler_matches_sysinfo_across_the_process_table() {
-    let mut system = System::new();
+    let mut system = System::new().unwrap();
     let mut sampler = ProcessSampler::new();
     system.refresh_processes_specifics(ProcessesToUpdate::All, true, refresh_kind());
     let _ = sampler.sample(system.processes().keys().map(|pid| pid.as_u32()));

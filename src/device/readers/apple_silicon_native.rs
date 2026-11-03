@@ -37,7 +37,6 @@ use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, Ordering},
 };
-use sysinfo::System;
 
 // Cache GPU info to avoid expensive system_profiler calls on every initialization
 static CACHED_GPU_INFO: Lazy<Mutex<Option<DeviceStaticInfo>>> = Lazy::new(|| Mutex::new(None));
@@ -442,7 +441,7 @@ fn parse_ioreg_gpu_cores(output_str: &str) -> Option<u32> {
 // Use a cached System instance for memory info to avoid creating new instances on every call
 // Total memory is static so we only need to fetch it once
 static CACHED_TOTAL_MEMORY: Lazy<u64> = Lazy::new(|| {
-    let mut system = System::new();
+    let mut system = crate::utils::system::new_system();
     system.refresh_memory();
     system.total_memory()
 });

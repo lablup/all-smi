@@ -321,54 +321,68 @@ fn format_gpu_vram(info: &GpuInfo) -> Option<String> {
 }
 
 fn format_cpu_cores(info: &CpuInfo) -> String {
-    if let Some(apple) = &info.apple_silicon_info {
-        if apple.s_core_count > 0 {
-            format!("{}S+{}P", apple.s_core_count, apple.p_core_count)
-        } else {
-            format!("{}P+{}E", apple.p_core_count, apple.e_core_count)
-        }
-    } else {
-        info.total_cores.to_string()
+    let tiers = info.display_cpu_tiers();
+    if !tiers.is_empty() {
+        return tiers
+            .iter()
+            .map(|tier| format!("{}{}", tier.core_count, tier.label))
+            .collect::<Vec<_>>()
+            .join("+");
     }
+    info.total_cores.to_string()
 }
 
 fn format_cpu_frequency(info: &CpuInfo) -> Option<String> {
-    if let Some(apple) = &info.apple_silicon_info {
-        let (high, low) = if apple.s_core_count > 0 {
-            (apple.s_cluster_frequency_mhz, apple.p_cluster_frequency_mhz)
-        } else {
-            (apple.p_cluster_frequency_mhz, apple.e_cluster_frequency_mhz)
-        };
-        if let (Some(high), Some(low)) = (high, low) {
-            return Some(format_frequency_pair(high, low));
-        }
+    let tiers = info.display_cpu_tiers();
+    let values: Vec<u32> = tiers.iter().filter_map(|tier| tier.frequency_mhz).collect();
+
+    if values.len() == 2 {
+        return Some(format_frequency_pair(values[0], values[1]));
+    }
+    if values.len() > 2 {
+        return Some(
+            values
+                .iter()
+                .map(|mhz| format_frequency_one(*mhz))
+                .collect::<Vec<_>>()
+                .join("+"),
+        );
     }
 
     (info.max_frequency_mhz > 0)
         .then(|| format!("{:.1}GHz", info.max_frequency_mhz as f64 / 1000.0))
 }
 
+fn format_frequency_one(mhz: u32) -> String {
+    if mhz >= 1000 {
+        format!("{:.2}GHz", mhz as f64 / 1000.0)
+    } else {
+        format!("{mhz}MHz")
+    }
+}
+
 fn format_frequency_pair(high: u32, low: u32) -> String {
-    let format_one = |mhz: u32| {
-        if mhz >= 1000 {
-            format!("{:.2}GHz", mhz as f64 / 1000.0)
-        } else {
-            format!("{mhz}MHz")
-        }
-    };
-    format!("{}+{}", format_one(high), format_one(low))
+    format!(
+        "{}+{}",
+        format_frequency_one(high),
+        format_frequency_one(low)
+    )
 }
 
 fn format_cpu_cache(info: &CpuInfo) -> Option<String> {
-    if let Some(apple) = &info.apple_silicon_info {
-        let (high, low) = if apple.s_core_count > 0 {
-            (apple.s_core_l2_cache_mb, apple.p_core_l2_cache_mb)
-        } else {
-            (apple.p_core_l2_cache_mb, apple.e_core_l2_cache_mb)
-        };
-        if let (Some(high), Some(low)) = (high, low) {
-            return Some(format!("L2 {high}+{low}MB"));
-        }
+    let tiers = info.display_cpu_tiers();
+    let values: Vec<u32> = tiers.iter().filter_map(|tier| tier.l2_cache_mb).collect();
+
+    if values.len() == 2 {
+        return Some(format!("L2 {}+{}MB", values[0], values[1]));
+    }
+    if values.len() > 2 {
+        let sizes = values
+            .iter()
+            .map(|mb| format!("{mb}MB"))
+            .collect::<Vec<_>>()
+            .join("+");
+        return Some(format!("L2 {sizes}"));
     }
 
     (info.cache_size_mb > 0).then(|| format!("{}MB", info.cache_size_mb))
@@ -383,7 +397,7 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
-    use crate::device::{CpuPlatformType, GPU_METRIC_UNAVAILABLE};
+    use crate::device::{AppleSiliconCpuInfo, CpuPlatformType, CpuTier, GPU_METRIC_UNAVAILABLE};
     use crate::ui::text::ansi_display_width;
 
     fn gpu() -> GpuInfo {
@@ -443,6 +457,7 @@ mod tests {
             power_consumption: Some(20.0),
             per_socket_info: Vec::new(),
             apple_silicon_info: None,
+            cpu_tiers: Vec::new(),
             per_core_utilization: Vec::new(),
             time: String::new(),
         }
@@ -454,6 +469,31 @@ mod tests {
             .filter(|line| !line.is_empty())
             .map(ToString::to_string)
             .collect()
+    }
+
+    /// Base M5: Super + Efficiency, no Performance cluster (issue #471).
+    fn base_m5() -> CpuInfo {
+        let mut info = cpu();
+        info.cpu_model = "Apple M5".to_string();
+        info.total_cores = 10;
+        info.max_frequency_mhz = 4200;
+        info.apple_silicon_info = Some(AppleSiliconCpuInfo {
+            s_core_count: 4,
+            p_core_count: 0,
+            e_core_count: 6,
+            gpu_core_count: 10,
+            s_core_utilization: 40.0,
+            p_core_utilization: 0.0,
+            e_core_utilization: 20.0,
+            ane_ops_per_second: None,
+            s_cluster_frequency_mhz: Some(4200),
+            p_cluster_frequency_mhz: None,
+            e_cluster_frequency_mhz: Some(2800),
+            s_core_l2_cache_mb: Some(16),
+            p_core_l2_cache_mb: None,
+            e_core_l2_cache_mb: Some(8),
+        });
+        info
     }
 
     #[test]
@@ -512,5 +552,105 @@ mod tests {
                 "unexpected {repeated}: {visible}"
             );
         }
+    }
+
+    #[test]
+    fn base_m5_details_use_super_and_efficiency_tiers() {
+        let info = base_m5();
+
+        assert_eq!(format_cpu_cores(&info), "4S+6E");
+        assert_eq!(
+            format_cpu_frequency(&info).as_deref(),
+            Some("4.20GHz+2.80GHz")
+        );
+        assert_eq!(format_cpu_cache(&info).as_deref(), Some("L2 16+8MB"));
+
+        let mut rendered = Vec::new();
+        print_cpu_details(&mut rendered, &info, 160);
+        let visible = String::from_utf8_lossy(&rendered);
+        assert!(visible.contains("4S+6E"), "{visible}");
+        assert!(visible.contains("4.20GHz+2.80GHz"), "{visible}");
+        assert!(visible.contains("L2 16+8MB"), "{visible}");
+    }
+
+    #[test]
+    fn m5_max_details_keep_super_and_performance_tiers() {
+        let mut info = base_m5();
+        let apple = info.apple_silicon_info.as_mut().unwrap();
+        apple.s_core_count = 6;
+        apple.p_core_count = 12;
+        apple.e_core_count = 0;
+        apple.p_cluster_frequency_mhz = Some(4000);
+        apple.e_cluster_frequency_mhz = None;
+        apple.p_core_l2_cache_mb = Some(8);
+        apple.e_core_l2_cache_mb = None;
+        info.total_cores = 18;
+
+        assert_eq!(format_cpu_cores(&info), "6S+12P");
+        assert_eq!(
+            format_cpu_frequency(&info).as_deref(),
+            Some("4.20GHz+4.00GHz")
+        );
+        assert_eq!(format_cpu_cache(&info).as_deref(), Some("L2 16+8MB"));
+    }
+    // --- N-tier CPU topology (issue #473) ---
+
+    fn three_tier() -> CpuInfo {
+        let mut info = cpu();
+        info.cpu_model = "Three Tier CPU".to_string();
+        info.total_cores = 6;
+        info.cpu_tiers = vec![
+            CpuTier {
+                label: "P".to_string(),
+                core_type: crate::device::CoreType::Performance,
+                core_count: 2,
+                utilization: 50.0,
+                frequency_mhz: Some(3200),
+                l2_cache_mb: Some(2),
+            },
+            CpuTier {
+                label: "M".to_string(),
+                core_type: crate::device::CoreType::Efficiency,
+                core_count: 2,
+                utilization: 30.0,
+                frequency_mhz: Some(3000),
+                l2_cache_mb: Some(1),
+            },
+            CpuTier {
+                label: "E".to_string(),
+                core_type: crate::device::CoreType::Efficiency,
+                core_count: 2,
+                utilization: 10.0,
+                frequency_mhz: Some(2400),
+                l2_cache_mb: Some(1),
+            },
+        ];
+        info
+    }
+
+    #[test]
+    fn three_tier_details_join_every_value() {
+        let info = three_tier();
+        assert_eq!(format_cpu_cores(&info), "2P+2M+2E");
+        assert_eq!(
+            format_cpu_frequency(&info).as_deref(),
+            Some("3.20GHz+3.00GHz+2.40GHz")
+        );
+        assert_eq!(format_cpu_cache(&info).as_deref(), Some("L2 2MB+1MB+1MB"));
+
+        let mut rendered = Vec::new();
+        print_cpu_details(&mut rendered, &info, 200);
+        let visible = String::from_utf8_lossy(&rendered);
+        assert!(visible.contains("2P+2M+2E"), "{visible}");
+    }
+
+    #[test]
+    fn two_tier_details_keep_the_legacy_compact_form() {
+        let info = base_m5();
+        assert_eq!(format_cpu_cache(&info).as_deref(), Some("L2 16+8MB"));
+        assert_eq!(
+            format_cpu_frequency(&info).as_deref(),
+            Some("4.20GHz+2.80GHz")
+        );
     }
 }

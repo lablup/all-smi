@@ -175,7 +175,7 @@ pub fn filter_docker_aware_disks(disks: &Disks) -> Vec<&Disk> {
     let mut device_mount_count: HashMap<String, usize> = HashMap::new();
     let mut device_to_disks: HashMap<String, Vec<&Disk>> = HashMap::new();
 
-    for disk in disks.list() {
+    for disk in disks {
         let device_name = disk.name().to_string_lossy().to_string();
         let mount_point = disk.mount_point().to_string_lossy().to_string();
 
@@ -214,7 +214,7 @@ pub fn filter_docker_aware_disks(disks: &Disks) -> Vec<&Disk> {
     }
 
     // Special case: include overlay filesystem (Docker container root) if it passes basic filter
-    for disk in disks.list() {
+    for disk in disks {
         let mount_point = disk.mount_point().to_string_lossy().to_string();
         if (disk.file_system() == "overlay" || disk.file_system() == "overlay2")
             && filter.should_include(&mount_point)

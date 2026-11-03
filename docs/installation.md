@@ -25,6 +25,8 @@ sudo apt install all-smi
 
 The PPA provides automatic updates and is maintained for Ubuntu 22.04 (Jammy), 24.04 (Noble), and 26.04 (Resolute).
 
+all-smi does not install, require, or replace an NVIDIA driver. The package lists the driver as a `Suggests`, which apt does not install by default, so it installs alongside a driver you already have from any repository (the Ubuntu archive or NVIDIA's CUDA repository), and a host with no driver still installs cleanly. Install your driver first, then all-smi.
+
 ## Option 3: Install via Debian Package
 
 For a compatible Debian-based distribution, download the `.deb` package built for your Ubuntu release and architecture from the [releases page](https://github.com/lablup/all-smi/releases):

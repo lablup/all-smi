@@ -562,6 +562,7 @@ mod tests {
                 core_id: i,
                 core_type: CoreType::Standard,
                 utilization: 10.0,
+                tier_index: None,
             })
             .collect();
         state.cpu_info.push(CpuInfo {
@@ -583,6 +584,7 @@ mod tests {
             power_consumption: Some(90.0),
             per_socket_info: Vec::new(),
             apple_silicon_info: None,
+            cpu_tiers: Vec::new(),
             per_core_utilization: per_core,
             time: String::new(),
         });

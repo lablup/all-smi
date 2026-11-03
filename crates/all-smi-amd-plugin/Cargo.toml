@@ -17,7 +17,8 @@ crate-type = ["cdylib"]
 all-smi = { path = "../..", default-features = false }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-sysinfo = "0.39"
+# Same feature set as the root crate, which explains why `gpu` is left out.
+sysinfo = { version = "0.40", default-features = false, features = ["component", "disk", "network", "system", "user"] }
 
 [target.'cfg(all(target_os = "linux", not(target_env = "musl")))'.dependencies]
 chrono = "0.4.44"

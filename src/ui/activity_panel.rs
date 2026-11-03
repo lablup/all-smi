@@ -16,17 +16,19 @@
 //!
 //! Renders per-core CPU utilization bars as the left half of a full-row
 //! Activity panel. When core count is high, bars are automatically collapsed
-//! into P/E cluster groups (Apple Silicon) or NUMA/socket groups (x86).
+//! into detected CPU tier groups (Apple Silicon clusters, Intel hybrid, ARM
+//! big/mid/little, or capacity tiers) or NUMA/socket groups (homogeneous x86).
 //!
 //! When terminal width is below 80 columns, the panel is omitted entirely
 //! and the caller falls back to the summary-bar-only layout.
 
+use std::collections::HashMap;
 use std::io::Write;
 
 use crossterm::{queue, style::Color, style::Print};
 
 use crate::common::config::ThemeConfig;
-use crate::device::{CoreType, CoreUtilization, CpuInfo};
+use crate::device::{CoreType, CoreUtilization, CpuInfo, CpuTier};
 use crate::ui::braille::sparkline_braille_rows;
 use crate::ui::buffer::BufferWriter;
 use crate::ui::renderers::widgets::gauges::{
@@ -67,8 +69,9 @@ pub fn use_multirow_graphs(terminal_rows: u16) -> bool {
 pub enum CollapseStrategy {
     /// Show individual bars for every core.
     Individual,
-    /// Group cores by P/E cluster (Apple Silicon).
-    PECluster,
+    /// Group cores by detected CPU tier (Apple Silicon clusters, Intel
+    /// hybrid, ARM big/mid/little, capacity groups).
+    TierCluster,
     /// Group cores by socket / NUMA node (x86 / other).
     SocketGroup,
 }
@@ -86,9 +89,9 @@ pub fn core_collapse_strategy(cpu_info: &CpuInfo, width: usize) -> CollapseStrat
         return CollapseStrategy::Individual;
     }
 
-    // High core count: group by platform type
-    if cpu_info.apple_silicon_info.is_some() {
-        CollapseStrategy::PECluster
+    // High core count: group by detected tier when the CPU is heterogeneous.
+    if cpu_info.display_cpu_tiers().len() > 1 {
+        CollapseStrategy::TierCluster
     } else {
         CollapseStrategy::SocketGroup
     }
@@ -115,10 +118,19 @@ fn bar_line_count(info: &CpuInfo, strategy: &CollapseStrategy, width: usize) -> 
             let core_count = info.per_core_utilization.len();
             core_count.div_ceil(cores_per_line)
         }
-        // P-cluster bar + E-cluster bar (or S+P on M-series Pro/Max) = 2 lines.
-        CollapseStrategy::PECluster => 2,
+        // One row per detected tier.
+        CollapseStrategy::TierCluster => tier_cluster_line_count(info),
         CollapseStrategy::SocketGroup => info.socket_count.max(1) as usize,
     }
+}
+
+/// Number of cluster rows [`draw_tier_cluster_bars`] emits: one per detected
+/// tier.
+///
+/// The renderer and this height calculation must agree, otherwise the panel
+/// reserves rows it never fills and the content area below it drifts.
+fn tier_cluster_line_count(info: &CpuInfo) -> usize {
+    info.display_cpu_tiers().len()
 }
 
 /// Calculate the number of terminal rows the Activity panel will consume.
@@ -198,10 +210,10 @@ pub fn render_activity_panel<W: Write>(
 
     match strategy {
         CollapseStrategy::Individual => {
-            draw_individual_cores(stdout, &info.per_core_utilization, panel_width, width);
+            draw_individual_cores(stdout, info, panel_width, width);
         }
-        CollapseStrategy::PECluster => {
-            draw_pe_cluster_bars(stdout, info, panel_width, width);
+        CollapseStrategy::TierCluster => {
+            draw_tier_cluster_bars(stdout, info, panel_width, width);
         }
         CollapseStrategy::SocketGroup => {
             draw_socket_group_bars(stdout, info, panel_width, width);
@@ -350,24 +362,20 @@ fn draw_panel_top_border<W: Write>(
             let avg_util = average_utilization(&info.per_core_utilization);
             format!("CPU Cores ({core_count} cores, {avg_util:.1}% avg)")
         }
-        CollapseStrategy::PECluster => {
-            if let Some(apple) = info.apple_silicon_info.as_ref() {
-                let avg = average_utilization(&info.per_core_utilization);
-                if apple.s_core_count > 0 {
-                    format!(
-                        "CPU Cores ({}S+{}P, {avg:.1}% avg)",
-                        apple.s_core_count, apple.p_core_count,
-                    )
-                } else {
-                    format!(
-                        "CPU Cores ({}P+{}E, {avg:.1}% avg)",
-                        apple.p_core_count, apple.e_core_count,
-                    )
-                }
-            } else {
+        CollapseStrategy::TierCluster => {
+            let tiers = info.display_cpu_tiers();
+            if tiers.is_empty() {
                 let core_count = info.per_core_utilization.len();
                 let avg_util = average_utilization(&info.per_core_utilization);
                 format!("CPU Cores ({core_count} cores, {avg_util:.1}% avg)")
+            } else {
+                let avg = average_utilization(&info.per_core_utilization);
+                let summary = tiers
+                    .iter()
+                    .map(|tier| format!("{}{}", tier.core_count, tier.label))
+                    .collect::<Vec<_>>()
+                    .join("+");
+                format!("CPU Cores ({summary}, {avg:.1}% avg)")
             }
         }
         CollapseStrategy::SocketGroup => {
@@ -430,7 +438,7 @@ fn calculate_cores_per_line(panel_width: usize) -> usize {
 
 fn draw_individual_cores<W: Write>(
     stdout: &mut W,
-    per_core: &[CoreUtilization],
+    info: &CpuInfo,
     panel_width: usize,
     _full_width: usize,
 ) {
@@ -440,13 +448,17 @@ fn draw_individual_cores<W: Write>(
     let core_bar_width =
         content_width.saturating_sub((cores_per_line - 1) * spacing) / cores_per_line;
 
-    // Separate cores by type
+    let tiers = info.display_cpu_tiers();
+
+    // Bucket order is unchanged (S, E, P, Standard by coarse core type), but
+    // the label of each bar comes from the core's own tier so a heterogeneous
+    // CPU shows P/E instead of a uniform C.
     let mut s_cores: Vec<&CoreUtilization> = Vec::new();
     let mut e_cores: Vec<&CoreUtilization> = Vec::new();
     let mut p_cores: Vec<&CoreUtilization> = Vec::new();
     let mut standard_cores: Vec<&CoreUtilization> = Vec::new();
 
-    for core in per_core {
+    for core in &info.per_core_utilization {
         match core.core_type {
             CoreType::Super => s_cores.push(core),
             CoreType::Efficiency => e_cores.push(core),
@@ -458,16 +470,20 @@ fn draw_individual_cores<W: Write>(
     // Render in order: S-cores, E-cores, P-cores, Standard cores
     let ordered_cores: Vec<(&CoreUtilization, &str)> = s_cores
         .iter()
-        .map(|c| (*c, "S"))
-        .chain(e_cores.iter().map(|c| (*c, "E")))
-        .chain(p_cores.iter().map(|c| (*c, "P")))
-        .chain(standard_cores.iter().map(|c| (*c, "C")))
+        .map(|c| (*c, core_tier_prefix(c, &tiers)))
+        .chain(e_cores.iter().map(|c| (*c, core_tier_prefix(c, &tiers))))
+        .chain(p_cores.iter().map(|c| (*c, core_tier_prefix(c, &tiers))))
+        .chain(
+            standard_cores
+                .iter()
+                .map(|c| (*c, core_tier_prefix(c, &tiers))),
+        )
         .collect();
 
-    let mut s_idx = 0usize;
-    let mut e_idx = 0usize;
-    let mut p_idx = 0usize;
-    let mut c_idx = 0usize;
+    // Counters are per prefix, not per bucket: one coarse bucket can hold
+    // several exact tiers (for example M and E cores that are all
+    // `Efficiency`).
+    let mut counters: HashMap<&str, usize> = HashMap::new();
     let mut cores_on_line = 0;
 
     for (core, prefix) in &ordered_cores {
@@ -475,24 +491,8 @@ fn draw_individual_cores<W: Write>(
             print_colored_text(stdout, "\u{2502} ", Color::Cyan, None, None);
         }
 
-        let idx = match *prefix {
-            "S" => {
-                s_idx += 1;
-                s_idx
-            }
-            "E" => {
-                e_idx += 1;
-                e_idx
-            }
-            "P" => {
-                p_idx += 1;
-                p_idx
-            }
-            _ => {
-                c_idx += 1;
-                c_idx
-            }
-        };
+        let idx = counters.entry(*prefix).or_insert(0);
+        *idx += 1;
         let label = format!("{prefix}{idx}");
         draw_bar(
             stdout,
@@ -537,91 +537,47 @@ fn draw_individual_cores<W: Write>(
 }
 
 // ---------------------------------------------------------------------------
-// P/E cluster grouped bars (Apple Silicon)
+// Tier grouped bars
 // ---------------------------------------------------------------------------
 
-fn draw_pe_cluster_bars<W: Write>(
+fn draw_tier_cluster_bars<W: Write>(
     stdout: &mut W,
     info: &CpuInfo,
     panel_width: usize,
     _full_width: usize,
 ) {
-    let apple = match &info.apple_silicon_info {
-        Some(a) => a,
-        None => return,
-    };
+    let tiers = info.display_cpu_tiers();
+    if tiers.is_empty() {
+        return;
+    }
 
     let content_width = panel_width.saturating_sub(4);
 
-    // Collect per-core utilization blocks for each cluster
-    let s_cores: Vec<&CoreUtilization> = info
-        .per_core_utilization
+    // Render every resolved tier. One shared bar width keeps the gauges
+    // ending at the same column.
+    let shown: Vec<(&CpuTier, Vec<&CoreUtilization>)> = tiers
         .iter()
-        .filter(|c| c.core_type == CoreType::Super)
-        .collect();
-    let p_cores: Vec<&CoreUtilization> = info
-        .per_core_utilization
-        .iter()
-        .filter(|c| c.core_type == CoreType::Performance)
-        .collect();
-    let e_cores: Vec<&CoreUtilization> = info
-        .per_core_utilization
-        .iter()
-        .filter(|c| c.core_type == CoreType::Efficiency)
+        .enumerate()
+        .map(|(position, tier)| (tier, info.cores_of_display_tier(position, tier)))
         .collect();
 
-    if apple.s_core_count > 0 {
-        // M5 Pro/Max: S-CPU + P-CPU gauges
-        let shared_block_width =
-            bounded_block_width(s_cores.len().max(p_cores.len()), content_width);
-        let shared_bar_width = content_width.saturating_sub(shared_block_width + 1);
+    let shared_block_width = bounded_block_width(
+        shown
+            .iter()
+            .map(|(_, cores)| cores.len())
+            .max()
+            .unwrap_or(0),
+        content_width,
+    );
+    let shared_bar_width = content_width.saturating_sub(shared_block_width + 1);
 
-        // S-cluster line: bar + utilization blocks
+    for (tier, cores) in &shown {
+        let label = format!("{}-CPU", tier.label);
         draw_cluster_line(
             stdout,
-            "S-CPU",
-            apple.s_core_utilization,
-            &s_cores,
-            shared_bar_width,
-            shared_block_width,
-            panel_width,
-        );
-
-        // P-cluster line: bar + utilization blocks
-        draw_cluster_line(
-            stdout,
-            "P-CPU",
-            apple.p_core_utilization,
-            &p_cores,
-            shared_bar_width,
-            shared_block_width,
-            panel_width,
-        );
-    } else {
-        // M1-M4: P-CPU + E-CPU gauges
-        // Compute one shared bar_width using the larger block section so that
-        // P-CPU and E-CPU gauges end at the same column.
-        let shared_block_width =
-            bounded_block_width(p_cores.len().max(e_cores.len()), content_width);
-        let shared_bar_width = content_width.saturating_sub(shared_block_width + 1);
-
-        // P-cluster line: bar + utilization blocks
-        draw_cluster_line(
-            stdout,
-            "P-CPU",
-            apple.p_core_utilization,
-            &p_cores,
-            shared_bar_width,
-            shared_block_width,
-            panel_width,
-        );
-
-        // E-cluster line: bar + utilization blocks
-        draw_cluster_line(
-            stdout,
-            "E-CPU",
-            apple.e_core_utilization,
-            &e_cores,
+            &label,
+            tier.utilization,
+            cores,
             shared_bar_width,
             shared_block_width,
             panel_width,
@@ -722,6 +678,19 @@ fn average_utilization(cores: &[CoreUtilization]) -> f64 {
     cores.iter().map(|c| c.utilization).sum::<f64>() / cores.len() as f64
 }
 
+/// Display prefix for one individual core bar.
+///
+/// The core's resolved tier label wins when `tier_index` points at a tier;
+/// otherwise the coarse core type label is used, which is what legacy Apple
+/// payloads carry (their tier label equals the short label, so the output is
+/// unchanged).
+fn core_tier_prefix<'a>(core: &CoreUtilization, tiers: &'a [CpuTier]) -> &'a str {
+    core.tier_index
+        .and_then(|index| tiers.get(usize::from(index)))
+        .map(|tier| tier.label.as_str())
+        .unwrap_or_else(|| core.core_type.short_label())
+}
+
 /// Width of a grouped per-core block section, capped so the gauge retains its
 /// full representation plus the one-column gap between gauge and blocks.
 fn bounded_block_width(core_count: usize, content_width: usize) -> usize {
@@ -788,6 +757,7 @@ mod tests {
                 core_id: i as u32,
                 core_type: CoreType::Standard,
                 utilization: (i as f64 * 10.0) % 100.0,
+                tier_index: None,
             })
             .collect();
 
@@ -810,6 +780,7 @@ mod tests {
             power_consumption: Some(95.0),
             per_socket_info: Vec::new(),
             apple_silicon_info: None,
+            cpu_tiers: Vec::new(),
             per_core_utilization: per_core,
             time: String::new(),
         }
@@ -822,6 +793,7 @@ mod tests {
                 core_id: i as u32,
                 core_type: CoreType::Efficiency,
                 utilization: 20.0 + i as f64 * 5.0,
+                tier_index: None,
             });
         }
         for i in 0..p_count {
@@ -829,6 +801,7 @@ mod tests {
                 core_id: (e_count + i) as u32,
                 core_type: CoreType::Performance,
                 utilization: 40.0 + i as f64 * 5.0,
+                tier_index: None,
             });
         }
 
@@ -866,9 +839,65 @@ mod tests {
                 p_core_l2_cache_mb: Some(16),
                 e_core_l2_cache_mb: Some(4),
             }),
+            cpu_tiers: Vec::new(),
             per_core_utilization: per_core,
             time: String::new(),
         }
+    }
+
+    /// Base M5: Super + Efficiency, no Performance cluster (issue #471).
+    fn make_base_m5_cpu() -> CpuInfo {
+        let mut cpu = make_apple_silicon_cpu(0, 6);
+        cpu.cpu_model = "Apple M5".to_string();
+        cpu.total_cores = 10;
+        cpu.total_threads = 10;
+        cpu.per_core_utilization = (0..4)
+            .map(|i| CoreUtilization {
+                core_id: i,
+                core_type: CoreType::Super,
+                utilization: 50.0 + i as f64 * 5.0,
+                tier_index: None,
+            })
+            .chain((4..10).map(|i| CoreUtilization {
+                core_id: i,
+                core_type: CoreType::Efficiency,
+                utilization: 20.0,
+                tier_index: None,
+            }))
+            .collect();
+
+        let apple = cpu.apple_silicon_info.as_mut().unwrap();
+        apple.s_core_count = 4;
+        apple.p_core_count = 0;
+        apple.e_core_count = 6;
+        apple.s_core_utilization = 55.0;
+        apple.p_core_utilization = 0.0;
+        apple.e_core_utilization = 25.0;
+        apple.s_cluster_frequency_mhz = Some(4200);
+        apple.p_cluster_frequency_mhz = None;
+        apple.e_cluster_frequency_mhz = Some(2800);
+        apple.s_core_l2_cache_mb = Some(16);
+        apple.p_core_l2_cache_mb = None;
+        apple.e_core_l2_cache_mb = Some(8);
+        cpu
+    }
+
+    #[test]
+    fn test_tier_cluster_base_m5_shows_super_and_efficiency() {
+        let cpu = make_base_m5_cpu();
+
+        let mut title = Vec::new();
+        draw_panel_top_border(&mut title, 60, &CollapseStrategy::TierCluster, &cpu);
+        let title = String::from_utf8(title).unwrap();
+        assert!(title.contains("4S+6E"), "{title}");
+        assert!(!title.contains("6P"), "{title}");
+
+        let mut bars = Vec::new();
+        draw_tier_cluster_bars(&mut bars, &cpu, 60, 120);
+        let bars = String::from_utf8(bars).unwrap();
+        assert!(bars.contains("S-CPU"), "{bars}");
+        assert!(bars.contains("E-CPU"), "{bars}");
+        assert!(!bars.contains("P-CPU"), "{bars}");
     }
 
     #[test]
@@ -891,7 +920,7 @@ mod tests {
         let cpu = make_apple_silicon_cpu(8, 4);
         // 12 cores with width 30 -> threshold = 10, 12 > 10 -> collapse
         let strategy = core_collapse_strategy(&cpu, 30);
-        assert_eq!(strategy, CollapseStrategy::PECluster);
+        assert_eq!(strategy, CollapseStrategy::TierCluster);
     }
 
     #[test]
@@ -973,11 +1002,11 @@ mod tests {
 
     #[test]
     fn test_panel_height_pe_cluster_both_modes() {
-        // 24-core Apple Silicon at width 120 -> PECluster (24 > threshold 16).
+        // 24-core Apple Silicon at width 120 -> TierCluster (24 > threshold 16).
         let cpu = vec![make_apple_silicon_cpu(16, 8)];
         assert_eq!(
             core_collapse_strategy(&cpu[0], 120),
-            CollapseStrategy::PECluster
+            CollapseStrategy::TierCluster
         );
         // Fallback: top + 2 cluster bars + bottom = 4 (unchanged from today).
         assert_eq!(panel_height(&cpu, 120, SHORT_ROWS), 4);
@@ -1022,6 +1051,28 @@ mod tests {
             let expected = panel_height(&cpu, 120, rows) as usize;
             let actual = cpu_rendered_lines(&cpu, &history, 120, rows);
             assert_eq!(actual, expected, "pe-cluster mismatch at rows={rows}");
+        }
+    }
+
+    #[test]
+    fn test_render_line_count_matches_height_pe_cluster_partial_tiers() {
+        // A layout with one tier (or none) must reserve exactly the rows the
+        // renderer emits; `draw_tier_cluster_bars` draws one line per present
+        // tier, not a fixed two.
+        let history = ramp_history(40);
+        let single_tier = vec![make_apple_silicon_cpu(24, 0)];
+        let mut no_tiers = make_apple_silicon_cpu(24, 0);
+        if let Some(apple) = no_tiers.apple_silicon_info.as_mut() {
+            apple.p_core_count = 0;
+            apple.e_core_count = 0;
+            apple.s_core_count = 0;
+        }
+        for cpu in [single_tier, vec![no_tiers]] {
+            for &rows in &[SHORT_ROWS, TALL_ROWS] {
+                let expected = panel_height(&cpu, 120, rows) as usize;
+                let actual = cpu_rendered_lines(&cpu, &history, 120, rows);
+                assert_eq!(actual, expected, "partial-tier mismatch at rows={rows}");
+            }
         }
     }
 
@@ -1356,11 +1407,13 @@ mod tests {
                 core_id: 0,
                 core_type: CoreType::Standard,
                 utilization: 20.0,
+                tier_index: None,
             },
             CoreUtilization {
                 core_id: 1,
                 core_type: CoreType::Standard,
                 utilization: 80.0,
+                tier_index: None,
             },
         ];
         let avg = average_utilization(&cores);
@@ -1371,5 +1424,170 @@ mod tests {
     fn test_average_utilization_empty() {
         let cores: Vec<CoreUtilization> = Vec::new();
         assert_eq!(average_utilization(&cores), 0.0);
+    }
+    // --- N-tier CPU topology display (issue #473) ---
+
+    /// Build a CPU with explicit tiers and `tier_index` on every core.
+    fn make_tiered_cpu(spec: &[(&str, usize)]) -> CpuInfo {
+        let mut per_core = Vec::new();
+        let mut tiers = Vec::new();
+        let mut next_id = 0u32;
+        for (position, (label, count)) in spec.iter().enumerate() {
+            let utilization = (position as f64 + 1.0) * 10.0;
+            tiers.push(CpuTier {
+                label: (*label).to_string(),
+                core_type: if position == 0 {
+                    CoreType::Performance
+                } else {
+                    CoreType::Efficiency
+                },
+                core_count: *count as u32,
+                utilization,
+                frequency_mhz: None,
+                l2_cache_mb: None,
+            });
+            for _ in 0..*count {
+                per_core.push(CoreUtilization {
+                    core_id: next_id,
+                    core_type: CoreType::Standard,
+                    utilization,
+                    tier_index: Some(position as u8),
+                });
+                next_id += 1;
+            }
+        }
+
+        let mut cpu = make_standard_cpu(next_id as usize);
+        cpu.cpu_tiers = tiers;
+        cpu.per_core_utilization = per_core;
+        cpu
+    }
+
+    #[test]
+    fn three_tier_panel_draws_every_tier() {
+        let cpu = make_tiered_cpu(&[("P", 8), ("M", 8), ("E", 8)]);
+
+        let mut title = Vec::new();
+        draw_panel_top_border(&mut title, 60, &CollapseStrategy::TierCluster, &cpu);
+        let title = String::from_utf8(title).unwrap();
+        assert!(title.contains("8P+8M+8E"), "{title}");
+
+        let mut bars = Vec::new();
+        draw_tier_cluster_bars(&mut bars, &cpu, 60, 120);
+        let bars = String::from_utf8(bars).unwrap();
+        assert!(bars.contains("P-CPU"), "{bars}");
+        assert!(bars.contains("M-CPU"), "{bars}");
+        assert!(bars.contains("E-CPU"), "{bars}");
+    }
+
+    #[test]
+    fn three_tier_panel_height_matches_emitted_rows() {
+        let cpu = vec![make_tiered_cpu(&[("P", 8), ("M", 8), ("E", 8)])];
+        assert_eq!(
+            core_collapse_strategy(&cpu[0], 120),
+            CollapseStrategy::TierCluster
+        );
+        let history = ramp_history(40);
+        for &rows in &[SHORT_ROWS, TALL_ROWS] {
+            let expected = panel_height(&cpu, 120, rows) as usize;
+            let actual = cpu_rendered_lines(&cpu, &history, 120, rows);
+            assert_eq!(actual, expected, "three-tier mismatch at rows={rows}");
+        }
+        // top + 3 cluster bars + bottom in the fallback mode.
+        assert_eq!(panel_height(&cpu, 120, SHORT_ROWS), 5);
+    }
+
+    #[test]
+    fn four_tier_panel_height_matches_emitted_rows() {
+        let cpu = vec![make_tiered_cpu(&[("P", 8), ("M", 6), ("E", 4), ("E4", 2)])];
+        assert_eq!(
+            core_collapse_strategy(&cpu[0], 120),
+            CollapseStrategy::TierCluster
+        );
+        let history = ramp_history(40);
+        for &rows in &[SHORT_ROWS, TALL_ROWS] {
+            let expected = panel_height(&cpu, 120, rows) as usize;
+            let actual = cpu_rendered_lines(&cpu, &history, 120, rows);
+            assert_eq!(actual, expected, "four-tier mismatch at rows={rows}");
+        }
+        assert_eq!(panel_height(&cpu, 120, SHORT_ROWS), 6);
+    }
+
+    #[test]
+    fn populated_macos_tiers_draw_every_row() {
+        // A populated list, not the empty-list Apple fallback: S, P and E must
+        // each produce a row.
+        let cpu = make_tiered_cpu(&[("S", 4), ("P", 6), ("E", 2)]);
+        assert!(!cpu.cpu_tiers.is_empty());
+
+        let mut bars = Vec::new();
+        draw_tier_cluster_bars(&mut bars, &cpu, 60, 120);
+        let bars = String::from_utf8(bars).unwrap();
+        assert!(bars.contains("S-CPU"), "{bars}");
+        assert!(bars.contains("P-CPU"), "{bars}");
+        assert!(bars.contains("E-CPU"), "{bars}");
+    }
+
+    #[test]
+    fn individual_cores_show_the_real_tier_not_the_coarse_class() {
+        // 16 Standard cores stay in Individual mode at width 120.
+        let mut cpu = make_standard_cpu(16);
+        cpu.cpu_tiers = vec![
+            CpuTier {
+                label: "P".to_string(),
+                core_type: CoreType::Performance,
+                core_count: 8,
+                utilization: 50.0,
+                frequency_mhz: None,
+                l2_cache_mb: None,
+            },
+            CpuTier {
+                label: "E".to_string(),
+                core_type: CoreType::Efficiency,
+                core_count: 8,
+                utilization: 20.0,
+                frequency_mhz: None,
+                l2_cache_mb: None,
+            },
+        ];
+        for (index, core) in cpu.per_core_utilization.iter_mut().enumerate() {
+            core.tier_index = Some(if index < 8 { 0 } else { 1 });
+        }
+        let cpu = vec![cpu];
+        assert_eq!(
+            core_collapse_strategy(&cpu[0], 120),
+            CollapseStrategy::Individual
+        );
+
+        let mut buf: Vec<u8> = Vec::new();
+        render_activity_panel(&mut buf, &cpu, &ramp_history(20), 120, SHORT_ROWS);
+        let output = String::from_utf8(buf).unwrap();
+
+        assert!(output.contains("P1"), "{output}");
+        assert!(output.contains("E1"), "{output}");
+        assert!(output.contains("P8"), "{output}");
+        assert!(output.contains("E8"), "{output}");
+        assert!(!output.contains("C1"), "{output}");
+    }
+
+    #[test]
+    fn apple_individual_mode_keeps_its_current_labels() {
+        // Legacy Apple payloads carry no tier_index; the synthesized tier
+        // label equals the short label, so E and P ordering is unchanged.
+        let cpu = vec![make_apple_silicon_cpu(8, 4)];
+        assert_eq!(
+            core_collapse_strategy(&cpu[0], 120),
+            CollapseStrategy::Individual
+        );
+
+        let mut buf: Vec<u8> = Vec::new();
+        render_activity_panel(&mut buf, &cpu, &ramp_history(20), 120, SHORT_ROWS);
+        let output = String::from_utf8(buf).unwrap();
+
+        assert!(output.contains("E1"), "{output}");
+        assert!(output.contains("E4"), "{output}");
+        assert!(output.contains("P1"), "{output}");
+        assert!(output.contains("P8"), "{output}");
+        assert!(!output.contains("C1"), "{output}");
     }
 }

@@ -143,10 +143,11 @@ impl Listing {
     /// disk's kind or I/O counters, and both cost extra IOKit calls.
     fn enumerate() -> Self {
         let disks =
-            Disks::new_with_refreshed_list_specifics(DiskRefreshKind::nothing().with_storage());
-        let volumes = shown_volumes(&disks);
+            Disks::new_with_refreshed_list_specifics(DiskRefreshKind::nothing().with_storage())
+                .ok();
+        let volumes = disks.as_ref().map(shown_volumes).unwrap_or_default();
         Self {
-            disks: Some(disks),
+            disks,
             volumes,
             generation: 0,
         }
@@ -193,7 +194,7 @@ fn shown_volumes(disks: &Disks) -> Vec<Volume> {
     shown
         .into_iter()
         .filter_map(|disk| {
-            let index = disks.list().iter().position(|d| std::ptr::eq(d, disk))?;
+            let index = disks.iter().position(|d| std::ptr::eq(d, disk))?;
             let network = is_network_file_system(&disk.file_system().to_string_lossy());
             Some(Volume {
                 index,

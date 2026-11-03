@@ -110,7 +110,7 @@ fn draw_identity_line<W: Write>(stdout: &mut W, state: &AppState, cols: u16) {
 
     // Uptime — read from sysinfo (cheap: sysinfo re-reads /proc/uptime on each call on Linux,
     // uses sysctl kern.boottime on macOS; both are lightweight system calls)
-    let uptime_secs = sysinfo::System::uptime();
+    let uptime_secs = sysinfo::System::uptime().unwrap_or(0);
     let uptime_str = format_uptime(uptime_secs);
 
     let width = cols as usize;

@@ -131,7 +131,7 @@ pub(super) fn refresh_capacities(
 ) -> Vec<(usize, u64, u64)> {
     let mut capacities = Vec::with_capacity(requests.len());
     for request in requests {
-        let Some(disk) = disks.list_mut().get_mut(request.disk) else {
+        let Some(disk) = disks.get_mut(request.disk) else {
             continue;
         };
 
