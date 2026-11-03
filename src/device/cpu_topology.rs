@@ -24,11 +24,18 @@
 //! test runner. The platform readers (`cpu_linux`, `cpu_windows_arm`,
 //! `cpu_macos`) own the OS calls and call into these helpers.
 
+#[cfg(any(target_os = "linux", test))]
 use std::collections::BTreeMap;
 
-use crate::device::{CoreType, CoreUtilization};
+use crate::device::CoreType;
+#[cfg(any(target_os = "linux", target_os = "windows", test))]
+use crate::device::CoreUtilization;
 
 /// Relative tier of a known ARM core design. Higher is faster.
+///
+/// Used by the Windows registry reader and by the Linux MIDR detector; the
+/// other targets compile neither, so the item is gated with them.
+#[cfg(any(target_os = "linux", target_os = "windows", test))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum CoreTier {
     /// Little cores (Cortex-A5xx).
@@ -39,6 +46,7 @@ pub enum CoreTier {
     Big,
 }
 
+#[cfg(any(target_os = "linux", target_os = "windows", test))]
 impl CoreTier {
     /// Canonical display label for this tier: `P`, `M` or `E`.
     pub fn label(self) -> &'static str {
@@ -53,6 +61,7 @@ impl CoreTier {
 /// ARM part numbers (`MIDR_EL1.PartNum`) of big.LITTLE / DynamIQ cores and
 /// their tier. Extend this table for new designs; an unknown part number
 /// returns `None` and leaves the core untiered.
+#[cfg(any(target_os = "linux", target_os = "windows", test))]
 pub const ARM_PART_TIERS: &[(u32, CoreTier)] = &[
     (0xD05, CoreTier::Little), // Cortex-A55
     (0xD46, CoreTier::Little), // Cortex-A510
@@ -76,9 +85,11 @@ pub const ARM_PART_TIERS: &[(u32, CoreTier)] = &[
 /// to. The kernel's `%*pbl` output describes real processors, so anything
 /// near this is already far beyond a plausible machine; the bound keeps a
 /// malformed range such as `0-4294967295` from allocating unbounded memory.
+#[cfg(any(target_os = "linux", test))]
 const MAX_CPUMASK_ENTRIES: usize = 8192;
 
 /// Look up the tier of an ARM part number. Unknown parts return `None`.
+#[cfg(any(target_os = "linux", target_os = "windows", test))]
 pub fn tier_of(part: u32) -> Option<CoreTier> {
     ARM_PART_TIERS
         .iter()
@@ -92,6 +103,7 @@ pub fn tier_of(part: u32) -> Option<CoreTier> {
 /// Surrounding whitespace is tolerated, empty entries are ignored, and a
 /// malformed or oversized entry is skipped rather than rejected wholesale, so
 /// one bad token does not discard the rest of a valid mask.
+#[cfg(any(target_os = "linux", test))]
 pub fn parse_cpumask_list(mask: &str) -> Vec<u32> {
     let mut ids = Vec::new();
 
@@ -139,6 +151,7 @@ pub fn parse_cpumask_list(mask: &str) -> Vec<u32> {
 /// Returns `None` for malformed input, for a zero register value (the arm64
 /// kernel writes an empty or zero file when `reg_midr` is unknown), and for a
 /// zero part number.
+#[cfg(any(target_os = "linux", test))]
 pub fn decode_midr(text: &str) -> Option<u32> {
     let trimmed = text.trim();
     let hex = trimmed
@@ -160,6 +173,7 @@ pub fn decode_midr(text: &str) -> Option<u32> {
 /// Returns `(capacity, cpu_ids)` groups ordered by capacity descending, so
 /// index 0 is the fastest cluster. CPU ids within a group are sorted
 /// ascending and deduplicated.
+#[cfg(any(target_os = "linux", test))]
 pub fn group_cpus_by_capacity(capacities: &[(u32, u32)]) -> Vec<(u32, Vec<u32>)> {
     let mut by_capacity: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
     for &(cpu_id, capacity) in capacities {
@@ -197,6 +211,7 @@ pub fn tier_rank(label: &str) -> u8 {
 /// `0` -> `P`, `1` -> `M`, `2` -> `E`, and `r >= 3` -> `E{r+1}`. The extra
 /// tiers are numbered after the fixed `E` rank so labels stay unique and the
 /// canonical rank order (`S`, `P`, `M`, `E`, `E4`, ...) stays stable.
+#[cfg(any(target_os = "linux", test))]
 pub fn tier_label_for_rank(position: usize) -> String {
     match position {
         0 => "P".to_string(),
@@ -210,6 +225,7 @@ pub fn tier_label_for_rank(position: usize) -> String {
 ///
 /// A core participates when its [`CoreUtilization::tier_index`] equals the
 /// tier position. Returns `0.0` when no core carries the index.
+#[cfg(any(target_os = "linux", target_os = "windows", test))]
 pub fn tier_utilization(per_core: &[CoreUtilization], tier_index: usize) -> f64 {
     let Some(position) = u8::try_from(tier_index).ok() else {
         return 0.0;
