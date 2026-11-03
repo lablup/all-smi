@@ -271,19 +271,32 @@ jobs:
         run: |
           set -eu
           fail=0
+          # A control field may continue on following lines that begin with
+          # whitespace. Fold those onto the field's first line first, because
+          # both field greps below are line-anchored and a relation written on
+          # a continuation line would otherwise escape them.
+          unfold() {
+            sed -e ':a' -e 'N' -e '$!ba' -e 's/\n[[:space:]]\+/ /g' "$1"
+          }
           for f in debian/control debian/control.source debian/control.binary; do
-            if grep -E '^(Depends|Pre-Depends|Recommends):' "$f" \
-              | grep -Eq 'nvidia-(utils|driver)'; then
+            if [ ! -f "$f" ]; then
+              echo "::error file=${f}::${f} is missing; its package relations cannot be checked"
+              fail=1
+            fi
+          done
+          [ "$fail" -eq 0 ] || exit "$fail"
+          # Control field names are case-insensitive, so match case-insensitively.
+          for f in debian/control debian/control.source debian/control.binary; do
+            if unfold "$f" | grep -Ei '^(Depends|Pre-Depends|Recommends):' \
+              | grep -Eqi 'nvidia-(utils|driver)'; then
               echo "::error file=${f}::${f} declares an NVIDIA driver in an apt-automatic field; move it to Suggests (issue #475)"
               fail=1
             fi
           done
-          ref=""
-          for f in debian/control debian/control.source debian/control.binary; do
-            got=$(grep -E '^(Depends|Recommends|Suggests):' "$f" | sed 's/[[:space:]]\+/ /g')
-            if [ -z "$ref" ]; then
-              ref="$got"
-            elif [ "$got" != "$ref" ]; then
+          ref=$(unfold debian/control | grep -Ei '^(Depends|Recommends|Suggests):' | sed 's/[[:space:]]\+/ /g')
+          for f in debian/control.source debian/control.binary; do
+            got=$(unfold "$f" | grep -Ei '^(Depends|Recommends|Suggests):' | sed 's/[[:space:]]\+/ /g')
+            if [ "$got" != "$ref" ]; then
               echo "::error file=${f}::${f} disagrees with debian/control on Depends, Recommends, or Suggests; keep those three fields identical across all three build paths"
               fail=1
             fi
