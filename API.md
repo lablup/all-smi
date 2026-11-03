@@ -734,13 +734,18 @@ Note: Google Cloud TPUs (v2-v7/Ironwood) are monitored via the `tpu-info` comman
 
 | Metric                                | Description                    | Unit    | Labels |
 |---------------------------------------|--------------------------------|---------|--------|
+| `all_smi_cpu_s_core_count`            | Number of Super cores          | count   | -      |
 | `all_smi_cpu_p_core_count`            | Number of performance cores    | count   | -      |
 | `all_smi_cpu_e_core_count`            | Number of efficiency cores     | count   | -      |
 | `all_smi_cpu_gpu_core_count`          | Number of integrated GPU cores | count   | -      |
+| `all_smi_cpu_s_core_utilization`      | S-core utilization percentage  | percent | -      |
 | `all_smi_cpu_p_core_utilization`      | P-core utilization percentage  | percent | -      |
 | `all_smi_cpu_e_core_utilization`      | E-core utilization percentage  | percent | -      |
+| `all_smi_cpu_s_cluster_frequency_mhz` | S-cluster frequency            | MHz     | -      |
 | `all_smi_cpu_p_cluster_frequency_mhz` | P-cluster frequency            | MHz     | -      |
 | `all_smi_cpu_e_cluster_frequency_mhz` | E-cluster frequency            | MHz     | -      |
+
+Apple Silicon exposes two `hw.perflevelN` clusters whose tier names differ by chip: M1-M4 report Performance + Efficiency (`8P+4E`), base M5 reports Super + Efficiency (`4S+6E`), and M5 Pro/Max report Super + Performance (`6S+12P`). The `s_core_*` series are published only when the chip has Super cores, a tier the chip lacks reports zero cores and zero utilization, and its cluster frequency is omitted. `all_smi_cpu_core_utilization` labels each core with the tier (`core_type` is `S`, `P`, `E`, or `C`) that the perflevel name assigns, so base M5 E-cores appear as `E`.
 
 ### Memory Metrics (All Platforms)
 
@@ -837,7 +842,7 @@ Runtime environment metrics are detected at startup and provide information abou
 | NVIDIA Jetson                | ✓ Full + DLA   | ✓ Full         | ✓ Full         | ✓ Full          |
 
 *Apple Silicon (M1/M2/M3/M4) GPU metrics do not include temperature (thermal pressure provided instead)
-**Apple Silicon (M1/M2/M3/M4) provides enhanced P-core/E-core metrics and cluster frequencies
+**Apple Silicon (M1-M5) provides per-tier core counts, utilization, and cluster frequencies; the tiers are P+E on M1-M4, S+E on base M5, and S+P on M5 Pro/Max
 ***Tenstorrent provides extensive hardware monitoring including multiple temperature sensors, health counters, and status registers
 ****Tenstorrent NPUs do not expose per-process GPU usage information
 *****Rebellions NPUs do not expose per-process GPU usage information
@@ -945,7 +950,8 @@ all_smi_gpu_utilization / all_smi_gpu_temperature_celsius
 
 ### Apple Silicon Specific
 ```promql
-# P-core vs E-core utilization comparison
+# Tier utilization comparison (a tier the chip lacks reports 0)
+all_smi_cpu_s_core_utilization - all_smi_cpu_p_core_utilization
 all_smi_cpu_p_core_utilization - all_smi_cpu_e_core_utilization
 
 # ANE power consumption in watts
