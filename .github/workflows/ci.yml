@@ -267,7 +267,7 @@ jobs:
       # `apt install all-smi` replace a working CUDA-repo driver, which is
       # issue #475. all-smi loads NVML at runtime, so the driver belongs in
       # Suggests only, and all three build paths must agree on the relation.
-      - name: Driver relation stays out of Depends, Pre-Depends, and Recommends
+      - name: Driver stays out of apt-automatic fields and the three copies agree
         run: |
           set -eu
           fail=0
@@ -285,17 +285,20 @@ jobs:
             fi
           done
           [ "$fail" -eq 0 ] || exit "$fail"
-          # Control field names are case-insensitive, so match case-insensitively.
+          # Control field names are case-insensitive, and dpkg accepts
+          # whitespace before the colon, so allow both in the field match:
+          # `Recommends : nvidia-utils` builds a package whose Recommends is
+          # the driver, which is the same regression in another spelling.
           for f in debian/control debian/control.source debian/control.binary; do
-            if unfold "$f" | grep -Ei '^(Depends|Pre-Depends|Recommends):' \
+            if unfold "$f" | grep -Ei '^(Depends|Pre-Depends|Recommends)[[:space:]]*:' \
               | grep -Eqi 'nvidia-(utils|driver)'; then
               echo "::error file=${f}::${f} declares an NVIDIA driver in an apt-automatic field; move it to Suggests (issue #475)"
               fail=1
             fi
           done
-          ref=$(unfold debian/control | grep -Ei '^(Depends|Recommends|Suggests):' | sed 's/[[:space:]]\+/ /g')
+          ref=$(unfold debian/control | grep -Ei '^(Depends|Recommends|Suggests)[[:space:]]*:' | sed 's/[[:space:]]\+/ /g')
           for f in debian/control.source debian/control.binary; do
-            got=$(unfold "$f" | grep -Ei '^(Depends|Recommends|Suggests):' | sed 's/[[:space:]]\+/ /g')
+            got=$(unfold "$f" | grep -Ei '^(Depends|Recommends|Suggests)[[:space:]]*:' | sed 's/[[:space:]]\+/ /g')
             if [ "$got" != "$ref" ]; then
               echo "::error file=${f}::${f} disagrees with debian/control on Depends, Recommends, or Suggests; keep those three fields identical across all three build paths"
               fail=1
