@@ -115,10 +115,22 @@ fn bar_line_count(info: &CpuInfo, strategy: &CollapseStrategy, width: usize) -> 
             let core_count = info.per_core_utilization.len();
             core_count.div_ceil(cores_per_line)
         }
-        // P-cluster bar + E-cluster bar (or S+P on M-series Pro/Max) = 2 lines.
-        CollapseStrategy::PECluster => 2,
+        // One row per present tier: S+P, P+E or S+E is 2 lines, but a layout
+        // with fewer tiers renders fewer rows.
+        CollapseStrategy::PECluster => pe_cluster_line_count(info),
         CollapseStrategy::SocketGroup => info.socket_count.max(1) as usize,
     }
+}
+
+/// Number of cluster rows [`draw_pe_cluster_bars`] emits: the two fastest
+/// present tiers, or fewer when the chip exposes fewer tiers.
+///
+/// The renderer and this height calculation must agree, otherwise the panel
+/// reserves rows it never fills and the content area below it drifts.
+fn pe_cluster_line_count(info: &CpuInfo) -> usize {
+    info.apple_silicon_info
+        .as_ref()
+        .map_or(2, |apple| apple.core_tiers().len().min(2))
 }
 
 /// Calculate the number of terminal rows the Activity panel will consume.
@@ -991,6 +1003,28 @@ mod tests {
             let expected = panel_height(&cpu, 120, rows) as usize;
             let actual = cpu_rendered_lines(&cpu, &history, 120, rows);
             assert_eq!(actual, expected, "pe-cluster mismatch at rows={rows}");
+        }
+    }
+
+    #[test]
+    fn test_render_line_count_matches_height_pe_cluster_partial_tiers() {
+        // A layout with one tier (or none) must reserve exactly the rows the
+        // renderer emits; `draw_pe_cluster_bars` draws one line per present
+        // tier, not a fixed two.
+        let history = ramp_history(40);
+        let single_tier = vec![make_apple_silicon_cpu(24, 0)];
+        let mut no_tiers = make_apple_silicon_cpu(24, 0);
+        if let Some(apple) = no_tiers.apple_silicon_info.as_mut() {
+            apple.p_core_count = 0;
+            apple.e_core_count = 0;
+            apple.s_core_count = 0;
+        }
+        for cpu in [single_tier, vec![no_tiers]] {
+            for &rows in &[SHORT_ROWS, TALL_ROWS] {
+                let expected = panel_height(&cpu, 120, rows) as usize;
+                let actual = cpu_rendered_lines(&cpu, &history, 120, rows);
+                assert_eq!(actual, expected, "partial-tier mismatch at rows={rows}");
+            }
         }
     }
 
