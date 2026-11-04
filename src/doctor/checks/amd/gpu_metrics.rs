@@ -182,7 +182,7 @@ fn gpu_metrics_verdict(observations: &[CardObservation]) -> CheckResult {
     {
         return CheckResult::Warn(
             format!(
-                "{} reports format {} content {}, outside the pinned parser ceiling ({}); utilization falls back to gpu_busy_percent, temperature, power, and frequency to hwmon, and any newer-table-only metric reports its default",
+                "{} reports format {} content {}, outside the pinned parser ceiling ({}); utilization falls back to gpu_busy_percent, while temperature, power, and frequency fall back to hwmon, and any newer-table-only metric reports its default",
                 observation.card,
                 header.format_revision,
                 header.content_revision,
@@ -222,8 +222,23 @@ fn gpu_metrics_verdict(observations: &[CardObservation]) -> CheckResult {
         })
         .collect::<Vec<_>>()
         .join(", ");
+    let unreadable = observations
+        .iter()
+        .filter_map(|observation| {
+            observation
+                .header
+                .as_ref()
+                .err()
+                .map(|reason| format!("{} ({reason})", observation.card))
+        })
+        .collect::<Vec<_>>();
+    let note = if unreadable.is_empty() {
+        String::new()
+    } else {
+        format!("; unreadable: {}", unreadable.join(", "))
+    };
     CheckResult::Pass(format!(
-        "{observed} (parser ceiling: {})",
+        "{observed} (parser ceiling: {}){note}",
         gpu_metrics_ceiling()
     ))
 }
@@ -327,7 +342,14 @@ mod tests {
             supported("card0", 2, 4),
             unreadable("card1", "shorter than four bytes"),
         ]);
-        assert!(matches!(result, CheckResult::Pass(_)));
+        let CheckResult::Pass(message) = result else {
+            panic!("expected Pass, got {result:?}");
+        };
+        assert!(message.contains("card0 format 2 content 4"));
+        assert!(
+            message.contains("card1 (shorter than four bytes)"),
+            "an unreadable card must still be named in the pass detail: {message}"
+        );
     }
 
     #[test]
