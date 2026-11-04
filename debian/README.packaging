@@ -18,6 +18,12 @@ The following packages are required and must be available in the Ubuntu reposito
 - `libprotobuf-dev` - Well-known protobuf includes such as `timestamp.proto`
 - `cmake` - Build system
 
+### Control file copies
+
+`debian/control` and `debian/control.source` must stay byte-identical. `debian/prepare-source-package.sh` copies `control.source` over `control` before a Launchpad upload, so any difference in the committed tree is drift. The `packaging-sync` CI job compares the two files byte for byte and fails on any difference, so edit both together.
+
+`debian/control.binary` is exempt from that whole-file comparison on purpose. `.github/workflows/debian_build.yml` copies it over `debian/control` for the prebuilt-binary path, and it differs by design: `Build-Depends` is reduced to `debhelper-compat (= 13), build-essential` because the binary is downloaded rather than compiled, and `Architecture` is pinned to `amd64 arm64`. The `packaging-sync` job still compares its `Depends`, `Recommends` and `Suggests` fields against `debian/control`.
+
 ### Rust Version Requirements
 This project currently requires Rust 1.97 or newer. This means:
 - Ubuntu 22.04 (Jammy): needs the `~lablup/+archive/ubuntu/rustc-release` dependency PPA (provides `rustc-1.97`)

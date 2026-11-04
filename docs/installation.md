@@ -27,6 +27,8 @@ The PPA provides automatic updates and is maintained for Ubuntu 22.04 (Jammy), 2
 
 all-smi does not install, require, or replace an NVIDIA driver. The package lists the driver as a `Suggests`, which apt does not install by default, so it installs alongside a driver you already have from any repository (the Ubuntu archive or NVIDIA's CUDA repository), and a host with no driver still installs cleanly. Install your driver first, then all-smi.
 
+Do not run `apt install --install-suggests all-smi` on a host whose NVIDIA driver comes from the CUDA repository. `--install-suggests` turns the `Suggests` hint into an installed set, and apt may resolve `nvidia-utils`/`nvidia-driver` to the Ubuntu archive's `*-server` packages, which is the destructive transaction issue #475 describes: the CUDA-repo driver is replaced, its DKMS kernel module is removed, and the install aborts on a firmware file conflict. Plain `apt install all-smi` is the supported path.
+
 ## Option 3: Install via Debian Package
 
 For a compatible Debian-based distribution, download the `.deb` package built for your Ubuntu release and architecture from the [releases page](https://github.com/lablup/all-smi/releases):

@@ -304,6 +304,20 @@ jobs:
               fail=1
             fi
           done
+          # debian/prepare-source-package.sh copies control.source over
+          # control before a Launchpad upload, so the committed control is
+          # stale the moment the source template changes. Treat any
+          # difference as drift and require the two files byte-identical.
+          # debian/control.binary is deliberately exempt from this whole-file
+          # check: .github/workflows/debian_build.yml copies it over
+          # debian/control for the prebuilt-binary path, and its reduced
+          # Build-Depends (debhelper-compat, build-essential) and pinned
+          # `Architecture: amd64 arm64` are intended there. The field
+          # comparison above stays the guard for control.binary.
+          if ! diff -u debian/control debian/control.source; then
+            echo "::error file=debian/control::debian/control has drifted from debian/control.source; debian/prepare-source-package.sh copies control.source over control, so keep the two files byte-identical"
+            fail=1
+          fi
           exit "$fail"
 
   # ═══════════════════════════════════════════════════════════════
