@@ -546,7 +546,7 @@ mod tests {
     #[test]
     fn test_content_area_reserves_multirow_activity_panel() {
         use crate::app_state::AppState;
-        use crate::device::{CoreType, CoreUtilization, CpuInfo, CpuPlatformType};
+        use crate::device::{CoreType, CoreUtilization, CpuInfo};
 
         // Local mode with one NVIDIA GPU (no ANE) and an 8-core CPU. At width
         // 120 the CPU uses the Individual strategy (3 bar lines) and the GPU
@@ -566,13 +566,10 @@ mod tests {
             })
             .collect();
         state.cpu_info.push(CpuInfo {
-            index: 0,
             host_id: "localhost".to_string(),
             hostname: "localhost".to_string(),
-            instance: String::new(),
             cpu_model: "Test CPU".to_string(),
             architecture: "x86_64".to_string(),
-            platform_type: CpuPlatformType::Intel,
             socket_count: 1,
             total_cores: 8,
             total_threads: 16,
@@ -582,11 +579,8 @@ mod tests {
             utilization: 50.0,
             temperature: Some(60),
             power_consumption: Some(90.0),
-            per_socket_info: Vec::new(),
-            apple_silicon_info: None,
-            cpu_tiers: Vec::new(),
             per_core_utilization: per_core,
-            time: String::new(),
+            ..CpuInfo::test_default()
         });
 
         let header = LayoutCalculator::calculate_header_lines(&state, 120);

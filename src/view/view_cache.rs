@@ -657,13 +657,10 @@ mod tests {
         let mut state = AppState::new();
         state.is_local_mode = true;
         state.cpu_info.push(CpuInfo {
-            index: 0,
             host_id: "local".into(),
             hostname: "local".into(),
-            instance: "".into(),
             cpu_model: "Test".into(),
             architecture: "x86_64".into(),
-            platform_type: crate::device::CpuPlatformType::Intel,
             socket_count: 1,
             total_cores: 4,
             total_threads: 8,
@@ -671,13 +668,7 @@ mod tests {
             max_frequency_mhz: 4000,
             cache_size_mb: 8,
             utilization: 10.0,
-            temperature: None,
-            power_consumption: None,
-            per_socket_info: Vec::new(),
-            apple_silicon_info: None,
-            cpu_tiers: Vec::new(),
-            per_core_utilization: Vec::new(),
-            time: "".into(),
+            ..CpuInfo::test_default()
         });
         state.memory_info.push(MemoryInfo {
             index: 0,
@@ -711,13 +702,10 @@ mod tests {
         state.is_local_mode = false;
         state.current_tab = 0; // "All" tab
         state.cpu_info.push(CpuInfo {
-            index: 0,
             host_id: "host-a".into(),
             hostname: "host-a".into(),
-            instance: "".into(),
             cpu_model: "Test".into(),
             architecture: "x86_64".into(),
-            platform_type: crate::device::CpuPlatformType::Intel,
             socket_count: 1,
             total_cores: 4,
             total_threads: 8,
@@ -725,13 +713,7 @@ mod tests {
             max_frequency_mhz: 4000,
             cache_size_mb: 8,
             utilization: 10.0,
-            temperature: None,
-            power_consumption: None,
-            per_socket_info: Vec::new(),
-            apple_silicon_info: None,
-            cpu_tiers: Vec::new(),
-            per_core_utilization: Vec::new(),
-            time: "".into(),
+            ..CpuInfo::test_default()
         });
         let snapshot = RenderSnapshot::capture(&mut state);
         let mut cache = ViewCache::new();

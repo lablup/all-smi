@@ -3842,7 +3842,6 @@ all_smi_cpu_tier_core_count{cpu_model=\"ARM\", instance=\"node\", hostname=\"nod
             },
         ];
         let cpu = crate::device::CpuInfo {
-            index: 0,
             host_id: "10.0.0.7:9090".to_string(),
             hostname: "node".to_string(),
             instance: "node".to_string(),
@@ -3856,13 +3855,9 @@ all_smi_cpu_tier_core_count{cpu_model=\"ARM\", instance=\"node\", hostname=\"nod
             max_frequency_mhz: 3200,
             cache_size_mb: 8,
             utilization: 30.0,
-            temperature: None,
-            power_consumption: None,
-            per_socket_info: Vec::new(),
-            apple_silicon_info: None,
             cpu_tiers: tiers,
             per_core_utilization: cores,
-            time: String::new(),
+            ..crate::device::CpuInfo::test_default()
         };
 
         let text = CpuMetricExporter::new(std::slice::from_ref(&cpu)).export_metrics();

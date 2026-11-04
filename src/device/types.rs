@@ -559,6 +559,39 @@ impl CpuInfo {
 
         self.cpu_tiers = tiers;
     }
+
+    /// Neutral value for test literals.
+    ///
+    /// Test helpers should build `CpuInfo { field: value, ..CpuInfo::test_default() }`
+    /// so a new field no longer breaks every unrelated test module with
+    /// `error[E0063]` (issues #474 and #479). Production readers keep
+    /// exhaustive literals: a new field must force a decision there.
+    #[cfg(test)]
+    pub(crate) fn test_default() -> Self {
+        Self {
+            index: 0,
+            host_id: String::new(),
+            hostname: String::new(),
+            instance: String::new(),
+            cpu_model: String::new(),
+            architecture: String::new(),
+            platform_type: CpuPlatformType::Intel,
+            socket_count: 0,
+            total_cores: 0,
+            total_threads: 0,
+            base_frequency_mhz: 0,
+            max_frequency_mhz: 0,
+            cache_size_mb: 0,
+            utilization: 0.0,
+            temperature: None,
+            power_consumption: None,
+            per_socket_info: Vec::new(),
+            apple_silicon_info: None,
+            cpu_tiers: Vec::new(),
+            per_core_utilization: Vec::new(),
+            time: String::new(),
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq)]
@@ -945,7 +978,6 @@ mod tests {
 
     fn cpu_with(tiers: Vec<CpuTier>, cores: Vec<CoreUtilization>) -> CpuInfo {
         CpuInfo {
-            index: 0,
             host_id: "localhost".to_string(),
             hostname: "localhost".to_string(),
             instance: "localhost".to_string(),
@@ -955,17 +987,9 @@ mod tests {
             socket_count: 1,
             total_cores: cores.len() as u32,
             total_threads: cores.len() as u32,
-            base_frequency_mhz: 0,
-            max_frequency_mhz: 0,
-            cache_size_mb: 0,
-            utilization: 0.0,
-            temperature: None,
-            power_consumption: None,
-            per_socket_info: Vec::new(),
-            apple_silicon_info: None,
             cpu_tiers: tiers,
             per_core_utilization: cores,
-            time: String::new(),
+            ..CpuInfo::test_default()
         }
     }
 

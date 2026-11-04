@@ -272,23 +272,16 @@ mod tests {
 
     fn apple_cpu(s: u32, p: u32, e: u32) -> CpuInfo {
         CpuInfo {
-            index: 0,
             host_id: "localhost".to_string(),
             hostname: "localhost".to_string(),
-            instance: String::new(),
             cpu_model: "Apple M5".to_string(),
             architecture: "arm64".to_string(),
             platform_type: CpuPlatformType::AppleSilicon,
             socket_count: 1,
             total_cores: s + p + e,
             total_threads: s + p + e,
-            base_frequency_mhz: 0,
             max_frequency_mhz: 4200,
-            cache_size_mb: 0,
             utilization: 10.0,
-            temperature: None,
-            power_consumption: None,
-            per_socket_info: Vec::new(),
             apple_silicon_info: Some(AppleSiliconCpuInfo {
                 s_core_count: s,
                 p_core_count: p,
@@ -305,9 +298,7 @@ mod tests {
                 p_core_l2_cache_mb: None,
                 e_core_l2_cache_mb: Some(8),
             }),
-            cpu_tiers: Vec::new(),
-            per_core_utilization: Vec::new(),
-            time: String::new(),
+            ..CpuInfo::test_default()
         }
     }
 

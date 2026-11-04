@@ -438,7 +438,6 @@ mod tests {
 
     fn cpu_with_tiers(tiers: Vec<CpuTier>, cores: Vec<CoreUtilization>) -> CpuInfo {
         CpuInfo {
-            index: 0,
             host_id: "host".to_string(),
             hostname: "host".to_string(),
             instance: "host".to_string(),
@@ -452,13 +451,9 @@ mod tests {
             max_frequency_mhz: 3000,
             cache_size_mb: 20,
             utilization: 30.0,
-            temperature: None,
-            power_consumption: None,
-            per_socket_info: Vec::new(),
-            apple_silicon_info: None,
             cpu_tiers: tiers,
             per_core_utilization: cores,
-            time: String::new(),
+            ..CpuInfo::test_default()
         }
     }
 

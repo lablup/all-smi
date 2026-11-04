@@ -234,11 +234,11 @@ impl FuriosaNpuReader {
                         // Build detail HashMap using DetailBuilder
                         let detail = DetailBuilder::new()
                             .insert("serial_number", info.serial())
-                            .insert("firmware_version", &info.firmware_version().to_string())
+                            .insert("firmware_version", info.firmware_version().to_string())
                             .insert("architecture", format!("{:?}", info.arch()))
-                            .insert("core_count", &info.core_num().to_string())
+                            .insert("core_count", info.core_num().to_string())
                             .insert("bdf", info.bdf())
-                            .insert("numa_node", &info.numa_node().to_string())
+                            .insert("numa_node", info.numa_node().to_string())
                             // Add unified AI acceleration library labels
                             .insert_lib_info("PERT", Some(&info.pert_version().to_string()))
                             .build();
@@ -546,7 +546,12 @@ fn first_pe_frequency_mhz(core_freq: &furiosa_smi_rs::CoreFrequency) -> u32 {
 }
 
 /// Create GpuInfo from RS API data using cached static info
+///
+/// The eight parameters are the cached static block plus the five dynamic
+/// samples one poll produces. Bundling them into a struct would change the
+/// polling shape, which is a separate refactor (issue #479).
 #[cfg(all(target_os = "linux", feature = "furiosa-smi-rs"))]
+#[allow(clippy::too_many_arguments)]
 fn create_gpu_info_from_device_2025_cached(
     static_info: &DeviceStaticInfo,
     utilization: &furiosa_smi_rs::CoreUtilization,
@@ -590,81 +595,6 @@ fn create_gpu_info_from_device_2025_cached(
         frequency: freq_mhz,
         power_consumption: *power,
         gpu_core_count,
-        // Furiosa RNGD exposes temperature only; no NVML thermal threshold,
-        // P-state, or NVIDIA hardware detail (NUMA/GSP/NvLink/GPM)
-        // equivalents exist for this accelerator.
-        temperature_threshold_slowdown: None,
-        temperature_threshold_shutdown: None,
-        temperature_threshold_max_operating: None,
-        temperature_threshold_acoustic: None,
-        performance_state: None,
-        fan_speed_rpm: None,
-        numa_node_id: None,
-        gsp_firmware_mode: None,
-        gsp_firmware_version: None,
-        nvlink_remote_devices: Vec::new(),
-        gpm_metrics: None,
-        detail,
-    })
-}
-
-#[cfg(all(target_os = "linux", feature = "furiosa-smi-rs"))]
-#[allow(dead_code)]
-fn create_gpu_info_from_device_2025(
-    info: &furiosa_smi_rs::DeviceInfo,
-    utilization: &furiosa_smi_rs::CoreUtilization,
-    temperature: &furiosa_smi_rs::DeviceTemperature,
-    power: &f64,
-    governor: &furiosa_smi_rs::GovernorProfile,
-    core_freq: &furiosa_smi_rs::CoreFrequency,
-    time: &str,
-    hostname: &str,
-) -> Option<GpuInfo> {
-    let freq_mhz = first_pe_frequency_mhz(core_freq);
-    let mut detail = HashMap::new();
-
-    // Add device details from DeviceInfo using 2025.3.0 API methods
-    detail.insert("serial_number".to_string(), info.serial());
-    detail.insert(
-        "firmware_version".to_string(),
-        info.firmware_version().to_string(),
-    );
-    detail.insert("architecture".to_string(), format!("{:?}", info.arch()));
-    detail.insert("core_count".to_string(), info.core_num().to_string());
-    detail.insert("bdf".to_string(), info.bdf());
-    detail.insert("numa_node".to_string(), info.numa_node().to_string());
-
-    // Add performance details
-    detail.insert("governor".to_string(), format!("{governor}"));
-    detail.insert("frequency".to_string(), format!("{freq_mhz}MHz"));
-
-    // Add unified AI acceleration library labels using PERT version
-    detail.insert("lib_name".to_string(), "PERT".to_string());
-    detail.insert("lib_version".to_string(), info.pert_version().to_string());
-
-    let avg_util = compute_avg_pe_utilization(utilization);
-
-    // TODO: Get memory info - not directly available in 2025.3.0 API
-    let (used_memory, total_memory) = (0u64, FURIOSA_HBM3_MEMORY_BYTES);
-
-    Some(GpuInfo {
-        uuid: info.uuid(),
-        time: time.to_string(),
-        name: format!("Furiosa {:?}", info.arch()),
-        device_type: "NPU".to_string(),
-        host_id: hostname.to_string(),
-        hostname: hostname.to_string(),
-        instance: hostname.to_string(),
-        utilization: avg_util,
-        ane_utilization: 0.0,
-        dla_utilization: None,
-        tensorcore_utilization: None,
-        temperature: temperature.soc_peak() as u32,
-        used_memory,
-        total_memory,
-        frequency: freq_mhz,
-        power_consumption: *power,
-        gpu_core_count: Some(info.core_num()),
         // Furiosa RNGD exposes temperature only; no NVML thermal threshold,
         // P-state, or NVIDIA hardware detail (NUMA/GSP/NvLink/GPM)
         // equivalents exist for this accelerator.

@@ -439,7 +439,6 @@ mod tests {
 
     fn cpu() -> CpuInfo {
         CpuInfo {
-            index: 0,
             host_id: "localhost".to_string(),
             hostname: "localhost".to_string(),
             instance: "localhost".to_string(),
@@ -449,17 +448,12 @@ mod tests {
             socket_count: 1,
             total_cores: 32,
             total_threads: 32,
-            base_frequency_mhz: 0,
             max_frequency_mhz: 3500,
             cache_size_mb: 16,
             utilization: 50.0,
             temperature: Some(55),
             power_consumption: Some(20.0),
-            per_socket_info: Vec::new(),
-            apple_silicon_info: None,
-            cpu_tiers: Vec::new(),
-            per_core_utilization: Vec::new(),
-            time: String::new(),
+            ..CpuInfo::test_default()
         }
     }
 
