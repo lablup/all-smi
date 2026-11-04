@@ -22,9 +22,12 @@ use std::time::Duration;
 use crate::doctor::exec::try_exec;
 use crate::doctor::types::{Check, CheckCtx, CheckResult, Severity};
 
+mod gpu_metrics;
+
 static CHECKS: &[&Check] = &[
     &ROCM_VERSION,
     &LIBAMDGPU_TOP_ABI,
+    &gpu_metrics::GPU_METRICS_REVISION,
     &DRI_PERMS,
     &BUILD_GATE,
     &ADL_LIBRARY,
