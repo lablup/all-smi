@@ -40,7 +40,10 @@ const DRM_CLASS_PATH: &str = "/sys/class/drm";
 fn check_gpu_metrics_revision(_ctx: &CheckCtx) -> CheckResult {
     #[cfg(all(target_os = "linux", not(target_env = "musl")))]
     {
-        gpu_metrics_verdict(&observe_cards())
+        match observe_cards() {
+            Ok(observations) => gpu_metrics_verdict(&observations),
+            Err(message) => CheckResult::Skip(message),
+        }
     }
     #[cfg(all(target_os = "linux", target_env = "musl"))]
     {
@@ -78,36 +81,39 @@ struct CardObservation {
 /// Connector entries such as `card0-HDMI-A-1` are skipped: only `card`
 /// followed by digits is a GPU. Cards without the file (older hardware, or a
 /// render-only node) are not observations at all, so a host with none of them
-/// reports `Skip` rather than an unobserved parse concern.
+/// reports `Skip` rather than an unobserved parse concern. The file is opened
+/// once, without a preceding `is_file` stat, so a card cannot be skipped or
+/// included on a stale answer about a path that changed in between.
 #[cfg(all(target_os = "linux", not(target_env = "musl")))]
-fn observe_cards() -> Vec<CardObservation> {
+fn observe_cards() -> Result<Vec<CardObservation>, String> {
     use std::path::PathBuf;
 
-    let Ok(entries) = std::fs::read_dir(DRM_CLASS_PATH) else {
-        return Vec::new();
-    };
+    let entries = std::fs::read_dir(DRM_CLASS_PATH)
+        .map_err(|error| format!("could not list {DRM_CLASS_PATH}: {error}"))?;
 
     let mut cards: Vec<(String, PathBuf)> = entries
         .flatten()
         .filter_map(|entry| {
             let name = entry.file_name().into_string().ok()?;
-            if !is_card_name(&name) {
-                return None;
-            }
-            let path = entry.path().join("device").join("gpu_metrics");
-            path.is_file().then_some((name, path))
+            is_card_name(&name).then(|| (name, entry.path().join("device").join("gpu_metrics")))
         })
         .collect();
     cards.sort_by(|left, right| left.0.cmp(&right.0));
 
-    cards
-        .into_iter()
-        .map(|(card, path)| CardObservation {
+    let mut observations = Vec::with_capacity(cards.len());
+    for (card, path) in cards {
+        let header = match read_header(&path) {
+            Ok(Some(header)) => Ok(header),
+            Ok(None) => continue,
+            Err(reason) => Err(reason),
+        };
+        observations.push(CardObservation {
             card,
             path: path.display().to_string(),
-            header: read_header(&path),
-        })
-        .collect()
+            header,
+        });
+    }
+    Ok(observations)
 }
 
 /// `card` followed by one or more ASCII digits, so `card0` matches and
@@ -121,19 +127,31 @@ fn is_card_name(name: &str) -> bool {
 /// Read the first four bytes of `gpu_metrics` and return the revision pair.
 ///
 /// Layout: little-endian `u16` `structure_size`, then `u8` `format_revision`,
-/// then `u8` `content_revision`. A short or unreadable file and a zero
+/// then `u8` `content_revision`. `Ok(None)` means the card has no table at
+/// all, which is not an observation. A short or unreadable file and a zero
 /// `structure_size` are errors, never a guessed revision; the caller turns
 /// them into `Skip` because doctor must not report a parse concern it could
 /// not observe.
 #[cfg(all(target_os = "linux", not(target_env = "musl")))]
-fn read_header(path: &std::path::Path) -> Result<MetricsHeader, String> {
-    use std::io::Read;
+fn read_header(path: &std::path::Path) -> Result<Option<MetricsHeader>, String> {
+    use std::io::{ErrorKind, Read};
 
-    let mut file = std::fs::File::open(path).map_err(|error| format!("unreadable ({error})"))?;
+    let mut file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("unreadable ({error})")),
+    };
+    if !file
+        .metadata()
+        .map_err(|error| format!("unreadable ({error})"))?
+        .is_file()
+    {
+        return Ok(None);
+    }
     let mut bytes = [0u8; 4];
     file.read_exact(&mut bytes)
         .map_err(|error| format!("shorter than four bytes ({error})"))?;
-    parse_header(bytes)
+    parse_header(bytes).map(Some)
 }
 
 #[cfg(all(target_os = "linux", not(target_env = "musl")))]
@@ -245,7 +263,10 @@ fn gpu_metrics_verdict(observations: &[CardObservation]) -> CheckResult {
 
 #[cfg(all(test, target_os = "linux", not(target_env = "musl")))]
 mod tests {
-    use super::{CardObservation, MetricsHeader, gpu_metrics_verdict, is_card_name, parse_header};
+    use super::{
+        CardObservation, MetricsHeader, gpu_metrics_verdict, is_card_name, parse_header,
+        read_header,
+    };
     use crate::doctor::types::CheckResult;
 
     fn supported(card: &str, format_revision: u8, content_revision: u8) -> CardObservation {
@@ -275,6 +296,15 @@ mod tests {
         assert!(!is_card_name("card0-HDMI-A-1"));
         assert!(!is_card_name("renderD128"));
         assert!(!is_card_name("card0x"));
+    }
+
+    #[test]
+    fn a_card_without_a_table_is_not_an_observation() {
+        let path = std::env::temp_dir().join(format!(
+            "all-smi-missing-gpu-metrics-{}",
+            std::process::id()
+        ));
+        assert_eq!(read_header(&path), Ok(None));
     }
 
     #[test]
