@@ -26,7 +26,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use all_smi::cli::{SnapshotFormat, SnapshotIncludes};
-use all_smi::device::{ChassisInfo, CpuInfo, CpuPlatformType, GpuInfo, MemoryInfo, ProcessInfo};
+use all_smi::device::{ChassisInfo, CpuInfo, GpuInfo, MemoryInfo, ProcessInfo};
 use all_smi::snapshot::{
     SnapshotCollector, SnapshotHardFailure, SnapshotOptions, run_with_collector,
 };
@@ -118,13 +118,11 @@ fn mock_gpu(name: &str, util: f64, temp: u32) -> GpuInfo {
 
 fn mock_cpu() -> CpuInfo {
     CpuInfo {
-        index: 0,
         host_id: "mockhost".to_string(),
         hostname: "mockhost".to_string(),
         instance: "mockhost:9090".to_string(),
         cpu_model: "Mock CPU".to_string(),
         architecture: "x86_64".to_string(),
-        platform_type: CpuPlatformType::Intel,
         socket_count: 1,
         total_cores: 8,
         total_threads: 16,
@@ -134,11 +132,8 @@ fn mock_cpu() -> CpuInfo {
         utilization: 25.0,
         temperature: Some(55),
         power_consumption: Some(65.0),
-        per_socket_info: Vec::new(),
-        apple_silicon_info: None,
-        cpu_tiers: Vec::new(),
-        per_core_utilization: Vec::new(),
         time: "2026-04-20T00:00:00Z".to_string(),
+        ..CpuInfo::test_default()
     }
 }
 

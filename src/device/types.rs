@@ -564,10 +564,13 @@ impl CpuInfo {
     ///
     /// Test helpers should build `CpuInfo { field: value, ..CpuInfo::test_default() }`
     /// so a new field no longer breaks every unrelated test module with
-    /// `error[E0063]` (issues #474 and #479). Production readers keep
-    /// exhaustive literals: a new field must force a decision there.
-    #[cfg(test)]
-    pub(crate) fn test_default() -> Self {
+    /// `error[E0063]` (issues #474 and #479). This is public because
+    /// integration tests compile the library without `cfg(test)`, and hidden
+    /// from the docs because it is not a production constructor. Production
+    /// readers keep exhaustive literals: a new field must force a decision
+    /// there.
+    #[doc(hidden)]
+    pub fn test_default() -> Self {
         Self {
             index: 0,
             host_id: String::new(),
