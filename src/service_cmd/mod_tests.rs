@@ -33,10 +33,20 @@ fn scope_display_is_stable() {
 
 #[test]
 fn elevation_error_matches_documented_wording() {
+    // A root test process is already elevated, so `require_elevation`
+    // legitimately returns Ok. Assert that documented outcome instead of
+    // skipping the test, and keep the wording assertions below for the
+    // unprivileged path.
+    if is_elevated() {
+        assert!(
+            require_elevation("install").is_ok(),
+            "an elevated process must not be refused"
+        );
+        return;
+    }
+
     let err = require_elevation("install").unwrap_err();
     let msg = err.to_string();
-    // Only assert the wording when the test process is unprivileged;
-    // a root CI container legitimately returns Ok.
     assert!(
         msg.contains("requires root"),
         "elevation error must say what is required, got: {msg}"

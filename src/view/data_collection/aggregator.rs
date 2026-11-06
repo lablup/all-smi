@@ -419,13 +419,11 @@ mod tests {
 
     fn cpu_with_temperature(temperature: Option<u32>) -> crate::device::CpuInfo {
         crate::device::CpuInfo {
-            index: 0,
             host_id: "localhost".to_string(),
             hostname: "testhost".to_string(),
             instance: "testhost".to_string(),
             cpu_model: "Test CPU".to_string(),
             architecture: "x86_64".to_string(),
-            platform_type: crate::device::CpuPlatformType::Intel,
             socket_count: 1,
             total_cores: 4,
             total_threads: 4,
@@ -434,12 +432,7 @@ mod tests {
             cache_size_mb: 16,
             utilization: 10.0,
             temperature,
-            power_consumption: None,
-            per_socket_info: Vec::new(),
-            apple_silicon_info: None,
-            cpu_tiers: Vec::new(),
-            per_core_utilization: Vec::new(),
-            time: String::new(),
+            ..crate::device::CpuInfo::test_default()
         }
     }
 

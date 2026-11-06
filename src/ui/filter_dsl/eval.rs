@@ -553,13 +553,10 @@ mod tests {
     #[test]
     fn cpu_row_temp_matches_when_present() {
         let cpu = CpuInfo {
-            index: 0,
             host_id: "h".to_string(),
             hostname: "n".to_string(),
-            instance: String::new(),
             cpu_model: "Intel".to_string(),
             architecture: "x86_64".to_string(),
-            platform_type: crate::device::types::CpuPlatformType::Intel,
             socket_count: 1,
             total_cores: 4,
             total_threads: 8,
@@ -569,11 +566,7 @@ mod tests {
             utilization: 40.0,
             temperature: Some(75),
             power_consumption: Some(95.0),
-            per_socket_info: Vec::new(),
-            apple_silicon_info: None,
-            cpu_tiers: Vec::new(),
-            per_core_utilization: Vec::new(),
-            time: String::new(),
+            ..CpuInfo::test_default()
         };
         let expr = parse("temp>70").unwrap().unwrap();
         assert!(eval(&expr, &cpu));
@@ -582,13 +575,10 @@ mod tests {
     #[test]
     fn cpu_row_temp_missing_fails_closed() {
         let cpu = CpuInfo {
-            index: 0,
             host_id: "h".to_string(),
             hostname: "n".to_string(),
-            instance: String::new(),
             cpu_model: "Intel".to_string(),
             architecture: "x86_64".to_string(),
-            platform_type: crate::device::types::CpuPlatformType::Intel,
             socket_count: 1,
             total_cores: 4,
             total_threads: 8,
@@ -596,13 +586,7 @@ mod tests {
             max_frequency_mhz: 3600,
             cache_size_mb: 8,
             utilization: 40.0,
-            temperature: None,
-            power_consumption: None,
-            per_socket_info: Vec::new(),
-            apple_silicon_info: None,
-            cpu_tiers: Vec::new(),
-            per_core_utilization: Vec::new(),
-            time: String::new(),
+            ..CpuInfo::test_default()
         };
         let expr = parse("temp>70").unwrap().unwrap();
         assert!(!eval(&expr, &cpu));

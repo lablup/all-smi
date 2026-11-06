@@ -762,13 +762,10 @@ mod tests {
             .collect();
 
         CpuInfo {
-            index: 0,
             host_id: "localhost".to_string(),
             hostname: "testhost".to_string(),
-            instance: "".to_string(),
             cpu_model: "Test CPU".to_string(),
             architecture: "x86_64".to_string(),
-            platform_type: CpuPlatformType::Intel,
             socket_count: 1,
             total_cores: core_count as u32,
             total_threads: core_count as u32 * 2,
@@ -778,11 +775,8 @@ mod tests {
             utilization: 50.0,
             temperature: Some(65),
             power_consumption: Some(95.0),
-            per_socket_info: Vec::new(),
-            apple_silicon_info: None,
-            cpu_tiers: Vec::new(),
             per_core_utilization: per_core,
-            time: String::new(),
+            ..CpuInfo::test_default()
         }
     }
 
@@ -806,10 +800,8 @@ mod tests {
         }
 
         CpuInfo {
-            index: 0,
             host_id: "localhost".to_string(),
             hostname: "testhost".to_string(),
-            instance: "".to_string(),
             cpu_model: "Apple M2 Pro".to_string(),
             architecture: "arm64".to_string(),
             platform_type: CpuPlatformType::AppleSilicon,
@@ -820,9 +812,6 @@ mod tests {
             max_frequency_mhz: 3490,
             cache_size_mb: 16,
             utilization: 35.0,
-            temperature: None,
-            power_consumption: None,
-            per_socket_info: Vec::new(),
             apple_silicon_info: Some(AppleSiliconCpuInfo {
                 s_core_count: 0,
                 p_core_count: p_count as u32,
@@ -839,9 +828,8 @@ mod tests {
                 p_core_l2_cache_mb: Some(16),
                 e_core_l2_cache_mb: Some(4),
             }),
-            cpu_tiers: Vec::new(),
             per_core_utilization: per_core,
-            time: String::new(),
+            ..CpuInfo::test_default()
         }
     }
 
