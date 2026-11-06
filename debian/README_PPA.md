@@ -80,6 +80,8 @@ sudo apt install all-smi
 
 all-smi does not install, require, or replace an NVIDIA driver. The driver is a `Suggests` relation, which apt does not install by default, so an existing driver from any repository is left untouched and a host with no driver still installs cleanly. Install your driver first, from whichever repository you prefer (the Ubuntu archive or NVIDIA's CUDA repository), then install all-smi.
 
+Do not run `apt install --install-suggests all-smi` on a host whose NVIDIA driver comes from the CUDA repository. `--install-suggests` turns the `Suggests` hint into an installed set, and apt may resolve `nvidia-utils`/`nvidia-driver` to the Ubuntu archive's `*-server` packages, which is the destructive transaction issue #475 describes: the CUDA-repo driver is replaced, its DKMS kernel module is removed, and the install aborts on a firmware file conflict. Plain `apt install all-smi` is the supported path.
+
 ## Updating Changelog
 
 To update the changelog from GitHub releases:
