@@ -833,10 +833,13 @@ jobs:
   # unit tests on every push and PR, in parallel with `test` (no `needs`).
   # The runner is a VM without IOReport or a reachable SMC; tests that
   # need real hardware detect that and skip, so a failure here is a real
-  # regression in what the VM can still check.
+  # regression in what the VM can still check. GitHub retires macOS
+  # images on a schedule (the macOS 14 images went away on 2026-11-02
+  # and every job pinned to `macos-14` was cancelled instead of running),
+  # so check actions/runner-images before changing this label.
   macos-unit-tests:
     name: macOS Unit Tests
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -886,7 +889,7 @@ jobs:
 
   launchd-service:
     name: launchd Service Smoke Test
-    runs-on: macos-14
+    runs-on: macos-15
     needs: test
     steps:
       - name: Checkout
