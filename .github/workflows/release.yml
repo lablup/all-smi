@@ -601,12 +601,22 @@ jobs:
       # Only the signing script is needed, taken from the ref that supplied
       # this workflow (as with .workflow-actions in the build job), so a tag
       # that predates this job can still be signed through a dispatch.
+      #
+      # The `path` is not optional. This job shares `_work/all-smi/all-smi`
+      # on the Windows runner with every other job that lands there, and a
+      # sparse checkout without its own directory reconfigures that shared
+      # root workspace to a single file. The skip-worktree entries survive
+      # into the next run, where `git clean`, `reset --hard` and `checkout`
+      # all report success without restoring a tree, so cargo fails with
+      # "could not find Cargo.toml" and both windows-selfhosted and the
+      # release build leg go red (issue #486).
       - name: Checkout signing script
         uses: actions/checkout@v6
         with:
           ref: ${{ github.sha }}
           sparse-checkout: scripts/sign-windows.ps1
           sparse-checkout-cone-mode: false
+          path: .signing-scripts
 
       - name: Download unsigned binary
         uses: actions/download-artifact@v8
@@ -641,7 +651,7 @@ jobs:
           WINDOWS_SIGN_CSP: ${{ secrets.WINDOWS_SIGN_CSP }}
           WINDOWS_SIGN_TIMESTAMP_URL: ${{ secrets.WINDOWS_SIGN_TIMESTAMP_URL }}
         run: |
-          ./scripts/sign-windows.ps1 "unsigned/all-smi.exe"
+          ./.signing-scripts/scripts/sign-windows.ps1 "unsigned/all-smi.exe"
 
       # sign-windows.ps1 only warns when verification fails. This job exists
       # to ship a signed binary, so an invalid signature fails it here and the

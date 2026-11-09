@@ -81,8 +81,45 @@ jobs:
       run:
         shell: pwsh
     steps:
+      # Every workflow that touches this runner shares `_work/all-smi/all-smi`.
+      # A checkout that narrows the workspace to a sparse set (release.yml's
+      # signing job did, before issue #486) leaves skip-worktree entries that
+      # outlive the run: the next `git clean`, `reset --hard` and `checkout`
+      # all report success while the tree stays empty, and cargo fails with
+      # "could not find Cargo.toml". Emptying the directory first makes the
+      # checkout below a full one no matter what the previous job left.
+      - name: Empty the shared workspace
+        run: |
+          $ws = $env:GITHUB_WORKSPACE
+          Get-ChildItem -LiteralPath $ws -Force -ErrorAction SilentlyContinue |
+            Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+          $left = @(Get-ChildItem -LiteralPath $ws -Force -ErrorAction SilentlyContinue)
+          if ($left.Count -gt 0) {
+            $left | ForEach-Object { Write-Output "left behind: $($_.Name)" }
+            throw "could not empty $ws before checkout"
+          }
+
       - name: Checkout
         uses: actions/checkout@v6
+
+      # A checkout that reports success is not evidence of a tree; the failure
+      # above looked exactly like one until cargo ran. Fail here, with the git
+      # state in the log, rather than four steps later against an empty tree.
+      - name: Require a populated checkout
+        run: |
+          $ErrorActionPreference = "Continue"
+          $PSNativeCommandUseErrorActionPreference = $false
+          if (Test-Path -LiteralPath (Join-Path $env:GITHUB_WORKSPACE "Cargo.toml")) { exit 0 }
+          Write-Output "::group::checkout diagnostics"
+          Write-Output "workspace: $env:GITHUB_WORKSPACE"
+          Get-ChildItem -LiteralPath $env:GITHUB_WORKSPACE -Force |
+            Select-Object Name | Format-Table | Out-String | Write-Output
+          git rev-parse --show-toplevel 2>&1 | Write-Output
+          git sparse-checkout list 2>&1 | Write-Output
+          Write-Output "--- skip-worktree entries"
+          git ls-files -v 2>&1 | Select-String -Pattern '^S ' | Select-Object -First 10 | Out-String | Write-Output
+          Write-Output "::endgroup::"
+          throw "the checkout at $env:GITHUB_WORKSPACE has no Cargo.toml"
 
       # Same persistent paths release.yml pins, so the registry and the
       # toolchain survive workspace cleanup between jobs. Must run before
@@ -114,6 +151,8 @@ jobs:
           Write-Output "--- OS"
           (Get-CimInstance Win32_OperatingSystem) |
             Select-Object Caption, Version, BuildNumber, OSArchitecture | Format-List
+          Write-Output "--- free space on the build drive"
+          Get-PSDrive C | Select-Object Used, Free | Format-List
           Write-Output "--- display adapters"
           Get-CimInstance Win32_VideoController |
             Select-Object Name, AdapterCompatibility, PNPDeviceID, AdapterRAM, DriverVersion |

@@ -291,13 +291,18 @@ mod tests {
     #[test]
     fn read_memory_discrete_via_resource2_rebar() {
         // Battlemage on kernels without `tile0/vram0/*`: BAR2 spans the
-        // whole VRAM when Resizable BAR is active. A sparse file's
-        // metadata length stands in for the sysfs resource size.
+        // whole VRAM when Resizable BAR is active. The file's metadata
+        // length stands in for the sysfs resource size, so any length
+        // above the 256 MiB aperture reaches the same branch. Keep it that
+        // small: Linux extends the file sparsely, but NTFS allocates the
+        // whole length, and a literal 12 GiB filled the Windows runner's
+        // disk (runs 2026-10-14 through 2026-10-18).
+        const REBAR_BYTES: u64 = (256 + 1) * 1024 * 1024;
         let dir = tempdir().unwrap();
         let bar2 = fs::File::create(dir.path().join("resource2")).unwrap();
-        bar2.set_len(12 * 1024 * 1024 * 1024).unwrap();
+        bar2.set_len(REBAR_BYTES).unwrap();
         let (used, total) = read_memory_bytes(dir.path(), MemoryVariant::Discrete);
-        assert_eq!(total, 12 * 1024 * 1024 * 1024);
+        assert_eq!(total, REBAR_BYTES);
         assert_eq!(used, 0);
     }
 
