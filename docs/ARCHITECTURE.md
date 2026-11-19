@@ -200,6 +200,7 @@ pub trait MetricsExporter: Send + Sync {
 #### NVIDIA (`src/device/readers/nvidia.rs`)
 - Primary: NVML library for direct GPU access
 - Fallback: `nvidia-smi` command parsing
+- Shared NVML handle (`nvml_handle.rs`): one `Arc<Nvml>` serves every reader and the doctor check for the life of the process, and `libnvidia-ml` is pinned with an extra never-closed `dlopen`, because each NVML init followed by a library unload leaks an `eventfd` (#488). After a failed init the handle is not retried until a back-off expires (30 s, doubling to 5 min, reset on success), so a host where NVML cannot start goes straight to `nvidia-smi` instead of re-running init on every poll (#489). A handle whose `device_count()` fails is replaced once immediately.
 - Supports multi-GPU configurations
 - Includes CUDA process tracking
 - SoC handling (`nvidia_soc.rs`): GB10 and RTX Spark N1X GPUs are reported with unified memory and no PCIe stub metrics; the N1X NPU (NVML `DLA-*` handle) is folded into its GPU row as `dla_utilization` plus `dla_*` detail keys instead of getting a device row; its engine clock comes from D3DKMT node performance data (`nvidia_dla_clock.rs`) because NVML reports none
