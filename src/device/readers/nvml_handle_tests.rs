@@ -18,6 +18,7 @@
 
 use super::*;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::mpsc;
 
 /// Stand-in for `Nvml`: an id to tell handles apart and a liveness flag the
 /// test flips to simulate a driver reload.
@@ -239,12 +240,169 @@ fn concurrent_callers_share_one_failed_attempt() {
         for _ in 0..8 {
             scope.spawn(|| {
                 for _ in 0..200 {
-                    assert!(get(&slot, &fake, now).is_err());
+                    // Either the shared failure or, while it is running,
+                    // the transient "in progress" error; never a second init.
+                    let err = get(&slot, &fake, now).err().expect("init fails");
+                    assert!(err.is_in_progress() || err.to_string() == "Driver Not Loaded");
                 }
             });
         }
     });
     assert_eq!(fake.calls(), 1);
+}
+
+/// Start `slot.get` on another thread with an init that blocks until the
+/// test releases it, run `body` while it is blocked (holding the init gate),
+/// then release it and return what that slow call returned. A `body` that
+/// waits on the gate is caught by the timeout instead of hanging the test.
+fn with_running_init(
+    slot: &NvmlSlot<FakeHandle>,
+    fake: &FakeInit,
+    now: Instant,
+    body: impl FnOnce(),
+) -> Result<Arc<FakeHandle>, SharedNvmlError> {
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel::<()>();
+    let release_rx = Mutex::new(release_rx);
+    let slow_init = || {
+        entered_tx.send(()).expect("test is listening");
+        release_rx
+            .lock()
+            .unwrap()
+            .recv_timeout(secs(10))
+            .expect("the other caller waited on the init gate");
+        fake.init()
+    };
+    std::thread::scope(|scope| {
+        let slow = scope.spawn(|| slot.get(slow_init, |h| h.live.load(Ordering::SeqCst), now));
+        entered_rx.recv_timeout(secs(10)).expect("init started");
+        body();
+        release_tx.send(()).expect("init is waiting");
+        slow.join().expect("slow init did not panic")
+    })
+}
+
+#[test]
+fn caller_does_not_wait_for_a_running_init() {
+    let slot = NvmlSlot::new();
+    let fake = FakeInit::new(true);
+    let now = Instant::now();
+
+    let slow = with_running_init(&slot, &fake, now, || {
+        let started = Instant::now();
+        for _ in 0..100 {
+            let err = get(&slot, &fake, now).err().expect("init is still running");
+            assert!(err.is_in_progress(), "got {err}");
+        }
+        assert!(started.elapsed() < secs(5));
+        assert_eq!(fake.calls(), 0, "a waiting caller ran its own init");
+    });
+
+    let handle = slow.expect("slow init succeeds");
+    let again = get(&slot, &fake, now).expect("cached after the slow init");
+    assert!(Arc::ptr_eq(&handle, &again));
+    assert_eq!(fake.calls(), 1);
+}
+
+#[test]
+fn in_progress_error_does_not_start_or_extend_backoff() {
+    let slot = NvmlSlot::new();
+    let fake = FakeInit::new(false);
+    let t0 = Instant::now();
+
+    // In-progress errors before any failure: no back-off from them alone.
+    let slow = with_running_init(&slot, &fake, t0, || {
+        for _ in 0..100 {
+            assert!(get(&slot, &fake, t0).err().unwrap().is_in_progress());
+        }
+    });
+    assert_eq!(slow.err().unwrap().to_string(), "Driver Not Loaded");
+    assert_eq!(fake.calls(), 1);
+
+    // The one real failure set a 30 s window, not a longer one.
+    let err = get(&slot, &fake, t0 + secs(29)).err().unwrap();
+    assert!(!err.is_in_progress());
+    assert_eq!(fake.calls(), 1);
+    assert!(get(&slot, &fake, t0 + INITIAL_BACKOFF).is_err());
+    assert_eq!(fake.calls(), 2);
+}
+
+#[test]
+fn probe_ignores_backoff_and_reports_the_real_result() {
+    let slot = NvmlSlot::new();
+    let fake = FakeInit::new(false);
+    let t0 = Instant::now();
+    let live = |h: &FakeHandle| h.live.load(Ordering::SeqCst);
+
+    assert!(get(&slot, &fake, t0).is_err());
+    fake.set_succeed(true);
+    assert!(get(&slot, &fake, t0 + secs(1)).is_err(), "back-off holds");
+    assert_eq!(fake.calls(), 1);
+
+    let probed = slot
+        .probe(|| fake.init(), live, t0 + secs(2))
+        .expect("probe runs init despite the back-off");
+    assert_eq!(fake.calls(), 2);
+    // Recorded like any attempt: readers now share the probed handle.
+    let read = get(&slot, &fake, t0 + secs(3)).expect("cached");
+    assert!(Arc::ptr_eq(&probed, &read));
+
+    // A live cached handle is returned without another init.
+    let again = slot.probe(|| fake.init(), live, t0 + secs(4)).unwrap();
+    assert!(Arc::ptr_eq(&probed, &again));
+    assert_eq!(fake.calls(), 2);
+}
+
+#[test]
+fn failed_probe_is_recorded_as_a_normal_attempt() {
+    let slot = NvmlSlot::new();
+    let fake = FakeInit::new(false);
+    let t0 = Instant::now();
+    let live = |h: &FakeHandle| h.live.load(Ordering::SeqCst);
+
+    assert!(get(&slot, &fake, t0).is_err());
+    let err = slot
+        .probe(|| fake.init(), live, t0 + secs(5))
+        .err()
+        .unwrap();
+    assert_eq!(err.to_string(), "Driver Not Loaded");
+    assert_eq!(fake.calls(), 2);
+
+    // The probe was the second failure, so the window doubled to 60 s.
+    assert!(get(&slot, &fake, t0 + secs(64)).is_err());
+    assert_eq!(fake.calls(), 2);
+    assert!(get(&slot, &fake, t0 + secs(65)).is_err());
+    assert_eq!(fake.calls(), 3);
+}
+
+#[test]
+fn probe_waits_for_a_running_init_and_shares_its_handle() {
+    let slot = NvmlSlot::new();
+    let fake = FakeInit::new(true);
+    let now = Instant::now();
+    let probed = Mutex::new(None);
+
+    let slow = std::thread::scope(|scope| {
+        with_running_init(&slot, &fake, now, || {
+            scope.spawn(|| {
+                let result = slot.probe(|| fake.init(), |h| h.live.load(Ordering::SeqCst), now);
+                *probed.lock().unwrap() = Some(result);
+            });
+            // The probe neither returns "in progress" nor runs its own init:
+            // it is still waiting on the gate the slow init holds.
+            std::thread::sleep(Duration::from_millis(100));
+            assert!(probed.lock().unwrap().is_none(), "probe did not wait");
+            assert_eq!(fake.calls(), 0);
+        })
+    });
+    let slow = slow.expect("slow init succeeds");
+    let probed = probed.into_inner().unwrap().expect("probe finished");
+    assert!(Arc::ptr_eq(&slow, &probed.expect("probe succeeds")));
+    assert_eq!(
+        fake.calls(),
+        1,
+        "the probe re-ran an init that just succeeded"
+    );
 }
 
 #[test]
@@ -351,5 +509,52 @@ fn real_pin_stops_reopening_once_pinned() {
         assert!(made <= 1);
     } else {
         assert_eq!(made, 100);
+    }
+}
+
+#[test]
+fn windows_dll_candidates_prefer_system32_then_nvsmi() {
+    assert_eq!(windows_dll_candidates(None), vec![DllCandidate::System32]);
+    let nvsmi = DllCandidate::Absolute(
+        "C:\\Program Files\\NVIDIA Corporation\\NVSMI\\nvml.dll".to_string(),
+    );
+    for program_files in [
+        "C:\\Program Files",
+        "C:\\Program Files\\",
+        "C:\\Program Files/",
+    ] {
+        assert_eq!(
+            windows_dll_candidates(Some(program_files)),
+            vec![DllCandidate::System32, nvsmi.clone()],
+            "{program_files}"
+        );
+    }
+    assert_eq!(
+        windows_dll_candidates(Some("d:/Apps")),
+        vec![
+            DllCandidate::System32,
+            DllCandidate::Absolute("d:/Apps\\NVIDIA Corporation\\NVSMI\\nvml.dll".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn windows_dll_candidates_skip_a_non_absolute_program_files() {
+    for program_files in [
+        "",
+        "   ",
+        "Program Files",
+        ".\\Program Files",
+        "C:Program Files",
+        "\\Program Files",
+        "\\\\server\\share",
+        "\\\\?\\C:\\Program Files",
+        "1:\\x",
+    ] {
+        assert_eq!(
+            windows_dll_candidates(Some(program_files)),
+            vec![DllCandidate::System32],
+            "{program_files:?}"
+        );
     }
 }

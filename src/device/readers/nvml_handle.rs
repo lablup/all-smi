@@ -22,16 +22,23 @@
 //!
 //! Two measures bound that:
 //!
-//! - [`pin_library`] opens the library once more and never closes it, so the
+//! - [`pin_library`](super::nvml_pin::pin_library) opens the library once more and never closes it, so the
 //!   load and unload inside `nvml-wrapper` only move a reference count and
 //!   the library is never unmapped. It runs only inside a real init attempt,
 //!   and a failed pin is retried at the next attempt, so a driver installed
-//!   after start is still pinned.
+//!   after start is still pinned. On Windows the pin loads `nvml.dll` from
+//!   System32 or the NVSMI directory only, never by bare name, so the copy
+//!   `nvml-wrapper` resolves afterwards is the trusted one.
 //! - [`shared_nvml`] keeps one `Arc<Nvml>` for every reader in the process,
 //!   and after a failed init it refuses to try again until a back-off window
 //!   (30 seconds, doubling up to 5 minutes) has passed. During the window the
 //!   cached error is returned at once, so callers go straight to their
 //!   `nvidia-smi` fallback.
+//!
+//! Init runs outside the slot's state lock, behind a separate init gate. A
+//! caller that finds the gate taken does not wait: it gets an "in progress"
+//! error, which is not cached and does not touch the back-off, so a stalled
+//! `nvmlInit_v2` delays one thread rather than every reader in the process.
 //!
 //! The handle lives in a `static` and is never dropped, so NVML is not shut
 //! down at exit. This is a design choice: the OS reclaims the driver
@@ -39,12 +46,16 @@
 //! exits without calling `nvmlShutdown`.
 
 use std::fmt;
-#[cfg(any(target_os = "linux", target_os = "windows"))]
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 use std::time::{Duration, Instant};
 
 use nvml_wrapper::Nvml;
+
+use super::nvml_pin::pin_library;
+#[cfg(test)]
+pub(crate) use super::nvml_pin::{
+    DllCandidate, LibraryPin, pin_open_attempts, windows_dll_candidates,
+};
 
 /// Wait after the first failed init before trying again.
 pub(crate) const INITIAL_BACKOFF: Duration = Duration::from_secs(30);
@@ -52,18 +63,36 @@ pub(crate) const INITIAL_BACKOFF: Duration = Duration::from_secs(30);
 /// Longest wait between failed init attempts.
 pub(crate) const MAX_BACKOFF: Duration = Duration::from_secs(300);
 
-/// The library name `nvml-wrapper` 0.13 passes to `dlopen` (its `LIB_PATH`).
-/// The pin must use the same name so both handles resolve to one mapping.
-#[cfg(target_os = "linux")]
-const NVML_LIBRARY: &str = "libnvidia-ml.so.1";
-#[cfg(target_os = "windows")]
-const NVML_LIBRARY: &str = "nvml.dll";
-
-/// NVML could not be initialised. Displays the NVML error text unchanged, so
-/// callers that format or match on it see what `Nvml::init()` reported.
+/// NVML could not be initialised, or another thread is initialising it right
+/// now. Displays the NVML error text unchanged, so callers that format or
+/// match on it see what `Nvml::init()` reported.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SharedNvmlError {
     message: String,
+    in_progress: bool,
+}
+
+impl SharedNvmlError {
+    pub(crate) fn failed(message: String) -> Self {
+        Self {
+            message,
+            in_progress: false,
+        }
+    }
+
+    pub(crate) fn in_progress() -> Self {
+        Self {
+            message: "NVML initialisation is in progress on another thread".to_string(),
+            in_progress: true,
+        }
+    }
+
+    /// True when another thread was initialising NVML and this call did not
+    /// wait for it. Says nothing about whether NVML works, so callers should
+    /// use their fallback for this one call and keep any status they show.
+    pub fn is_in_progress(&self) -> bool {
+        self.in_progress
+    }
 }
 
 impl fmt::Display for SharedNvmlError {
@@ -73,79 +102,6 @@ impl fmt::Display for SharedNvmlError {
 }
 
 impl std::error::Error for SharedNvmlError {}
-
-/// Holds a library handle that, once opened, is never reopened or released.
-/// While nothing is held, each `ensure` call tries to open it again.
-#[cfg_attr(
-    not(any(target_os = "linux", target_os = "windows", test)),
-    allow(dead_code)
-)]
-pub(crate) struct LibraryPin<L> {
-    cell: Mutex<Option<L>>,
-}
-
-#[cfg_attr(
-    not(any(target_os = "linux", target_os = "windows", test)),
-    allow(dead_code)
-)]
-impl<L> LibraryPin<L> {
-    pub(crate) const fn new() -> Self {
-        Self {
-            cell: Mutex::new(None),
-        }
-    }
-
-    /// Report whether a handle is held, running `open` only while none is.
-    pub(crate) fn ensure(&self, open: impl FnOnce() -> Option<L>) -> bool {
-        let mut cell = self.cell.lock().unwrap_or_else(|p| p.into_inner());
-        if cell.is_none() {
-            *cell = open();
-        }
-        cell.is_some()
-    }
-}
-
-#[cfg(any(target_os = "linux", target_os = "windows"))]
-static LIBRARY_PIN: LibraryPin<libloading::Library> = LibraryPin::new();
-
-/// How many times [`pin_library`] has called `dlopen`.
-#[cfg(any(target_os = "linux", target_os = "windows"))]
-static PIN_OPEN_ATTEMPTS: AtomicUsize = AtomicUsize::new(0);
-
-/// Keep `libnvidia-ml` loaded for the life of the process. Returns whether
-/// the library is pinned; a missing library is not an error, and NVML init
-/// then fails exactly as it would have without the pin. A held pin is never
-/// reopened; a failed one is retried on the next call.
-pub(crate) fn pin_library() -> bool {
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
-    {
-        LIBRARY_PIN.ensure(|| {
-            PIN_OPEN_ATTEMPTS.fetch_add(1, Ordering::Relaxed);
-            // SAFETY: this loads the same library `Nvml::init()` loads right
-            // after, so its initialisers run no code that init would not run
-            // anyway. No symbol is taken from this handle; it only holds a
-            // reference so the library stays mapped.
-            unsafe { libloading::Library::new(NVML_LIBRARY) }.ok()
-        })
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
-    {
-        false
-    }
-}
-
-/// Number of attempts [`pin_library`] has made to open the library.
-#[cfg(test)]
-pub(crate) fn pin_open_attempts() -> usize {
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
-    {
-        PIN_OPEN_ATTEMPTS.load(Ordering::Relaxed)
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
-    {
-        0
-    }
-}
 
 struct SlotState<T> {
     handle: Option<Arc<T>>,
@@ -157,11 +113,38 @@ struct SlotState<T> {
     backoff: Option<Duration>,
 }
 
+impl<T> SlotState<T> {
+    /// The cached error while `now` is inside the back-off window.
+    fn backed_off(&self, now: Instant) -> Option<SharedNvmlError> {
+        match (self.retry_at, &self.last_error) {
+            (Some(retry_at), Some(message)) if now < retry_at => {
+                Some(SharedNvmlError::failed(message.clone()))
+            }
+            _ => None,
+        }
+    }
+}
+
+/// How an init attempt treats the init gate and the back-off.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Attempt {
+    /// Normal reads: skip init during the back-off, and return
+    /// "in progress" at once when another thread holds the gate.
+    Poll,
+    /// The doctor probe: wait for the gate and run init even in back-off.
+    Probe,
+}
+
 /// The shared-handle state machine, generic over the handle type so tests
 /// can drive it with a fake handle, a counting init function, and explicit
 /// instants instead of a GPU and the wall clock.
+///
+/// `state` is held only for short reads and writes, never across `init` or
+/// `is_live`. `gate` is held for the whole of an init attempt, so at most one
+/// runs at a time.
 pub(crate) struct NvmlSlot<T> {
     state: Mutex<SlotState<T>>,
+    gate: Mutex<()>,
 }
 
 impl<T> NvmlSlot<T> {
@@ -173,55 +156,14 @@ impl<T> NvmlSlot<T> {
                 retry_at: None,
                 backoff: None,
             }),
+            gate: Mutex::new(()),
         }
     }
 
     fn lock(&self) -> MutexGuard<'_, SlotState<T>> {
-        // A panic inside `init` leaves the state consistent (it is written
-        // only after init returns), so a poisoned lock is safe to reuse.
+        // `init` never runs under this lock and every write is a few plain
+        // assignments, so a poisoned lock still holds consistent state.
         self.state.lock().unwrap_or_else(|p| p.into_inner())
-    }
-
-    /// Return the current handle, initialising when there is none and the
-    /// back-off allows it; the flag says whether this call ran init. Init runs under the lock, so concurrent callers
-    /// wait for one attempt rather than each making their own.
-    fn acquire<E: fmt::Display>(
-        &self,
-        init: &impl Fn() -> Result<T, E>,
-        now: Instant,
-    ) -> Result<(Arc<T>, bool), SharedNvmlError> {
-        let mut state = self.lock();
-        if let Some(handle) = &state.handle {
-            return Ok((Arc::clone(handle), false));
-        }
-        Self::initialise(&mut state, init, now).map(|h| (h, true))
-    }
-
-    /// Run `init` unless the back-off forbids it. Caller holds the lock and
-    /// has found no cached handle.
-    fn initialise<E: fmt::Display>(
-        state: &mut SlotState<T>,
-        init: &impl Fn() -> Result<T, E>,
-        now: Instant,
-    ) -> Result<Arc<T>, SharedNvmlError> {
-        if let (Some(retry_at), Some(message)) = (state.retry_at, &state.last_error)
-            && now < retry_at
-        {
-            return Err(SharedNvmlError {
-                message: message.clone(),
-            });
-        }
-        match init() {
-            Ok(handle) => {
-                let handle = Arc::new(handle);
-                state.handle = Some(Arc::clone(&handle));
-                state.last_error = None;
-                state.retry_at = None;
-                state.backoff = None;
-                Ok(handle)
-            }
-            Err(e) => Err(Self::record_failure(state, e.to_string(), now)),
-        }
     }
 
     /// Start or extend the back-off and remember `message` for its duration.
@@ -232,22 +174,72 @@ impl<T> NvmlSlot<T> {
         state.backoff = Some(backoff);
         state.retry_at = Some(now + backoff);
         state.last_error = Some(message.clone());
-        SharedNvmlError { message }
+        SharedNvmlError::failed(message)
     }
 
-    /// Drop `handle` if it is still the cached one and treat the liveness
-    /// failure as a failed init, so a handle that initialises but never
-    /// answers is not re-initialised on every call.
-    fn reject_fresh(&self, handle: &Arc<T>, now: Instant) -> SharedNvmlError {
-        let mut state = self.lock();
-        if matches!(&state.handle, Some(c) if Arc::ptr_eq(c, handle)) {
-            state.handle = None;
+    /// Run one init attempt under the init gate. The state lock is taken
+    /// only to re-check the slot before init and to store the outcome after
+    /// it. A handle is cached only once `is_live` accepts it; a freshly
+    /// initialised handle that is already dead counts as a failed init.
+    fn attempt<E: fmt::Display>(
+        &self,
+        init: &impl Fn() -> Result<T, E>,
+        is_live: &impl Fn(&T) -> bool,
+        now: Instant,
+        mode: Attempt,
+    ) -> Result<Arc<T>, SharedNvmlError> {
+        let _gate = match mode {
+            Attempt::Poll => match self.gate.try_lock() {
+                Ok(guard) => guard,
+                // A panicking init left nothing half-written: the state is
+                // only touched after init returns.
+                Err(TryLockError::Poisoned(p)) => p.into_inner(),
+                Err(TryLockError::WouldBlock) => return Err(SharedNvmlError::in_progress()),
+            },
+            Attempt::Probe => self.gate.lock().unwrap_or_else(|p| p.into_inner()),
+        };
+        {
+            // Another thread may have finished an attempt while this one
+            // waited for the gate or between the caller's check and here.
+            let state = self.lock();
+            if let Some(handle) = &state.handle {
+                return Ok(Arc::clone(handle));
+            }
+            if mode == Attempt::Poll
+                && let Some(err) = state.backed_off(now)
+            {
+                return Err(err);
+            }
         }
-        Self::record_failure(
-            &mut state,
-            "NVML initialised but device_count() failed".to_string(),
-            now,
-        )
+        let outcome = match init() {
+            Ok(handle) if is_live(&handle) => Ok(handle),
+            Ok(_dead) => Err("NVML initialised but device_count() failed".to_string()),
+            Err(e) => Err(e.to_string()),
+        };
+        let mut state = self.lock();
+        match outcome {
+            Ok(handle) => {
+                let handle = Arc::new(handle);
+                state.handle = Some(Arc::clone(&handle));
+                state.last_error = None;
+                state.retry_at = None;
+                state.backoff = None;
+                Ok(handle)
+            }
+            Err(message) => Err(Self::record_failure(&mut state, message, now)),
+        }
+    }
+
+    /// The cached handle if it is still live. A dead one is dropped from the
+    /// slot (the driver was reloaded); callers that still hold its `Arc` keep
+    /// it until they release it.
+    fn live_cached(&self, is_live: &impl Fn(&T) -> bool) -> Option<Arc<T>> {
+        let cached = self.lock().handle.clone()?;
+        if is_live(&cached) {
+            return Some(cached);
+        }
+        self.invalidate(&cached);
+        None
     }
 
     /// Whether the slot currently caches a handle.
@@ -270,53 +262,70 @@ impl<T> NvmlSlot<T> {
         }
     }
 
-    /// Return a live handle. When `is_live` rejects the shared handle (the
-    /// driver was reloaded), drop it from the slot and initialise once more
-    /// straight away; if that fails, or the new handle is not live either,
-    /// the back-off starts. Callers that still
-    /// hold the old `Arc` keep it until they release it.
+    /// Return a live handle. A cached handle that `is_live` rejects is
+    /// dropped and replaced by one init attempt straight away. During a
+    /// back-off the cached error comes back without calling `init`, and
+    /// while another thread is initialising the call returns an "in
+    /// progress" error at once instead of waiting.
     pub(crate) fn get<E: fmt::Display>(
         &self,
         init: impl Fn() -> Result<T, E>,
         is_live: impl Fn(&T) -> bool,
         now: Instant,
     ) -> Result<Arc<T>, SharedNvmlError> {
-        let (handle, fresh) = self.acquire(&init, now)?;
-        if is_live(&handle) {
+        if let Some(handle) = self.live_cached(&is_live) {
             return Ok(handle);
         }
-        // A handle that was initialised just now and is already dead is a
-        // failed init, not a stale handle: do not retry it straight away.
-        if fresh {
-            return Err(self.reject_fresh(&handle, now));
+        if let Some(err) = self.lock().backed_off(now) {
+            return Err(err);
         }
-        self.invalidate(&handle);
-        drop(handle);
-        let (fresh, _) = self.acquire(&init, now)?;
-        if is_live(&fresh) {
-            return Ok(fresh);
+        self.attempt(&init, &is_live, now, Attempt::Poll)
+    }
+
+    /// Like [`get`](Self::get), but ignores the back-off: unless a live
+    /// handle is cached, wait for any running attempt and then make a real
+    /// one, recorded in the slot like any other. For diagnostics that must
+    /// not report an error several minutes old.
+    pub(crate) fn probe<E: fmt::Display>(
+        &self,
+        init: impl Fn() -> Result<T, E>,
+        is_live: impl Fn(&T) -> bool,
+        now: Instant,
+    ) -> Result<Arc<T>, SharedNvmlError> {
+        if let Some(handle) = self.live_cached(&is_live) {
+            return Ok(handle);
         }
-        Err(self.reject_fresh(&fresh, now))
+        self.attempt(&init, &is_live, now, Attempt::Probe)
     }
 }
 
 static SHARED_NVML: NvmlSlot<Nvml> = NvmlSlot::new();
 
+/// Pin the library, then initialise NVML. Only ever called from inside a real
+/// init attempt, so the pin is never tried during a back-off or while a
+/// handle is cached.
+fn init_nvml() -> Result<Nvml, nvml_wrapper::error::NvmlError> {
+    pin_library();
+    Nvml::init()
+}
+
+fn nvml_is_live(nvml: &Nvml) -> bool {
+    nvml.device_count().is_ok()
+}
+
 /// The process-wide NVML handle, initialising or re-initialising it as
-/// needed (each real init pins `libnvidia-ml` first). While a
-/// failed init is in back-off, returns that failure's error without calling
-/// NVML.
+/// needed. While a failed init is in back-off, returns that failure's error
+/// without calling NVML; while another thread is initialising, returns an
+/// error whose [`SharedNvmlError::is_in_progress`] is true.
 pub(crate) fn shared_nvml() -> Result<Arc<Nvml>, SharedNvmlError> {
-    // The pin runs inside the init closure, so it is tried only when init
-    // really executes: never during a back-off and never with a cached handle.
-    SHARED_NVML.get(
-        || {
-            pin_library();
-            Nvml::init()
-        },
-        |nvml| nvml.device_count().is_ok(),
-        Instant::now(),
-    )
+    SHARED_NVML.get(init_nvml, nvml_is_live, Instant::now())
+}
+
+/// The process-wide NVML handle for `doctor`: ignores the back-off and waits
+/// for a running init, so the result reflects NVML now rather than a cached
+/// failure up to five minutes old.
+pub(crate) fn probe_shared_nvml() -> Result<Arc<Nvml>, SharedNvmlError> {
+    SHARED_NVML.probe(init_nvml, nvml_is_live, Instant::now())
 }
 
 /// Whether this process currently holds an initialised shared NVML handle.

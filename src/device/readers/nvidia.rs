@@ -573,9 +573,18 @@ fn parse_meminfo_content(content: &str) -> (u64, u64) {
 
 // Helper function to set NVML status. While the shared handle is in
 // back-off this receives the cached error from the last real attempt, so the
-// notification keeps explaining why the nvidia-smi fallback is in use.
+// notification keeps explaining why the nvidia-smi fallback is in use. An
+// "in progress" error (another thread is initialising NVML) says nothing
+// about NVML's health, so it leaves the status as it was.
 fn set_nvml_status(error: SharedNvmlError) {
-    if let Ok(mut status) = NVML_STATUS.lock() {
+    record_nvml_status(&NVML_STATUS, error);
+}
+
+fn record_nvml_status(slot: &Mutex<Option<String>>, error: SharedNvmlError) {
+    if error.is_in_progress() {
+        return;
+    }
+    if let Ok(mut status) = slot.lock() {
         *status = Some(format!("NVML Error: {error}"));
     }
 }
@@ -1065,6 +1074,23 @@ fn parse_memory_value(value: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn in_progress_error_leaves_the_nvml_status_alone() {
+        let slot = Mutex::new(None);
+        record_nvml_status(&slot, SharedNvmlError::failed("Driver Not Loaded".into()));
+        let failed = Some("NVML Error: Driver Not Loaded".to_string());
+        assert_eq!(*slot.lock().unwrap(), failed);
+
+        // Another thread is initialising: no verdict, keep the old status.
+        record_nvml_status(&slot, SharedNvmlError::in_progress());
+        assert_eq!(*slot.lock().unwrap(), failed);
+
+        // And it does not invent one either.
+        let empty = Mutex::new(None);
+        record_nvml_status(&empty, SharedNvmlError::in_progress());
+        assert_eq!(*empty.lock().unwrap(), None);
+    }
 
     #[test]
     fn csv_power_draw_is_already_watts() {
