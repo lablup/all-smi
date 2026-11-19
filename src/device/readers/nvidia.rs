@@ -28,12 +28,12 @@ use crate::device::readers::nvidia_soc::{
     read_dla, system_memory_for_uma, valid_threshold,
 };
 use crate::device::readers::nvidia_vgpu::collect_vgpu_info;
+use crate::device::readers::nvml_handle::{SharedNvmlError, shared_nvml};
 use crate::device::types::{GpuInfo, MigGpuInfo, ProcessInfo, VgpuHostInfo};
 use crate::utils::{get_hostname, with_global_system};
 use chrono::Local;
 use nvml_wrapper::enum_wrappers::device::{PerformanceState, TemperatureThreshold};
 use nvml_wrapper::enums::device::{DeviceArchitecture, UsedGpuMemory};
-use nvml_wrapper::error::NvmlError;
 use nvml_wrapper::{Nvml, cuda_driver_version_major, cuda_driver_version_minor};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
@@ -87,8 +87,6 @@ pub struct NvidiaGpuReader {
     cuda_version: OnceLock<String>,
     /// Cached static device information per device index
     device_static_info: OnceLock<HashMap<u32, NvmlStaticDevice>>,
-    /// Cached NVML handle (initialized once, reused across calls)
-    nvml: Mutex<Option<Nvml>>,
     /// Cached temperature thresholds per device index. Populated lazily on
     /// the first successful read and reused for the lifetime of the process.
     thermal_thresholds: Mutex<HashMap<u32, ThermalThresholds>>,
@@ -134,11 +132,15 @@ impl Default for NvidiaGpuReader {
 
 impl NvidiaGpuReader {
     pub fn new() -> Self {
+        // Initialise the process-wide NVML handle up front, as the reader
+        // did when it owned its own handle. Every reader shares it, so a
+        // second reader (a second `AllSmi`) costs no extra NVML init, and
+        // dropping a reader does not shut NVML down (#488).
+        let _ = shared_nvml();
         Self {
             driver_version: OnceLock::new(),
             cuda_version: OnceLock::new(),
             device_static_info: OnceLock::new(),
-            nvml: Mutex::new(Nvml::init().ok()),
             thermal_thresholds: Mutex::new(HashMap::new()),
             hardware_details: HardwareDetailCache::new(),
         }
@@ -210,33 +212,19 @@ impl NvidiaGpuReader {
             .clone()
     }
 
-    /// Execute a closure with a reference to the cached NVML handle.
-    /// Reinitializes the handle if it was previously unavailable or became invalid.
-    fn with_nvml<F, T>(&self, f: F) -> Result<T, NvmlError>
+    /// Execute a closure with the process-wide NVML handle.
+    ///
+    /// [`shared_nvml`] re-initialises a handle that stopped answering
+    /// (driver reload), and after a failed init it returns the cached error
+    /// without touching NVML until its back-off expires, so a host where
+    /// NVML cannot start does not retry on every poll (#489). Every NVML
+    /// entry point of this reader goes through here.
+    fn with_nvml<F, T>(&self, f: F) -> Result<T, SharedNvmlError>
     where
         F: FnOnce(&Nvml) -> T,
     {
-        let mut guard = self.nvml.lock().map_err(|_| NvmlError::Unknown)?;
-        // Try to use existing handle first
-        if let Some(ref nvml) = *guard {
-            // Validate the handle is still usable by querying device count
-            if nvml.device_count().is_ok() {
-                return Ok(f(nvml));
-            }
-            // Handle is stale, drop and reinitialize below
-        }
-        // Initialize or reinitialize
-        match Nvml::init() {
-            Ok(nvml) => {
-                let result = f(&nvml);
-                *guard = Some(nvml);
-                Ok(result)
-            }
-            Err(e) => {
-                *guard = None;
-                Err(e)
-            }
-        }
+        let nvml = shared_nvml()?;
+        Ok(f(&nvml))
     }
 
     /// Get cached static device info for all devices, initializing if needed
@@ -583,9 +571,20 @@ fn parse_meminfo_content(content: &str) -> (u64, u64) {
     (total, total.saturating_sub(available))
 }
 
-// Helper function to set NVML status
-fn set_nvml_status(error: NvmlError) {
-    if let Ok(mut status) = NVML_STATUS.lock() {
+// Helper function to set NVML status. While the shared handle is in
+// back-off this receives the cached error from the last real attempt, so the
+// notification keeps explaining why the nvidia-smi fallback is in use. An
+// "in progress" error (another thread is initialising NVML) says nothing
+// about NVML's health, so it leaves the status as it was.
+fn set_nvml_status(error: SharedNvmlError) {
+    record_nvml_status(&NVML_STATUS, error);
+}
+
+fn record_nvml_status(slot: &Mutex<Option<String>>, error: SharedNvmlError) {
+    if error.is_in_progress() {
+        return;
+    }
+    if let Ok(mut status) = slot.lock() {
         *status = Some(format!("NVML Error: {error}"));
     }
 }
@@ -695,7 +694,8 @@ fn cached_pci_identity(
         Ok(_) => true,
         Err(err) => matches!(
             err,
-            NvmlError::NotSupported | NvmlError::FailedToLoadSymbol(_)
+            nvml_wrapper::error::NvmlError::NotSupported
+                | nvml_wrapper::error::NvmlError::FailedToLoadSymbol(_)
         ),
     };
     let complete = name.is_ok() && pci_definitive;
@@ -1074,6 +1074,23 @@ fn parse_memory_value(value: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn in_progress_error_leaves_the_nvml_status_alone() {
+        let slot = Mutex::new(None);
+        record_nvml_status(&slot, SharedNvmlError::failed("Driver Not Loaded".into()));
+        let failed = Some("NVML Error: Driver Not Loaded".to_string());
+        assert_eq!(*slot.lock().unwrap(), failed);
+
+        // Another thread is initialising: no verdict, keep the old status.
+        record_nvml_status(&slot, SharedNvmlError::in_progress());
+        assert_eq!(*slot.lock().unwrap(), failed);
+
+        // And it does not invent one either.
+        let empty = Mutex::new(None);
+        record_nvml_status(&empty, SharedNvmlError::in_progress());
+        assert_eq!(*empty.lock().unwrap(), None);
+    }
 
     #[test]
     fn csv_power_draw_is_already_watts() {

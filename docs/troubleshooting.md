@@ -89,3 +89,9 @@ Stable check IDs (greppable across versions):
 | `windows.*` | `windows.wmi`, `windows.amd_ryzen_master`, `windows.intel_wmi`, `windows.libre_hardware_monitor` |
 | `env.*` | `env.all_smi`, `env.cuda`, `env.rocr`, `env.tpu`, `env.hl` |
 | `network.*` | `network.dns`, `network.tcp`, `network.http` |
+
+## NVML initialisation failures and back-off
+
+all-smi shares one NVML handle for the whole process and keeps `libnvidia-ml` loaded until exit. When NVML cannot initialise (driver missing or mismatched, device nodes not visible in a container or a sandboxed service), all-smi reports the error, reads GPU data from `nvidia-smi` instead, and does not call NVML init again until a back-off expires. The back-off starts at 30 seconds, doubles after each failed attempt up to 5 minutes, and resets after a successful init. A handle that initialises but then fails `device_count()` is replaced once immediately; if the replacement is also dead, the same back-off applies.
+
+After you fix the cause, expect NVML data to return within 5 minutes without restarting all-smi. Restarting the process retries at once. `all-smi doctor` (`nvidia.nvml.loadable`) shows the underlying NVML error and a fix hint.

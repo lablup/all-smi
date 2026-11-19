@@ -832,6 +832,12 @@ async fn main() -> Result<()> {
 }
 ```
 
+### NVML Lifecycle
+
+On hosts with an NVIDIA driver, the NVML handle is process-wide. Every `AllSmi` instance shares one handle, and `libnvidia-ml` stays loaded until the process exits. Constructing and dropping `AllSmi` repeatedly is cheap and does not leak file descriptors; dropping an instance never shuts NVML down for the others.
+
+If NVML cannot initialise (for example the device nodes are hidden), `get_gpu_info()` falls back to `nvidia-smi` and does not retry NVML until a back-off expires: 30 seconds, doubling to 5 minutes on repeated failures, and reset after a successful init.
+
 ### Low-Level Access
 
 For advanced use cases, you can access the underlying reader traits:

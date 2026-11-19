@@ -47,6 +47,9 @@ pub(crate) mod nvidia_soc;
 pub mod nvidia_vgpu;
 #[cfg(any(target_os = "windows", test))]
 pub(crate) mod nvidia_wddm;
+// One process-wide NVML handle and the pinned libnvidia-ml (#488, #489).
+pub(crate) mod nvml_handle;
+pub(crate) mod nvml_pin;
 pub mod rebellions;
 #[cfg(target_os = "linux")]
 pub mod tpu_grpc;

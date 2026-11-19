@@ -18,6 +18,7 @@
 use std::time::Duration;
 
 use crate::device::platform_detection::has_nvidia;
+use crate::device::readers::nvml_handle::probe_shared_nvml;
 use crate::doctor::exec::{try_exec, which};
 use crate::doctor::types::{Check, CheckCtx, CheckResult, Severity};
 
@@ -103,11 +104,13 @@ fn check_nvml_loadable(_ctx: &CheckCtx) -> CheckResult {
         return CheckResult::Skip(nvidia_absent_reason());
     }
 
-    // The `nvml-wrapper` crate loads libnvidia-ml via dlopen on first
-    // Nvml::init(). Attempting the init is the cheapest authoritative test:
-    // if the library is missing or the driver isn't usable, init() fails
-    // with a discriminator error.
-    match nvml_wrapper::Nvml::init() {
+    // Attempting NVML init is the cheapest authoritative test: if the
+    // library is missing or the driver isn't usable, init fails with a
+    // discriminator error. It goes through the process-wide handle the
+    // readers use (#488), whose error displays the NVML text unchanged, so
+    // the fix hints below still key on it. The probe ignores the readers'
+    // back-off, so a failure cached minutes ago is not reported as current.
+    match probe_shared_nvml() {
         Ok(_) => CheckResult::Pass("NVML initialised".to_string()),
         Err(e) => {
             let msg = e.to_string();
