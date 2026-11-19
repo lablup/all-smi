@@ -67,6 +67,12 @@ fn nvml_usable() -> Result<(), String> {
     if let Some(status) = all_smi::device::get_nvml_status_message() {
         return Err(format!("NVML did not initialise ({status})"));
     }
+    // The status message stays unset when AllSmi picked a reader that never
+    // touches NVML (for example the Jetson reader), so also require that the
+    // shared NVML handle exists in this process.
+    if !all_smi::device::shared_nvml_present() {
+        return Err("AllSmi did not initialise NVML (non-NVML reader in use)".to_string());
+    }
     Ok(())
 }
 

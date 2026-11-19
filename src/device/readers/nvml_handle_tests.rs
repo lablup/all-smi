@@ -248,7 +248,56 @@ fn concurrent_callers_share_one_failed_attempt() {
 }
 
 #[test]
-fn library_pin_opens_at_most_once() {
+fn dead_fresh_handle_is_a_failed_init_with_backoff() {
+    let slot = NvmlSlot::new();
+    let fake = FakeInit::new(true);
+    let t0 = Instant::now();
+    let never_live = |_: &FakeHandle| false;
+
+    let err = slot
+        .get(|| fake.init(), never_live, t0)
+        .err()
+        .expect("dead handle must be rejected");
+    assert!(err.to_string().contains("device_count() failed"));
+    assert!(fake.calls() <= 2);
+    let calls = fake.calls();
+
+    for i in 0..1_000u64 {
+        let now = t0 + Duration::from_millis(i * 29);
+        assert!(slot.get(|| fake.init(), never_live, now).is_err());
+    }
+    assert_eq!(fake.calls(), calls, "init ran again inside the back-off");
+    assert!(!slot.has_handle());
+}
+
+#[test]
+fn dead_fresh_handle_recovers_once_live_after_the_window() {
+    let slot = NvmlSlot::new();
+    let fake = FakeInit::new(true);
+    let t0 = Instant::now();
+    let live = AtomicBool::new(false);
+    let is_live = |_: &FakeHandle| live.load(Ordering::SeqCst);
+
+    assert!(slot.get(|| fake.init(), is_live, t0).is_err());
+    let calls = fake.calls();
+    live.store(true, Ordering::SeqCst);
+    // Still inside the window: no init even though the handle would be live.
+    assert!(slot.get(|| fake.init(), is_live, t0 + secs(29)).is_err());
+    assert_eq!(fake.calls(), calls);
+
+    let handle = slot
+        .get(|| fake.init(), is_live, t0 + secs(30))
+        .expect("recovers after the window");
+    assert_eq!(fake.calls(), calls + 1);
+    let again = slot
+        .get(|| fake.init(), is_live, t0 + secs(31))
+        .expect("cached");
+    assert!(Arc::ptr_eq(&handle, &again));
+    assert_eq!(fake.calls(), calls + 1);
+}
+
+#[test]
+fn library_pin_opens_once_and_is_never_reopened() {
     let pin = LibraryPin::<()>::new();
     let opens = AtomicUsize::new(0);
     std::thread::scope(|scope| {
@@ -264,25 +313,43 @@ fn library_pin_opens_at_most_once() {
         }
     });
     assert_eq!(opens.load(Ordering::SeqCst), 1);
+}
 
-    // A missing library is remembered too, not retried.
-    let missing = LibraryPin::<()>::new();
+#[test]
+fn library_pin_retries_after_failure_then_holds() {
+    let pin = LibraryPin::<()>::new();
     let attempts = AtomicUsize::new(0);
-    for _ in 0..100 {
-        assert!(!missing.ensure(|| {
+    for _ in 0..5 {
+        assert!(!pin.ensure(|| {
             attempts.fetch_add(1, Ordering::SeqCst);
             None
         }));
     }
-    assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    assert_eq!(attempts.load(Ordering::SeqCst), 5);
+
+    // The library becomes loadable: pinned once, never retried after.
+    for _ in 0..100 {
+        assert!(pin.ensure(|| {
+            attempts.fetch_add(1, Ordering::SeqCst);
+            Some(())
+        }));
+    }
+    assert_eq!(attempts.load(Ordering::SeqCst), 6);
 }
 
 #[test]
-fn real_pin_tries_the_library_at_most_once() {
-    // Runs on any host: with no NVIDIA driver the single attempt fails and
-    // is not repeated.
+fn real_pin_stops_reopening_once_pinned() {
+    // Runs on any host: with a driver the first call pins and later calls
+    // do not reopen; without one every call is a fresh attempt.
+    let before = pin_open_attempts();
+    let mut pinned = false;
     for _ in 0..100 {
-        pin_library();
+        pinned = pin_library();
     }
-    assert!(pin_open_attempts() <= 1);
+    let made = pin_open_attempts() - before;
+    if pinned {
+        assert!(made <= 1);
+    } else {
+        assert_eq!(made, 100);
+    }
 }
