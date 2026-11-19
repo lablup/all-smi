@@ -57,12 +57,7 @@ pub fn is_running_in_container() -> bool {
     }
 
     // Method 4: Check for container-specific environment variables
-    if std::env::var("KUBERNETES_SERVICE_HOST").is_ok() || std::env::var("DOCKER_CONTAINER").is_ok()
-    {
-        return true;
-    }
-
-    false
+    std::env::var("KUBERNETES_SERVICE_HOST").is_ok() || std::env::var("DOCKER_CONTAINER").is_ok()
 }
 
 /// Check if a process is running in a container by examining its namespace
