@@ -114,12 +114,16 @@ fn numbered_entries(dir: &Path, prefix: &str) -> Vec<PathBuf> {
     entries.into_iter().map(|(_, p)| p).collect()
 }
 
-/// `(N, tempN_input path, tempN_label)` for every temp input in a hwmon dir, sorted by N.
-fn hwmon_inputs(dir: &Path) -> Vec<(u32, PathBuf, Option<String>)> {
+/// `(N, tempN_input path)` for every temp input in a hwmon dir, sorted by N.
+///
+/// Only directory entries are listed; no input is read here. On large Xeons each
+/// coretemp input read is an MSR read on that core, so reads are left to the
+/// callers and happen only for the candidate under consideration.
+fn hwmon_inputs(dir: &Path) -> Vec<(u32, PathBuf)> {
     let Ok(read_dir) = fs::read_dir(dir) else {
         return Vec::new();
     };
-    let mut inputs: Vec<(u32, PathBuf, Option<String>)> = read_dir
+    let mut inputs: Vec<(u32, PathBuf)> = read_dir
         .flatten()
         .filter_map(|e| {
             let name = e.file_name().into_string().ok()?;
@@ -128,13 +132,16 @@ fn hwmon_inputs(dir: &Path) -> Vec<(u32, PathBuf, Option<String>)> {
                 .strip_suffix("_input")?
                 .parse::<u32>()
                 .ok()?;
-            let label = read_trimmed(&dir.join(format!("temp{n}_label")));
-            Some((n, e.path(), label))
+            Some((n, e.path()))
         })
-        .filter(|(_, path, _)| read_millicelsius(path).is_some())
         .collect();
-    inputs.sort_by_key(|(n, _, _)| *n);
+    inputs.sort_by_key(|(n, _)| *n);
     inputs
+}
+
+/// `tempN_label` of an input (a cheap text file, not a sensor read).
+fn hwmon_label(dir: &Path, n: u32) -> Option<String> {
+    read_trimmed(&dir.join(format!("temp{n}_label")))
 }
 
 fn hwmon_instances(root: &Path, driver: &str) -> Vec<PathBuf> {
@@ -144,37 +151,46 @@ fn hwmon_instances(root: &Path, driver: &str) -> Vec<PathBuf> {
         .collect()
 }
 
-/// Pick the readable input whose label equals one of `labels` (in preference order).
-fn pick_by_labels(inputs: &[(u32, PathBuf, Option<String>)], labels: &[&str]) -> Option<PathBuf> {
-    labels.iter().find_map(|want| {
-        inputs
-            .iter()
-            .find(|(_, _, l)| l.as_deref() == Some(*want))
-            .map(|(_, p, _)| p.clone())
-    })
+/// First input of `inputs` (ascending N) whose label equals `want` and that reads.
+fn first_readable_with_label(dir: &Path, inputs: &[(u32, PathBuf)], want: &str) -> Option<PathBuf> {
+    inputs
+        .iter()
+        .filter(|(n, _)| hwmon_label(dir, *n).as_deref() == Some(want))
+        .find(|(_, p)| read_millicelsius(p).is_some())
+        .map(|(_, p)| p.clone())
 }
 
-/// coretemp: lowest package id across instances, else lowest readable input.
+/// coretemp: lowest readable package id across instances, else lowest readable input.
 fn pick_coretemp(instances: &[PathBuf]) -> Option<PathBuf> {
-    let mut best_package: Option<(u32, PathBuf)> = None;
-    let mut first_input: Option<PathBuf> = None;
-    for dir in instances {
-        for (_, path, label) in hwmon_inputs(dir) {
-            if first_input.is_none() {
-                first_input = Some(path.clone());
-            }
-            let id = label
+    let per_instance: Vec<Vec<(u32, PathBuf)>> =
+        instances.iter().map(|d| hwmon_inputs(d)).collect();
+
+    // Labels first: only package candidates are read, in ascending id order.
+    let mut packages: Vec<(u32, &PathBuf)> = Vec::new();
+    for (dir, inputs) in instances.iter().zip(&per_instance) {
+        for (n, path) in inputs {
+            let id = hwmon_label(dir, *n)
                 .as_deref()
                 .and_then(|l| l.strip_prefix("Package id"))
                 .and_then(|rest| rest.trim().parse::<u32>().ok());
-            if let Some(id) = id
-                && best_package.as_ref().is_none_or(|(b, _)| id < *b)
-            {
-                best_package = Some((id, path));
+            if let Some(id) = id {
+                packages.push((id, path));
             }
         }
     }
-    best_package.map(|(_, p)| p).or(first_input)
+    packages.sort_by_key(|(id, _)| *id); // stable: ties keep discovery order
+    if let Some((_, p)) = packages
+        .into_iter()
+        .find(|(_, p)| read_millicelsius(p).is_some())
+    {
+        return Some(p.clone());
+    }
+
+    per_instance
+        .iter()
+        .flatten()
+        .find(|(_, p)| read_millicelsius(p).is_some())
+        .map(|(_, p)| p.clone())
 }
 
 fn pick_from_hwmon(root: &Path) -> Option<PathBuf> {
@@ -187,16 +203,21 @@ fn pick_from_hwmon(root: &Path) -> Option<PathBuf> {
             "coretemp" => pick_coretemp(&instances),
             "k10temp" | "zenpower" => instances.iter().find_map(|dir| {
                 let inputs = hwmon_inputs(dir);
-                pick_by_labels(&inputs, &["Tdie", "Tctl"]).or_else(|| {
-                    inputs
-                        .iter()
-                        .find(|(n, _, _)| *n == 1)
-                        .map(|(_, p, _)| p.clone())
-                })
+                first_readable_with_label(dir, &inputs, "Tdie")
+                    .or_else(|| first_readable_with_label(dir, &inputs, "Tctl"))
+                    .or_else(|| {
+                        inputs
+                            .iter()
+                            .find(|(n, p)| *n == 1 && read_millicelsius(p).is_some())
+                            .map(|(_, p)| p.clone())
+                    })
             }),
-            _ => instances
-                .iter()
-                .find_map(|dir| hwmon_inputs(dir).into_iter().next().map(|(_, p, _)| p)),
+            _ => instances.iter().find_map(|dir| {
+                hwmon_inputs(dir)
+                    .into_iter()
+                    .find(|(_, p)| read_millicelsius(p).is_some())
+                    .map(|(_, p)| p)
+            }),
         };
         if picked.is_some() {
             return picked;

@@ -275,3 +275,45 @@ fn scan_runs_once_across_reader_instances_when_no_sensor() {
     assert_eq!(late.get_cpu_temperature(), None);
     assert_eq!(source.scan_count(), 1);
 }
+
+#[test]
+fn dead_package_falls_through_to_next_package() {
+    let dir = TempDir::new().unwrap();
+    let r = dir.path();
+    hwmon(r, 0, "coretemp", &[(1, Some("Package id 0"), 50000)]);
+    write(r, "class/hwmon/hwmon0/temp1_input", "garbage");
+    hwmon(r, 1, "coretemp", &[(1, Some("Package id 1"), 61000)]);
+    assert_eq!(read(r), Some(61));
+}
+
+#[test]
+fn dead_only_package_falls_through_to_lowest_core() {
+    let dir = TempDir::new().unwrap();
+    let r = dir.path();
+    hwmon(
+        r,
+        0,
+        "coretemp",
+        &[
+            (1, Some("Package id 0"), 0),
+            (2, Some("Core 0"), 44000),
+            (3, Some("Core 1"), 45000),
+        ],
+    );
+    write(r, "class/hwmon/hwmon0/temp1_input", "");
+    assert_eq!(read(r), Some(44));
+}
+
+#[test]
+fn k10temp_dead_tdie_falls_through_to_tctl() {
+    let dir = TempDir::new().unwrap();
+    let r = dir.path();
+    hwmon(
+        r,
+        0,
+        "k10temp",
+        &[(1, Some("Tctl"), 70000), (2, Some("Tdie"), 0)],
+    );
+    write(r, "class/hwmon/hwmon0/temp2_input", "x");
+    assert_eq!(read(r), Some(70));
+}
