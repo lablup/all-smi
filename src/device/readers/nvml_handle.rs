@@ -285,7 +285,9 @@ impl<T> NvmlSlot<T> {
     /// Like [`get`](Self::get), but ignores the back-off: unless a live
     /// handle is cached, wait for any running attempt and then make a real
     /// one, recorded in the slot like any other. For diagnostics that must
-    /// not report an error several minutes old.
+    /// not report an error several minutes old. Only `doctor` (behind the
+    /// `cli` feature) and the tests call it.
+    #[cfg_attr(not(feature = "cli"), allow(dead_code))]
     pub(crate) fn probe<E: fmt::Display>(
         &self,
         init: impl Fn() -> Result<T, E>,
@@ -324,6 +326,7 @@ pub(crate) fn shared_nvml() -> Result<Arc<Nvml>, SharedNvmlError> {
 /// The process-wide NVML handle for `doctor`: ignores the back-off and waits
 /// for a running init, so the result reflects NVML now rather than a cached
 /// failure up to five minutes old.
+#[cfg(feature = "cli")]
 pub(crate) fn probe_shared_nvml() -> Result<Arc<Nvml>, SharedNvmlError> {
     SHARED_NVML.probe(init_nvml, nvml_is_live, Instant::now())
 }
