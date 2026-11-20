@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use super::*;
+use crate::device::cpu_linux::LinuxCpuReader;
 use std::fs;
 use tempfile::TempDir;
 
@@ -231,5 +232,46 @@ fn scan_runs_once_when_no_sensor() {
         &[(1, Some("Package id 0"), 55000)],
     );
     assert_eq!(source.read_celsius(), None);
+    assert_eq!(source.scan_count(), 1);
+}
+
+#[test]
+fn scan_runs_once_across_reader_instances_when_found() {
+    let dir = TempDir::new().unwrap();
+    let r = dir.path();
+    zone(r, 0, "acpitz", 16000);
+    hwmon(r, 7, "coretemp", &[(1, Some("Package id 0"), 57000)]);
+    let source: &'static CpuTempSource = Box::leak(Box::new(CpuTempSource::new(r.to_path_buf())));
+    let readers: Vec<LinuxCpuReader> = (0..3)
+        .map(|_| LinuxCpuReader::with_temp_source(source))
+        .collect();
+    // Construction stays cheap: nothing is resolved until the first read.
+    assert_eq!(source.scan_count(), 0);
+    for reader in &readers {
+        for _ in 0..2 {
+            assert_eq!(reader.get_cpu_temperature(), Some(57));
+        }
+    }
+    let late = LinuxCpuReader::with_temp_source(source);
+    assert_eq!(late.get_cpu_temperature(), Some(57));
+    assert_eq!(source.scan_count(), 1);
+}
+
+#[test]
+fn scan_runs_once_across_reader_instances_when_no_sensor() {
+    let dir = TempDir::new().unwrap();
+    let source: &'static CpuTempSource =
+        Box::leak(Box::new(CpuTempSource::new(dir.path().to_path_buf())));
+    let readers: Vec<LinuxCpuReader> = (0..3)
+        .map(|_| LinuxCpuReader::with_temp_source(source))
+        .collect();
+    assert_eq!(source.scan_count(), 0);
+    for reader in &readers {
+        for _ in 0..2 {
+            assert_eq!(reader.get_cpu_temperature(), None);
+        }
+    }
+    let late = LinuxCpuReader::with_temp_source(source);
+    assert_eq!(late.get_cpu_temperature(), None);
     assert_eq!(source.scan_count(), 1);
 }

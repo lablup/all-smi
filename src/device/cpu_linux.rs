@@ -342,6 +342,16 @@ impl LinuxCpuReader {
         }
     }
 
+    /// Build a reader that resolves CPU temperature through `source` instead of
+    /// the process-wide `/sys` instance, so tests can count scans across readers.
+    #[cfg(test)]
+    fn with_temp_source(source: &'static CpuTempSource) -> Self {
+        Self {
+            temp_source: source,
+            ..Self::new()
+        }
+    }
+
     /// Clone the static topology and refresh only the per-tick utilization.
     fn resolved_tiers(&self, per_core: &[CoreUtilization]) -> Vec<CpuTier> {
         let mut tiers = self.topology.tiers.clone();
