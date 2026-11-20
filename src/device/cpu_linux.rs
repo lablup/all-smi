@@ -31,7 +31,10 @@ use crate::device::{
 };
 use crate::utils::command::new_command;
 use crate::utils::system::get_hostname;
-use crate::utils::{hz_to_mhz, khz_to_mhz, millicelsius_to_celsius};
+use crate::utils::{hz_to_mhz, khz_to_mhz};
+
+mod temperature;
+use temperature::{CPU_TEMP_SOURCE, CpuTempSource};
 
 type CpuInfoParseResult = Result<
     (
@@ -309,6 +312,8 @@ pub struct LinuxCpuReader {
     /// Static tier topology, read from sysfs once at construction and never
     /// per tick (issue #473).
     topology: CpuTopology,
+    /// Process-wide CPU temperature source, shared by every reader instance.
+    temp_source: &'static CpuTempSource,
 }
 
 impl Default for LinuxCpuReader {
@@ -333,6 +338,7 @@ impl LinuxCpuReader {
             system: RwLock::new(system),
             first_refresh_done: RwLock::new(false),
             topology,
+            temp_source: &CPU_TEMP_SOURCE,
         }
     }
 
@@ -893,23 +899,9 @@ impl LinuxCpuReader {
     }
 
     fn get_cpu_temperature(&self) -> Option<u32> {
-        // Try to read from various thermal zone files
-        let thermal_paths = [
-            "/sys/class/thermal/thermal_zone0/temp",
-            "/sys/class/thermal/thermal_zone1/temp",
-            "/sys/class/hwmon/hwmon0/temp1_input",
-            "/sys/class/hwmon/hwmon1/temp1_input",
-        ];
-
-        for path in &thermal_paths {
-            if let Ok(content) = fs::read_to_string(path)
-                && let Ok(temp_millicelsius) = content.trim().parse::<u32>()
-            {
-                return Some(millicelsius_to_celsius(temp_millicelsius));
-            }
-        }
-
-        None
+        // The sensor is resolved once per process on the first read; each sample
+        // then reads only the cached file (issue #492).
+        self.temp_source.read_celsius()
     }
 
     fn get_cache_size_from_lscpu(&self) -> Option<u32> {
