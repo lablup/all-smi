@@ -12,15 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! `platform.*` checks — OS, kernel, architecture, CPU, memory, uptime,
-//! runtime target triple.
+//! `platform.*` checks: OS, kernel, architecture, CPU, CPU temperature
+//! sensor, memory, uptime, runtime target triple.
 
 use std::time::Duration;
 
 use crate::doctor::exec::try_exec;
 use crate::doctor::types::{Check, CheckCtx, CheckResult, Severity};
 
-static CHECKS: &[&Check] = &[&OS, &RUNTIME, &CPU, &MEMORY, &UPTIME, &HARDWARE];
+use super::cpu_temp::CPU_TEMP;
+
+static CHECKS: &[&Check] = &[&OS, &RUNTIME, &CPU, &CPU_TEMP, &MEMORY, &UPTIME, &HARDWARE];
 
 pub fn checks() -> &'static [&'static Check] {
     CHECKS

@@ -17,13 +17,13 @@ use crate::device::cpu_linux::LinuxCpuReader;
 use std::fs;
 use tempfile::TempDir;
 
-fn write(root: &Path, rel: &str, content: &str) {
+pub(super) fn write(root: &Path, rel: &str, content: &str) {
     let path = root.join(rel);
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(path, content).unwrap();
 }
 
-fn hwmon(root: &Path, idx: u32, name: &str, temps: &[(u32, Option<&str>, u32)]) {
+pub(super) fn hwmon(root: &Path, idx: u32, name: &str, temps: &[(u32, Option<&str>, u32)]) {
     write(root, &format!("class/hwmon/hwmon{idx}/name"), name);
     for (n, label, value) in temps {
         write(
@@ -37,7 +37,7 @@ fn hwmon(root: &Path, idx: u32, name: &str, temps: &[(u32, Option<&str>, u32)]) 
     }
 }
 
-fn zone(root: &Path, idx: u32, ty: &str, value: u32) {
+pub(super) fn zone(root: &Path, idx: u32, ty: &str, value: u32) {
     write(root, &format!("class/thermal/thermal_zone{idx}/type"), ty);
     write(
         root,

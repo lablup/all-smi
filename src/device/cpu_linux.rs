@@ -35,6 +35,16 @@ use crate::utils::{hz_to_mhz, khz_to_mhz};
 
 mod temperature;
 use temperature::{CPU_TEMP_SOURCE, CpuTempSource};
+#[cfg_attr(not(feature = "cli"), allow(unused_imports))]
+pub(crate) use temperature::{CpuTempResolution, TempRule};
+
+/// The process-wide CPU temperature resolution plus a current reading, for
+/// `all-smi doctor`. Resolves through the same cached source the readers use,
+/// so calling it never adds a second sysfs scan.
+#[cfg_attr(not(feature = "cli"), allow(dead_code))]
+pub(crate) fn cpu_temp_status() -> (&'static CpuTempResolution, Option<u32>) {
+    (CPU_TEMP_SOURCE.resolution(), CPU_TEMP_SOURCE.read_celsius())
+}
 
 type CpuInfoParseResult = Result<
     (

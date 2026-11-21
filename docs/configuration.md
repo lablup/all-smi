@@ -132,6 +132,15 @@ Older releases introduced environment variables with different naming. All alias
 | `ALL_SMI_ENERGY_GAP_SECONDS` | `ALL_SMI_ENERGY_GAP_INTERPOLATE_SECONDS` | Interpolation gap in seconds. |
 | `ALL_SMI_ENERGY_CURRENCY` | `ALL_SMI_ENERGY_CURRENCY` | Currency symbol (same canonical name). |
 
+### Other environment variables
+
+These variables have no config-file key; they also apply when all-smi is used as a library.
+
+| Env var | Description |
+|---|---|
+| `ALL_SMI_CPU_TEMP_SENSOR` | Linux only. Selects the CPU temperature sensor: `<driver>:temp<N>` (for example `it87:temp2`), `<driver>:<label>` (for example `nct6798:CPUTIN`), or an absolute path to a `temp*_input` or thermal zone `temp` file under `/sys`. Read once per process; an invalid value is ignored and reported by `all-smi doctor`. See [Wrong or missing CPU temperature on Linux](troubleshooting.md#wrong-or-missing-cpu-temperature-on-linux). |
+| `ALL_SMI_AMD_PLUGIN` | Absolute path to the Linux AMD companion library (`liball_smi_amd.so`). See [Cargo features](LIB_mode.md#cargo-features). |
+
 ### Cache paths
 
 The platform cache directory is `$XDG_CACHE_HOME` (or `~/.cache`) on Linux, `~/Library/Caches` on macOS, and `%LOCALAPPDATA%` on Windows. Record output, the energy WAL, and users-CSV exports use this location consistently when no explicit path is configured.
