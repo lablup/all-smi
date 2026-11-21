@@ -18,6 +18,8 @@
 #[cfg(target_os = "linux")]
 use crate::device::cpu_linux::{CpuTempResolution, TempRule, cpu_temp_status};
 use crate::doctor::types::{Check, CheckCtx, CheckResult, Severity};
+#[cfg(target_os = "linux")]
+use crate::parsing::common::strip_control_chars;
 
 pub(super) static CPU_TEMP: Check = Check {
     id: "platform.cpu_temp",
@@ -44,9 +46,12 @@ fn check_cpu_temp(_ctx: &CheckCtx) -> CheckResult {
 /// Render a resolution and the current reading as a check outcome.
 #[cfg(target_os = "linux")]
 fn describe(res: &CpuTempResolution, reading: Option<u32>) -> CheckResult {
+    // Driver and label come from sysfs, and the rejection embeds the override
+    // value, so strip control characters before they reach the terminal.
+    let rejection_text = res.override_rejection.as_deref().map(strip_control_chars);
     let Some(path) = &res.path else {
         let msg = "no CPU temperature sensor found".to_string();
-        return match &res.override_rejection {
+        return match &rejection_text {
             Some(rejection) => {
                 CheckResult::Warn(format!("{msg}; {rejection}"), Some(OVERRIDE_HINT.into()))
             }
@@ -55,17 +60,20 @@ fn describe(res: &CpuTempResolution, reading: Option<u32>) -> CheckResult {
     };
     let mut msg = res.rule.as_str().to_string();
     if let Some(driver) = &res.driver {
-        msg.push_str(&format!(" {driver}"));
+        msg.push_str(&format!(" {}", strip_control_chars(driver)));
     }
     if let Some(label) = &res.label {
-        msg.push_str(&format!(" \"{label}\""));
+        msg.push_str(&format!(" \"{}\"", strip_control_chars(label)));
     }
-    msg.push_str(&format!(" at {}", path.display()));
+    msg.push_str(&format!(
+        " at {}",
+        strip_control_chars(&path.display().to_string())
+    ));
     match reading {
         Some(celsius) => msg.push_str(&format!(", {celsius}°C")),
         None => msg.push_str(", currently unreadable"),
     }
-    if let Some(rejection) = &res.override_rejection {
+    if let Some(rejection) = &rejection_text {
         return CheckResult::Warn(format!("{msg}; {rejection}"), Some(OVERRIDE_HINT.into()));
     }
     if reading.is_none() {
@@ -146,6 +154,27 @@ mod tests {
     fn unreadable_sensor_is_a_warning() {
         let r = describe(&res(TempRule::Driver, Some(PATH), None), None);
         assert!(matches!(r, CheckResult::Warn(ref m, _) if m.ends_with("currently unreadable")));
+    }
+
+    #[test]
+    fn control_characters_are_stripped_from_the_message() {
+        let mut r = res(TempRule::Override, Some(PATH), Some("bad \x1b[2Jvalue\n"));
+        r.driver = Some("nct\x1b[31m6798".to_string());
+        r.label = Some("PECI\x07 Agent\x1b]0;x\x07".to_string());
+        let CheckResult::Warn(msg, _) = describe(&r, Some(48)) else {
+            panic!("expected a warning");
+        };
+        assert!(!msg.chars().any(char::is_control), "{msg:?}");
+        assert!(msg.contains("nct[31m6798"), "{msg}");
+        let r = res(
+            TempRule::None,
+            None,
+            Some("ALL_SMI_CPU_TEMP_SENSOR=\x1b[2J ignored"),
+        );
+        let CheckResult::Warn(msg, _) = describe(&r, None) else {
+            panic!("expected a warning");
+        };
+        assert!(!msg.chars().any(char::is_control), "{msg:?}");
     }
 
     #[test]

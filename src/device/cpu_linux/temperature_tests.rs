@@ -317,3 +317,20 @@ fn k10temp_dead_tdie_falls_through_to_tctl() {
     write(r, "class/hwmon/hwmon0/temp2_input", "x");
     assert_eq!(read(r), Some(70));
 }
+
+#[test]
+fn small_reads_are_capped_and_real_values_unchanged() {
+    let dir = TempDir::new().unwrap();
+    let r = dir.path();
+    write(r, "ok", "48000\n");
+    assert_eq!(read_millicelsius(&r.join("ok")), Some(48000));
+    write(r, "name", "nct6798\n");
+    assert_eq!(read_trimmed(&r.join("name")).as_deref(), Some("nct6798"));
+    // A large file yields at most the bound, never the whole content.
+    write(r, "big", &"a".repeat(1_000_000));
+    assert_eq!(
+        read_trimmed(&r.join("big")).map(|s| s.len()),
+        Some(MAX_SYSFS_READ_BYTES as usize)
+    );
+    assert_eq!(read_millicelsius(&r.join("big")), None);
+}

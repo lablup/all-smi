@@ -19,6 +19,7 @@
 //! per process, and afterwards only the single resolved file is read per sample.
 
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -180,12 +181,29 @@ impl CpuTempSource {
     }
 }
 
+/// Upper bound for the small text files read during selection. Real sysfs
+/// values (`name`, `type`, `temp*_label`, `temp*_input`) are far shorter, so a
+/// non-sysfs file reached through an override or a symlink cannot force a
+/// large read.
+const MAX_SYSFS_READ_BYTES: u64 = 64;
+
+/// Read at most [`MAX_SYSFS_READ_BYTES`] bytes of `path` as UTF-8 text.
+fn read_small(path: &Path) -> Option<String> {
+    let mut buf = Vec::new();
+    fs::File::open(path)
+        .ok()?
+        .take(MAX_SYSFS_READ_BYTES)
+        .read_to_end(&mut buf)
+        .ok()?;
+    String::from_utf8(buf).ok()
+}
+
 fn read_millicelsius(path: &Path) -> Option<u32> {
-    fs::read_to_string(path).ok()?.trim().parse::<u32>().ok()
+    read_small(path)?.trim().parse::<u32>().ok()
 }
 
 fn read_trimmed(path: &Path) -> Option<String> {
-    fs::read_to_string(path).ok().map(|s| s.trim().to_string())
+    read_small(path).map(|s| s.trim().to_string())
 }
 
 /// List `<dir>/<prefix>N` entries sorted numerically by N.

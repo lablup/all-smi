@@ -123,7 +123,7 @@ ALL_SMI_CPU_TEMP_SENSOR=nct6798:CPUTIN all-smi
 ALL_SMI_CPU_TEMP_SENSOR=/sys/class/hwmon/hwmon3/temp2_input all-smi
 ```
 
-The `<driver>:...` forms search every hwmon device with that `name`, lowest index first, so they survive hwmon renumbering across reboots; prefer them over a path. Label matching is exact and case-sensitive. An empty value counts as unset. A malformed value, a path outside `/sys`, or a sensor that matches nothing readable is ignored: all-smi continues with automatic selection, and `all-smi doctor` reports the rejection as a warning, for example ``ALL_SMI_CPU_TEMP_SENSOR=it87:temp2 ignored: no hwmon device is named `it87` ``. The variable is read once at startup, so restart all-smi after changing it.
+The `<driver>:...` forms search every hwmon device with that `name`, lowest index first, so they survive hwmon renumbering across reboots; prefer them over a path. Label matching is exact and case-sensitive. An empty value counts as unset. A malformed value, a path outside `/sys`, or a sensor that matches nothing readable is ignored: all-smi continues with automatic selection, and `all-smi doctor` reports the rejection as a warning, for example ``ALL_SMI_CPU_TEMP_SENSOR=it87:temp2 ignored: no hwmon device is named `it87` ``. The variable is read once at startup, so restart all-smi after changing it. An override that points at a slow sensor (for example `drivetemp` or `nvme` inputs, which issue device commands) is read on every sample, so prefer a CPU sensor.
 
 To find the right input, compare `sensors` (lm-sensors) with the raw sysfs files:
 
