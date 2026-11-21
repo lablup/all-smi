@@ -77,6 +77,18 @@ fn parse_temp_index(spec: &str) -> Option<u32> {
 }
 
 fn resolve_path_override(root: &Path, value: &str) -> Result<PathBuf, String> {
+    let mapped = map_override_path(root, value)?;
+    if read_millicelsius(&mapped).is_none() {
+        return Err(format!("{value} is not readable as a temperature"));
+    }
+    Ok(mapped)
+}
+
+/// Map an absolute `/sys/...` override onto `root` without touching the
+/// filesystem. Symlinks are not resolved: sysfs links such as
+/// `/sys/class/hwmon/hwmonN` point into `/sys/devices`, so either spelling of a
+/// real sysfs file stays under the root.
+pub(super) fn map_override_path(root: &Path, value: &str) -> Result<PathBuf, String> {
     let path = Path::new(value);
     let rel = path
         .strip_prefix("/sys")
@@ -101,11 +113,7 @@ fn resolve_path_override(root: &Path, value: &str) -> Result<PathBuf, String> {
     if !is_hwmon_input && !is_zone_temp {
         return Err("path is not a temp*_input or thermal zone temp file".to_string());
     }
-    let mapped = root.join(rel);
-    if read_millicelsius(&mapped).is_none() {
-        return Err(format!("{value} is not readable as a temperature"));
-    }
-    Ok(mapped)
+    Ok(root.join(rel))
 }
 
 fn parse_digits(s: &str) -> Option<u32> {

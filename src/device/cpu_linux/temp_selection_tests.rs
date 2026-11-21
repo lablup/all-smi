@@ -274,6 +274,8 @@ fn bad_override_falls_back_and_records_reason() {
         ("nct6798:temp9", "no readable temp9_input"),
         ("nct6798:cputin", "no readable input labelled `cputin`"),
         ("/etc/passwd", "outside /sys"),
+        ("/sysfoo/class/hwmon/hwmon2/temp1_input", "outside /sys"),
+        ("/sys", "not a temp*_input"),
         ("/sys/../etc/passwd", "`.` or `..`"),
         ("/sys/class/hwmon/hwmon2/name", "not a temp*_input"),
         ("/sys/class/hwmon/hwmon2/temp9_input", "not readable"),
@@ -334,4 +336,56 @@ fn scan_runs_once_with_override() {
     write(r, "class/hwmon/hwmon3/temp2_input", "51000");
     assert_eq!(source.read_celsius(), Some(51));
     assert_eq!(source.scan_count(), 1);
+}
+
+#[test]
+fn production_sys_paths_map_onto_the_sys_root() {
+    let sys = Path::new("/sys");
+    for value in [
+        "/sys/class/hwmon/hwmon2/temp1_input",
+        "/sys/devices/platform/nct6775.656/hwmon/hwmon2/temp7_input",
+        "/sys/class/thermal/thermal_zone0/temp",
+        "/sys/devices/virtual/thermal/thermal_zone3/temp",
+    ] {
+        assert_eq!(map_override_path(sys, value), Ok(PathBuf::from(value)));
+    }
+    for value in [
+        "/sysfoo/class/hwmon/hwmon2/temp1_input",
+        "/sys/class/hwmon/hwmon2/../../../etc/temp1_input",
+        "/proc/temp1_input",
+    ] {
+        assert!(map_override_path(sys, value).is_err(), "{value}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn symlinked_hwmon_dirs_work_for_both_selection_and_override() {
+    // Real sysfs: class/hwmon/hwmonN is a symlink into devices/.
+    let dir = TempDir::new().unwrap();
+    let r = dir.path();
+    let dev = "devices/platform/nct6775.656/hwmon/hwmon2";
+    write(r, &format!("{dev}/name"), "nct6798");
+    write(r, &format!("{dev}/temp7_label"), "PECI Agent 0");
+    write(r, &format!("{dev}/temp7_input"), "48000");
+    fs::create_dir_all(r.join("class/hwmon")).unwrap();
+    std::os::unix::fs::symlink(format!("../../{dev}"), r.join("class/hwmon/hwmon2")).unwrap();
+
+    let res = resolve(r, None);
+    assert_pick(
+        &res,
+        TempRule::BoardLabel,
+        "hwmon2/temp7_input",
+        Some("PECI Agent 0"),
+    );
+
+    for value in [
+        "/sys/class/hwmon/hwmon2/temp7_input".to_string(),
+        format!("/sys/{dev}/temp7_input"),
+        "nct6798:temp7".to_string(),
+    ] {
+        let res = resolve(r, Some(&value));
+        assert_eq!(res.rule, TempRule::Override, "{value}: {res:?}");
+        assert_eq!(res.label.as_deref(), Some("PECI Agent 0"), "{value}");
+    }
 }

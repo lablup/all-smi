@@ -27,6 +27,8 @@ use crate::utils::millicelsius_to_celsius;
 
 #[path = "temp_override.rs"]
 mod temp_override;
+#[cfg(test)]
+use temp_override::map_override_path;
 use temp_override::{CPU_TEMP_SENSOR_ENV, resolve_override};
 
 /// hwmon `name` values that identify a CPU temperature driver, in priority order.

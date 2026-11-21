@@ -101,7 +101,7 @@ After you fix the cause, expect NVML data to return within 5 minutes without res
 all-smi picks the CPU temperature file once per process, at the first sample, and then reads only that file. The first readable candidate in this order wins:
 
 1. The `ALL_SMI_CPU_TEMP_SENSOR` override, if set (see below).
-2. A CPU driver by hwmon `name`: `coretemp`, `k10temp`, `zenpower`, `cpu_thermal`.
+2. A CPU driver by hwmon `name`: `coretemp`, `k10temp`, `zenpower`, `cpu_thermal`, `cpu-thermal`.
 3. A CPU thermal zone by `type`: `x86_pkg_temp`, `cpu-thermal`, `cpu_thermal`, `CPU-therm`.
 4. A motherboard sensor chip input (Super I/O, board EC or WMI drivers such as `nct6775`, `nct6683`, `asus_ec_sensors`, `asus_wmi_sensors`, `dell_smm`) whose `temp*_label` is exactly one of, in priority order: `CPU Package`, `PECI Agent 0`, `PECI Agent 0 Calibration`, `PECI 0.0`, `CPU Temperature`, `CPU`, `CPUTIN`. The best label wins across all chips; ties go to the lower hwmon index. Labels such as `CPU Socket Temperature` or `CPU VRM Temperature` are never taken.
 5. The legacy paths `thermal_zone0`, `thermal_zone1`, `hwmon0/temp1_input`, `hwmon1/temp1_input`.
