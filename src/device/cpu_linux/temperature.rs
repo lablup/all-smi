@@ -12,18 +12,25 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! CPU temperature sensor selection for Linux (issue #492).
+//! CPU temperature sensor selection for Linux (issues #492, #495).
 //!
-//! The sensor is chosen by driver name instead of a fixed sysfs index, resolved
-//! once per process, and afterwards only the single resolved file is read per
-//! sample.
+//! The sensor is chosen by override, driver name, thermal zone type, or
+//! motherboard sensor label instead of a fixed sysfs index. It is resolved once
+//! per process, and afterwards only the single resolved file is read per sample.
 
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::utils::millicelsius_to_celsius;
+
+#[path = "temp_override.rs"]
+mod temp_override;
+#[cfg(test)]
+use temp_override::map_override_path;
+use temp_override::{CPU_TEMP_SENSOR_ENV, resolve_override};
 
 /// hwmon `name` values that identify a CPU temperature driver, in priority order.
 const CPU_HWMON_DRIVERS: &[&str] = &[
@@ -38,6 +45,19 @@ const CPU_HWMON_DRIVERS: &[&str] = &[
 const CPU_THERMAL_ZONE_TYPES: &[&str] =
     &["x86_pkg_temp", "cpu-thermal", "cpu_thermal", "CPU-therm"];
 
+/// Motherboard sensor labels (Super I/O, board EC/WMI) that name the CPU input,
+/// in priority order. Exact, case-sensitive match. PECI and package readings
+/// are die temperatures; `CPUTIN` is a socket thermistor and ranks last.
+const BOARD_CPU_LABELS: &[&str] = &[
+    "CPU Package",
+    "PECI Agent 0",
+    "PECI Agent 0 Calibration",
+    "PECI 0.0",
+    "CPU Temperature",
+    "CPU",
+    "CPUTIN",
+];
+
 /// Legacy fixed paths relative to the sysfs root, tried in order as a last resort.
 const FALLBACK_PATHS: &[&str] = &[
     "class/thermal/thermal_zone0/temp",
@@ -46,22 +66,82 @@ const FALLBACK_PATHS: &[&str] = &[
     "class/hwmon/hwmon1/temp1_input",
 ];
 
+/// Which selection rule produced the CPU temperature file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(feature = "cli"), allow(dead_code))]
+pub(crate) enum TempRule {
+    Override,
+    Driver,
+    ThermalZone,
+    BoardLabel,
+    Legacy,
+    None,
+}
+
+#[cfg_attr(not(feature = "cli"), allow(dead_code))]
+impl TempRule {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            TempRule::Override => "override",
+            TempRule::Driver => "driver",
+            TempRule::ThermalZone => "thermal-zone",
+            TempRule::BoardLabel => "board-label",
+            TempRule::Legacy => "legacy",
+            TempRule::None => "none",
+        }
+    }
+}
+
+/// How the CPU temperature source was chosen, cached for the process lifetime.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(not(feature = "cli"), allow(dead_code))]
+pub(crate) struct CpuTempResolution {
+    pub(crate) rule: TempRule,
+    /// hwmon `name`, or the thermal zone `type` for a thermal zone file.
+    pub(crate) driver: Option<String>,
+    /// hwmon `temp*_label` of the chosen input, when it has one.
+    pub(crate) label: Option<String>,
+    pub(crate) path: Option<PathBuf>,
+    /// Set when an override was given but not used, with the reason.
+    pub(crate) override_rejection: Option<String>,
+}
+
+/// Where the override value comes from.
+enum OverrideInput {
+    /// Production: read `ALL_SMI_CPU_TEMP_SENSOR` once, inside the resolution.
+    Environment,
+    /// Tests: a fixed value, so the process environment is never mutated.
+    #[cfg(test)]
+    Fixed(Option<String>),
+}
+
 /// Process-wide cache of the resolved CPU temperature file.
-pub(super) struct CpuTempSource {
+pub(crate) struct CpuTempSource {
     root: PathBuf,
-    resolved: OnceLock<Option<PathBuf>>,
+    override_input: OverrideInput,
+    resolved: OnceLock<CpuTempResolution>,
     scans: AtomicUsize,
 }
 
 /// Production instance rooted at `/sys`.
-pub(super) static CPU_TEMP_SOURCE: CpuTempSource = CpuTempSource::new(PathBuf::new());
+pub(crate) static CPU_TEMP_SOURCE: CpuTempSource = CpuTempSource::new(PathBuf::new());
 
 impl CpuTempSource {
     pub(super) const fn new(root: PathBuf) -> Self {
         Self {
             root,
+            override_input: OverrideInput::Environment,
             resolved: OnceLock::new(),
             scans: AtomicUsize::new(0),
+        }
+    }
+
+    /// A source with a fixed override value instead of the environment.
+    #[cfg(test)]
+    pub(super) fn with_override(root: PathBuf, value: Option<&str>) -> Self {
+        Self {
+            override_input: OverrideInput::Fixed(value.map(str::to_string)),
+            ..Self::new(root)
         }
     }
 
@@ -79,22 +159,51 @@ impl CpuTempSource {
         self.scans.load(Ordering::SeqCst)
     }
 
-    /// Resolve lazily on first call, then read only the cached file.
-    pub(super) fn read_celsius(&self) -> Option<u32> {
-        let path = self.resolved.get_or_init(|| {
+    /// The cached resolution, resolving on the first call.
+    pub(crate) fn resolution(&self) -> &CpuTempResolution {
+        self.resolved.get_or_init(|| {
             self.scans.fetch_add(1, Ordering::SeqCst);
-            resolve_cpu_temp_path(self.sys_root())
-        });
-        read_millicelsius(path.as_deref()?).map(millicelsius_to_celsius)
+            let value = match &self.override_input {
+                OverrideInput::Environment => {
+                    std::env::var_os(CPU_TEMP_SENSOR_ENV).map(|v| v.to_string_lossy().into_owned())
+                }
+                #[cfg(test)]
+                OverrideInput::Fixed(v) => v.clone(),
+            };
+            resolve_cpu_temp(self.sys_root(), value.as_deref())
+        })
+    }
+
+    /// Resolve lazily on first call, then read only the cached file.
+    pub(crate) fn read_celsius(&self) -> Option<u32> {
+        let path = self.resolution().path.as_deref()?;
+        read_millicelsius(path).map(millicelsius_to_celsius)
     }
 }
 
+/// Upper bound for the small text files read during selection. Real sysfs
+/// values (`name`, `type`, `temp*_label`, `temp*_input`) are far shorter, so a
+/// non-sysfs file reached through an override or a symlink cannot force a
+/// large read.
+const MAX_SYSFS_READ_BYTES: u64 = 64;
+
+/// Read at most [`MAX_SYSFS_READ_BYTES`] bytes of `path` as UTF-8 text.
+fn read_small(path: &Path) -> Option<String> {
+    let mut buf = Vec::new();
+    fs::File::open(path)
+        .ok()?
+        .take(MAX_SYSFS_READ_BYTES)
+        .read_to_end(&mut buf)
+        .ok()?;
+    String::from_utf8(buf).ok()
+}
+
 fn read_millicelsius(path: &Path) -> Option<u32> {
-    fs::read_to_string(path).ok()?.trim().parse::<u32>().ok()
+    read_small(path)?.trim().parse::<u32>().ok()
 }
 
 fn read_trimmed(path: &Path) -> Option<String> {
-    fs::read_to_string(path).ok().map(|s| s.trim().to_string())
+    read_small(path).map(|s| s.trim().to_string())
 }
 
 /// List `<dir>/<prefix>N` entries sorted numerically by N.
@@ -237,20 +346,100 @@ fn pick_from_thermal_zones(root: &Path) -> Option<PathBuf> {
         .find(|p| read_millicelsius(p).is_some())
 }
 
-/// Resolve the CPU temperature file under `root` (production: `/sys`).
+/// Board sensor stage: the best-priority label present on any hwmon instance
+/// that reads wins; ties go to the lower hwmon index, then the lower input N.
 ///
-/// Order: named hwmon driver, named thermal zone type, legacy fixed paths.
-pub(super) fn resolve_cpu_temp_path(root: &Path) -> Option<PathBuf> {
-    pick_from_hwmon(root)
-        .or_else(|| pick_from_thermal_zones(root))
-        .or_else(|| {
-            FALLBACK_PATHS
-                .iter()
-                .map(|rel| root.join(rel))
-                .find(|p| read_millicelsius(p).is_some())
-        })
+/// Labels are read first and only the candidate under consideration is read as
+/// a sensor, as in the driver stage.
+fn pick_from_board_labels(root: &Path) -> Option<PathBuf> {
+    let mut candidates: Vec<(usize, PathBuf)> = Vec::new();
+    for dir in numbered_entries(&root.join("class/hwmon"), "hwmon") {
+        for (n, path) in hwmon_inputs(&dir) {
+            let priority = hwmon_label(&dir, n)
+                .and_then(|label| BOARD_CPU_LABELS.iter().position(|l| *l == label));
+            if let Some(priority) = priority {
+                candidates.push((priority, path));
+            }
+        }
+    }
+    candidates.sort_by_key(|(priority, _)| *priority); // stable: keeps index order
+    candidates
+        .into_iter()
+        .map(|(_, p)| p)
+        .find(|p| read_millicelsius(p).is_some())
+}
+
+fn pick_from_legacy(root: &Path) -> Option<PathBuf> {
+    FALLBACK_PATHS
+        .iter()
+        .map(|rel| root.join(rel))
+        .find(|p| read_millicelsius(p).is_some())
+}
+
+/// Driver and label of a chosen file, from its cheap sibling text files.
+fn describe(path: &Path) -> (Option<String>, Option<String>) {
+    let Some(dir) = path.parent() else {
+        return (None, None);
+    };
+    let file = path.file_name().and_then(|f| f.to_str()).unwrap_or("");
+    if file == "temp" {
+        return (read_trimmed(&dir.join("type")), None);
+    }
+    let n = file
+        .strip_prefix("temp")
+        .and_then(|rest| rest.strip_suffix("_input"))
+        .and_then(|digits| digits.parse::<u32>().ok());
+    let label = n.and_then(|n| hwmon_label(dir, n));
+    (read_trimmed(&dir.join("name")), label)
+}
+
+/// Resolve the CPU temperature source under `root` (production: `/sys`).
+///
+/// Order, first readable candidate wins: override, named hwmon driver, named
+/// thermal zone type, motherboard sensor label, legacy fixed paths. An empty or
+/// whitespace-only override counts as unset.
+pub(super) fn resolve_cpu_temp(root: &Path, override_value: Option<&str>) -> CpuTempResolution {
+    let mut override_rejection = None;
+    let mut picked = None;
+    if let Some(value) = override_value.map(str::trim).filter(|v| !v.is_empty()) {
+        match resolve_override(root, value) {
+            Ok(path) => picked = Some((TempRule::Override, path)),
+            Err(reason) => {
+                override_rejection =
+                    Some(format!("{CPU_TEMP_SENSOR_ENV}={value} ignored: {reason}"))
+            }
+        }
+    }
+    let picked = picked
+        .or_else(|| pick_from_hwmon(root).map(|p| (TempRule::Driver, p)))
+        .or_else(|| pick_from_thermal_zones(root).map(|p| (TempRule::ThermalZone, p)))
+        .or_else(|| pick_from_board_labels(root).map(|p| (TempRule::BoardLabel, p)))
+        .or_else(|| pick_from_legacy(root).map(|p| (TempRule::Legacy, p)));
+    match picked {
+        Some((rule, path)) => {
+            let (driver, label) = describe(&path);
+            CpuTempResolution {
+                rule,
+                driver,
+                label,
+                path: Some(path),
+                override_rejection,
+            }
+        }
+        None => CpuTempResolution {
+            rule: TempRule::None,
+            driver: None,
+            label: None,
+            path: None,
+            override_rejection,
+        },
+    }
 }
 
 #[cfg(test)]
 #[path = "temperature_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "temp_selection_tests.rs"]
+mod selection_tests;

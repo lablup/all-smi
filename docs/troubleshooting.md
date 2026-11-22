@@ -74,7 +74,7 @@ Stable check IDs (greppable across versions):
 
 | Category | Example IDs |
 |---|---|
-| `platform.*` | `platform.os`, `platform.runtime`, `platform.cpu`, `platform.memory`, `platform.hardware`, `platform.uptime` |
+| `platform.*` | `platform.os`, `platform.runtime`, `platform.cpu`, `platform.cpu_temp`, `platform.memory`, `platform.hardware`, `platform.uptime` |
 | `privileges.*` | `privileges.user`, `privileges.root`, `privileges.video_render_group`, `privileges.dev_dri`, `privileges.dev_tenstorrent` |
 | `container.*` | `container.runtime`, `container.cgroup`, `container.k8s_serviceaccount` |
 | `nvidia.*` | `nvidia.nvml.loadable`, `nvidia.smi.binary`, `nvidia.driver.version`, `nvidia.env.visible_devices`, `nvidia.mig.mode` |
@@ -95,3 +95,42 @@ Stable check IDs (greppable across versions):
 all-smi shares one NVML handle for the whole process and keeps `libnvidia-ml` loaded until exit. When NVML cannot initialise (driver missing or mismatched, device nodes not visible in a container or a sandboxed service), all-smi reports the error, reads GPU data from `nvidia-smi` instead, and does not call NVML init again until a back-off expires. The back-off starts at 30 seconds, doubles after each failed attempt up to 5 minutes, and resets after a successful init. A handle that initialises but then fails `device_count()` is replaced once immediately; if the replacement is also dead, the same back-off applies.
 
 After you fix the cause, expect NVML data to return within 5 minutes without restarting all-smi. Restarting the process retries at once. `all-smi doctor` (`nvidia.nvml.loadable`) shows the underlying NVML error and a fix hint.
+
+## Wrong or missing CPU temperature on Linux
+
+all-smi picks the CPU temperature file once per process, at the first sample, and then reads only that file. The first readable candidate in this order wins:
+
+1. The `ALL_SMI_CPU_TEMP_SENSOR` override, if set (see below).
+2. A CPU driver by hwmon `name`: `coretemp`, `k10temp`, `zenpower`, `cpu_thermal`, `cpu-thermal`.
+3. A CPU thermal zone by `type`: `x86_pkg_temp`, `cpu-thermal`, `cpu_thermal`, `CPU-therm`.
+4. A motherboard sensor chip input (Super I/O, board EC or WMI drivers such as `nct6775`, `nct6683`, `asus_ec_sensors`, `asus_wmi_sensors`, `dell_smm`) whose `temp*_label` is exactly one of, in priority order: `CPU Package`, `PECI Agent 0`, `PECI Agent 0 Calibration`, `PECI 0.0`, `CPU Temperature`, `CPU`, `CPUTIN`. The best label wins across all chips; ties go to the lower hwmon index. Labels such as `CPU Socket Temperature` or `CPU VRM Temperature` are never taken.
+5. The legacy paths `thermal_zone0`, `thermal_zone1`, `hwmon0/temp1_input`, `hwmon1/temp1_input`.
+
+`all-smi doctor --only platform.cpu_temp` shows which rule matched, the driver and label, the file, and the current reading:
+
+```text
+PASS platform.cpu_temp                board-label nct6798 "PECI Agent 0" at /sys/class/hwmon/hwmon2/temp7_input, 48°C
+```
+
+If the value looks stuck or wrong (often a motherboard `thermal_zone0` reading), or the chip has no labels (`it87`, `gigabyte_wmi`, `f71882fg`, where the CPU input depends on board wiring), name the sensor explicitly with `ALL_SMI_CPU_TEMP_SENSOR`:
+
+```bash
+# Input 2 of the first it87 chip that reads
+ALL_SMI_CPU_TEMP_SENSOR=it87:temp2 all-smi
+# The input labelled exactly CPUTIN on an nct6798 chip
+ALL_SMI_CPU_TEMP_SENSOR=nct6798:CPUTIN all-smi
+# An absolute path to a temp*_input or a thermal zone temp file under /sys
+ALL_SMI_CPU_TEMP_SENSOR=/sys/class/hwmon/hwmon3/temp2_input all-smi
+```
+
+The `<driver>:...` forms search every hwmon device with that `name`, lowest index first, so they survive hwmon renumbering across reboots; prefer them over a path. Label matching is exact and case-sensitive. An empty value counts as unset. A malformed value, a path outside `/sys`, or a sensor that matches nothing readable is ignored: all-smi continues with automatic selection, and `all-smi doctor` reports the rejection as a warning, for example ``ALL_SMI_CPU_TEMP_SENSOR=it87:temp2 ignored: no hwmon device is named `it87` ``. The variable is read once at startup, so restart all-smi after changing it. An override that points at a slow sensor (for example `drivetemp` or `nvme` inputs, which issue device commands) is read on every sample, so prefer a CPU sensor.
+
+To find the right input, compare `sensors` (lm-sensors) with the raw sysfs files:
+
+```bash
+grep . /sys/class/hwmon/hwmon*/name
+grep . /sys/class/hwmon/hwmon*/temp*_label
+grep . /sys/class/hwmon/hwmon*/temp*_input   # millidegrees Celsius
+```
+
+Load the CPU under a stress test and pick the input that rises with it.

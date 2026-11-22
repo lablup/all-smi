@@ -17,13 +17,13 @@ use crate::device::cpu_linux::LinuxCpuReader;
 use std::fs;
 use tempfile::TempDir;
 
-fn write(root: &Path, rel: &str, content: &str) {
+pub(super) fn write(root: &Path, rel: &str, content: &str) {
     let path = root.join(rel);
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(path, content).unwrap();
 }
 
-fn hwmon(root: &Path, idx: u32, name: &str, temps: &[(u32, Option<&str>, u32)]) {
+pub(super) fn hwmon(root: &Path, idx: u32, name: &str, temps: &[(u32, Option<&str>, u32)]) {
     write(root, &format!("class/hwmon/hwmon{idx}/name"), name);
     for (n, label, value) in temps {
         write(
@@ -37,7 +37,7 @@ fn hwmon(root: &Path, idx: u32, name: &str, temps: &[(u32, Option<&str>, u32)]) 
     }
 }
 
-fn zone(root: &Path, idx: u32, ty: &str, value: u32) {
+pub(super) fn zone(root: &Path, idx: u32, ty: &str, value: u32) {
     write(root, &format!("class/thermal/thermal_zone{idx}/type"), ty);
     write(
         root,
@@ -316,4 +316,21 @@ fn k10temp_dead_tdie_falls_through_to_tctl() {
     );
     write(r, "class/hwmon/hwmon0/temp2_input", "x");
     assert_eq!(read(r), Some(70));
+}
+
+#[test]
+fn small_reads_are_capped_and_real_values_unchanged() {
+    let dir = TempDir::new().unwrap();
+    let r = dir.path();
+    write(r, "ok", "48000\n");
+    assert_eq!(read_millicelsius(&r.join("ok")), Some(48000));
+    write(r, "name", "nct6798\n");
+    assert_eq!(read_trimmed(&r.join("name")).as_deref(), Some("nct6798"));
+    // A large file yields at most the bound, never the whole content.
+    write(r, "big", &"a".repeat(1_000_000));
+    assert_eq!(
+        read_trimmed(&r.join("big")).map(|s| s.len()),
+        Some(MAX_SYSFS_READ_BYTES as usize)
+    );
+    assert_eq!(read_millicelsius(&r.join("big")), None);
 }

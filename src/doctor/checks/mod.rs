@@ -23,6 +23,7 @@ use crate::doctor::types::Check;
 pub mod amd;
 pub mod apple;
 pub mod container;
+mod cpu_temp;
 pub mod env;
 pub mod furiosa;
 pub mod gaudi;
