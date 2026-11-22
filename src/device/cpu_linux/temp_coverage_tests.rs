@@ -260,6 +260,27 @@ fn rk3588_prefers_package_over_cluster_zones() {
 }
 
 #[test]
+fn existing_zone_types_keep_priority_over_new_arm_types() {
+    // A host that resolved to `cpu-thermal` under #496 must not switch to a
+    // newly listed type just because that zone has a lower index.
+    let dir = TempDir::new().unwrap();
+    let r = dir.path();
+    zone(r, 0, "soc-thermal", 52000);
+    zone(r, 1, "cpu-thermal", 48000);
+    let res = resolve_cpu_temp(r, None);
+    assert_pick(&res, TempRule::ThermalZone, "thermal_zone1/temp", None);
+    assert_eq!(res.driver.as_deref(), Some("cpu-thermal"));
+
+    // Secondary types still beat the per-cluster fallback at any index.
+    let dir = TempDir::new().unwrap();
+    let r = dir.path();
+    zone(r, 0, "bigcore0-thermal", 47000);
+    zone(r, 3, "soc_thermal", 45000);
+    let res = resolve_cpu_temp(r, None);
+    assert_pick(&res, TempRule::ThermalZone, "thermal_zone3/temp", None);
+}
+
+#[test]
 fn other_cluster_zones_are_not_cpu_zones() {
     let dir = TempDir::new().unwrap();
     let r = dir.path();

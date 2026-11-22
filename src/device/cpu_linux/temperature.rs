@@ -49,14 +49,15 @@ const CPU_HWMON_DRIVERS: &[&str] = &[
 
 /// thermal zone `type` values that identify a CPU zone (exact, case-sensitive).
 ///
-/// Matching zones are tried in zone index order. Zones of the per-cluster
-/// [`CPU_THERMAL_ZONE_FALLBACK_TYPES`] are tried only when no zone of these
-/// types reads.
-const CPU_THERMAL_ZONE_TYPES: &[&str] = &[
-    "x86_pkg_temp",
-    "cpu-thermal",
-    "cpu_thermal",
-    "CPU-therm",
+/// Zones are tried in tiers, and in zone index order within a tier: these
+/// types first, then [`CPU_THERMAL_ZONE_SECONDARY_TYPES`], then the per-cluster
+/// [`CPU_THERMAL_ZONE_FALLBACK_TYPES`]. Keeping the types added after #496 in a
+/// lower tier means a host that resolved before still resolves to the same zone.
+const CPU_THERMAL_ZONE_TYPES: &[&str] =
+    &["x86_pkg_temp", "cpu-thermal", "cpu_thermal", "CPU-therm"];
+
+/// ARM SoC zone types, tried only when no zone of [`CPU_THERMAL_ZONE_TYPES`] reads.
+const CPU_THERMAL_ZONE_SECONDARY_TYPES: &[&str] = &[
     "package-thermal", // Rockchip RK3588 mainline
     "cpu0-thermal",    // Exynos5422 and others
     "soc-thermal",     // Rockchip/Amlogic vendor kernels
@@ -65,7 +66,7 @@ const CPU_THERMAL_ZONE_TYPES: &[&str] = &[
 ];
 
 /// Per-cluster thermal zone `type` values, tried only when no zone of
-/// [`CPU_THERMAL_ZONE_TYPES`] reads.
+/// [`CPU_THERMAL_ZONE_TYPES`] or [`CPU_THERMAL_ZONE_SECONDARY_TYPES`] reads.
 const CPU_THERMAL_ZONE_FALLBACK_TYPES: &[&str] = &[
     // RK3588 without `package-thermal`: the first big-core cluster stands in.
     "bigcore0-thermal",
@@ -351,22 +352,22 @@ fn pick_from_hwmon(root: &Path) -> Option<PathBuf> {
 }
 
 fn pick_from_thermal_zones(root: &Path) -> Option<PathBuf> {
-    let mut zones: Vec<(bool, PathBuf)> =
+    let mut zones: Vec<(u8, PathBuf)> =
         numbered_entries(&root.join("class/thermal"), "thermal_zone")
             .into_iter()
             .filter_map(|dir| {
                 let ty = read_trimmed(&dir.join("type"))?;
-                let fallback = if CPU_THERMAL_ZONE_TYPES.contains(&ty.as_str()) {
-                    false
-                } else if CPU_THERMAL_ZONE_FALLBACK_TYPES.contains(&ty.as_str()) {
-                    true
-                } else {
-                    return None;
-                };
-                Some((fallback, dir.join("temp")))
+                let tier = [
+                    CPU_THERMAL_ZONE_TYPES,
+                    CPU_THERMAL_ZONE_SECONDARY_TYPES,
+                    CPU_THERMAL_ZONE_FALLBACK_TYPES,
+                ]
+                .iter()
+                .position(|types| types.contains(&ty.as_str()))?;
+                Some((tier as u8, dir.join("temp")))
             })
             .collect();
-    zones.sort_by_key(|(fallback, _)| *fallback); // stable: keeps zone index order
+    zones.sort_by_key(|(tier, _)| *tier); // stable: keeps zone index order within a tier
     zones
         .into_iter()
         .map(|(_, p)| p)
