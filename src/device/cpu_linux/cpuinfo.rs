@@ -64,13 +64,17 @@ pub(super) fn machine_string() -> String {
     // SAFETY: `uts` is a valid, writable `utsname`; `uname` fills it and
     // returns 0 on success.
     if unsafe { libc::uname(&mut uts) } == 0 {
-        // SAFETY: on success the kernel writes a NUL-terminated string into
-        // `machine`, and the zeroed buffer guarantees a terminator even if it
-        // did not.
-        let machine = unsafe { CStr::from_ptr(uts.machine.as_ptr()) };
-        let machine = machine.to_string_lossy().trim().to_string();
-        if !machine.is_empty() {
-            return machine;
+        // `c_char` is `i8` or `u8` depending on the target; reinterpret as bytes.
+        let bytes: Vec<u8> = uts
+            .machine
+            .iter()
+            .map(|&c| u8::from_ne_bytes(c.to_ne_bytes()))
+            .collect();
+        if let Ok(machine) = CStr::from_bytes_until_nul(&bytes) {
+            let machine = machine.to_string_lossy().trim().to_string();
+            if !machine.is_empty() {
+                return machine;
+            }
         }
     }
     std::env::consts::ARCH.to_string()

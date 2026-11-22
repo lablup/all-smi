@@ -90,8 +90,22 @@ pub(super) fn priority_cache() -> MutexGuard<'static, PriorityCache> {
 #[cfg(unix)]
 pub(super) const USER_CACHE_CAP: usize = 4096;
 
+/// Outcome of resolving a uid to a user name.
+#[cfg(unix)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum UserLookup {
+    /// The passwd entry's name.
+    Found(String),
+    /// The uid definitively has no usable entry; safe to cache as a number.
+    NotFound,
+    /// A transient failure (interrupted call, resource exhaustion, ...); the
+    /// next call should retry rather than remember the numeric fallback.
+    Transient,
+}
+
 /// uid -> user name, including uids with no passwd entry (cached as the
-/// numeric uid) so an unknown uid does not hit NSS on every call.
+/// numeric uid) so an unknown uid does not hit NSS on every call. A transient
+/// lookup failure returns the numeric uid without caching it.
 #[cfg(unix)]
 #[derive(Debug, Default)]
 pub(super) struct UserCache {
@@ -100,17 +114,18 @@ pub(super) struct UserCache {
 
 #[cfg(unix)]
 impl UserCache {
-    /// The name for `uid`, calling `lookup` only on a miss. A `None` from
-    /// `lookup` is stored as the numeric uid, which is what the row shows.
-    pub(super) fn resolve(
-        &mut self,
-        uid: u32,
-        lookup: impl FnOnce(u32) -> Option<String>,
-    ) -> String {
+    /// The name for `uid`, calling `lookup` only on a miss. `NotFound` is
+    /// stored as the numeric uid, which is what the row shows; `Transient`
+    /// returns the numeric uid without storing it.
+    pub(super) fn resolve(&mut self, uid: u32, lookup: impl FnOnce(u32) -> UserLookup) -> String {
         if let Some(name) = self.names.get(&uid) {
             return name.clone();
         }
-        let name = lookup(uid).unwrap_or_else(|| uid.to_string());
+        let name = match lookup(uid) {
+            UserLookup::Found(name) => name,
+            UserLookup::NotFound => uid.to_string(),
+            UserLookup::Transient => return uid.to_string(),
+        };
         if self.names.len() >= USER_CACHE_CAP {
             self.names.clear();
         }
@@ -137,10 +152,12 @@ pub(super) fn user_cache() -> MutexGuard<'static, UserCache> {
 /// Resolve a uid through the thread-safe `getpwuid_r`.
 ///
 /// `getpwuid` returns a pointer into static storage, so two readers building
-/// rows on different threads could overwrite each other's result. Returns
-/// `None` when the uid has no entry or its name is not UTF-8.
+/// rows on different threads could overwrite each other's result.
+/// `NotFound` covers a uid with no entry (zero return with a null result, or
+/// ENOENT, ESRCH, EBADF, EPERM) and a name that is not UTF-8; any other error
+/// is `Transient`.
 #[cfg(unix)]
-pub(super) fn lookup_user_name(uid: u32) -> Option<String> {
+pub(super) fn lookup_user_name(uid: u32) -> UserLookup {
     use std::ffi::CStr;
 
     // Most passwd entries fit in 1 KiB; a large one (long GECOS, many
@@ -173,15 +190,31 @@ pub(super) fn lookup_user_name(uid: u32) -> Option<String> {
         if rc == libc::ERANGE && attempt == 0 {
             continue;
         }
-        if rc != 0 || result.is_null() || pwd.pw_name.is_null() {
-            return None;
+        if rc != 0 {
+            return classify_getpwuid_error(rc);
+        }
+        if result.is_null() || pwd.pw_name.is_null() {
+            return UserLookup::NotFound;
         }
         // SAFETY: on success `pw_name` points to a NUL-terminated string
         // inside `buf`, which is still alive here.
         let name = unsafe { CStr::from_ptr(pwd.pw_name) };
-        return name.to_str().ok().map(str::to_string);
+        return name
+            .to_str()
+            .map_or(UserLookup::NotFound, |n| UserLookup::Found(n.to_string()));
     }
-    None
+    UserLookup::Transient
+}
+
+/// Map a non-zero `getpwuid_r` return code to a cacheable or retryable result.
+#[cfg(unix)]
+fn classify_getpwuid_error(rc: i32) -> UserLookup {
+    match rc {
+        libc::ENOENT | libc::ESRCH | libc::EBADF | libc::EPERM => UserLookup::NotFound,
+        // EINTR, EIO, EMFILE, ENFILE, ENOMEM, a second ERANGE and anything
+        // else may succeed on the next call.
+        _ => UserLookup::Transient,
+    }
 }
 
 #[cfg(test)]
@@ -227,14 +260,14 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn user_names_are_resolved_once_and_bounded() {
-        use super::{USER_CACHE_CAP, UserCache};
+        use super::{USER_CACHE_CAP, UserCache, UserLookup};
 
         let mut cache = UserCache::default();
         let mut calls = 0;
         for _ in 0..3 {
             let name = cache.resolve(0, |_| {
                 calls += 1;
-                Some("root".to_string())
+                UserLookup::Found("root".to_string())
             });
             assert_eq!(name, "root");
         }
@@ -245,14 +278,29 @@ mod tests {
         for _ in 0..2 {
             let name = cache.resolve(424_242, |_| {
                 misses += 1;
-                None
+                UserLookup::NotFound
             });
             assert_eq!(name, "424242");
         }
         assert_eq!(misses, 1);
 
+        // A transient failure returns the number but is retried next call.
+        let mut attempts = 0;
+        for _ in 0..2 {
+            let name = cache.resolve(777, |_| {
+                attempts += 1;
+                UserLookup::Transient
+            });
+            assert_eq!(name, "777");
+        }
+        assert_eq!(attempts, 2);
+        assert_eq!(
+            cache.resolve(777, |_| UserLookup::Found("late".into())),
+            "late"
+        );
+
         for uid in 1..(USER_CACHE_CAP as u32 * 2) {
-            cache.resolve(uid, |uid| Some(format!("u{uid}")));
+            cache.resolve(uid, |uid| UserLookup::Found(format!("u{uid}")));
             assert!(cache.len() <= USER_CACHE_CAP);
         }
     }
@@ -260,6 +308,28 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn getpwuid_r_resolves_root() {
-        assert_eq!(super::lookup_user_name(0).as_deref(), Some("root"));
+        assert_eq!(
+            super::lookup_user_name(0),
+            super::UserLookup::Found("root".to_string())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn getpwuid_r_errors_are_cached_only_when_definitive() {
+        use super::{UserLookup, classify_getpwuid_error};
+
+        for rc in [libc::ENOENT, libc::ESRCH, libc::EBADF, libc::EPERM] {
+            assert_eq!(classify_getpwuid_error(rc), UserLookup::NotFound);
+        }
+        for rc in [
+            libc::EINTR,
+            libc::EIO,
+            libc::EMFILE,
+            libc::ENFILE,
+            libc::ENOMEM,
+        ] {
+            assert_eq!(classify_getpwuid_error(rc), UserLookup::Transient);
+        }
     }
 }

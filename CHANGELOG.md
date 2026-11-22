@@ -9,6 +9,7 @@
 - Fixed the API and library process lists from the NVIDIA, Jetson, Tenstorrent, Intel and Windows GPU readers containing one row per thread; they now list processes only (#504).
 - Fixed the Linux TUI command column showing `[name]` instead of the full command line for processes it discovered (#504).
 - Hardware detection reads the PCI inventory once from `/sys/bus/pci/devices` and runs `lspci -nn` only when sysfs is unreadable, instead of spawning `lspci` up to eight times at startup; Apple Silicon no longer runs `system_profiler SPPCIDataType` to look for an NVIDIA GPU (#504).
+- On Linux hosts with cpufreq, the reported base CPU frequency is now the average `scaling_cur_freq` over all counted CPUs (previously cpu0 on ARM and the `cpu MHz` average on x86) (#504).
 
 ### Library API
 
