@@ -620,7 +620,9 @@ where
 }
 
 /// [`gpu_processes_with`] over an explicit snapshot, so the row and PID
-/// shape is testable without Windows.
+/// shape is testable without Windows. Test-only: no production path calls it,
+/// so outside tests the Windows bin build rejects it as dead code.
+#[cfg(test)]
 pub fn gpu_processes_from(
     snapshot: &Snapshot,
     adapter_index: &AdapterIndex,
