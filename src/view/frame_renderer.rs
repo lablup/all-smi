@@ -954,8 +954,10 @@ fn lookup_vgpu_host<'a>(
     vgpu_info: &'a [crate::device::VgpuHostInfo],
     gpu: &crate::device::GpuInfo,
 ) -> Option<&'a crate::device::VgpuHostInfo> {
-    if let Some(&idx) = lookup.get(gpu.uuid.as_str()) {
-        return Some(&vgpu_info[idx]);
+    if let Some(&idx) = lookup.get(gpu.uuid.as_str())
+        && let Some(info) = vgpu_info.get(idx)
+    {
+        return Some(info);
     }
     // Fallback: hostname + gpu_name linear scan for entries without UUID match.
     vgpu_info
@@ -977,8 +979,10 @@ fn lookup_mig_gpu<'a>(
     mig_info: &'a [crate::device::MigGpuInfo],
     gpu: &crate::device::GpuInfo,
 ) -> Option<&'a crate::device::MigGpuInfo> {
-    if let Some(&idx) = lookup.get(gpu.uuid.as_str()) {
-        return Some(&mig_info[idx]);
+    if let Some(&idx) = lookup.get(gpu.uuid.as_str())
+        && let Some(info) = mig_info.get(idx)
+    {
+        return Some(info);
     }
     // Fallback: hostname + gpu_name linear scan for entries without UUID match.
     mig_info
@@ -1477,6 +1481,24 @@ mod tests {
     // renderers, so these drive real device rows rather than the empty
     // snapshot the smoke tests above use.
     // -----------------------------------------------------------------------
+
+    #[test]
+    fn lookup_vgpu_host_stale_index_falls_back_to_none() {
+        // A cached map whose index points past the (shorter) info slice must
+        // be treated as not found instead of panicking.
+        let mut lookup = HashMap::new();
+        lookup.insert("GPU-X".to_string(), 3usize);
+        let gpu = make_gpu("GPU-X", "A100");
+        assert!(lookup_vgpu_host(&lookup, &[], &gpu).is_none());
+    }
+
+    #[test]
+    fn lookup_mig_gpu_stale_index_falls_back_to_none() {
+        let mut lookup = HashMap::new();
+        lookup.insert("GPU-X".to_string(), 3usize);
+        let gpu = make_gpu("GPU-X", "A100");
+        assert!(lookup_mig_gpu(&lookup, &[], &gpu).is_none());
+    }
 
     fn make_gpu(uuid: &str, name: &str) -> crate::device::GpuInfo {
         crate::device::GpuInfo {

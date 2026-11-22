@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! UI layout calculation utilities
+
 use crate::cli::ViewArgs;
 use crate::device::{GpuInfo, MigGpuInfo, VgpuHostInfo};
 use crate::ui::activity_panel;
@@ -19,7 +21,6 @@ use crate::ui::gpu_sparkline_panel;
 use crate::ui::renderers::gpu_renderer::{
     build_mig_uuid_lookup, build_vgpu_uuid_lookup, gpu_render_line_count_with_lookup,
 };
-/// UI layout calculation utilities
 use crate::ui::view_state::ViewState;
 
 pub struct LayoutCalculator;
