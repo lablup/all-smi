@@ -79,8 +79,9 @@ pub(super) fn pick_from_board_labels(root: &Path) -> Option<PathBuf> {
         .find(|p| read_millicelsius(p).is_some())
 }
 
-/// Sensor type stage for unlabelled chips (it87 and others): the first input,
-/// by hwmon index then N, whose `temp<N>_type` is PECI or AMD TSI and that reads.
+/// Sensor type stage for chips without CPU labels (it87 and others): the first
+/// input, by hwmon index then N, whose `temp<N>_type` is PECI or AMD TSI and
+/// that reads. The input's label, if any, is not consulted.
 pub(super) fn pick_from_sensor_types(root: &Path) -> Option<PathBuf> {
     numbered_entries(&root.join("class/hwmon"), "hwmon")
         .into_iter()

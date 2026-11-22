@@ -15,8 +15,9 @@
 //! CPU temperature sensor selection for Linux (issues #492, #495, #497).
 //!
 //! The sensor is chosen by override, driver name, thermal zone type,
-//! motherboard sensor label, or hwmon sensor type instead of a fixed sysfs index. It is resolved once
-//! per process, and afterwards only the single resolved file is read per sample.
+//! motherboard sensor label, or hwmon sensor type instead of a fixed sysfs
+//! index. It is resolved once per process, and afterwards only the single
+//! resolved file is read per sample.
 
 use std::fs;
 use std::io::Read;
@@ -48,9 +49,9 @@ const CPU_HWMON_DRIVERS: &[&str] = &[
 
 /// thermal zone `type` values that identify a CPU zone (exact, case-sensitive).
 ///
-/// Matching zones are tried in zone index order. The entries from
-/// [`CPU_THERMAL_ZONE_FALLBACK_TYPES`] on are per-cluster zones, tried only when
-/// no zone of an earlier type reads.
+/// Matching zones are tried in zone index order. Zones of the per-cluster
+/// [`CPU_THERMAL_ZONE_FALLBACK_TYPES`] are tried only when no zone of these
+/// types reads.
 const CPU_THERMAL_ZONE_TYPES: &[&str] = &[
     "x86_pkg_temp",
     "cpu-thermal",
@@ -61,12 +62,14 @@ const CPU_THERMAL_ZONE_TYPES: &[&str] = &[
     "soc-thermal",     // Rockchip/Amlogic vendor kernels
     "soc_thermal",     // Rockchip/Amlogic vendor kernels
     "BCPU-therm",      // NVIDIA DRIVE OS
+];
+
+/// Per-cluster thermal zone `type` values, tried only when no zone of
+/// [`CPU_THERMAL_ZONE_TYPES`] reads.
+const CPU_THERMAL_ZONE_FALLBACK_TYPES: &[&str] = &[
     // RK3588 without `package-thermal`: the first big-core cluster stands in.
     "bigcore0-thermal",
 ];
-
-/// Index in [`CPU_THERMAL_ZONE_TYPES`] where the per-cluster fallback types start.
-const CPU_THERMAL_ZONE_FALLBACK_TYPES: usize = 9;
 
 /// Legacy fixed paths relative to the sysfs root, tried in order as a last resort.
 const FALLBACK_PATHS: &[&str] = &[
@@ -353,11 +356,14 @@ fn pick_from_thermal_zones(root: &Path) -> Option<PathBuf> {
             .into_iter()
             .filter_map(|dir| {
                 let ty = read_trimmed(&dir.join("type"))?;
-                let position = CPU_THERMAL_ZONE_TYPES.iter().position(|t| *t == ty)?;
-                Some((
-                    position >= CPU_THERMAL_ZONE_FALLBACK_TYPES,
-                    dir.join("temp"),
-                ))
+                let fallback = if CPU_THERMAL_ZONE_TYPES.contains(&ty.as_str()) {
+                    false
+                } else if CPU_THERMAL_ZONE_FALLBACK_TYPES.contains(&ty.as_str()) {
+                    true
+                } else {
+                    return None;
+                };
+                Some((fallback, dir.join("temp")))
             })
             .collect();
     zones.sort_by_key(|(fallback, _)| *fallback); // stable: keeps zone index order
@@ -395,8 +401,8 @@ fn describe(path: &Path) -> (Option<String>, Option<String>) {
 ///
 /// Order, first readable candidate wins: override, named hwmon driver, named
 /// thermal zone type, motherboard sensor label, hwmon sensor type (PECI or AMD
-/// TSI), legacy fixed paths. An empty or
-/// whitespace-only override counts as unset.
+/// TSI), legacy fixed paths. An empty or whitespace-only override counts as
+/// unset.
 pub(super) fn resolve_cpu_temp(root: &Path, override_value: Option<&str>) -> CpuTempResolution {
     let mut override_rejection = None;
     let mut picked = None;
