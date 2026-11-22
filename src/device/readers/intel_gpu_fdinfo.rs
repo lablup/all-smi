@@ -58,12 +58,11 @@
 //! Multiple distinct clients in the same process (e.g. a multi-context
 //! workload) DO sum, since they represent distinct allocations.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 #[path = "intel_gpu_fdinfo/io.rs"]
 mod io;
-use io::read_fdinfo_to_string;
 
 /// Hard cap on process enumeration. Matches the spirit of
 /// `MAX_DEVICES = 256` in [`crate::device::readers::common_cache`] —
@@ -377,119 +376,19 @@ pub struct GpuProcessUsage {
 /// with two `read_dir` and one `read_link` per fd. On a busy host
 /// with 1k processes and ~10 fds each this is well under 10ms; matches
 /// what the AMD reader does via `libamdgpu_top::FdInfoStat`.
+// Walk-then-fold form of `fold_process_usage`, kept for library consumers
+// and the fixture tests; the reader folds a scan it shares across a tick.
+#[allow(dead_code)]
 pub fn collect_intel_gpu_processes(
     intel_drm_basenames: &HashMap<String, usize>,
     proc_root: &Path,
 ) -> Vec<GpuProcessUsage> {
-    // Empty card map means no Intel GPUs were enumerated; nothing to
-    // do. This is the steady-state for an AMD-only or NVIDIA-only host.
-    if intel_drm_basenames.is_empty() {
-        return Vec::new();
-    }
-
-    let Ok(entries) = std::fs::read_dir(proc_root) else {
-        return Vec::new();
-    };
-
-    // Aggregate state: per (pid, card_index, drm_client_id) -> bytes.
-    // We keep the most recent (highest) resident value across fds with
-    // the same client id, because the resident block can race with the
-    // kernel's writer; the largest value is the most recent successful
-    // snapshot. Different client ids in the same (pid, card) DO sum.
-    type Key = (u32, usize);
-    let mut per_client: HashMap<Key, HashMap<u64, u64>> = HashMap::new();
-    // For fds without a client-id, we cannot dedupe, so we credit each
-    // fd separately under a synthetic "no client id" bucket keyed by
-    // fdinfo path. Same-key entries overwrite (max), different keys
-    // sum. In practice modern kernels always emit drm-client-id so
-    // this branch is a safety net only.
-    let mut no_client_id: HashMap<Key, HashMap<PathBuf, u64>> = HashMap::new();
-    let mut process_count: usize = 0;
-
-    for entry in entries.flatten() {
-        if process_count >= MAX_GPU_PROCESSES {
-            break;
-        }
-        let path = entry.path();
-        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-            continue;
-        };
-        let Ok(pid) = name.parse::<u32>() else {
-            continue;
-        };
-
-        let fds = intel_drm_fds_for_pid(pid, intel_drm_basenames, proc_root);
-        if fds.is_empty() {
-            continue;
-        }
-        process_count += 1;
-
-        for fd in fds {
-            let Some(content) = read_fdinfo_to_string(&fd.fdinfo_path) else {
-                continue; // permission / TOCTOU process exit / oversized fdinfo
-            };
-            let Some(info) = parse_fdinfo(&content) else {
-                continue;
-            };
-            let key = (pid, fd.card_index);
-            match info.drm_client_id {
-                Some(cid) => {
-                    let entry = per_client.entry(key).or_default().entry(cid).or_insert(0);
-                    if info.resident_bytes > *entry {
-                        *entry = info.resident_bytes;
-                    }
-                }
-                None => {
-                    let entry = no_client_id
-                        .entry(key)
-                        .or_default()
-                        .entry(fd.fdinfo_path)
-                        .or_insert(0);
-                    if info.resident_bytes > *entry {
-                        *entry = info.resident_bytes;
-                    }
-                }
-            }
-        }
-    }
-
-    // Fold into the final aggregate: sum distinct clients per (pid, card).
-    let mut keys: HashSet<Key> = HashSet::new();
-    for k in per_client.keys() {
-        keys.insert(*k);
-    }
-    for k in no_client_id.keys() {
-        keys.insert(*k);
-    }
-
-    let mut out: Vec<GpuProcessUsage> = Vec::with_capacity(keys.len());
-    for (pid, card_index) in keys {
-        let mut total: u64 = 0;
-        if let Some(by_client) = per_client.get(&(pid, card_index)) {
-            for bytes in by_client.values() {
-                total = total.saturating_add(*bytes);
-            }
-        }
-        if let Some(by_fd) = no_client_id.get(&(pid, card_index)) {
-            for bytes in by_fd.values() {
-                total = total.saturating_add(*bytes);
-            }
-        }
-        out.push(GpuProcessUsage {
-            pid,
-            card_index,
-            used_memory_bytes: total,
-        });
-    }
-
-    // Stable ordering keeps downstream consumers' output deterministic
-    // across refreshes — PID-major, then by card index.
-    out.sort_by_key(|u| (u.pid, u.card_index));
-    out
+    fold_process_usage(&scan_intel_drm_fds(intel_drm_basenames, proc_root))
 }
 
 /// Sum resident **VRAM** bytes per card across every Intel-GPU-using
-/// process, in a single `/proc` walk. Used by the Linux reader as a
+/// process, in a single `/proc` walk ([`scan_intel_drm_fds`] followed by
+/// [`fold_vram_by_card`]). Used by the Linux reader as a
 /// card-level `used_memory` fallback when the xe driver exposes no
 /// `tile0/vram0/used_bytes` counter in sysfs (Battlemage on kernels
 /// before 6.14).
@@ -507,89 +406,34 @@ pub fn collect_intel_gpu_processes(
 /// correct for per-process rows but would double count a card-level
 /// total. Fds without a client id cannot be deduped and are credited
 /// per fdinfo path, matching the collector's safety net.
+// Walk-then-fold form of `fold_vram_by_card`; see
+// `collect_intel_gpu_processes`.
+#[allow(dead_code)]
 pub fn sum_vram_by_card_from_fdinfo(
     intel_drm_basenames: &HashMap<String, usize>,
     proc_root: &Path,
 ) -> HashMap<usize, u64> {
-    let mut out: HashMap<usize, u64> = HashMap::new();
-    if intel_drm_basenames.is_empty() {
-        return out;
-    }
-    let Ok(entries) = std::fs::read_dir(proc_root) else {
-        return out;
-    };
-
-    // Per-card aggregation: client-id keyed VRAM bytes (max-wins) plus
-    // a per-fdinfo-path bucket for fds whose fdinfo lacks a client id.
-    let mut per_client: HashMap<usize, HashMap<u64, u64>> = HashMap::new();
-    let mut no_client_id: HashMap<usize, HashMap<PathBuf, u64>> = HashMap::new();
-    let mut process_count: usize = 0;
-
-    for entry in entries.flatten() {
-        if process_count >= MAX_GPU_PROCESSES {
-            break;
-        }
-        let path = entry.path();
-        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-            continue;
-        };
-        let Ok(pid) = name.parse::<u32>() else {
-            continue;
-        };
-
-        let fds = intel_drm_fds_for_pid(pid, intel_drm_basenames, proc_root);
-        if fds.is_empty() {
-            continue;
-        }
-        process_count += 1;
-
-        for fd in fds {
-            let Some(content) = read_fdinfo_to_string(&fd.fdinfo_path) else {
-                continue;
-            };
-            let Some(info) = parse_fdinfo(&content) else {
-                continue;
-            };
-            match info.drm_client_id {
-                Some(cid) => {
-                    let entry = per_client
-                        .entry(fd.card_index)
-                        .or_default()
-                        .entry(cid)
-                        .or_insert(0);
-                    *entry = (*entry).max(info.resident_vram_bytes);
-                }
-                None => {
-                    let entry = no_client_id
-                        .entry(fd.card_index)
-                        .or_default()
-                        .entry(fd.fdinfo_path)
-                        .or_insert(0);
-                    *entry = (*entry).max(info.resident_vram_bytes);
-                }
-            }
-        }
-    }
-
-    for (card_index, by_client) in &per_client {
-        let slot = out.entry(*card_index).or_insert(0);
-        for bytes in by_client.values() {
-            *slot = slot.saturating_add(*bytes);
-        }
-    }
-    for (card_index, by_fd) in &no_client_id {
-        let slot = out.entry(*card_index).or_insert(0);
-        for bytes in by_fd.values() {
-            *slot = slot.saturating_add(*bytes);
-        }
-    }
-    out
+    fold_vram_by_card(&scan_intel_drm_fds(intel_drm_basenames, proc_root))
 }
+
+#[path = "intel_gpu_fdinfo/scan.rs"]
+mod scan;
+#[cfg(test)]
+pub(crate) use scan::scans_on_this_thread;
+pub use scan::{DrmFdRecord, fold_process_usage, fold_vram_by_card, scan_intel_drm_fds};
 
 #[path = "intel_gpu_fdinfo/enrichment.rs"]
 mod enrichment;
-pub use enrichment::{build_intel_gpu_rows, build_intel_process_infos};
+#[allow(unused_imports)] // `build_*` are for library consumers only.
+pub use enrichment::{
+    build_intel_gpu_rows, build_intel_process_infos, intel_gpu_rows_from_usages,
+    intel_process_infos_from_usages,
+};
 
 #[cfg(test)]
 #[path = "intel_gpu_fdinfo/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "intel_gpu_fdinfo/scan_tests.rs"]
+mod scan_tests;

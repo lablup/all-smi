@@ -155,7 +155,7 @@ all-smi does not ship a container image, and container deployment is not a suppo
 
 | Hardware | Runtime source / requirement |
 |---|---|
-| NVIDIA Jetson | Tegra platform support and `tegrastats`; some readings need elevated permissions |
+| NVIDIA Jetson | Tegra platform sysfs and `/proc/meminfo`; some readings need elevated permissions |
 | Intel Gaudi | Habana driver and `hl-smi` |
 | Google Cloud TPU | TPU host/runtime; availability varies by TPU generation and metric source |
 | Tenstorrent | Tenstorrent driver and device access; Wormhole and Blackhole supported, Grayskull skipped |

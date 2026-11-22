@@ -16,6 +16,12 @@
 - API mode collects on the blocking pool with a fixed tick period, renders `/metrics` once per collection instead of once per scrape, and serializes each `/events` and `/snapshot` frame once per filter instead of once per client (#503).
 - A hung reader no longer leaks one blocking thread per tick in `record` and `/snapshot`; the section is reported with `kind: "busy"` until the reader returns. `snapshot`, `record`, and the `/snapshot` fallback collect sections concurrently (#503).
 - Replay seeks inside the cached window do no I/O, and far seeks use the recording's index frames (#503).
+- Accelerator readers no longer spawn the same vendor CLI twice per tick: Neuron (`neuron-ls`), Rebellions (`rbln-stat --json`) and Furiosa (`furiosa-smi info`/`status`) share one result between the device and process passes, and the Intel xe reader on Linux walks `/proc/*/fd` once for both the VRAM fallback and the process rows (#502).
+- Neuron utilization now comes from one long-lived `neuron-monitor` child read by a single thread, instead of a process and a helper thread spawned and killed every tick. The child is respawned 30 s after it exits, a record older than 15 s is reported as absent, and static sysfs identity is read once per device (#502).
+- Failures are no longer retried every tick: a missing `rbln-stat` is looked up once per 60 s, the NVIDIA `nvidia-smi` fallback backs off from 30 s up to 300 s after a failed spawn, the Jetson `nvidia-smi` process query and failed Tenstorrent chip detection wait 60 s, and the TPU metrics server is connected to at most once per 10 s while no workload runs (#502).
+- Jetson memory is read from `/proc/meminfo` instead of spawning `tegrastats --once` every tick, which could block a tick for the full command timeout (#502).
+- NVIDIA: device UUID and name come from the cached static info, the GPM support probe runs once per device, and `vgpu_host_mode()` / `mig_mode()` are not probed again on a GPU that answered `NotSupported`. A GPU reporting MIG disabled is still probed every tick (#502).
+- Fixed Furiosa devices staying hidden for the rest of the process when the first `furiosa-smi info` call failed (#502).
 
 ### Library API
 
@@ -23,6 +29,7 @@
 - Removed the unused `all_smi::device::container_utils` module (`is_running_in_container`, `is_containerized_process`, `get_container_pid_mapping`, `get_self_pid_mapping`, `map_host_to_container_pid`, `find_host_pid_from_container_pid`, `build_pid_mapping_cache`, `format_process_name_with_container_info`) and `all_smi::device::process_utils` module (`get_system_process_info`) (#504).
 - Removed the unused `all_smi::utils::refresh_global_processes` (#504).
 - `all_smi::device::process_list::get_all_processes` no longer returns rows for userland threads (#504).
+- `all_smi::device::readers::nvidia_vgpu::collect_vgpu_info` and `nvidia_mig::collect_mig_info` take a second argument, `&nvidia_hardware::NotSupportedSkipSet`, holding the device indices that already answered `NotSupported`; pass a fresh `NotSupportedSkipSet::new()` to probe every device (#502).
 
 ## v0.28.1 (2026/10/20)
 
