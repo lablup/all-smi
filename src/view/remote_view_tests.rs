@@ -30,7 +30,7 @@ use crate::network::metrics_parser::MetricsParser;
 use crate::view::data_collection::remote_collector::RemoteCollectorBuilder;
 use crate::view::data_collection::strategy::{CollectionConfig, DataCollectionStrategy};
 use crate::view::frame_renderer::FrameRenderer;
-use crate::view::render_snapshot::RenderSnapshot;
+use crate::view::render_snapshot::{HeavyCache, RenderSnapshot};
 use crate::view::view_cache::ViewCache;
 
 const METRICS: &str = r#"
@@ -163,7 +163,7 @@ async fn explicit_http_host_renders_devices_chassis_energy_and_cost() {
             .iter()
             .position(|tab| tab == &host_id)
             .expect("host tab");
-        RenderSnapshot::capture(&mut state)
+        RenderSnapshot::capture(&mut state, &mut HeavyCache::default())
     };
 
     let mut cache = ViewCache::new();
@@ -223,7 +223,7 @@ async fn unreachable_explicit_http_host_keeps_disconnection_notice() {
             .iter()
             .position(|tab| tab == &host_id)
             .expect("unreachable host tab");
-        RenderSnapshot::capture(&mut state)
+        RenderSnapshot::capture(&mut state, &mut HeavyCache::default())
     };
 
     let mut args = ViewArgs::empty();

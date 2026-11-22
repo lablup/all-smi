@@ -170,6 +170,39 @@ impl Alerter {
         }
     }
 
+    /// True while any card has an unexpired flash deadline. The UI loop
+    /// keeps its fast animation tick on while this holds so the border
+    /// marker can blink.
+    pub fn any_flashing(&self) -> bool {
+        let now = Instant::now();
+        self.flashing.values().any(|deadline| *deadline > now)
+    }
+
+    /// Whether the flash marker of `card_key` is drawn at `now`.
+    ///
+    /// The marker blinks at 1 Hz: it is on during even whole seconds
+    /// since the flash started and off during odd ones. The phase comes
+    /// from wall time rather than a frame count, so it does not speed up
+    /// or slow down with the render rate.
+    pub fn flash_visible_at(&self, card_key: &str, now: Instant) -> bool {
+        let Some(deadline) = self.flashing.get(card_key) else {
+            return false;
+        };
+        if *deadline <= now {
+            return false;
+        }
+        let duration = std::time::Duration::from_secs(self.config.flash_duration_secs);
+        let started = deadline.checked_sub(duration).unwrap_or(*deadline);
+        now.saturating_duration_since(started)
+            .as_secs()
+            .is_multiple_of(2)
+    }
+
+    /// [`Self::flash_visible_at`] evaluated now.
+    pub fn flash_visible(&self, card_key: &str) -> bool {
+        self.flash_visible_at(card_key, Instant::now())
+    }
+
     /// Run a single evaluation pass against the current GPU snapshot.
     /// Returns the set of transitions that the caller must forward to the
     /// notification manager / webhook queue.
@@ -663,6 +696,45 @@ mod tests {
         assert_eq!(t.len(), 1);
         assert_eq!(t[0].rule, RuleKind::Power);
         assert_eq!(t[0].to, AlertLevel::Crit);
+    }
+
+    #[test]
+    fn any_flashing_tracks_unexpired_deadlines() {
+        let mut a = Alerter::new(default_cfg());
+        assert!(!a.any_flashing());
+        a.mark_flash("GPU-0");
+        assert!(a.any_flashing());
+        a.flashing.insert(
+            "GPU-0".to_string(),
+            Instant::now() - std::time::Duration::from_secs(1),
+        );
+        assert!(
+            !a.any_flashing(),
+            "an expired deadline must not keep flashing"
+        );
+    }
+
+    #[test]
+    fn flash_marker_toggles_at_one_hertz_from_wall_time() {
+        let mut a = Alerter::new(AlertConfig {
+            flash_duration_secs: 4,
+            ..default_cfg()
+        });
+        a.mark_flash("GPU-0");
+        let deadline = a.flashing["GPU-0"];
+        let start = deadline - std::time::Duration::from_secs(4);
+        let at = |ms: u64| start + std::time::Duration::from_millis(ms);
+        // On for the first second, off for the next, on again, and the
+        // answer depends only on the instant, not on how often it is asked.
+        assert!(a.flash_visible_at("GPU-0", at(0)));
+        assert!(a.flash_visible_at("GPU-0", at(999)));
+        assert!(!a.flash_visible_at("GPU-0", at(1_000)));
+        assert!(!a.flash_visible_at("GPU-0", at(1_999)));
+        assert!(a.flash_visible_at("GPU-0", at(2_000)));
+        assert!(!a.flash_visible_at("GPU-0", at(3_500)));
+        // Past the deadline, and for unknown cards, the marker is off.
+        assert!(!a.flash_visible_at("GPU-0", at(4_000)));
+        assert!(!a.flash_visible_at("GPU-1", at(0)));
     }
 
     #[test]

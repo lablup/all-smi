@@ -21,7 +21,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crossterm::event::{self, Event, KeyEventKind};
+use crossterm::event::{self, Event, KeyEventKind, MouseEventKind};
 use tokio::sync::{Notify, mpsc};
 
 use crate::common::config::AppConfig;
@@ -46,6 +46,24 @@ use crate::common::config::AppConfig;
 #[inline]
 fn is_actionable_key_event(kind: KeyEventKind) -> bool {
     matches!(kind, KeyEventKind::Press)
+}
+
+/// Returns `true` if a terminal event read by the reader thread should be
+/// forwarded to the UI loop.
+///
+/// Drops non-`Press` key events (see [`is_actionable_key_event`]) and
+/// pointer motion. `EnableMouseCapture` turns on any-motion tracking, so
+/// every pointer move over the terminal arrives as `Moved` (or `Drag` with
+/// a button held). The UI acts only on clicks and wheel scrolls, so
+/// forwarding motion would just wake the loop and take the state lock
+/// for nothing.
+#[inline]
+pub(crate) fn should_forward_event(evt: &Event) -> bool {
+    match evt {
+        Event::Key(k) => is_actionable_key_event(k.kind),
+        Event::Mouse(m) => !matches!(m.kind, MouseEventKind::Moved | MouseEventKind::Drag(_)),
+        _ => true,
+    }
 }
 
 /// All possible reasons the UI loop should wake up and consider re-rendering.
@@ -143,10 +161,8 @@ impl UiEventCoordinator {
                         // deliver only Press. Forward Press-kind keys only so
                         // toggle bindings (Help, alerts, topology mode, etc.)
                         // don't fire twice and immediately undo themselves on
-                        // Windows. See issue #212.
-                        if let Event::Key(k) = &evt
-                            && !is_actionable_key_event(k.kind)
-                        {
+                        // Windows (issue #212). Pointer motion is dropped too.
+                        if !should_forward_event(&evt) {
                             continue;
                         }
                         // blocking_send is fine here -- we are in a blocking context
@@ -504,16 +520,13 @@ mod tests {
     }
 
     /// The reader-loop filter must drop non-`Press` key events before they
-    /// reach the coordinator's channel. We mirror that filter here so the
-    /// regression is locked at the logic level (the reader loop reads from a
-    /// real terminal, which is unavailable in unit tests).
+    /// reach the coordinator's channel. The reader loop calls
+    /// `should_forward_event`, so the regression is locked at the logic level
+    /// (the reader reads from a real terminal, unavailable in unit tests).
     #[test]
     fn test_reader_filter_drops_release_events() {
         let release = key_event_with_kind(KeyEventKind::Release);
-        let should_forward = match &release {
-            Event::Key(k) => is_actionable_key_event(k.kind),
-            _ => true,
-        };
+        let should_forward = should_forward_event(&release);
         assert!(
             !should_forward,
             "Release key events must be filtered out (issue #212)"
@@ -525,10 +538,7 @@ mod tests {
     #[test]
     fn test_reader_filter_passes_non_key_events() {
         let resize = Event::Resize(80, 24);
-        let should_forward = match &resize {
-            Event::Key(k) => is_actionable_key_event(k.kind),
-            _ => true,
-        };
+        let should_forward = should_forward_event(&resize);
         assert!(
             should_forward,
             "Non-key events must not be filtered by the key-kind guard"
@@ -540,13 +550,41 @@ mod tests {
     #[test]
     fn test_reader_filter_passes_press_events() {
         let press = key_event_with_kind(KeyEventKind::Press);
-        let should_forward = match &press {
-            Event::Key(k) => is_actionable_key_event(k.kind),
-            _ => true,
-        };
+        let should_forward = should_forward_event(&press);
         assert!(
             should_forward,
             "Press key events must be forwarded (Unix parity)"
         );
+    }
+
+    fn mouse(kind: MouseEventKind) -> Event {
+        Event::Mouse(crossterm::event::MouseEvent {
+            kind,
+            column: 3,
+            row: 7,
+            modifiers: KeyModifiers::NONE,
+        })
+    }
+
+    #[test]
+    fn pointer_motion_is_not_forwarded() {
+        use crossterm::event::MouseButton;
+        assert!(!should_forward_event(&mouse(MouseEventKind::Moved)));
+        assert!(!should_forward_event(&mouse(MouseEventKind::Drag(
+            MouseButton::Left
+        ))));
+    }
+
+    #[test]
+    fn clicks_scrolls_keys_and_resizes_are_forwarded() {
+        use crossterm::event::MouseButton;
+        assert!(should_forward_event(&mouse(MouseEventKind::Down(
+            MouseButton::Left
+        ))));
+        assert!(should_forward_event(&mouse(MouseEventKind::ScrollUp)));
+        assert!(should_forward_event(&key_event_with_kind(
+            KeyEventKind::Press
+        )));
+        assert!(should_forward_event(&Event::Resize(80, 24)));
     }
 }

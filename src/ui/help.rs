@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::app_state::AppState;
+use crate::ui::view_state::ViewState;
 use crossterm::style::{Color, Stylize};
 
 /// Generate a full-screen, colorful help interface with three sections:
@@ -22,7 +22,7 @@ use crossterm::style::{Color, Stylize};
 pub fn generate_help_popup_content(
     cols: u16,
     rows: u16,
-    state: &AppState,
+    state: &dyn ViewState,
     is_remote: bool,
 ) -> String {
     let width = cols as usize;
@@ -98,7 +98,7 @@ fn get_row_content(
     row: usize,
     width: usize,
     height: usize,
-    state: &AppState,
+    state: &dyn ViewState,
     is_remote: bool,
 ) -> String {
     let content_width = width.saturating_sub(2); // Account for border
@@ -157,7 +157,7 @@ fn render_title_section(line_idx: usize, width: usize) -> String {
 fn render_shortcuts_section(
     line_idx: usize,
     width: usize,
-    state: &AppState,
+    state: &dyn ViewState,
     is_remote: bool,
 ) -> String {
     // Split content into left and right columns
@@ -213,7 +213,7 @@ fn render_shortcuts_section(
 
     // Users-tab keybindings (issue #189).  Only emitted in remote /
     // replay modes; the tab itself doesn't exist in local mode.
-    if is_remote || state.replay.is_some() {
+    if is_remote || state.replay().is_some() {
         left_column.extend(vec![
             ("", "", ""),
             ("Users tab (V):", "", "header"),
@@ -246,7 +246,7 @@ fn render_shortcuts_section(
     }
 
     // Replay mode keybindings — only shown when replay is active.
-    if state.replay.is_some() {
+    if state.replay().is_some() {
         left_column.extend(vec![
             ("", "", ""),
             ("Replay Controls (--replay):", "", "header"),
@@ -327,11 +327,11 @@ fn render_shortcuts_section(
     ];
 
     // Add current sort status
-    let sort_status = get_current_sort_status(&state.sort_criteria);
+    let sort_status = get_current_sort_status(&state.sort_criteria());
     right_column.push(("  Sort mode:", &sort_status, "status"));
 
     // Add filter status
-    let filter_status = if state.gpu_filter_enabled {
+    let filter_status = if state.gpu_filter_enabled() {
         "GPU Only"
     } else {
         "All Processes"

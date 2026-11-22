@@ -18,8 +18,8 @@ use crossterm::{
 };
 use std::io::Write;
 
-use crate::app_state::AppState;
 use crate::ui::text::print_colored_text;
+use crate::ui::view_state::ViewState;
 
 /// Reserved tab name for the cluster-wide Users tab (issue #189).
 ///
@@ -46,10 +46,10 @@ pub fn users_tab_index(tabs: &[String]) -> Option<usize> {
     tabs.iter().position(|t| t == USERS_TAB_NAME)
 }
 
-/// True when `state.current_tab` is the Users tab.
+/// True when `state.current_tab()` is the Users tab.
 #[inline]
-pub fn is_users_tab_active(state: &AppState) -> bool {
-    users_tab_index(&state.tabs).is_some_and(|i| i == state.current_tab)
+pub fn is_users_tab_active(state: &dyn ViewState) -> bool {
+    users_tab_index(state.tabs()).is_some_and(|i| i == state.current_tab())
 }
 
 /// Return the index of the Topology tab inside `tabs`, or `None` when
@@ -59,10 +59,10 @@ pub fn topology_tab_index(tabs: &[String]) -> Option<usize> {
     tabs.iter().position(|t| t == TOPOLOGY_TAB_NAME)
 }
 
-/// True when `state.current_tab` is the Topology tab.
+/// True when `state.current_tab()` is the Topology tab.
 #[inline]
-pub fn is_topology_tab_active(state: &AppState) -> bool {
-    topology_tab_index(&state.tabs).is_some_and(|i| i == state.current_tab)
+pub fn is_topology_tab_active(state: &dyn ViewState) -> bool {
+    topology_tab_index(state.tabs()).is_some_and(|i| i == state.current_tab())
 }
 
 /// True when `name` is a reserved cluster-level tab ("All", Users,
@@ -84,7 +84,7 @@ pub fn host_tab_count(tabs: &[String]) -> usize {
     tabs.iter().filter(|t| !is_reserved_tab(t)).count()
 }
 
-pub fn draw_tabs<W: Write>(stdout: &mut W, state: &AppState, cols: u16) {
+pub fn draw_tabs<W: Write>(stdout: &mut W, state: &dyn ViewState, cols: u16) {
     // Print tabs
     let mut labels: Vec<(String, Color)> = Vec::new();
 
@@ -93,12 +93,12 @@ pub fn draw_tabs<W: Write>(stdout: &mut W, state: &AppState, cols: u16) {
     let mut available_width = cols.saturating_sub(8);
 
     // Always show "All" tab first (index 0)
-    if !state.tabs.is_empty() {
-        let all_tab = &state.tabs[0];
+    if !state.tabs().is_empty() {
+        let all_tab = &state.tabs()[0];
         let tab_width = all_tab.len() as u16 + 2; // Tab name + 2 spaces padding
 
         if available_width >= tab_width {
-            if state.current_tab == 0 {
+            if state.current_tab() == 0 {
                 labels.push((format!(" {all_tab} "), Color::Black));
             } else {
                 labels.push((format!(" {all_tab} "), Color::White));
@@ -109,16 +109,16 @@ pub fn draw_tabs<W: Write>(stdout: &mut W, state: &AppState, cols: u16) {
 
     // Show node tabs starting from scroll offset (skip "All" tab at index 0)
     let node_tabs: Vec<_> = state
-        .tabs
+        .tabs()
         .iter()
         .enumerate()
         .skip(1) // Skip "All" tab
-        .skip(state.tab_scroll_offset)
+        .skip(state.tab_scroll_offset())
         .collect();
 
     for (i, tab) in node_tabs {
         // Get display name (instance name) while keeping tab as the key
-        let connection_status = state.connection_status.get(tab);
+        let connection_status = state.connection_status().get(tab);
         let display_name = if tab == "All" {
             tab.to_string()
         } else if let Some(status) = connection_status {
@@ -148,13 +148,13 @@ pub fn draw_tabs<W: Write>(stdout: &mut W, state: &AppState, cols: u16) {
         }
 
         // Determine color based on connection status and selection
-        let color = if state.current_tab == i {
+        let color = if state.current_tab() == i {
             Color::Black // Selected tab (will get blue background)
         } else {
             // Check if this tab represents a disconnected node
             let is_connected = if tab != "All" {
                 state
-                    .connection_status
+                    .connection_status()
                     .get(tab)
                     .map(|status| status.is_connected)
                     .unwrap_or(true) // Default to connected for local mode
@@ -210,37 +210,37 @@ pub fn format_ssh_tab_label(host_id: &str) -> String {
 }
 
 #[allow(dead_code)]
-pub fn calculate_tab_visibility(state: &AppState, cols: u16) -> TabVisibility {
+pub fn calculate_tab_visibility(state: &dyn ViewState, cols: u16) -> TabVisibility {
     let mut available_width = cols.saturating_sub(8);
 
     // Reserve space for "All" tab (always visible)
-    if !state.tabs.is_empty() {
-        let all_tab_width = state.tabs[0].len() as u16 + 2;
+    if !state.tabs().is_empty() {
+        let all_tab_width = state.tabs()[0].len() as u16 + 2;
         available_width = available_width.saturating_sub(all_tab_width);
     }
 
     // Calculate visible node tabs (skip "All" tab)
-    let mut last_visible_node_tab = state.tab_scroll_offset;
+    let mut last_visible_node_tab = state.tab_scroll_offset();
 
     for (node_index, tab) in state
-        .tabs
+        .tabs()
         .iter()
         .enumerate()
         .skip(1)
-        .skip(state.tab_scroll_offset)
+        .skip(state.tab_scroll_offset())
     {
         // Get display name for width calculation
         let display_name = if tab.contains('@') && !tab.starts_with("http") {
             let base = format_ssh_tab_label(tab);
             match state
-                .connection_status
+                .connection_status()
                 .get(tab)
                 .and_then(|s| s.transport_chip.as_deref())
             {
                 Some(chip) if !chip.is_empty() => format!("{base}·{chip}"),
                 _ => base,
             }
-        } else if let Some(connection_status) = state.connection_status.get(tab) {
+        } else if let Some(connection_status) = state.connection_status().get(tab) {
             connection_status
                 .actual_hostname
                 .as_ref()
@@ -258,10 +258,10 @@ pub fn calculate_tab_visibility(state: &AppState, cols: u16) -> TabVisibility {
     }
 
     TabVisibility {
-        first_visible: state.tab_scroll_offset,
+        first_visible: state.tab_scroll_offset(),
         last_visible: last_visible_node_tab + 1, // Convert back to absolute tab index
-        has_more_left: state.tab_scroll_offset > 0,
-        has_more_right: last_visible_node_tab + 1 < state.tabs.len() - 1,
+        has_more_left: state.tab_scroll_offset() > 0,
+        has_more_right: last_visible_node_tab + 1 < state.tabs().len() - 1,
     }
 }
 
@@ -276,6 +276,7 @@ pub struct TabVisibility {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app_state::AppState;
 
     fn create_test_state() -> AppState {
         let mut state = AppState::new();

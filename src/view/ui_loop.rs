@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashSet;
 use std::io::Write;
 use std::sync::Arc;
 
@@ -26,7 +25,7 @@ use crate::ui::buffer::DifferentialRenderer;
 use crate::ui::viewport::Viewport;
 use crate::view::event_handler::handle_key_event;
 use crate::view::frame_renderer::FrameRenderer;
-use crate::view::render_snapshot::{RenderDecisions, RenderSnapshot};
+use crate::view::render_snapshot::{HeavyCache, RenderDecisions, RenderSnapshot};
 use crate::view::ui_events::{UiEvent, UiEventCoordinator};
 use crate::view::view_cache::ViewCache;
 
@@ -54,6 +53,8 @@ pub struct UiLoop {
     previous_too_small: bool,
     /// Cached derived view data (sorted GPU lists, filtered host subsets, etc.)
     view_cache: ViewCache,
+    /// Heavy part of the last snapshot, reused until the data version moves.
+    heavy_cache: HeavyCache,
     /// Event coordinator for event-driven wakeups
     event_coordinator: UiEventCoordinator,
     #[cfg(target_os = "linux")]
@@ -93,6 +94,7 @@ impl UiLoop {
             previous_filter_is_active: false,
             previous_too_small: false,
             view_cache: ViewCache::new(),
+            heavy_cache: HeavyCache::default(),
             event_coordinator,
             #[cfg(target_os = "linux")]
             hlsmi_notified: false,
@@ -190,14 +192,10 @@ impl UiLoop {
             let (snapshot, decisions) = {
                 let mut state = self.app_state.lock().await;
 
-                // Activate animation ticks only when there are animated elements.
-                // In remote mode, only enable fast ticks when there are actual
-                // scrolling animations; otherwise use the slow refresh tick to
-                // reduce terminal output over SSH.
-                let has_scroll_animations = !state.device_name_scroll_offsets.is_empty()
-                    || !state.host_id_scroll_offsets.is_empty()
-                    || !state.cpu_name_scroll_offsets.is_empty();
-                let animations_needed = state.loading || has_scroll_animations;
+                // Fast ticks only while something on screen animates;
+                // otherwise the slow refresh tick keeps the clock alive
+                // and keeps terminal output low over SSH.
+                let animations_needed = animations_needed(&state);
                 self.event_coordinator
                     .set_animations_active(animations_needed);
 
@@ -236,29 +234,24 @@ impl UiLoop {
                     || scroll_changed
                     || (time_to_render && (data_changed || tick_fired));
 
-                // Update scroll offsets for long text (marquee animation)
-                if time_to_render {
-                    state.frame_counter += 1;
-                    #[allow(clippy::modulo_one)]
-                    if state.frame_counter % AppConfig::SCROLL_UPDATE_FREQUENCY == 0 {
-                        Self::update_scroll_offsets(&mut state);
-                    }
-                }
-
                 if !should_render {
                     needs_render = false;
                     // Lock is dropped here via `state` going out of scope
                     continue;
                 }
 
+                // One step per drawn frame: the marquee, loading bar and
+                // LED grid pages derive their phase from this counter, so
+                // wakeups that draw nothing must not advance it.
+                state.frame_counter += 1;
+
                 self.last_render_time = now;
                 needs_render = false;
 
-                // Capture snapshot while still holding the lock.
-                // `capture` takes `&mut state` so it can materialise
-                // the memoised user-aggregation (issue #189) under the
-                // lock exactly once per data_version.
-                let snapshot = RenderSnapshot::capture(&mut state);
+                // Capture snapshot while still holding the lock. The heavy
+                // collections are re-cloned only when data_version moved;
+                // otherwise the previous frame's copy is shared.
+                let snapshot = RenderSnapshot::capture(&mut state, &mut self.heavy_cache);
 
                 // Update previous-state tracking
                 self.previous_show_help = state.show_help;
@@ -446,88 +439,107 @@ impl UiLoop {
             self.hlsmi_notified = true;
         }
     }
+}
 
-    fn update_scroll_offsets(state: &mut AppState) {
-        let mut processed_hostnames = HashSet::new();
+/// Name lengths above which the remote rows scroll their text instead of
+/// fitting it (the widths `print_gpu_info`, `print_cpu_info` and the
+/// hostname formatters truncate at).
+const MARQUEE_NAME_WIDTH: usize = 15;
+const MARQUEE_HOSTNAME_WIDTH: usize = 9;
 
-        // Collect GPU keys and lengths first to avoid borrow conflicts
-        let gpu_updates: Vec<_> = state
-            .gpu_info
-            .iter()
-            .filter_map(|gpu| {
-                if gpu.name.len() > 15 {
-                    Some((gpu.uuid.clone(), gpu.name.len()))
-                } else {
-                    None
-                }
-            })
-            .collect();
+/// Whether the UI needs the fast animation tick right now.
+///
+/// True while loading, while any alert card flashes, and in remote mode
+/// while any GPU name, CPU model or hostname is long enough to scroll.
+/// Local mode never scrolls names (its rows come from
+/// `print_gpu_details` / `print_cpu_details`, which take no offset), so a
+/// long local CPU model does not keep the 200 ms tick on. The answer is
+/// derived from the current data only, so a long-named host that leaves
+/// the cluster stops the fast tick with it.
+fn animations_needed(state: &AppState) -> bool {
+    if state.loading || state.alerter.any_flashing() {
+        return true;
+    }
+    if state.is_local_mode {
+        return false;
+    }
+    state.gpu_info.iter().any(|gpu| {
+        gpu.name.len() > MARQUEE_NAME_WIDTH || gpu.hostname.len() > MARQUEE_HOSTNAME_WIDTH
+    }) || state.cpu_info.iter().any(|cpu| {
+        cpu.cpu_model.len() > MARQUEE_NAME_WIDTH || cpu.hostname.len() > MARQUEE_HOSTNAME_WIDTH
+    })
+}
 
-        // Skip hostname scroll animation in local mode -- the hostname is
-        // not rendered on any device row, so advancing the offset would
-        // just burn CPU for no visible effect.
-        let gpu_hostname_updates: Vec<_> = if state.is_local_mode {
-            Vec::new()
-        } else {
-            state
-                .gpu_info
-                .iter()
-                .filter_map(|gpu| {
-                    if gpu.hostname.len() > 9 && processed_hostnames.insert(gpu.host_id.clone()) {
-                        Some((gpu.host_id.clone(), gpu.hostname.len()))
-                    } else {
-                        None
-                    }
-                })
-                .collect()
-        };
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::device::CpuInfo;
+    use crate::view::render_snapshot::tests::test_gpu;
 
-        // Collect CPU keys and lengths
-        let cpu_updates: Vec<_> = state
-            .cpu_info
-            .iter()
-            .filter_map(|cpu| {
-                if cpu.cpu_model.len() > 15 {
-                    let key = format!("{}-{}", cpu.hostname, cpu.cpu_model);
-                    Some((key, cpu.cpu_model.len()))
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        let cpu_hostname_updates: Vec<_> = if state.is_local_mode {
-            Vec::new()
-        } else {
-            state
-                .cpu_info
-                .iter()
-                .filter_map(|cpu| {
-                    if cpu.hostname.len() > 9 && processed_hostnames.insert(cpu.host_id.clone()) {
-                        Some((cpu.host_id.clone(), cpu.hostname.len()))
-                    } else {
-                        None
-                    }
-                })
-                .collect()
-        };
-
-        // Apply GPU device name scroll updates in-place
-        for (key, name_len) in gpu_updates {
-            let offset = state.device_name_scroll_offsets.entry(key).or_insert(0);
-            *offset = (*offset + 1) % (name_len + 3);
+    fn cpu(model: &str, hostname: &str) -> CpuInfo {
+        CpuInfo {
+            host_id: hostname.to_string(),
+            hostname: hostname.to_string(),
+            instance: hostname.to_string(),
+            cpu_model: model.to_string(),
+            ..CpuInfo::test_default()
         }
+    }
 
-        // Apply hostname scroll updates in-place (GPU + CPU)
-        for (key, hostname_len) in gpu_hostname_updates.into_iter().chain(cpu_hostname_updates) {
-            let offset = state.host_id_scroll_offsets.entry(key).or_insert(0);
-            *offset = (*offset + 1) % (hostname_len + 3);
-        }
+    fn long_named_state(is_local_mode: bool) -> AppState {
+        let mut state = AppState::new();
+        state.loading = false;
+        state.is_local_mode = is_local_mode;
+        state.gpu_info = vec![test_gpu("GPU-0", "NVIDIA GeForce RTX 4090", "ws")];
+        state.cpu_info = vec![cpu("AMD Ryzen 9 7950X 16-Core Processor", "ws")];
+        state
+    }
 
-        // Apply CPU name scroll updates in-place
-        for (key, model_len) in cpu_updates {
-            let offset = state.cpu_name_scroll_offsets.entry(key).or_insert(0);
-            *offset = (*offset + 1) % (model_len + 3);
+    #[test]
+    fn local_mode_with_long_names_uses_the_slow_tick() {
+        assert!(!animations_needed(&long_named_state(true)));
+    }
+
+    #[test]
+    fn remote_mode_with_long_names_keeps_the_fast_tick() {
+        assert!(animations_needed(&long_named_state(false)));
+
+        // A long hostname alone also scrolls.
+        let mut state = AppState::new();
+        state.loading = false;
+        state.is_local_mode = false;
+        state.gpu_info = vec![test_gpu("GPU-0", "H100", "gpu-node-0001")];
+        assert!(animations_needed(&state));
+    }
+
+    #[test]
+    fn flashing_alert_keeps_the_fast_tick_in_both_modes() {
+        for local in [true, false] {
+            let mut state = AppState::new();
+            state.loading = false;
+            state.is_local_mode = local;
+            assert!(!animations_needed(&state));
+            state.alerter.mark_flash("GPU-0");
+            assert!(animations_needed(&state), "local={local}");
         }
+    }
+
+    #[test]
+    fn loading_keeps_the_fast_tick() {
+        let state = AppState::new();
+        assert!(state.loading);
+        assert!(animations_needed(&state));
+    }
+
+    #[test]
+    fn removing_the_long_named_hosts_stops_the_fast_tick() {
+        let mut state = long_named_state(false);
+        assert!(animations_needed(&state));
+        state.gpu_info.clear();
+        state.cpu_info.clear();
+        assert!(
+            !animations_needed(&state),
+            "no per-entity marquee state may outlive the hosts it scrolled"
+        );
     }
 }

@@ -20,9 +20,9 @@ use crossterm::{
     terminal::{Clear, ClearType},
 };
 
-use crate::app_state::AppState;
 use crate::ui::constants::{ANIMATION_SPEED, BLOCK_SIZE_DIVISOR, BLOCK_SIZE_MAX, SCREEN_MARGIN};
 use crate::ui::text::{display_width, print_colored_text, truncate_to_width};
+use crate::ui::view_state::ViewState;
 
 pub fn print_loading_indicator<W: Write>(
     stdout: &mut W,
@@ -128,7 +128,7 @@ pub fn print_function_keys<W: Write>(
     stdout: &mut W,
     cols: u16,
     rows: u16,
-    state: &AppState,
+    state: &dyn ViewState,
     is_remote: bool,
 ) {
     // The status bar occupies the last row. A terminal reporting zero rows
@@ -155,19 +155,19 @@ pub fn print_function_keys<W: Write>(
     // drop the filter even while replaying. The status bar never shows
     // both at once — replay metadata is cheap to re-read the moment the
     // filter clears.
-    if state.filter_input_mode == crate::app_state::FilterInputMode::Editing
-        || state.filter_query.is_some()
+    if state.filter_input_mode() == crate::app_state::FilterInputMode::Editing
+        || state.filter_query().is_some()
     {
         print_filter_bar(stdout, cols, state);
         return;
     }
-    if state.replay.is_some() {
+    if state.replay().is_some() {
         print_replay_bar(stdout, cols, state);
         return;
     }
 
     // Get current sorting indicator
-    let sort_indicator = match state.sort_criteria {
+    let sort_indicator = match state.sort_criteria() {
         crate::app_state::SortCriteria::Default => "Sort:Default",
         crate::app_state::SortCriteria::Pid => "Sort:PID",
         crate::app_state::SortCriteria::User => "Sort:User",
@@ -189,7 +189,7 @@ pub fn print_function_keys<W: Write>(
     };
 
     // Get GPU filter indicator
-    let filter_indicator = if state.gpu_filter_enabled {
+    let filter_indicator = if state.gpu_filter_enabled() {
         "Filter:GPU"
     } else {
         ""
@@ -202,7 +202,7 @@ pub fn print_function_keys<W: Write>(
         )
     } else {
         // Local mode: both process and GPU sorting
-        if state.gpu_filter_enabled {
+        if state.gpu_filter_enabled() {
             format!(
                 "h:Help q:Exit f:Filter ←→:Scroll ↑↓:Scroll p:PID c:CPU m:Memory g:GPU-Mem [{sort_indicator}] [{filter_indicator}]"
             )
@@ -222,7 +222,7 @@ pub fn print_function_keys<W: Write>(
     };
 
     // Check if there's a notification to display
-    let notification_msg = state.notifications.get_current_message().unwrap_or("");
+    let notification_msg = state.notifications().get_current_message().unwrap_or("");
     let notification_len = display_width(notification_msg);
 
     // Calculate space available for function keys (reserve space for notification)
@@ -291,8 +291,8 @@ pub fn print_function_keys<W: Write>(
 /// replaced with `Seek: HH:MM:SS_` and any parse error is appended in
 /// red. The status bar is never drawn while the filter bar is active
 /// (that mode wins in `print_function_keys`).
-fn print_replay_bar<W: Write>(stdout: &mut W, cols: u16, state: &AppState) {
-    let Some(replay) = state.replay.as_ref() else {
+fn print_replay_bar<W: Write>(stdout: &mut W, cols: u16, state: &dyn ViewState) {
+    let Some(replay) = state.replay().as_ref() else {
         return;
     };
 
@@ -385,18 +385,18 @@ fn format_hms(total_seconds: u64) -> String {
 /// Render the filter bar. Active when the operator is editing a query or
 /// has committed one. `_` is appended to the buffer to indicate the cursor
 /// while editing. Inline errors are shown in red after the buffer.
-fn print_filter_bar<W: Write>(stdout: &mut W, cols: u16, state: &AppState) {
-    let editing = state.filter_input_mode == crate::app_state::FilterInputMode::Editing;
+fn print_filter_bar<W: Write>(stdout: &mut W, cols: u16, state: &dyn ViewState) {
+    let editing = state.filter_input_mode() == crate::app_state::FilterInputMode::Editing;
     let mut bar = String::new();
     bar.push_str("Filter: ");
-    bar.push_str(&state.filter_buffer);
+    bar.push_str(state.filter_buffer());
     if editing {
         bar.push('_');
     }
-    if let Some((matched, total)) = state.filter_preview_count {
+    if let Some((matched, total)) = state.filter_preview_count() {
         bar.push_str(&format!(" [matched {matched} of {total}]"));
     }
-    let error = state.filter_error.clone();
+    let error = state.filter_error().clone();
 
     // Truncate to terminal width so an overlong query doesn't wrap.
     let room = cols as usize;

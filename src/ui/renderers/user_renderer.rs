@@ -30,7 +30,7 @@ use crate::app_state::UsersTabState;
 use crate::network::metrics_parser::ParsedProcessRow;
 use crate::ui::aggregation::user::{
     UNATTRIBUTED_DISPLAY, UNATTRIBUTED_USER, UserAggregate, UserAggregationResult, UserSortKey,
-    format_longest, sort_users,
+    format_longest,
 };
 use crate::ui::renderers::utils::truncate_str;
 use crate::ui::text::print_colored_text;
@@ -70,6 +70,11 @@ pub struct UsersRenderResult {
 /// operator has hit `Enter`).  Returns the number of rows currently
 /// visible so callers can bound keyboard navigation.
 ///
+/// `visible_order` holds indices into `aggregation.users` in display
+/// order (filter and sort already applied, see
+/// `AppState::users_visible_order`), so no row is cloned or re-sorted
+/// per frame.
+///
 /// `remote_process_info` is only consulted when the operator has
 /// drilled past the per-host table into the per-process view
 /// (second `Enter` → `drill_user.is_some()` *and* `drill_host.is_some()`).
@@ -79,6 +84,7 @@ pub struct UsersRenderResult {
 pub fn render_users_tab<W: Write>(
     stdout: &mut W,
     aggregation: &UserAggregationResult,
+    visible_order: &[usize],
     tab_state: &UsersTabState,
     remote_process_info: &[ParsedProcessRow],
     cols: u16,
@@ -109,22 +115,17 @@ pub fn render_users_tab<W: Write>(
     }
 
     // ------------------------------------------------------------------
-    // Filter + sort the view.  This is only a vector copy — the pure
-    // aggregation in `AppState::users_aggregation` is already cached by
-    // collector_data_version.
+    // Rows in display order, borrowed from the memoised aggregation.
     // ------------------------------------------------------------------
-    let mut rows: Vec<UserAggregate> = aggregation
-        .users
+    let rows: Vec<&UserAggregate> = visible_order
         .iter()
-        .filter(|u| !(tab_state.filter_sys && u.is_system))
-        .cloned()
+        .filter_map(|&i| aggregation.users.get(i))
         .collect();
-    sort_users(&mut rows, tab_state.sort);
 
     // ------------------------------------------------------------------
     // Banners
     // ------------------------------------------------------------------
-    render_banner(stdout, aggregation, tab_state, &rows, cols as usize);
+    render_banner(stdout, aggregation, tab_state, rows.len(), cols as usize);
 
     // ------------------------------------------------------------------
     // Header
@@ -196,12 +197,11 @@ fn render_banner<W: Write>(
     stdout: &mut W,
     aggregation: &UserAggregationResult,
     tab_state: &UsersTabState,
-    rows: &[UserAggregate],
+    total_users: usize,
     cols: usize,
 ) {
     // Summary line: totals.
     let total_vram = aggregation.users.iter().map(|u| u.vram_bytes).sum::<u64>();
-    let total_users = rows.len();
     let total_nodes = aggregation.total_hosts;
     let mut summary = format!(
         " Users: {total_users}  |  Reporting nodes: {}/{total_nodes}  |  Total VRAM: {}",

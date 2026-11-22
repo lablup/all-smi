@@ -16,43 +16,43 @@ use std::io::Write;
 
 use crossterm::{queue, style::Color, style::Print};
 
-use crate::app_state::AppState;
 use crate::metrics::gpu_readings;
 use crate::ui::buffer::BufferWriter;
 use crate::ui::led_grid;
 use crate::ui::remote_sparkline_panel;
 use crate::ui::text::{format_ram_value, print_colored_text};
+use crate::ui::view_state::ViewState;
 
-pub fn draw_system_view<W: Write>(stdout: &mut W, state: &AppState, cols: u16) {
+pub fn draw_system_view<W: Write>(stdout: &mut W, state: &dyn ViewState, cols: u16) {
     let box_width = (cols as usize).min(80);
 
     // Calculate cluster statistics
-    let is_local_mode = state.is_local_mode;
+    let is_local_mode = state.is_local_mode();
     let total_nodes = if is_local_mode {
         1 // Local mode has 1 node
     } else {
-        // Count only host tabs — `state.tabs` also carries the reserved
+        // Count only host tabs — `state.tabs()` also carries the reserved
         // cluster-level entries (All, Users, Topology). Counting them as
         // nodes is what caused `50/52` on a 50-host cluster.
-        crate::ui::tabs::host_tab_count(&state.tabs)
+        crate::ui::tabs::host_tab_count(state.tabs())
     };
     let live_nodes = if is_local_mode {
         1 // Local node is always considered live
     } else {
         state
-            .connection_status
+            .connection_status()
             .values()
             .filter(|status| status.is_connected)
             .count()
     };
-    let total_gpus = state.gpu_info.len();
+    let total_gpus = state.gpu_info().len();
 
     // Check if we're on Apple Silicon. The native reader writes the
     // architecture detail under the lowercase "architecture" key
     // (see device/readers/apple_silicon_native.rs); previously this lookup
     // used "Architecture" and never matched, so the special-case path
     // (thermal pressure display, unified memory totals, etc.) was dead.
-    let is_apple_silicon = state.gpu_info.iter().any(|gpu| {
+    let is_apple_silicon = state.gpu_info().iter().any(|gpu| {
         gpu.detail
             .get("architecture")
             .map(|arch| arch == "Apple Silicon")
@@ -69,7 +69,7 @@ pub fn draw_system_view<W: Write>(stdout: &mut W, state: &AppState, cols: u16) {
     } else if is_apple_silicon {
         // Local Apple Silicon: show actual GPU core count
         state
-            .gpu_info
+            .gpu_info()
             .iter()
             .map(|gpu| gpu.gpu_core_count.unwrap_or(0) as usize)
             .sum::<usize>()
@@ -81,7 +81,7 @@ pub fn draw_system_view<W: Write>(stdout: &mut W, state: &AppState, cols: u16) {
     let total_memory_gb = if is_apple_silicon {
         // Use system RAM for Apple Silicon
         state
-            .memory_info
+            .memory_info()
             .iter()
             .map(|memory| memory.total_bytes)
             .sum::<u64>() as f64
@@ -89,7 +89,7 @@ pub fn draw_system_view<W: Write>(stdout: &mut W, state: &AppState, cols: u16) {
     } else {
         // Use GPU memory for other platforms
         state
-            .gpu_info
+            .gpu_info()
             .iter()
             .map(|gpu| gpu.total_memory)
             .sum::<u64>() as f64
@@ -102,7 +102,7 @@ pub fn draw_system_view<W: Write>(stdout: &mut W, state: &AppState, cols: u16) {
     let total_power_watts = if is_apple_silicon {
         // Try to get combined power from GPU detail (set by native metrics manager)
         state
-            .gpu_info
+            .gpu_info()
             .iter()
             .filter_map(|gpu| {
                 gpu.detail
@@ -113,15 +113,15 @@ pub fn draw_system_view<W: Write>(stdout: &mut W, state: &AppState, cols: u16) {
             .next() // Only one GPU entry for Apple Silicon
             .unwrap_or_else(|| {
                 // Fallback to GPU power if combined power not available
-                gpu_readings::total_power_watts(&state.gpu_info)
+                gpu_readings::total_power_watts(state.gpu_info())
             })
     } else {
-        gpu_readings::total_power_watts(&state.gpu_info)
+        gpu_readings::total_power_watts(state.gpu_info())
     };
 
     // Calculate total CPU cores
     let total_cpu_cores = state
-        .cpu_info
+        .cpu_info()
         .iter()
         .map(|cpu| {
             if let Some(apple_info) = &cpu.apple_silicon_info {
@@ -136,14 +136,14 @@ pub fn draw_system_view<W: Write>(stdout: &mut W, state: &AppState, cols: u16) {
 
     // Calculate total system memory
     let total_system_memory_gb = state
-        .memory_info
+        .memory_info()
         .iter()
         .map(|memory| memory.total_bytes)
         .sum::<u64>() as f64
         / (1024.0 * 1024.0 * 1024.0);
 
     let used_system_memory_gb = state
-        .memory_info
+        .memory_info()
         .iter()
         .map(|memory| memory.used_bytes)
         .sum::<u64>() as f64
@@ -152,13 +152,13 @@ pub fn draw_system_view<W: Write>(stdout: &mut W, state: &AppState, cols: u16) {
     // Calculate averages. These skip devices with no reading rather than
     // folding a sentinel in, and render N/A when nothing reported at all —
     // an average over zero reporting GPUs is not 0% (issue #325).
-    let avg_utilization = gpu_readings::mean_utilization(&state.gpu_info);
+    let avg_utilization = gpu_readings::mean_utilization(state.gpu_info());
 
     // Average GPU temperature in °C — shown identically on every platform.
     // On Apple Silicon, gpu.temperature is sourced from the SMC CPU die sensor
     // (CPU/GPU share the same SoC die), so this is a real die temperature
     // rather than the qualitative thermal-pressure text we used to show.
-    let avg_temperature = gpu_readings::mean_temperature(&state.gpu_info);
+    let avg_temperature = gpu_readings::mean_temperature(state.gpu_info());
     let avg_temperature_display = match avg_temperature {
         Some(temp) => format!("{temp:.0}°C"),
         None => "N/A".to_string(),
@@ -171,14 +171,14 @@ pub fn draw_system_view<W: Write>(stdout: &mut W, state: &AppState, cols: u16) {
     // - On multi-GPU platforms we keep the cross-GPU temperature spread.
     let (temp_secondary_label, temp_secondary_display) = if is_apple_silicon && total_gpus > 0 {
         let thermal_pressure = state
-            .gpu_info
+            .gpu_info()
             .first()
             .and_then(|gpu| gpu.detail.get("thermal_pressure"))
             .cloned()
             .unwrap_or_else(|| "Unknown".to_string());
         ("Thermal", thermal_pressure)
     } else {
-        let display = match gpu_readings::temperature_std_dev(&state.gpu_info) {
+        let display = match gpu_readings::temperature_std_dev(state.gpu_info()) {
             Some(sd) => format!("±{sd:.1}°C"),
             // Fewer than two devices reported a temperature, so the spread
             // is undefined. Preserves the previous "±0.0°C" for the
@@ -196,7 +196,7 @@ pub fn draw_system_view<W: Write>(stdout: &mut W, state: &AppState, cols: u16) {
     let avg_power = if is_apple_silicon {
         (total_gpus > 0).then(|| total_power_watts / total_gpus as f64)
     } else {
-        gpu_readings::mean_power_watts(&state.gpu_info)
+        gpu_readings::mean_power_watts(state.gpu_info())
     };
     let avg_power_display = match avg_power {
         Some(watts) => format!("{watts:.1}W"),
@@ -207,7 +207,7 @@ pub fn draw_system_view<W: Write>(stdout: &mut W, state: &AppState, cols: u16) {
     let used_gpu_memory_gb = if is_apple_silicon {
         // Use system RAM for Apple Silicon
         state
-            .memory_info
+            .memory_info()
             .iter()
             .map(|memory| memory.used_bytes)
             .sum::<u64>() as f64
@@ -215,7 +215,7 @@ pub fn draw_system_view<W: Write>(stdout: &mut W, state: &AppState, cols: u16) {
     } else {
         // Use GPU memory for other platforms
         state
-            .gpu_info
+            .gpu_info()
             .iter()
             .map(|gpu| gpu.used_memory)
             .sum::<u64>() as f64
@@ -314,7 +314,7 @@ pub fn draw_system_view<W: Write>(stdout: &mut W, state: &AppState, cols: u16) {
     }
 }
 
-pub fn draw_dashboard_items<W: Write>(stdout: &mut W, state: &AppState, cols: u16) {
+pub fn draw_dashboard_items<W: Write>(stdout: &mut W, state: &dyn ViewState, cols: u16) {
     // Print separator
     let separator = "\u{2500}".repeat(cols as usize);
     print_colored_text(stdout, &separator, Color::DarkGrey, None, None);

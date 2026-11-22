@@ -45,7 +45,6 @@ use std::io::Write;
 
 use crossterm::{queue, style::Color, style::Print};
 
-use crate::app_state::AppState;
 use crate::common::config::ThemeConfig;
 use crate::ui::braille::sparkline_braille;
 use crate::ui::buffer::BufferWriter;
@@ -54,6 +53,7 @@ use crate::ui::scale::{
     power_range, power_soft_grid, power_soft_min_span, soft_range, temp_range,
 };
 use crate::ui::text::{ansi_display_width, print_colored_text, truncate_to_width};
+use crate::ui::view_state::ViewState;
 
 /// Width in braille cells for each metric sparkline.
 const SPARKLINE_WIDTH: usize = 8;
@@ -85,7 +85,7 @@ struct MetricPresentation {
 ///
 /// This function is called from `render_main()` in `frame_renderer.rs` when
 /// `view_state.is_local_mode` is `true`, in place of the Cluster Overview.
-pub fn draw_local_header_bar<W: Write>(stdout: &mut W, state: &AppState, cols: u16) {
+pub fn draw_local_header_bar<W: Write>(stdout: &mut W, state: &dyn ViewState, cols: u16) {
     draw_identity_line(stdout, state, cols);
     draw_metrics_line(stdout, state, cols);
 }
@@ -100,10 +100,10 @@ pub fn local_header_line_count(cols: u16) -> u16 {
 
 /// Render the identity line:
 /// `Host <hostname> · up <uptime>    ● Live`
-fn draw_identity_line<W: Write>(stdout: &mut W, state: &AppState, cols: u16) {
+fn draw_identity_line<W: Write>(stdout: &mut W, state: &dyn ViewState, cols: u16) {
     // Hostname — use the first CPU entry's hostname (always available in local mode)
     let hostname = state
-        .cpu_info
+        .cpu_info()
         .first()
         .map(|c| c.hostname.as_str())
         .unwrap_or("localhost");
@@ -138,7 +138,7 @@ fn draw_identity_line<W: Write>(stdout: &mut W, state: &AppState, cols: u16) {
 
     // Right-side "● Live" indicator — blinks on even frame counts
     // `frame_counter` is incremented on every render tick by the UI loop
-    let live_color = if state.frame_counter.is_multiple_of(2) {
+    let live_color = if state.frame_counter().is_multiple_of(2) {
         Color::Green
     } else {
         Color::DarkGreen
@@ -155,7 +155,7 @@ fn draw_identity_line<W: Write>(stdout: &mut W, state: &AppState, cols: u16) {
 // ─── Line 2: metrics sparklines ──────────────────────────────────────────────
 
 /// Render the metrics sparkline row.
-fn draw_metrics_line<W: Write>(stdout: &mut W, state: &AppState, cols: u16) {
+fn draw_metrics_line<W: Write>(stdout: &mut W, state: &dyn ViewState, cols: u16) {
     let width = cols as usize;
     let detailed = render_metrics_line(state, Some(SPARKLINE_WIDTH));
     if ansi_display_width(&detailed) <= width {
@@ -174,16 +174,16 @@ fn draw_metrics_line<W: Write>(stdout: &mut W, state: &AppState, cols: u16) {
     draw_tiny_metrics(stdout, state, width);
 }
 
-fn render_metrics_line(state: &AppState, sparkline_width: Option<usize>) -> String {
+fn render_metrics_line(state: &dyn ViewState, sparkline_width: Option<usize>) -> String {
     let mut stdout = BufferWriter::new();
 
     // CPU% — theme color Cyan
-    let cpu_history: Vec<f64> = state.cpu_utilization_history.iter().copied().collect();
+    let cpu_history: Vec<f64> = state.cpu_utilization_history().iter().copied().collect();
     draw_metric_sparkline(
         &mut stdout,
         "CPU",
         &cpu_history,
-        format_pct(state.cpu_utilization_history.back().copied()),
+        format_pct(state.cpu_utilization_history().back().copied()),
         MetricPresentation {
             color: ThemeConfig::cpu_color(),
             range: Some(soft_range(
@@ -200,12 +200,12 @@ fn render_metrics_line(state: &AppState, sparkline_width: Option<usize>) -> Stri
     print_colored_text(&mut stdout, "  ", Color::White, None, None);
 
     // GPU% — theme color Blue
-    let gpu_history: Vec<f64> = state.utilization_history.iter().copied().collect();
+    let gpu_history: Vec<f64> = state.utilization_history().iter().copied().collect();
     draw_metric_sparkline(
         &mut stdout,
         "GPU",
         &gpu_history,
-        format_pct(state.utilization_history.back().copied()),
+        format_pct(state.utilization_history().back().copied()),
         MetricPresentation {
             color: ThemeConfig::gpu_color(),
             range: Some(soft_range(
@@ -232,7 +232,7 @@ fn render_metrics_line(state: &AppState, sparkline_width: Option<usize>) -> Stri
     print_colored_text(&mut stdout, "  ", Color::White, None, None);
 
     // Temperature — theme color Magenta
-    let temp_history: Vec<f64> = state.cpu_temperature_history.iter().copied().collect();
+    let temp_history: Vec<f64> = state.cpu_temperature_history().iter().copied().collect();
     // Soft axis clamped to (0, temp ceiling): CPU sensors report no thermal
     // threshold, so the ceiling is the 100°C fallback while the floor is 0 so a
     // cool sensor can zoom below 30°C. The window then tracks small changes.
@@ -241,7 +241,7 @@ fn render_metrics_line(state: &AppState, sparkline_width: Option<usize>) -> Stri
         &mut stdout,
         "Tmp",
         &temp_history,
-        format_temp(state.cpu_temperature_history.back().copied()),
+        format_temp(state.cpu_temperature_history().back().copied()),
         MetricPresentation {
             color: ThemeConfig::thermal_color(),
             range: Some(soft_range(
@@ -258,13 +258,13 @@ fn render_metrics_line(state: &AppState, sparkline_width: Option<usize>) -> Stri
     stdout.get_buffer().to_string()
 }
 
-fn draw_tiny_metrics<W: Write>(stdout: &mut W, state: &AppState, width: usize) {
-    let cpu = compact_pct(state.cpu_utilization_history.back().copied());
-    let gpu = compact_pct(state.utilization_history.back().copied());
+fn draw_tiny_metrics<W: Write>(stdout: &mut W, state: &dyn ViewState, width: usize) {
+    let cpu = compact_pct(state.cpu_utilization_history().back().copied());
+    let gpu = compact_pct(state.utilization_history().back().copied());
     let memory = compact_memory_pct(state);
     let power = format!("{:.0}W", current_power_watts(state));
     let temp = state
-        .cpu_temperature_history
+        .cpu_temperature_history()
         .back()
         .map_or_else(|| "N/A".to_string(), |value| format!("{value:.0}°"));
 
@@ -300,9 +300,17 @@ fn compact_pct(value: Option<f64>) -> String {
     value.map_or_else(|| "N/A".to_string(), |value| format!("{value:.0}%"))
 }
 
-fn compact_memory_pct(state: &AppState) -> String {
-    let total = state.memory_info.iter().map(|m| m.total_bytes).sum::<u64>();
-    let used = state.memory_info.iter().map(|m| m.used_bytes).sum::<u64>();
+fn compact_memory_pct(state: &dyn ViewState) -> String {
+    let total = state
+        .memory_info()
+        .iter()
+        .map(|m| m.total_bytes)
+        .sum::<u64>();
+    let used = state
+        .memory_info()
+        .iter()
+        .map(|m| m.used_bytes)
+        .sum::<u64>();
     if total == 0 {
         "N/A".to_string()
     } else {
@@ -380,17 +388,29 @@ fn trend_glyph(history: &[f64], flat: f64, steep: f64) -> &'static str {
 /// Draw the RAM metric: `RAM <used>/<total>GB <sparkline>`.
 ///
 /// The sparkline tracks `system_memory_history` (memory utilization %).
-fn draw_ram_sparkline<W: Write>(stdout: &mut W, state: &AppState, sparkline_width: Option<usize>) {
-    let total_gb = state.memory_info.iter().map(|m| m.total_bytes).sum::<u64>() as f64
+fn draw_ram_sparkline<W: Write>(
+    stdout: &mut W,
+    state: &dyn ViewState,
+    sparkline_width: Option<usize>,
+) {
+    let total_gb = state
+        .memory_info()
+        .iter()
+        .map(|m| m.total_bytes)
+        .sum::<u64>() as f64
         / (1024.0 * 1024.0 * 1024.0);
 
-    let used_gb = state.memory_info.iter().map(|m| m.used_bytes).sum::<u64>() as f64
+    let used_gb = state
+        .memory_info()
+        .iter()
+        .map(|m| m.used_bytes)
+        .sum::<u64>() as f64
         / (1024.0 * 1024.0 * 1024.0);
 
     let total_str = format!("{total_gb:.0}");
     let value_str = format!("{used_gb:>width$.0}/{total_str}GB", width = total_str.len());
 
-    let history: Vec<f64> = state.system_memory_history.iter().copied().collect();
+    let history: Vec<f64> = state.system_memory_history().iter().copied().collect();
 
     // Soft axis over the memory-utilization (%) window.
     let range = soft_range(
@@ -421,19 +441,19 @@ fn draw_ram_sparkline<W: Write>(stdout: &mut W, state: &AppState, sparkline_widt
 /// data aggregator.
 fn draw_power_sparkline<W: Write>(
     stdout: &mut W,
-    state: &AppState,
+    state: &dyn ViewState,
     sparkline_width: Option<usize>,
 ) {
     let power_watts = current_power_watts(state);
 
     let value_str = format!("{power_watts:>5.1}W");
 
-    let history: Vec<f64> = state.package_power_history.iter().copied().collect();
+    let history: Vec<f64> = state.package_power_history().iter().copied().collect();
     // Soft axis clamped to (0, power ceiling), where the ceiling is the summed
     // enforced power limits (or a nice-rounded peak when no limit is reported).
     // The soft-axis min span and grid step scale with that ceiling, so the
     // height zooms into the visible window without leaving the power budget.
-    let ceiling = power_range(&state.gpu_info, &history).1;
+    let ceiling = power_range(state.gpu_info(), &history).1;
     let range = soft_range(
         &history,
         power_soft_min_span(ceiling),
@@ -453,8 +473,8 @@ fn draw_power_sparkline<W: Write>(
     }
 }
 
-fn current_power_watts(state: &AppState) -> f64 {
-    let is_apple_silicon = state.gpu_info.iter().any(|gpu| {
+fn current_power_watts(state: &dyn ViewState) -> f64 {
+    let is_apple_silicon = state.gpu_info().iter().any(|gpu| {
         gpu.detail
             .get("architecture")
             .map(|arch| arch == "Apple Silicon")
@@ -464,7 +484,7 @@ fn current_power_watts(state: &AppState) -> f64 {
     if is_apple_silicon {
         // Apple Silicon: combined CPU+GPU+ANE power from the native metrics manager
         state
-            .gpu_info
+            .gpu_info()
             .iter()
             .filter_map(|gpu| {
                 gpu.detail
@@ -473,10 +493,10 @@ fn current_power_watts(state: &AppState) -> f64 {
                     .map(|mw| mw / 1000.0)
             })
             .next()
-            .unwrap_or_else(|| crate::metrics::gpu_readings::total_power_watts(&state.gpu_info))
+            .unwrap_or_else(|| crate::metrics::gpu_readings::total_power_watts(state.gpu_info()))
     } else {
         // Linux/NVIDIA: aggregate GPU power
-        crate::metrics::gpu_readings::total_power_watts(&state.gpu_info)
+        crate::metrics::gpu_readings::total_power_watts(state.gpu_info())
     }
 }
 

@@ -82,8 +82,14 @@ impl DataCollector {
             bell_on_critical = state.alerter.config().bell_on_critical;
             webhook_url = state.alerter.config().webhook_url.clone();
 
-            let snapshot = state.gpu_info.clone();
-            transitions = state.alerter.evaluate(&snapshot);
+            // Split-borrow through the guard so the alerter reads the GPU
+            // rows in place instead of from a per-tick clone.
+            transitions = {
+                let AppState {
+                    alerter, gpu_info, ..
+                } = &mut *state;
+                alerter.evaluate(gpu_info)
+            };
             for t in &transitions {
                 let notification_type = match t.to {
                     crate::ui::alerts::AlertLevel::Crit => NotificationType::Error,
@@ -97,11 +103,18 @@ impl DataCollector {
                 );
                 state.push_alert_transition(t.clone());
             }
+            // The render loop reuses its copy of the alerter, the alert
+            // history and the toasts until data_version moves, and this
+            // runs after the collector already bumped it for the new data.
+            if !transitions.is_empty() {
+                state.mark_data_changed();
+            }
         }
 
         if transitions.is_empty() {
             return;
         }
+        self.notify_ui();
 
         if bell_on_critical
             && transitions

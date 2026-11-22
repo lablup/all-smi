@@ -28,7 +28,6 @@ use crossterm::{
     style::{Color, Print},
 };
 
-use crate::app_state::AppState;
 use crate::cli::ViewArgs;
 use crate::device::ProcessInfo;
 use crate::ui::activity_panel;
@@ -48,7 +47,8 @@ use crate::ui::renderer::{
 use crate::ui::renderers::chassis_renderer::print_chassis_energy_row_for_host;
 use crate::ui::renderers::gpu_renderer::print_gpu_diagnostic_rows;
 use crate::ui::tabs::draw_tabs;
-use crate::ui::text::print_colored_text;
+use crate::ui::tabs::is_users_tab_active;
+use crate::ui::text::{marquee_offset, print_colored_text};
 use crate::view::render_snapshot::RenderSnapshot;
 use crate::view::view_cache::ViewCache;
 
@@ -62,8 +62,7 @@ impl FrameRenderer {
     /// Render help popup content from the snapshot.
     pub fn render_help(snapshot: &RenderSnapshot, args: &ViewArgs, cols: u16, rows: u16) -> String {
         let is_remote = args.hosts.is_some() || args.hostfile.is_some();
-        let view_state = snapshot.as_app_state();
-        crate::ui::help::generate_help_popup_content(cols, rows, &view_state, is_remote)
+        crate::ui::help::generate_help_popup_content(cols, rows, snapshot, is_remote)
     }
 
     /// Render the alert history panel (`A` key). Lists the most recent
@@ -82,14 +81,14 @@ impl FrameRenderer {
             None,
         );
         queue!(buffer, Print("\r\n")).unwrap();
-        if snapshot.alert_history.is_empty() {
+        if snapshot.heavy.alert_history.is_empty() {
             let msg = "No alert transitions yet. Thresholds are configured — keep \
                       monitoring.";
             print_colored_text(&mut buffer, msg, Color::DarkGrey, None, None);
             queue!(buffer, Print("\r\n")).unwrap();
         } else {
             let limit = (rows as usize).saturating_sub(3).max(1);
-            for t in snapshot.alert_history.iter().take(limit) {
+            for t in snapshot.heavy.alert_history.iter().take(limit) {
                 let ts = t.timestamp.format("%H:%M:%S").to_string();
                 let line = format!("  {ts}  {msg}", msg = t.message);
                 let color = match t.to {
@@ -112,8 +111,7 @@ impl FrameRenderer {
         rows: u16,
     ) -> String {
         let mut buffer = BufferWriter::new();
-        let view_state = snapshot.as_app_state();
-        print_function_keys(&mut buffer, cols, rows, &view_state, is_remote);
+        print_function_keys(&mut buffer, cols, rows, snapshot, is_remote);
         print_loading_indicator(
             &mut buffer,
             cols,
@@ -143,8 +141,6 @@ impl FrameRenderer {
         let width = cols as usize;
         let mut buffer = BufferWriter::new();
 
-        let view_state = snapshot.as_app_state();
-
         // Write time/date header to buffer first
         let current_time = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
         let version = env!("CARGO_PKG_VERSION");
@@ -153,7 +149,7 @@ impl FrameRenderer {
 
         // Get runtime environment info
         let runtime_shield =
-            if let Some((name, color)) = snapshot.runtime_environment.display_info() {
+            if let Some((name, color)) = snapshot.heavy.runtime_environment.display_info() {
                 let shield_content = format!(" {name} ");
                 let shield_len = shield_content.len();
                 Some((shield_content, color, shield_len))
@@ -205,7 +201,7 @@ impl FrameRenderer {
         // hidden path can use AppState to select their remote device/layout
         // pipeline without changing their existing chrome when the flag is off.
         let render_remote_devices =
-            chrome_is_remote || (args.hide_storage && !view_state.is_local_mode);
+            chrome_is_remote || (args.hide_storage && !snapshot.is_local_mode);
 
         // Cluster Overview, dashboard items, and the tabs row are only meaningful
         // when monitoring multiple remote hosts. `is_local_mode` is false the moment
@@ -214,15 +210,15 @@ impl FrameRenderer {
         // host still shows these widgets.
         //
         // In local mode we show the compact two-line host summary bar instead.
-        if view_state.is_local_mode {
-            draw_local_header_bar(&mut buffer, &view_state, cols);
+        if snapshot.is_local_mode {
+            draw_local_header_bar(&mut buffer, snapshot, cols);
 
             // Activity panel: CPU per-core bars (left) + GPU sparklines (right)
             if activity_panel::should_show_panel(cols) {
                 gpu_sparkline_panel::render_combined_activity_panel(
                     &mut buffer,
-                    &view_state,
-                    &snapshot.cpu_info,
+                    snapshot,
+                    &snapshot.heavy.cpu_info,
                     width,
                     rows,
                 );
@@ -230,18 +226,17 @@ impl FrameRenderer {
         } else {
             // Write remaining header content to buffer
             print_colored_text(&mut buffer, "Cluster Overview\r\n", Color::Cyan, None, None);
-            draw_system_view(&mut buffer, &view_state, cols);
+            draw_system_view(&mut buffer, snapshot, cols);
 
-            draw_dashboard_items(&mut buffer, &view_state, cols);
-            draw_tabs(&mut buffer, &view_state, cols);
+            draw_dashboard_items(&mut buffer, snapshot, cols);
+            draw_tabs(&mut buffer, snapshot, cols);
         }
 
         // Users tab (issue #189) owns its own section and skips the
         // normal GPU / chassis / device pipeline.  The tab is only
         // present in remote / replay mode; local mode never inserts
         // the `"Users"` entry into `AppState::tabs`.
-        let on_users_tab = is_users_tab_selected(snapshot);
-        if on_users_tab {
+        if is_users_tab_active(snapshot) {
             // Budget: rows minus function-key footer minus the 4-row
             // heading we already printed above.
             let heading_rows = buffer.line_count() as u16;
@@ -249,12 +244,13 @@ impl FrameRenderer {
             crate::ui::renderers::user_renderer::render_users_tab(
                 &mut buffer,
                 &snapshot.users_aggregation,
+                &snapshot.users_visible_order,
                 &snapshot.users_tab_state,
-                &snapshot.remote_process_info,
+                &snapshot.heavy.remote_process_info,
                 cols,
                 avail,
             );
-            print_function_keys(&mut buffer, cols, rows, &view_state, chrome_is_remote);
+            print_function_keys(&mut buffer, cols, rows, snapshot, chrome_is_remote);
             return (buffer.get_buffer().to_string(), 0);
         }
 
@@ -265,21 +261,21 @@ impl FrameRenderer {
             let target_host = topology_target_host(snapshot);
             crate::ui::renderers::topology_renderer::render_topology_tab(
                 &mut buffer,
-                &snapshot.gpu_info,
+                &snapshot.heavy.gpu_info,
                 &target_host,
                 snapshot.topology_view_mode,
                 cols,
                 rows,
             );
-            print_function_keys(&mut buffer, cols, rows, &view_state, chrome_is_remote);
+            print_function_keys(&mut buffer, cols, rows, snapshot, chrome_is_remote);
             return (buffer.get_buffer().to_string(), 0);
         }
 
         // Render chassis information (node-level metrics)
         Self::render_chassis_section(&mut buffer, snapshot, width, cache);
 
-        // Render GPU information (reuse the single view_state for layout calculation)
-        Self::render_gpu_section(&mut buffer, snapshot, &view_state, args, cols, rows, cache);
+        // Render GPU information
+        Self::render_gpu_section(&mut buffer, snapshot, args, cols, rows, cache);
 
         // Render other device information based on mode
         let visible_process_rows = if render_remote_devices {
@@ -290,7 +286,7 @@ impl FrameRenderer {
         };
 
         // Add function keys to main content view
-        print_function_keys(&mut buffer, cols, rows, &view_state, chrome_is_remote);
+        print_function_keys(&mut buffer, cols, rows, snapshot, chrome_is_remote);
 
         (buffer.get_buffer().to_string(), visible_process_rows)
     }
@@ -298,7 +294,6 @@ impl FrameRenderer {
     fn render_gpu_section(
         buffer: &mut BufferWriter,
         snapshot: &RenderSnapshot,
-        view_state: &AppState,
         args: &ViewArgs,
         cols: u16,
         rows: u16,
@@ -317,9 +312,10 @@ impl FrameRenderer {
             let mut indices: Vec<usize> =
                 if let Some(tab_name) = snapshot.tabs.get(snapshot.current_tab) {
                     if tab_name == "All" {
-                        (0..snapshot.gpu_info.len()).collect()
+                        (0..snapshot.heavy.gpu_info.len()).collect()
                     } else {
                         snapshot
+                            .heavy
                             .gpu_info
                             .iter()
                             .enumerate()
@@ -329,32 +325,42 @@ impl FrameRenderer {
                     }
                 } else {
                     // Out-of-bounds tab index: show all (defensive)
-                    (0..snapshot.gpu_info.len()).collect()
+                    (0..snapshot.heavy.gpu_info.len()).collect()
                 };
             indices.sort_by(|&a, &b| {
                 snapshot
                     .sort_criteria
-                    .sort_gpus(&snapshot.gpu_info[a], &snapshot.gpu_info[b])
+                    .sort_gpus(&snapshot.heavy.gpu_info[a], &snapshot.heavy.gpu_info[b])
             });
             fallback_indices = indices;
             &fallback_indices
         };
 
-        // Calculate content area and GPU display parameters using the shared
-        // view_state from render_main, avoiding a second as_app_state() call.
-        let content_area = LayoutCalculator::calculate_content_area(view_state, cols, rows);
+        // Same layout calculation the event handler runs on the live state,
+        // so paging and the rendered GPU count agree.
+        let content_area = LayoutCalculator::calculate_content_area(snapshot, cols, rows);
         let gpu_display_params =
-            LayoutCalculator::calculate_gpu_display_params(view_state, args, &content_area);
+            LayoutCalculator::calculate_gpu_display_params(snapshot, args, &content_area);
         let max_gpu_items = gpu_display_params.max_items;
 
         // Display GPUs with scrolling
         let start_gpu_index = snapshot.gpu_scroll_offset;
         let end_gpu_index = (start_gpu_index + max_gpu_items).min(display_indices.len());
 
-        // Build O(1) lookup maps for vGPU and MIG matching, replacing the
-        // previous per-GPU linear scans that were O(G*V) + O(G*M) per frame.
-        let vgpu_lookup = build_vgpu_lookup(&snapshot.vgpu_info);
-        let mig_lookup = build_mig_lookup(&snapshot.mig_info);
+        // O(1) uuid -> index maps for vGPU and MIG matching. The view cache
+        // rebuilds them once per data version; without a cache (tests) they
+        // are built for this frame only.
+        let fallback_lookups;
+        let (vgpu_lookup, mig_lookup) = match cache.and_then(|c| c.device_lookups()) {
+            Some(lookups) => (&*lookups.vgpu, &*lookups.mig),
+            None => {
+                fallback_lookups = (
+                    build_vgpu_lookup(&snapshot.heavy.vgpu_info),
+                    build_mig_lookup(&snapshot.heavy.mig_info),
+                );
+                (&fallback_lookups.0, &fallback_lookups.1)
+            }
+        };
 
         for (i, &gpu_idx) in display_indices
             .iter()
@@ -362,17 +368,11 @@ impl FrameRenderer {
             .skip(start_gpu_index)
             .take(end_gpu_index.saturating_sub(start_gpu_index))
         {
-            let gpu_info = &snapshot.gpu_info[gpu_idx];
-            let device_name_scroll_offset = snapshot
-                .device_name_scroll_offsets
-                .get(&gpu_info.uuid)
-                .copied()
-                .unwrap_or(0);
-            let hostname_scroll_offset = snapshot
-                .host_id_scroll_offsets
-                .get(&gpu_info.host_id)
-                .copied()
-                .unwrap_or(0);
+            let gpu_info = &snapshot.heavy.gpu_info[gpu_idx];
+            let device_name_scroll_offset =
+                marquee_offset(snapshot.frame_counter, gpu_info.name.len());
+            let hostname_scroll_offset =
+                marquee_offset(snapshot.frame_counter, gpu_info.hostname.len());
 
             // Filter matching (issue #186). Non-matching rows are dimmed
             // by default and hidden when `filter_hide_nonmatching` is on.
@@ -383,13 +383,13 @@ impl FrameRenderer {
 
             // Border-flash support: when this GPU has a pending alert
             // flash we prefix/postfix the row with red marker characters.
-            // Alternating at ~1 Hz is driven by `frame_counter`.
-            let flashing = snapshot.alerter.is_flashing(gpu_info.uuid.as_str())
-                && (snapshot.frame_counter / 10).is_multiple_of(2);
+            // The marker blinks at 1 Hz from wall time, independent of the
+            // render rate.
+            let flashing = snapshot.heavy.alerter.flash_visible(gpu_info.uuid.as_str());
 
             if matched && !flashing {
                 // Fast path: no filter mismatch, no flash — emit directly.
-                if view_state.is_local_mode {
+                if snapshot.is_local_mode {
                     print_gpu_details(buffer, gpu_info, cols as usize);
                     print_gpu_diagnostic_rows(buffer, gpu_info);
                 } else {
@@ -404,11 +404,13 @@ impl FrameRenderer {
                     );
                 }
                 if let Some(vgpu_host) =
-                    lookup_vgpu_host(&vgpu_lookup, &snapshot.vgpu_info, gpu_info)
+                    lookup_vgpu_host(vgpu_lookup, &snapshot.heavy.vgpu_info, gpu_info)
                 {
                     print_vgpu_section(buffer, vgpu_host, cols as usize);
                 }
-                if let Some(mig_host) = lookup_mig_gpu(&mig_lookup, &snapshot.mig_info, gpu_info) {
+                if let Some(mig_host) =
+                    lookup_mig_gpu(mig_lookup, &snapshot.heavy.mig_info, gpu_info)
+                {
                     print_mig_section(buffer, mig_host, cols as usize);
                 }
             } else {
@@ -416,7 +418,7 @@ impl FrameRenderer {
                 // (dim for filter-mismatch, prefix for flash) before the
                 // bytes reach the main output.
                 let mut scratch = BufferWriter::new();
-                if view_state.is_local_mode {
+                if snapshot.is_local_mode {
                     print_gpu_details(&mut scratch, gpu_info, cols as usize);
                     print_gpu_diagnostic_rows(&mut scratch, gpu_info);
                 } else {
@@ -431,11 +433,13 @@ impl FrameRenderer {
                     );
                 }
                 if let Some(vgpu_host) =
-                    lookup_vgpu_host(&vgpu_lookup, &snapshot.vgpu_info, gpu_info)
+                    lookup_vgpu_host(vgpu_lookup, &snapshot.heavy.vgpu_info, gpu_info)
                 {
                     print_vgpu_section(&mut scratch, vgpu_host, cols as usize);
                 }
-                if let Some(mig_host) = lookup_mig_gpu(&mig_lookup, &snapshot.mig_info, gpu_info) {
+                if let Some(mig_host) =
+                    lookup_mig_gpu(mig_lookup, &snapshot.heavy.mig_info, gpu_info)
+                {
                     print_mig_section(&mut scratch, mig_host, cols as usize);
                 }
 
@@ -468,7 +472,7 @@ impl FrameRenderer {
         width: usize,
         cache: Option<&ViewCache>,
     ) {
-        if snapshot.chassis_info.is_empty() {
+        if snapshot.heavy.chassis_info.is_empty() {
             return;
         }
 
@@ -478,12 +482,9 @@ impl FrameRenderer {
                 return;
             }
             for (i, &idx) in hd.chassis_indices.iter().enumerate() {
-                let chassis = &snapshot.chassis_info[idx];
-                let hostname_scroll_offset = snapshot
-                    .host_id_scroll_offsets
-                    .get(&chassis.host_id)
-                    .copied()
-                    .unwrap_or(0);
+                let chassis = &snapshot.heavy.chassis_info[idx];
+                let hostname_scroll_offset =
+                    marquee_offset(snapshot.frame_counter, chassis.hostname.len());
                 if snapshot.is_local_mode {
                     print_chassis_details(buffer, chassis, width);
                 } else {
@@ -498,7 +499,7 @@ impl FrameRenderer {
                 };
                 print_chassis_energy_row_for_host(
                     buffer,
-                    snapshot.energy.integrator(),
+                    snapshot.heavy.energy.integrator(),
                     &snapshot.energy_config,
                     energy_host,
                 );
@@ -508,26 +509,24 @@ impl FrameRenderer {
 
         // Fallback: filter inline (only reached when cache is None)
         let chassis_to_display: Vec<_> = if snapshot.is_local_mode {
-            snapshot.chassis_info.iter().collect()
+            snapshot.heavy.chassis_info.iter().collect()
         } else if snapshot.current_tab == 0 {
             return;
         } else if snapshot.current_tab < snapshot.tabs.len() {
             let current_host = &snapshot.tabs[snapshot.current_tab];
             snapshot
+                .heavy
                 .chassis_info
                 .iter()
                 .filter(|c| c.host_id == *current_host || c.hostname == *current_host)
                 .collect()
         } else {
-            snapshot.chassis_info.iter().collect()
+            snapshot.heavy.chassis_info.iter().collect()
         };
 
         for (i, chassis) in chassis_to_display.iter().enumerate() {
-            let hostname_scroll_offset = snapshot
-                .host_id_scroll_offsets
-                .get(&chassis.host_id)
-                .copied()
-                .unwrap_or(0);
+            let hostname_scroll_offset =
+                marquee_offset(snapshot.frame_counter, chassis.hostname.len());
             if snapshot.is_local_mode {
                 print_chassis_details(buffer, chassis, width);
             } else {
@@ -542,7 +541,7 @@ impl FrameRenderer {
             };
             print_chassis_energy_row_for_host(
                 buffer,
-                snapshot.energy.integrator(),
+                snapshot.heavy.energy.integrator(),
                 &snapshot.energy_config,
                 energy_host,
             );
@@ -563,20 +562,22 @@ impl FrameRenderer {
         let current_hostname = &snapshot.tabs[snapshot.current_tab];
 
         // Check connection status for the current node
-        let is_connected = if let Some(host_id) = snapshot.hostname_to_host_id.get(current_hostname)
-        {
-            snapshot
-                .connection_status
-                .get(host_id)
-                .map(|status| status.is_connected)
-                .unwrap_or(false)
-        } else {
-            snapshot
-                .connection_status
-                .get(current_hostname)
-                .map(|status| status.is_connected)
-                .unwrap_or(true)
-        };
+        let is_connected =
+            if let Some(host_id) = snapshot.heavy.hostname_to_host_id.get(current_hostname) {
+                snapshot
+                    .heavy
+                    .connection_status
+                    .get(host_id)
+                    .map(|status| status.is_connected)
+                    .unwrap_or(false)
+            } else {
+                snapshot
+                    .heavy
+                    .connection_status
+                    .get(current_hostname)
+                    .map(|status| status.is_connected)
+                    .unwrap_or(true)
+            };
 
         if !is_connected {
             Self::render_disconnection_notification(buffer, current_hostname, width);
@@ -598,11 +599,13 @@ impl FrameRenderer {
             )
         } else {
             fallback_cpu =
-                Self::filter_indices(&snapshot.cpu_info, |c| c.host_id == *current_hostname);
-            fallback_mem =
-                Self::filter_indices(&snapshot.memory_info, |m| m.host_id == *current_hostname);
-            fallback_stor =
-                Self::filter_indices(&snapshot.storage_info, |s| s.host_id == *current_hostname);
+                Self::filter_indices(&snapshot.heavy.cpu_info, |c| c.host_id == *current_hostname);
+            fallback_mem = Self::filter_indices(&snapshot.heavy.memory_info, |m| {
+                m.host_id == *current_hostname
+            });
+            fallback_stor = Self::filter_indices(&snapshot.heavy.storage_info, |s| {
+                s.host_id == *current_hostname
+            });
             (
                 fallback_cpu.as_slice(),
                 fallback_mem.as_slice(),
@@ -612,17 +615,11 @@ impl FrameRenderer {
 
         // CPU
         for (i, &idx) in cpu_idx.iter().enumerate() {
-            let cpu_info = &snapshot.cpu_info[idx];
-            let cpu_name_scroll_offset = snapshot
-                .cpu_name_scroll_offsets
-                .get(&format!("{}-{}", cpu_info.hostname, cpu_info.cpu_model))
-                .copied()
-                .unwrap_or(0);
-            let hostname_scroll_offset = snapshot
-                .host_id_scroll_offsets
-                .get(&cpu_info.host_id)
-                .copied()
-                .unwrap_or(0);
+            let cpu_info = &snapshot.heavy.cpu_info[idx];
+            let cpu_name_scroll_offset =
+                marquee_offset(snapshot.frame_counter, cpu_info.cpu_model.len());
+            let hostname_scroll_offset =
+                marquee_offset(snapshot.frame_counter, cpu_info.hostname.len());
             print_cpu_info(
                 buffer,
                 i,
@@ -637,12 +634,9 @@ impl FrameRenderer {
 
         // Memory
         for (i, &idx) in mem_idx.iter().enumerate() {
-            let memory_info = &snapshot.memory_info[idx];
-            let hostname_scroll_offset = snapshot
-                .host_id_scroll_offsets
-                .get(&memory_info.host_id)
-                .copied()
-                .unwrap_or(0);
+            let memory_info = &snapshot.heavy.memory_info[idx];
+            let hostname_scroll_offset =
+                marquee_offset(snapshot.frame_counter, memory_info.hostname.len());
             print_memory_info(buffer, i, memory_info, width, hostname_scroll_offset, true);
         }
 
@@ -654,12 +648,9 @@ impl FrameRenderer {
                 .take(10)
                 .enumerate()
             {
-                let storage_info = &snapshot.storage_info[idx];
-                let hostname_scroll_offset = snapshot
-                    .host_id_scroll_offsets
-                    .get(&storage_info.host_id)
-                    .copied()
-                    .unwrap_or(0);
+                let storage_info = &snapshot.heavy.storage_info[idx];
+                let hostname_scroll_offset =
+                    marquee_offset(snapshot.frame_counter, storage_info.hostname.len());
                 print_storage_info(buffer, i, storage_info, width, hostname_scroll_offset, true);
             }
         }
@@ -768,37 +759,26 @@ impl FrameRenderer {
 
         // The header owns live CPU values and the Activity panel owns
         // utilization history, so this row is inventory-only.
-        for cpu_info in &snapshot.cpu_info {
+        for cpu_info in &snapshot.heavy.cpu_info {
             print_cpu_details(buffer, cpu_info, width);
         }
 
         // Host RAM used/total is already in the summary. Swap pressure is
         // separate information and appears only when swap exists.
-        for memory_info in &snapshot.memory_info {
+        for memory_info in &snapshot.heavy.memory_info {
             print_memory_details(buffer, memory_info, width);
         }
 
         // Storage information for local mode
         if !args.hide_storage {
-            for (i, storage_info) in snapshot.storage_info.iter().enumerate() {
-                let hostname_scroll_offset = snapshot
-                    .host_id_scroll_offsets
-                    .get(&storage_info.host_id)
-                    .copied()
-                    .unwrap_or(0);
-                print_storage_info(
-                    buffer,
-                    i,
-                    storage_info,
-                    width,
-                    hostname_scroll_offset,
-                    false,
-                );
+            for (i, storage_info) in snapshot.heavy.storage_info.iter().enumerate() {
+                // Local rows hide the hostname, so nothing scrolls here.
+                print_storage_info(buffer, i, storage_info, width, 0, false);
             }
         }
 
         // Process information for local mode (if available)
-        if !snapshot.process_info.is_empty() {
+        if !snapshot.heavy.process_info.is_empty() {
             let lines_used = buffer.line_count();
 
             // Add a blank line before process list
@@ -814,8 +794,8 @@ impl FrameRenderer {
             // footer_rows = 2 ("Showing..." + "Active..." stats)
             let visible = (available_rows as usize).saturating_sub(4 + 2);
 
-            // Get current user for process coloring
-            let current_user = whoami::username().unwrap_or_default();
+            // Current user for process coloring (resolved once per session).
+            let current_user = current_username();
 
             // Use cached GPU-filtered process list when available, avoiding
             // a per-frame clone of the entire process vector.
@@ -823,12 +803,13 @@ impl FrameRenderer {
                 if let Some(pl) = cache.and_then(|c| c.process_display_list()) {
                     match &pl.filtered {
                         Some(filtered) => Cow::Borrowed(filtered.as_slice()),
-                        None => Cow::Borrowed(&snapshot.process_info),
+                        None => Cow::Borrowed(&snapshot.heavy.process_info),
                     }
                 } else if snapshot.gpu_filter_enabled {
                     // Fallback: filter inline (only when cache is None)
                     Cow::Owned(
                         snapshot
+                            .heavy
                             .process_info
                             .iter()
                             .filter(|p| p.used_memory > 0)
@@ -836,7 +817,7 @@ impl FrameRenderer {
                             .collect(),
                     )
                 } else {
-                    Cow::Borrowed(&snapshot.process_info)
+                    Cow::Borrowed(&snapshot.heavy.process_info)
                 };
 
             // Issue #186: also narrow by the interactive filter query. In
@@ -865,7 +846,7 @@ impl FrameRenderer {
                 available_rows,
                 cols,
                 snapshot.process_horizontal_scroll_offset,
-                &current_user,
+                current_user,
                 &snapshot.sort_criteria,
                 &snapshot.sort_direction,
             );
@@ -876,16 +857,13 @@ impl FrameRenderer {
     }
 }
 
-/// True when the snapshot's current tab is the cluster-wide Users tab
-/// (issue #189).  Kept outside of [`FrameRenderer`] so it can be used
-/// by tests and `render_main` alike without plumbing a snapshot through
-/// multiple call sites.
-fn is_users_tab_selected(snapshot: &RenderSnapshot) -> bool {
-    snapshot
-        .tabs
-        .get(snapshot.current_tab)
-        .map(|t| t == crate::ui::tabs::USERS_TAB_NAME)
-        .unwrap_or(false)
+/// Name of the effective user, used to highlight the operator's own
+/// processes. The effective uid cannot change during a session, and the
+/// lookup goes through NSS (a passwd read, or a network round trip under
+/// sssd/LDAP), so it is resolved once instead of on every frame.
+fn current_username() -> &'static str {
+    static CURRENT_USER: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    CURRENT_USER.get_or_init(|| whoami::username().unwrap_or_default())
 }
 
 /// True when the snapshot's current tab is the per-host Topology tab
@@ -912,6 +890,7 @@ fn is_topology_tab_selected(snapshot: &RenderSnapshot) -> bool {
 fn topology_target_host(snapshot: &RenderSnapshot) -> String {
     if snapshot.is_local_mode {
         return snapshot
+            .heavy
             .gpu_info
             .first()
             .map(|g| g.host_id.clone())
@@ -939,21 +918,23 @@ fn topology_target_host(snapshot: &RenderSnapshot) -> String {
 /// Locate the [`crate::device::VgpuHostInfo`] record matching a given GPU row.
 ///
 /// Build an O(1) lookup map from `gpu_uuid` to index in the vGPU info slice.
-/// Called once per frame to replace per-GPU linear scans.
-fn build_vgpu_lookup(vgpu_info: &[crate::device::VgpuHostInfo]) -> HashMap<&str, usize> {
+/// The view cache calls this once per data version.
+pub(crate) fn build_vgpu_lookup(
+    vgpu_info: &[crate::device::VgpuHostInfo],
+) -> HashMap<String, usize> {
     let mut map = HashMap::with_capacity(vgpu_info.len());
     for (i, host) in vgpu_info.iter().enumerate() {
-        map.entry(host.gpu_uuid.as_str()).or_insert(i);
+        map.entry(host.gpu_uuid.clone()).or_insert(i);
     }
     map
 }
 
 /// Build an O(1) lookup map from `gpu_uuid` to index in the MIG info slice.
-/// Called once per frame to replace per-GPU linear scans.
-fn build_mig_lookup(mig_info: &[crate::device::MigGpuInfo]) -> HashMap<&str, usize> {
+/// The view cache calls this once per data version.
+pub(crate) fn build_mig_lookup(mig_info: &[crate::device::MigGpuInfo]) -> HashMap<String, usize> {
     let mut map = HashMap::with_capacity(mig_info.len());
     for (i, host) in mig_info.iter().enumerate() {
-        map.entry(host.gpu_uuid.as_str()).or_insert(i);
+        map.entry(host.gpu_uuid.clone()).or_insert(i);
     }
     map
 }
@@ -969,12 +950,14 @@ fn build_mig_lookup(mig_info: &[crate::device::MigGpuInfo]) -> HashMap<&str, usi
 /// Returns `None` when no match is found, which keeps the vGPU section from
 /// appearing under unrelated GPU rows.
 fn lookup_vgpu_host<'a>(
-    lookup: &HashMap<&str, usize>,
+    lookup: &HashMap<String, usize>,
     vgpu_info: &'a [crate::device::VgpuHostInfo],
     gpu: &crate::device::GpuInfo,
 ) -> Option<&'a crate::device::VgpuHostInfo> {
-    if let Some(&idx) = lookup.get(gpu.uuid.as_str()) {
-        return Some(&vgpu_info[idx]);
+    if let Some(&idx) = lookup.get(gpu.uuid.as_str())
+        && let Some(info) = vgpu_info.get(idx)
+    {
+        return Some(info);
     }
     // Fallback: hostname + gpu_name linear scan for entries without UUID match.
     vgpu_info
@@ -992,12 +975,14 @@ fn lookup_vgpu_host<'a>(
 /// Returns `None` when no match is found, keeping the MIG section from
 /// appearing under unrelated GPU rows.
 fn lookup_mig_gpu<'a>(
-    lookup: &HashMap<&str, usize>,
+    lookup: &HashMap<String, usize>,
     mig_info: &'a [crate::device::MigGpuInfo],
     gpu: &crate::device::GpuInfo,
 ) -> Option<&'a crate::device::MigGpuInfo> {
-    if let Some(&idx) = lookup.get(gpu.uuid.as_str()) {
-        return Some(&mig_info[idx]);
+    if let Some(&idx) = lookup.get(gpu.uuid.as_str())
+        && let Some(info) = mig_info.get(idx)
+    {
+        return Some(info);
     }
     // Fallback: hostname + gpu_name linear scan for entries without UUID match.
     mig_info
@@ -1011,7 +996,7 @@ mod tests {
     use crate::app_state::AppState;
     use crate::device::MemoryInfo;
     use crate::storage::StorageInfo;
-    use crate::view::render_snapshot::RenderSnapshot;
+    use crate::view::render_snapshot::{HeavyCache, RenderSnapshot};
 
     fn make_local_args() -> ViewArgs {
         ViewArgs::empty()
@@ -1019,7 +1004,7 @@ mod tests {
 
     fn make_snapshot() -> RenderSnapshot {
         let mut state = AppState::new();
-        RenderSnapshot::capture(&mut state)
+        RenderSnapshot::capture(&mut state, &mut HeavyCache::default())
     }
 
     fn make_storage(host_id: &str, index: u32) -> StorageInfo {
@@ -1085,7 +1070,7 @@ mod tests {
         state.storage_info = (0..50)
             .map(|index| make_storage("localhost", index))
             .collect();
-        let snapshot = RenderSnapshot::capture(&mut state);
+        let snapshot = RenderSnapshot::capture(&mut state, &mut HeavyCache::default());
         let mut args = make_local_args();
         args.hide_storage = true;
 
@@ -1120,14 +1105,14 @@ mod tests {
     fn hidden_local_render_is_identical_with_zero_or_many_disks() {
         let mut empty_state = AppState::new();
         empty_state.process_info = (1..=5).map(make_process).collect();
-        let empty_snapshot = RenderSnapshot::capture(&mut empty_state);
+        let empty_snapshot = RenderSnapshot::capture(&mut empty_state, &mut HeavyCache::default());
 
         let mut many_state = AppState::new();
         many_state.process_info = (1..=5).map(make_process).collect();
         many_state.storage_info = (0..50)
             .map(|index| make_storage("localhost", index))
             .collect();
-        let many_snapshot = RenderSnapshot::capture(&mut many_state);
+        let many_snapshot = RenderSnapshot::capture(&mut many_state, &mut HeavyCache::default());
 
         let mut args = make_local_args();
         args.hide_storage = true;
@@ -1171,7 +1156,7 @@ mod tests {
         state.cpu_info = vec![cpu];
         state.memory_info = vec![make_memory("host-a")];
         state.storage_info = vec![make_storage("host-a", 0)];
-        let snapshot = RenderSnapshot::capture(&mut state);
+        let snapshot = RenderSnapshot::capture(&mut state, &mut HeavyCache::default());
         let mut args = ViewArgs::empty();
         args.hosts = Some(vec!["host-a".into()]);
         args.hide_storage = true;
@@ -1193,7 +1178,7 @@ mod tests {
 
         let mut all_state = state;
         all_state.current_tab = 0;
-        let all_snapshot = RenderSnapshot::capture(&mut all_state);
+        let all_snapshot = RenderSnapshot::capture(&mut all_state, &mut HeavyCache::default());
         let mut all = BufferWriter::new();
         FrameRenderer::render_remote_devices(&mut all, &all_snapshot, &args, 120, None);
         assert!(all.get_buffer().is_empty(), "All tab emitted devices");
@@ -1231,7 +1216,7 @@ mod tests {
                         1.0, false,
                     ));
                 }
-                let snapshot = RenderSnapshot::capture(&mut state);
+                let snapshot = RenderSnapshot::capture(&mut state, &mut HeavyCache::default());
 
                 let mut hidden_args = args.clone();
                 hidden_args.hide_storage = true;
@@ -1261,7 +1246,7 @@ mod tests {
         let mut state = AppState::new();
         state.is_local_mode = false;
         state.storage_info = vec![make_storage("recorded-host", 0)];
-        let snapshot = RenderSnapshot::capture(&mut state);
+        let snapshot = RenderSnapshot::capture(&mut state, &mut HeavyCache::default());
         let mut args = ViewArgs::empty();
         args.replay = Some("recording.ndjson".into());
         args.hide_storage = true;
@@ -1285,15 +1270,14 @@ mod tests {
         state.storage_info = (0..50)
             .map(|index| make_storage("recorded-host", index))
             .collect();
-        let snapshot = RenderSnapshot::capture(&mut state);
+        let snapshot = RenderSnapshot::capture(&mut state, &mut HeavyCache::default());
         let mut args = ViewArgs::empty();
         args.replay = Some("recording.ndjson".into());
         args.hide_storage = true;
 
-        let view_state = snapshot.as_app_state();
-        let content_area = LayoutCalculator::calculate_content_area(&view_state, 120, 40);
+        let content_area = LayoutCalculator::calculate_content_area(&snapshot, 120, 40);
         let params =
-            LayoutCalculator::calculate_gpu_display_params(&view_state, &args, &content_area);
+            LayoutCalculator::calculate_gpu_display_params(&snapshot, &args, &content_area);
         let (content, _) = FrameRenderer::render_main(&snapshot, &args, 120, 40, None);
         let rendered_gpus = (0..30)
             .filter(|index| content.contains(&format!("G{index:02}")))
@@ -1339,7 +1323,7 @@ mod tests {
         state
             .startup_status_lines
             .push("Connecting to GPUs...".to_string());
-        let snapshot = RenderSnapshot::capture(&mut state);
+        let snapshot = RenderSnapshot::capture(&mut state, &mut HeavyCache::default());
         // Should not panic and produce output with the status line.
         let output = FrameRenderer::render_loading(&snapshot, false, 80, 24);
         assert!(!output.is_empty());
@@ -1460,7 +1444,7 @@ mod tests {
             "host2".to_string(),
         ];
         state.topology_last_host_tab = last_host.map(|s| s.to_string());
-        RenderSnapshot::capture(&mut state)
+        RenderSnapshot::capture(&mut state, &mut HeavyCache::default())
     }
 
     #[test]
@@ -1497,6 +1481,24 @@ mod tests {
     // renderers, so these drive real device rows rather than the empty
     // snapshot the smoke tests above use.
     // -----------------------------------------------------------------------
+
+    #[test]
+    fn lookup_vgpu_host_stale_index_falls_back_to_none() {
+        // A cached map whose index points past the (shorter) info slice must
+        // be treated as not found instead of panicking.
+        let mut lookup = HashMap::new();
+        lookup.insert("GPU-X".to_string(), 3usize);
+        let gpu = make_gpu("GPU-X", "A100");
+        assert!(lookup_vgpu_host(&lookup, &[], &gpu).is_none());
+    }
+
+    #[test]
+    fn lookup_mig_gpu_stale_index_falls_back_to_none() {
+        let mut lookup = HashMap::new();
+        lookup.insert("GPU-X".to_string(), 3usize);
+        let gpu = make_gpu("GPU-X", "A100");
+        assert!(lookup_mig_gpu(&lookup, &[], &gpu).is_none());
+    }
 
     fn make_gpu(uuid: &str, name: &str) -> crate::device::GpuInfo {
         crate::device::GpuInfo {
@@ -1575,7 +1577,7 @@ mod tests {
             make_gpu("gpu-1", "NVIDIA H100 80GB HBM3"),
         ];
         state.cpu_info = vec![make_cpu()];
-        RenderSnapshot::capture(&mut state)
+        RenderSnapshot::capture(&mut state, &mut HeavyCache::default())
     }
 
     #[test]
@@ -1659,5 +1661,12 @@ mod tests {
         let args = make_local_args();
         let resolved = Viewport::resolve(0, 40);
         let _ = FrameRenderer::render_help(&snapshot, &args, resolved.cols, resolved.rows);
+    }
+
+    #[test]
+    fn current_username_is_resolved_once() {
+        // Pointer equality only holds for the cached `&'static str`; a
+        // per-call lookup would hand back a fresh allocation each time.
+        assert!(std::ptr::eq(current_username(), current_username()));
     }
 }

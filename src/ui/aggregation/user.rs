@@ -472,24 +472,51 @@ pub enum UserSortKey {
     Longest,
 }
 
-/// Sort a `UserAggregate` slice in place according to `key`.  Ties are
-/// broken by `user` alphabetically so the output order is stable across
-/// renders.
-pub fn sort_users(users: &mut [UserAggregate], key: UserSortKey) {
+/// Compare two users under `key`.  Ties are broken by `user`
+/// alphabetically so the order is stable across renders.
+pub fn compare_users(a: &UserAggregate, b: &UserAggregate, key: UserSortKey) -> std::cmp::Ordering {
     use std::cmp::Ordering;
-    users.sort_by(|a, b| {
-        let primary = match key {
-            UserSortKey::User => a.user.cmp(&b.user),
-            UserSortKey::Memory => b.vram_bytes.cmp(&a.vram_bytes),
-            UserSortKey::Power => b
-                .power_watts
-                .partial_cmp(&a.power_watts)
-                .unwrap_or(Ordering::Equal),
-            UserSortKey::Nodes => b.node_count.cmp(&a.node_count),
-            UserSortKey::Longest => b.longest_seconds.cmp(&a.longest_seconds),
-        };
-        primary.then_with(|| a.user.cmp(&b.user))
-    });
+    let primary = match key {
+        UserSortKey::User => a.user.cmp(&b.user),
+        UserSortKey::Memory => b.vram_bytes.cmp(&a.vram_bytes),
+        UserSortKey::Power => b
+            .power_watts
+            .partial_cmp(&a.power_watts)
+            .unwrap_or(Ordering::Equal),
+        UserSortKey::Nodes => b.node_count.cmp(&a.node_count),
+        UserSortKey::Longest => b.longest_seconds.cmp(&a.longest_seconds),
+    };
+    primary.then_with(|| a.user.cmp(&b.user))
+}
+
+/// Sort a `UserAggregate` slice in place according to `key` (see
+/// [`compare_users`]). Library API; the TUI itself sorts indices through
+/// [`visible_user_order`] so it never clones rows.
+#[allow(dead_code)] // Unused by the binary; kept for library callers.
+pub fn sort_users(users: &mut [UserAggregate], key: UserSortKey) {
+    users.sort_by(|a, b| compare_users(a, b, key));
+}
+
+/// Indices into `users` of the rows the Users table shows, in display
+/// order: system accounts dropped when `filter_sys` is set, the rest
+/// sorted by `key` (see [`compare_users`]).
+///
+/// The table, the `Enter` drill-down and the CSV export all read rows
+/// through this order, so they agree on which user sits at which row
+/// without cloning any `UserAggregate`.
+pub fn visible_user_order(
+    users: &[UserAggregate],
+    key: UserSortKey,
+    filter_sys: bool,
+) -> Vec<usize> {
+    let mut order: Vec<usize> = users
+        .iter()
+        .enumerate()
+        .filter(|(_, u)| !(filter_sys && u.is_system))
+        .map(|(i, _)| i)
+        .collect();
+    order.sort_by(|&a, &b| compare_users(&users[a], &users[b], key));
+    order
 }
 
 /// Format an elapsed-seconds value as `<days>d HH:MM:SS` or `HH:MM:SS`
@@ -808,7 +835,7 @@ mod tests {
     }
 
     #[test]
-    fn sort_users_by_memory_descending() {
+    fn visible_user_order_by_memory_descending() {
         let mut u1 = UserAggregate {
             user: "alice".into(),
             is_system: false,
@@ -835,9 +862,58 @@ mod tests {
         };
         u1.longest_seconds = 10;
         u2.longest_seconds = 20;
-        let mut v = vec![u1, u2];
-        sort_users(&mut v, UserSortKey::Memory);
-        assert_eq!(v[0].user, "bob", "highest VRAM first");
+        let v = vec![u1, u2];
+        let order = visible_user_order(&v, UserSortKey::Memory, false);
+        assert_eq!(v[order[0]].user, "bob", "highest VRAM first");
+    }
+
+    #[test]
+    fn visible_user_order_matches_filter_then_sort_for_every_key() {
+        // Ties on every key except `User`, a system account, and an
+        // unsorted input order: the index order must equal what the
+        // renderer, drill-down and CSV export computed before by cloning,
+        // filtering and sorting the rows.
+        let make =
+            |user: &str, is_system: bool, vram: u64, power: f64, nodes: usize| UserAggregate {
+                user: user.into(),
+                is_system,
+                node_count: nodes,
+                gpu_count: 1,
+                process_count: 1,
+                vram_bytes: vram,
+                power_watts: power,
+                longest_seconds: vram,
+                top_command: String::new(),
+                per_host: vec![],
+            };
+        let users = vec![
+            make("dave", false, 100, 5.0, 2),
+            make("root", true, 900, 50.0, 3),
+            make("alice", false, 300, 5.0, 2),
+            make("carol", false, 100, 9.0, 1),
+            make("bob", false, 300, 1.0, 2),
+        ];
+        let keys = [
+            UserSortKey::User,
+            UserSortKey::Memory,
+            UserSortKey::Power,
+            UserSortKey::Nodes,
+            UserSortKey::Longest,
+        ];
+        for key in keys {
+            for filter_sys in [false, true] {
+                let mut expected: Vec<UserAggregate> = users
+                    .iter()
+                    .filter(|u| !(filter_sys && u.is_system))
+                    .cloned()
+                    .collect();
+                sort_users(&mut expected, key);
+                let order = visible_user_order(&users, key, filter_sys);
+                let got: Vec<&str> = order.iter().map(|&i| users[i].user.as_str()).collect();
+                let want: Vec<&str> = expected.iter().map(|u| u.user.as_str()).collect();
+                assert_eq!(got, want, "key={key:?} filter_sys={filter_sys}");
+            }
+        }
     }
 
     #[test]

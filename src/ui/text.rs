@@ -255,6 +255,20 @@ pub fn print_colored_text<W: Write>(
     }
 }
 
+/// Marquee start position for a name of `text_len` bytes on frame
+/// `frame_counter`.
+///
+/// The marquee advances one character every
+/// [`AppConfig::SCROLL_UPDATE_FREQUENCY`] drawn frames and wraps after
+/// `text_len + 3` steps (the name, a three-space gap, then the name
+/// again). Every row derives its offset from the shared frame counter,
+/// so no per-host or per-GPU scroll state has to be stored or pruned.
+/// Renderers ignore the offset for names short enough to fit.
+pub fn marquee_offset(frame_counter: u64, text_len: usize) -> usize {
+    let step = frame_counter / crate::common::config::AppConfig::SCROLL_UPDATE_FREQUENCY;
+    (step % (text_len as u64 + 3)) as usize
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -388,5 +402,22 @@ mod tests {
             elapsed.as_millis() < 1000,
             "truncate_to_width throughput too slow: {elapsed:?}"
         );
+    }
+
+    #[test]
+    fn marquee_offset_steps_per_update_and_wraps_after_len_plus_three() {
+        use crate::common::config::AppConfig;
+        let freq = AppConfig::SCROLL_UPDATE_FREQUENCY;
+        let len = 20;
+        // Step 0 holds for the first `freq` frames.
+        assert_eq!(marquee_offset(0, len), 0);
+        assert_eq!(marquee_offset(freq - 1, len), 0);
+        // One character per `freq` frames.
+        assert_eq!(marquee_offset(freq, len), 1);
+        assert_eq!(marquee_offset(freq * 2, len), 2);
+        // Last position before the wrap, then back to the start.
+        assert_eq!(marquee_offset(freq * (len as u64 + 2), len), len + 2);
+        assert_eq!(marquee_offset(freq * (len as u64 + 3), len), 0);
+        assert_eq!(marquee_offset(freq * (len as u64 + 4), len), 1);
     }
 }

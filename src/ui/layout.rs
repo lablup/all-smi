@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-/// UI layout calculation utilities
-use crate::app_state::AppState;
+//! UI layout calculation utilities
+
 use crate::cli::ViewArgs;
 use crate::device::{GpuInfo, MigGpuInfo, VgpuHostInfo};
 use crate::ui::activity_panel;
@@ -21,24 +21,25 @@ use crate::ui::gpu_sparkline_panel;
 use crate::ui::renderers::gpu_renderer::{
     build_mig_uuid_lookup, build_vgpu_uuid_lookup, gpu_render_line_count_with_lookup,
 };
+use crate::ui::view_state::ViewState;
 
 pub struct LayoutCalculator;
 
 impl LayoutCalculator {
     /// Calculate the number of header lines for dynamic layout.
     ///
-    /// In local mode (`state.is_local_mode == true`) the Cluster Overview card,
+    /// In local mode (`state.is_local_mode() == true`) the Cluster Overview card,
     /// dashboard items, and the tabs row are all suppressed by `render_main()`,
     /// so their line contributions are excluded here.  This keeps the content
     /// area (process list, GPU rows) from being unnecessarily clipped and
     /// preserves the "reserved space for function keys" regression fix.
-    pub fn calculate_header_lines(state: &AppState, cols: u16) -> u16 {
+    pub fn calculate_header_lines(state: &dyn ViewState, cols: u16) -> u16 {
         let mut lines = 0u16;
 
         // Basic header (title line)
         lines += 1;
 
-        if state.is_local_mode {
+        if state.is_local_mode() {
             // Local mode shows an identity row plus responsive metrics. The
             // metrics intentionally occupy two rows below 40 columns rather
             // than relying on terminal auto-wrap.
@@ -51,7 +52,9 @@ impl LayoutCalculator {
             lines += 4;
 
             // Live statistics section (remote sparkline panel)
-            if !state.utilization_history.is_empty() || !state.cpu_utilization_history.is_empty() {
+            if !state.utilization_history().is_empty()
+                || !state.cpu_utilization_history().is_empty()
+            {
                 lines += 6; // Separator + header + 3 sparkline rows + spacer
             }
 
@@ -63,18 +66,18 @@ impl LayoutCalculator {
     }
 
     /// Calculate available content area
-    pub fn calculate_content_area(state: &AppState, cols: u16, rows: u16) -> ContentArea {
+    pub fn calculate_content_area(state: &dyn ViewState, cols: u16, rows: u16) -> ContentArea {
         let header_lines = Self::calculate_header_lines(state, cols);
         let function_keys_lines = 1; // Reserve space for function keys
 
         // In local mode, the Activity panel (CPU left + GPU right) consumes
         // additional rows.  Both halves render on the same terminal rows, so
         // we take the maximum height of the two.
-        let activity_panel_lines = if state.is_local_mode {
+        let activity_panel_lines = if state.is_local_mode() {
             // Both height functions take `rows` and share the same multi-row
             // mode decision (`use_multirow_graphs`) as the renderer, so the
             // reserved height always matches the emitted line count.
-            let cpu_lines = activity_panel::panel_height(&state.cpu_info, cols, rows);
+            let cpu_lines = activity_panel::panel_height(state.cpu_info(), cols, rows);
             let gpu_content = gpu_sparkline_panel::gpu_content_rows(state, rows) as u16;
             // GPU panel has top+bottom borders (+2) when it has content
             let gpu_lines = if gpu_content > 0 { gpu_content + 2 } else { 0 };
@@ -99,7 +102,7 @@ impl LayoutCalculator {
 
     /// Calculate GPU display parameters
     pub fn calculate_gpu_display_params(
-        state: &AppState,
+        state: &dyn ViewState,
         args: &ViewArgs,
         content_area: &ContentArea,
     ) -> GpuDisplayParams {
@@ -108,7 +111,7 @@ impl LayoutCalculator {
         // configuration use remote GPU row heights without changing defaults.
         let is_remote = args.hosts.is_some()
             || args.hostfile.is_some()
-            || (args.hide_storage && !state.is_local_mode);
+            || (args.hide_storage && !state.is_local_mode());
 
         // Calculate storage space requirements
         let storage_items_count = Self::calculate_storage_items_count(state, args);
@@ -120,14 +123,16 @@ impl LayoutCalculator {
 
         // Calculate GPU display area
         let gpu_display_rows = if is_remote {
-            if state.current_tab < state.tabs.len() && state.tabs[state.current_tab] == "All" {
+            if state.current_tab() < state.tabs().len()
+                && state.tabs()[state.current_tab()] == "All"
+            {
                 content_area.available_rows // Full space for "All" tab
             } else {
                 content_area
                     .available_rows
                     .saturating_sub(storage_display_rows)
             }
-        } else if state.process_info.is_empty() {
+        } else if state.process_info().is_empty() {
             content_area
                 .available_rows
                 .saturating_sub(storage_display_rows)
@@ -162,7 +167,7 @@ impl LayoutCalculator {
             display_rows: gpu_display_rows,
             lines_per_gpu,
             max_items: max_gpu_items,
-            start_index: state.gpu_scroll_offset,
+            start_index: state.gpu_scroll_offset(),
             storage_rows: storage_display_rows,
         }
     }
@@ -219,26 +224,28 @@ impl LayoutCalculator {
 
     /// Public entry point used by `view::event_handler` so PgUp / PgDn page
     /// sizes stay consistent with the rendered layout.
-    pub fn max_gpu_lines_for_tab(state: &AppState) -> usize {
+    pub fn max_gpu_lines_for_tab(state: &dyn ViewState) -> usize {
         max_gpu_lines_for_tab(state)
     }
 
-    fn calculate_storage_items_count(state: &AppState, args: &ViewArgs) -> usize {
+    fn calculate_storage_items_count(state: &dyn ViewState, args: &ViewArgs) -> usize {
         if args.hide_storage {
             return 0;
         }
 
         let is_remote = args.hosts.is_some() || args.hostfile.is_some();
 
-        if state.storage_info.is_empty() {
+        if state.storage_info().is_empty() {
             return 0;
         }
 
         if is_remote {
-            if state.current_tab < state.tabs.len() && state.tabs[state.current_tab] != "All" {
-                let current_hostname = &state.tabs[state.current_tab];
+            if state.current_tab() < state.tabs().len()
+                && state.tabs()[state.current_tab()] != "All"
+            {
+                let current_hostname = &state.tabs()[state.current_tab()];
                 state
-                    .storage_info
+                    .storage_info()
                     .iter()
                     .filter(|info| info.host_id == *current_hostname)
                     .count()
@@ -246,7 +253,7 @@ impl LayoutCalculator {
                 0
             }
         } else {
-            state.storage_info.len()
+            state.storage_info().len()
         }
     }
 }
@@ -344,28 +351,30 @@ impl StandardColumns {
 /// Filter `gpu_info` to the subset visible under the current tab. "All"
 /// returns every GPU; a host tab returns only GPUs whose `host_id`
 /// matches the tab name.
-fn visible_gpus_for_tab<'a>(state: &'a AppState) -> Box<dyn Iterator<Item = &'a GpuInfo> + 'a> {
-    if let Some(tab_name) = state.tabs.get(state.current_tab) {
+fn visible_gpus_for_tab<'a>(
+    state: &'a dyn ViewState,
+) -> Box<dyn Iterator<Item = &'a GpuInfo> + 'a> {
+    if let Some(tab_name) = state.tabs().get(state.current_tab()) {
         if tab_name == "All" {
-            Box::new(state.gpu_info.iter())
+            Box::new(state.gpu_info().iter())
         } else {
             let owned = tab_name.clone();
-            Box::new(state.gpu_info.iter().filter(move |g| g.host_id == owned))
+            Box::new(state.gpu_info().iter().filter(move |g| g.host_id == owned))
         }
     } else {
-        Box::new(state.gpu_info.iter())
+        Box::new(state.gpu_info().iter())
     }
 }
 
 /// Compute the maximum line count any visible GPU would render given the
-/// current `state.gpu_info`, `state.vgpu_info`, and `state.mig_info`. Falls
+/// current `state.gpu_info()`, `state.vgpu_info()`, and `state.mig_info()`. Falls
 /// back to the historical 2-line baseline when no GPUs are visible (empty
 /// cluster, loading state) so layout math never returns 0.
-pub(crate) fn max_gpu_lines_for_tab(state: &AppState) -> usize {
+pub(crate) fn max_gpu_lines_for_tab(state: &dyn ViewState) -> usize {
     max_gpu_lines_over(
         visible_gpus_for_tab(state),
-        &state.vgpu_info,
-        &state.mig_info,
+        state.vgpu_info(),
+        state.mig_info(),
     )
 }
 
@@ -393,6 +402,7 @@ pub(crate) fn max_gpu_lines_over<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app_state::AppState;
     use crate::storage::StorageInfo;
 
     fn storage(host_id: &str, index: u32) -> StorageInfo {
