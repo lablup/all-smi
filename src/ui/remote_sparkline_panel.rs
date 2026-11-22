@@ -32,13 +32,13 @@ use std::io::Write;
 
 use crossterm::{queue, style::Color, style::Print};
 
-use crate::app_state::AppState;
 use crate::ui::braille::sparkline_braille;
 use crate::ui::scale::{
     PERCENT_DOMAIN, PERCENT_SOFT_GRID, PERCENT_SOFT_MIN_SPAN, TEMP_SOFT_GRID, TEMP_SOFT_MIN_SPAN,
     soft_range, temp_range,
 };
 use crate::ui::text::print_colored_text;
+use crate::ui::view_state::ViewState;
 
 /// Width reserved for the label column (e.g. "GPU Util.").
 const LABEL_WIDTH: usize = 10;
@@ -61,10 +61,10 @@ pub const PANEL_ROWS: usize = 4;
 ///
 /// Each sparkline row shows GPU and CPU metrics side by side, each taking
 /// half the available width.
-pub fn draw_remote_sparkline_panel<W: Write>(stdout: &mut W, state: &AppState, cols: u16) {
+pub fn draw_remote_sparkline_panel<W: Write>(stdout: &mut W, state: &dyn ViewState, cols: u16) {
     let box_width = (cols as usize).min(200);
 
-    if state.utilization_history.is_empty() && state.cpu_utilization_history.is_empty() {
+    if state.utilization_history().is_empty() && state.cpu_utilization_history().is_empty() {
         return;
     }
 
@@ -75,24 +75,24 @@ pub fn draw_remote_sparkline_panel<W: Write>(stdout: &mut W, state: &AppState, c
     // Split into GPU and CPU halves
     let half_width = box_width / 2;
 
-    let has_gpu = !state.gpu_info.is_empty();
+    let has_gpu = !state.gpu_info().is_empty();
 
     // Row 1: Utilization — soft axis over each window (clamped to 0..100).
-    let gpu_util = history_vec(&state.utilization_history);
-    let cpu_util = history_vec(&state.cpu_utilization_history);
+    let gpu_util = history_vec(state.utilization_history());
+    let cpu_util = history_vec(state.cpu_utilization_history());
     draw_sparkline_pair(
         stdout,
         SparklinePairParams {
             left_label: "GPU Util.",
             left_color: Color::Yellow,
             left_history: &gpu_util,
-            left_value: avg_str(&state.utilization_history, "%"),
+            left_value: avg_str(state.utilization_history(), "%"),
             left_range: Some(percent_soft_range(&gpu_util)),
             left_available: has_gpu,
             right_label: "CPU Util.",
             right_color: Color::Cyan,
             right_history: &cpu_util,
-            right_value: avg_str(&state.cpu_utilization_history, "%"),
+            right_value: avg_str(state.cpu_utilization_history(), "%"),
             right_range: Some(percent_soft_range(&cpu_util)),
             half_width,
         },
@@ -100,21 +100,21 @@ pub fn draw_remote_sparkline_panel<W: Write>(stdout: &mut W, state: &AppState, c
     queue!(stdout, Print("\r\n")).unwrap();
 
     // Row 2: Memory — soft axis over each window (clamped to 0..100).
-    let gpu_mem = history_vec(&state.memory_history);
-    let host_mem = history_vec(&state.system_memory_history);
+    let gpu_mem = history_vec(state.memory_history());
+    let host_mem = history_vec(state.system_memory_history());
     draw_sparkline_pair(
         stdout,
         SparklinePairParams {
             left_label: "GPU Mem. ",
             left_color: Color::Yellow,
             left_history: &gpu_mem,
-            left_value: avg_str(&state.memory_history, "%"),
+            left_value: avg_str(state.memory_history(), "%"),
             left_range: Some(percent_soft_range(&gpu_mem)),
             left_available: has_gpu,
             right_label: "Host Mem.",
             right_color: Color::Cyan,
             right_history: &host_mem,
-            right_value: avg_str(&state.system_memory_history, "%"),
+            right_value: avg_str(state.system_memory_history(), "%"),
             right_range: Some(percent_soft_range(&host_mem)),
             half_width,
         },
@@ -124,9 +124,9 @@ pub fn draw_remote_sparkline_panel<W: Write>(stdout: &mut W, state: &AppState, c
     // Row 3: Temperature — soft axis clamped to (0, thermal-threshold ceiling);
     // the GPU ceiling comes from its reported threshold, the CPU from the
     // 100°C fallback. The floor is 0 so a cool sensor can zoom below 30°C.
-    let gpu_temp = history_vec(&state.temperature_history);
-    let cpu_temp = history_vec(&state.cpu_temperature_history);
-    let gpu_temp_ceiling = temp_range(state.gpu_info.first()).1;
+    let gpu_temp = history_vec(state.temperature_history());
+    let cpu_temp = history_vec(state.cpu_temperature_history());
+    let gpu_temp_ceiling = temp_range(state.gpu_info().first()).1;
     let cpu_temp_ceiling = temp_range(None).1;
     draw_sparkline_pair(
         stdout,
@@ -134,7 +134,7 @@ pub fn draw_remote_sparkline_panel<W: Write>(stdout: &mut W, state: &AppState, c
             left_label: "GPU Temp.",
             left_color: Color::Yellow,
             left_history: &gpu_temp,
-            left_value: avg_temp_str(&state.temperature_history),
+            left_value: avg_temp_str(state.temperature_history()),
             left_range: Some(soft_range(
                 &gpu_temp,
                 TEMP_SOFT_MIN_SPAN,
@@ -145,7 +145,7 @@ pub fn draw_remote_sparkline_panel<W: Write>(stdout: &mut W, state: &AppState, c
             right_label: "CPU Temp.",
             right_color: Color::Cyan,
             right_history: &cpu_temp,
-            right_value: avg_temp_str(&state.cpu_temperature_history),
+            right_value: avg_temp_str(state.cpu_temperature_history()),
             right_range: Some(soft_range(
                 &cpu_temp,
                 TEMP_SOFT_MIN_SPAN,

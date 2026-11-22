@@ -52,7 +52,6 @@ use std::io::Write;
 
 use crossterm::{queue, style::Color, style::Print};
 
-use crate::app_state::AppState;
 use crate::common::config::ThemeConfig;
 use crate::device::CpuInfo;
 use crate::ui::activity_panel::{self, GRAPH_ROWS, use_multirow_graphs};
@@ -64,6 +63,7 @@ use crate::ui::scale::{
     power_soft_min_span, scale_badge, soft_range, temp_range,
 };
 use crate::ui::text::print_colored_text;
+use crate::ui::view_state::ViewState;
 
 /// Width reserved for the label column (e.g. "GPU Util").
 const LABEL_WIDTH: usize = 9;
@@ -83,8 +83,8 @@ const SPACING: usize = 5; // 1+1 border padding + 3 inter-column spaces
 /// the same mode decision as the renderer ([`use_multirow_graphs`]): in
 /// multi-row mode GPU Util becomes a [`GRAPH_ROWS`]-tall graph and the
 /// remaining metrics collapse to compact rows of two metrics each.
-pub fn gpu_content_rows(state: &AppState, terminal_rows: u16) -> usize {
-    if state.gpu_info.is_empty() {
+pub fn gpu_content_rows(state: &dyn ViewState, terminal_rows: u16) -> usize {
+    if state.gpu_info().is_empty() {
         return 0;
     }
     let ane = show_ane_row(state);
@@ -114,7 +114,7 @@ pub fn gpu_content_rows(state: &AppState, terminal_rows: u16) -> usize {
 /// functions used by [`LayoutCalculator`](crate::ui::layout::LayoutCalculator).
 pub fn render_combined_activity_panel<W: Write>(
     stdout: &mut W,
-    state: &AppState,
+    state: &dyn ViewState,
     cpu_info: &[CpuInfo],
     width: usize,
     terminal_rows: u16,
@@ -129,7 +129,7 @@ pub fn render_combined_activity_panel<W: Write>(
     // Render left half (CPU) into line buffer. The CPU total-utilization
     // history is handed down as a slice so `activity_panel` stays decoupled
     // from `AppState`.
-    let cpu_history: Vec<f64> = state.cpu_utilization_history.iter().copied().collect();
+    let cpu_history: Vec<f64> = state.cpu_utilization_history().iter().copied().collect();
     let left_lines = render_cpu_lines(cpu_info, &cpu_history, width, terminal_rows);
 
     // Render right half (GPU) into line buffer
@@ -192,8 +192,8 @@ fn render_cpu_lines(
 /// mode ([`use_multirow_graphs`]) GPU Util is drawn as a [`GRAPH_ROWS`]-tall
 /// history graph and the remaining metrics collapse to compact rows of two
 /// metrics each; otherwise every metric keeps its own single-row sparkline.
-fn render_gpu_lines(state: &AppState, panel_width: usize, terminal_rows: u16) -> Vec<String> {
-    if state.gpu_info.is_empty() {
+fn render_gpu_lines(state: &dyn ViewState, panel_width: usize, terminal_rows: u16) -> Vec<String> {
+    if state.gpu_info().is_empty() {
         return Vec::new();
     }
 
@@ -270,13 +270,18 @@ struct SparklineRow {
 // Row construction
 // ---------------------------------------------------------------------------
 
-fn build_rows(state: &AppState, is_apple: bool, has_ane: bool, has_npu: bool) -> Vec<SparklineRow> {
+fn build_rows(
+    state: &dyn ViewState,
+    is_apple: bool,
+    has_ane: bool,
+    has_npu: bool,
+) -> Vec<SparklineRow> {
     let mut rows = Vec::with_capacity(6);
-    let gpu = state.gpu_info.first();
+    let gpu = state.gpu_info().first();
 
     // 1. GPU Utilization — soft axis zoomed into the visible window (clamped to
     //    0..100) so small variations around a typical load stay visible.
-    let gpu_util: Vec<f64> = state.utilization_history.iter().copied().collect();
+    let gpu_util: Vec<f64> = state.utilization_history().iter().copied().collect();
     let latest_util = gpu_util.last().copied().unwrap_or(0.0);
     let util_range = soft_range(
         &gpu_util,
@@ -296,7 +301,7 @@ fn build_rows(state: &AppState, is_apple: bool, has_ane: bool, has_npu: bool) ->
     });
 
     // 2. GPU Memory — soft axis over the memory-utilization (%) window.
-    let gpu_mem: Vec<f64> = state.memory_history.iter().copied().collect();
+    let gpu_mem: Vec<f64> = state.memory_history().iter().copied().collect();
     let latest_mem = gpu_mem.last().copied().unwrap_or(0.0);
     let mem_range = soft_range(
         &gpu_mem,
@@ -318,7 +323,7 @@ fn build_rows(state: &AppState, is_apple: bool, has_ane: bool, has_npu: bool) ->
     // 3. GPU Temperature — soft axis clamped to (0, thermal-threshold ceiling)
     //    (100°C fallback). The floor is 0 so a cool GPU can zoom below 30°C
     //    while the window still tracks small changes.
-    let gpu_temp: Vec<f64> = state.temperature_history.iter().copied().collect();
+    let gpu_temp: Vec<f64> = state.temperature_history().iter().copied().collect();
     let latest_temp = gpu_temp.last().copied().unwrap_or(0.0);
     let temp_ceiling = temp_range(gpu).1;
     let temp_rng = soft_range(
@@ -340,13 +345,17 @@ fn build_rows(state: &AppState, is_apple: bool, has_ane: bool, has_npu: bool) ->
 
     // 4. ANE (Apple Silicon -- always shown regardless of current power)
     if has_ane {
-        let ane_w = state.ane_power_history.back().copied().unwrap_or_else(|| {
-            crate::metrics::gpu_readings::first_ane_power_watts(&state.gpu_info).unwrap_or(0.0)
-        });
-        let ane_history: Vec<f64> = if state.ane_power_history.is_empty() {
+        let ane_w = state
+            .ane_power_history()
+            .back()
+            .copied()
+            .unwrap_or_else(|| {
+                crate::metrics::gpu_readings::first_ane_power_watts(state.gpu_info()).unwrap_or(0.0)
+            });
+        let ane_history: Vec<f64> = if state.ane_power_history().is_empty() {
             vec![ane_w]
         } else {
-            state.ane_power_history.iter().copied().collect()
+            state.ane_power_history().iter().copied().collect()
         };
         // Soft axis clamped to (0, ane ceiling); the ceiling still comes from
         // ane_range so a busy Neural Engine keeps a comparable top.
@@ -373,15 +382,15 @@ fn build_rows(state: &AppState, is_apple: bool, has_ane: bool, has_npu: bool) ->
     //     shown whenever a GPU row carries a DLA reading.
     if show_dla_row(state) {
         let latest_dla = state
-            .dla_utilization_history
+            .dla_utilization_history()
             .back()
             .copied()
-            .or_else(|| crate::metrics::gpu_readings::mean_dla_utilization(&state.gpu_info))
+            .or_else(|| crate::metrics::gpu_readings::mean_dla_utilization(state.gpu_info()))
             .unwrap_or(0.0);
-        let dla_history: Vec<f64> = if state.dla_utilization_history.is_empty() {
+        let dla_history: Vec<f64> = if state.dla_utilization_history().is_empty() {
             vec![latest_dla]
         } else {
-            state.dla_utilization_history.iter().copied().collect()
+            state.dla_utilization_history().iter().copied().collect()
         };
         let dla_rng = soft_range(
             &dla_history,
@@ -420,12 +429,12 @@ fn build_rows(state: &AppState, is_apple: bool, has_ane: bool, has_npu: bool) ->
     //    all GPUs), else a nice-rounded peak. The soft min span and grid step
     //    scale with that ceiling.
     let power_w = package_power(state, is_apple);
-    let power_history: Vec<f64> = if state.package_power_history.is_empty() {
+    let power_history: Vec<f64> = if state.package_power_history().is_empty() {
         vec![power_w]
     } else {
-        state.package_power_history.iter().copied().collect()
+        state.package_power_history().iter().copied().collect()
     };
-    let power_ceiling = power_range(&state.gpu_info, &power_history).1;
+    let power_ceiling = power_range(state.gpu_info(), &power_history).1;
     let power_rng = soft_range(
         &power_history,
         power_soft_min_span(power_ceiling),
@@ -639,8 +648,8 @@ fn fit_field(s: &str, width: usize) -> String {
 // Platform detection helpers
 // ---------------------------------------------------------------------------
 
-fn detect_apple_silicon(state: &AppState) -> bool {
-    state.gpu_info.iter().any(|gpu| {
+fn detect_apple_silicon(state: &dyn ViewState) -> bool {
+    state.gpu_info().iter().any(|gpu| {
         gpu.detail
             .get("architecture")
             .map(|arch| arch == "Apple Silicon")
@@ -654,15 +663,15 @@ fn detect_apple_silicon(state: &AppState) -> bool {
 /// An ANE at 0 W is a meaningful "idle" reading and the row is
 /// load-bearing for platform identity even when the Neural Engine
 /// is completely idle.
-fn show_ane_row(state: &AppState) -> bool {
+fn show_ane_row(state: &dyn ViewState) -> bool {
     detect_apple_silicon(state)
 }
 
 /// Whether the DLA row should be shown: some GPU row carries a DLA reading
 /// (Jetson DLA, RTX Spark N1X NPU folded into its GPU row; issue #459).
-fn show_dla_row(state: &AppState) -> bool {
+fn show_dla_row(state: &dyn ViewState) -> bool {
     state
-        .gpu_info
+        .gpu_info()
         .iter()
         .any(|gpu| gpu.dla_utilization.is_some())
 }
@@ -672,15 +681,15 @@ fn show_dla_row(state: &AppState) -> bool {
 /// Currently returns `false` -- no Intel/Windows NPU reader exists yet.
 /// When an NPU telemetry reader is added (Meteor Lake / Core Ultra),
 /// flip this to check for NPU presence via `src/api/metrics/npu/common.rs`.
-fn show_npu_row(_state: &AppState) -> bool {
+fn show_npu_row(_state: &dyn ViewState) -> bool {
     false
 }
 
-fn package_power(state: &AppState, is_apple: bool) -> f64 {
+fn package_power(state: &dyn ViewState, is_apple: bool) -> f64 {
     if is_apple {
         // Apple Silicon: combined CPU+GPU+ANE power from native metrics
         let power_mw = state
-            .gpu_info
+            .gpu_info()
             .iter()
             .filter_map(|gpu| {
                 gpu.detail
@@ -692,7 +701,7 @@ fn package_power(state: &AppState, is_apple: bool) -> f64 {
         power_mw / 1000.0
     } else {
         // NVIDIA / other: sum GPU board power
-        crate::metrics::gpu_readings::total_power_watts(&state.gpu_info)
+        crate::metrics::gpu_readings::total_power_watts(state.gpu_info())
     }
 }
 

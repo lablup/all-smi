@@ -36,5 +36,6 @@ pub mod scale;
 pub mod tabs;
 pub mod text;
 pub mod topology;
+pub mod view_state;
 pub mod viewport;
 pub mod widgets;

@@ -19,7 +19,8 @@
 //! This keeps the critical section short so that background data collectors
 //! are not blocked while the UI assembles its output.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
+use std::sync::Arc;
 
 use crate::app_state::{
     AppState, ConnectionStatus, FilterInputMode, ReplayState, SortCriteria, SortDirection,
@@ -36,7 +37,9 @@ use crate::ui::aggregation::user::UserAggregationResult;
 use crate::ui::alerts::{AlertTransition, Alerter};
 use crate::ui::filter_dsl::Expr as FilterExpr;
 use crate::ui::notification::NotificationManager;
+use crate::ui::tabs::is_users_tab_active;
 use crate::ui::topology::TopologyViewMode;
+use crate::ui::view_state::ViewState;
 use crate::utils::RuntimeEnvironment;
 
 /// Pre-computed rendering decisions captured from `AppState` under lock.
@@ -52,13 +55,110 @@ pub struct RenderDecisions {
     pub animations_needed: bool,
 }
 
+/// Every collection the frame reads, copied out of `AppState` once per
+/// data version and shared between frames through an `Arc`.
+///
+/// Rebuilding this is the expensive part of a capture (GPU detail maps,
+/// process rows, histories), so [`RenderSnapshot::capture`] reuses the
+/// previous copy until `AppState::data_version` moves.
+pub struct HeavySnapshot {
+    pub gpu_info: Vec<GpuInfo>,
+    pub cpu_info: Vec<CpuInfo>,
+    pub memory_info: Vec<MemoryInfo>,
+    pub process_info: Vec<ProcessInfo>,
+    pub chassis_info: Vec<ChassisInfo>,
+    pub storage_info: Vec<StorageInfo>,
+    /// Per-GPU vGPU host info (NVIDIA vGPU only). Empty on bare-metal.
+    pub vgpu_info: Vec<VgpuHostInfo>,
+    /// Per-GPU MIG host info (NVIDIA datacenter GPUs with MIG enabled). Empty
+    /// on consumer cards, pre-Ampere architectures, and non-MIG hosts.
+    pub mig_info: Vec<MigGpuInfo>,
+
+    // Connection tracking (remote mode)
+    pub connection_status: HashMap<String, ConnectionStatus>,
+    pub hostname_to_host_id: HashMap<String, String>,
+
+    // Runtime environment display
+    pub runtime_environment: RuntimeEnvironment,
+
+    // Dashboard history data
+    pub utilization_history: VecDeque<f64>,
+    pub memory_history: VecDeque<f64>,
+    pub temperature_history: VecDeque<f64>,
+    pub package_power_history: VecDeque<f64>,
+    pub ane_power_history: VecDeque<f64>,
+    pub dla_utilization_history: VecDeque<f64>,
+    pub cpu_utilization_history: VecDeque<f64>,
+    pub system_memory_history: VecDeque<f64>,
+    pub cpu_temperature_history: VecDeque<f64>,
+
+    // Alerter state (issue #186)
+    pub alerter: Alerter,
+    pub alert_history: VecDeque<AlertTransition>,
+
+    /// Per-process rows from the remote `all_smi_process_*` families,
+    /// read only by the Users-tab drill-down. Copied only while the Users
+    /// tab is selected (issue #189); empty otherwise.
+    pub remote_process_info: Vec<ParsedProcessRow>,
+
+    /// Energy accountant so the chassis and energy renderers can read
+    /// session / lifetime counters without holding the app-state lock
+    /// (issue #191).
+    pub energy: EnergyAccountant,
+}
+
+impl HeavySnapshot {
+    fn capture(state: &AppState, with_users: bool) -> Self {
+        Self {
+            gpu_info: state.gpu_info.clone(),
+            cpu_info: state.cpu_info.clone(),
+            memory_info: state.memory_info.clone(),
+            process_info: state.process_info.clone(),
+            chassis_info: state.chassis_info.clone(),
+            storage_info: state.storage_info.clone(),
+            vgpu_info: state.vgpu_info.clone(),
+            mig_info: state.mig_info.clone(),
+            connection_status: state.connection_status.clone(),
+            hostname_to_host_id: state.hostname_to_host_id.clone(),
+            runtime_environment: state.runtime_environment.clone(),
+            utilization_history: state.utilization_history.clone(),
+            memory_history: state.memory_history.clone(),
+            temperature_history: state.temperature_history.clone(),
+            package_power_history: state.package_power_history.clone(),
+            ane_power_history: state.ane_power_history.clone(),
+            dla_utilization_history: state.dla_utilization_history.clone(),
+            cpu_utilization_history: state.cpu_utilization_history.clone(),
+            system_memory_history: state.system_memory_history.clone(),
+            cpu_temperature_history: state.cpu_temperature_history.clone(),
+            alerter: state.alerter.clone(),
+            alert_history: state.alert_history.clone(),
+            remote_process_info: if with_users {
+                state.remote_process_info.clone()
+            } else {
+                Vec::new()
+            },
+            energy: state.energy.clone(),
+        }
+    }
+}
+
+/// The heavy part of the last capture, owned by the UI loop.
+///
+/// Keyed on `AppState::data_version` (not `collector_data_version`): UI-only
+/// events bump it as well, which costs one rebuild per keypress but cannot
+/// miss a writer. Whether the Users tab is selected is part of the key
+/// because it decides whether `remote_process_info` is copied at all.
+#[derive(Default)]
+pub struct HeavyCache(Option<(u64, bool, Arc<HeavySnapshot>)>);
+
 /// A snapshot of `AppState` containing only the data needed for one frame.
 ///
 /// Created quickly under the mutex lock, then used without the lock held
 /// for the full (potentially expensive) frame composition path.
 ///
-/// The snapshot mirrors the `AppState` fields that are read during rendering.
-/// Mutable UI-only bookkeeping (e.g., frame counters, scroll offsets) is
+/// Small UI state is copied per frame; the collections live in
+/// [`HeavySnapshot`], shared through an `Arc` until the data version
+/// changes. Mutable UI-only bookkeeping (e.g., the frame counter) is
 /// updated under the lock before the snapshot is taken, so the snapshot
 /// itself is immutable from the render path's perspective.
 #[derive(Clone)]
@@ -81,50 +181,14 @@ pub struct RenderSnapshot {
     pub start_index: usize,
     pub process_horizontal_scroll_offset: usize,
 
-    // Scroll animation offsets (marquee text)
-    pub device_name_scroll_offsets: HashMap<String, usize>,
-    pub host_id_scroll_offsets: HashMap<String, usize>,
-    pub cpu_name_scroll_offsets: HashMap<String, usize>,
-
-    // Frame counter for animation
+    // Frame counter for animation (marquee, loading bar, LED grid pages)
     pub frame_counter: u64,
 
     // Sort state
     pub sort_criteria: SortCriteria,
     pub sort_direction: SortDirection,
 
-    // Device data
-    pub gpu_info: Vec<GpuInfo>,
-    pub cpu_info: Vec<CpuInfo>,
-    pub memory_info: Vec<MemoryInfo>,
-    pub process_info: Vec<ProcessInfo>,
-    pub chassis_info: Vec<ChassisInfo>,
-    pub storage_info: Vec<StorageInfo>,
-    /// Per-GPU vGPU host info (NVIDIA vGPU only). Empty on bare-metal.
-    pub vgpu_info: Vec<VgpuHostInfo>,
-    /// Per-GPU MIG host info (NVIDIA datacenter GPUs with MIG enabled). Empty
-    /// on consumer cards, pre-Ampere architectures, and non-MIG hosts.
-    pub mig_info: Vec<MigGpuInfo>,
-
-    // Connection tracking (remote mode)
-    pub connection_status: HashMap<String, ConnectionStatus>,
-    pub hostname_to_host_id: HashMap<String, String>,
-
-    // Runtime environment display
-    pub runtime_environment: RuntimeEnvironment,
-
-    // Dashboard history data (Vec instead of VecDeque for lighter clone)
-    pub utilization_history: Vec<f64>,
-    pub memory_history: Vec<f64>,
-    pub temperature_history: Vec<f64>,
-    pub package_power_history: Vec<f64>,
-    pub ane_power_history: Vec<f64>,
-    pub dla_utilization_history: Vec<f64>,
-    pub cpu_utilization_history: Vec<f64>,
-    pub system_memory_history: Vec<f64>,
-    pub cpu_temperature_history: Vec<f64>,
-
-    // Notifications (cloned for display)
+    // Notifications (cloned for display; they expire by wall time)
     pub notifications: NotificationManager,
 
     // Loading status
@@ -132,38 +196,28 @@ pub struct RenderSnapshot {
 
     // Data version for change detection
     pub data_version: u64,
-    /// Collector-only data version. Keys the Users-tab aggregation
-    /// cache so UI-only state changes (sort/filter/drill) do not
-    /// invalidate it.
-    pub collector_data_version: u64,
 
     // Filter state (issue #186)
     pub filter_query: Option<FilterExpr>,
     pub filter_buffer: String,
     pub filter_input_mode: FilterInputMode,
-    pub filter_recent: Vec<String>,
     pub filter_error: Option<String>,
     pub filter_preview_count: Option<(usize, usize)>,
     pub filter_hide_nonmatching: bool,
-
-    // Alerter state (issue #186)
-    pub alerter: Alerter,
-    pub alert_history: Vec<AlertTransition>,
     pub alert_panel_open: bool,
 
     // Replay state (issue #187)
     pub replay: Option<ReplayState>,
 
     // Users tab (issue #189)
-    /// Per-process rows from the remote `all_smi_process_*` families.
-    /// Used only when the aggregation cache is cold; in steady state the
-    /// pre-computed `users_aggregation` below is the read path.
-    pub remote_process_info: Vec<ParsedProcessRow>,
     pub users_tab_state: UsersTabState,
-    /// Pre-computed aggregation copied out of the app state while the
-    /// lock is held.  Cloning the result (small: one vector per user)
-    /// keeps the render path lock-free.
-    pub users_aggregation: UserAggregationResult,
+    /// Memoised aggregation, shared with `AppState`. Empty unless the
+    /// Users tab is selected, so other tabs never run `aggregate_users`.
+    pub users_aggregation: Arc<UserAggregationResult>,
+    /// Display order of `users_aggregation.users` (see
+    /// `AppState::users_visible_order`). Empty unless the Users tab is
+    /// selected.
+    pub users_visible_order: Arc<[usize]>,
 
     // Topology tab (issue #190)
     /// Render mode selected by the Topology tab's `M` toggle.
@@ -173,247 +227,222 @@ pub struct RenderSnapshot {
     /// that host; otherwise it falls back to the first host tab.
     pub topology_last_host_tab: Option<String>,
 
-    // Energy accounting (issue #191)
-    /// Cloned energy accountant so the chassis and energy renderers
-    /// can read session / lifetime counters without holding the
-    /// app-state lock.
-    pub energy: EnergyAccountant,
-    /// Energy configuration (price, currency, display toggles).
+    /// Energy configuration (price, currency, display toggles, issue #191).
     pub energy_config: EnergyConfig,
+
+    /// Collections shared between frames of the same data version.
+    pub heavy: Arc<HeavySnapshot>,
 }
 
 impl RenderSnapshot {
     /// Capture a snapshot from the live `AppState`.
     ///
-    /// This clones only the data needed for rendering. The caller should drop
-    /// the `AppState` lock immediately after this returns.
-    ///
-    /// History VecDeques are converted to Vec to avoid cloning the deque
-    /// ring-buffer internals; the rendering path only iterates forward.
-    pub fn capture(state: &mut AppState) -> Self {
-        // Materialise the memoised user aggregation while we still hold
-        // the lock so the render path never has to.  `users_aggregation`
-        // is a no-op after the first call per data_version.
-        let users_aggregation = state.users_aggregation().clone();
+    /// Small UI state is cloned every call. The collections are cloned
+    /// only when `state.data_version` (or the Users-tab selection) differs
+    /// from the entry in `heavy_cache`; otherwise the cached
+    /// [`HeavySnapshot`] is shared. The caller should drop the `AppState`
+    /// lock immediately after this returns.
+    pub fn capture(state: &mut AppState, heavy_cache: &mut HeavyCache) -> Self {
+        let on_users_tab = is_users_tab_active(state);
+
+        // The Users-tab aggregation walks every remote process row, so it
+        // is materialised (under the lock, memoised per collector version)
+        // only while that tab is on screen.
+        let (users_aggregation, users_visible_order) = if on_users_tab {
+            let order = Arc::clone(state.users_visible_order());
+            (Arc::clone(state.users_aggregation()), order)
+        } else {
+            (Arc::default(), Arc::from(Vec::new()))
+        };
+
+        let heavy = match &heavy_cache.0 {
+            Some((version, with_users, heavy))
+                if *version == state.data_version && *with_users == on_users_tab =>
+            {
+                Arc::clone(heavy)
+            }
+            _ => {
+                let heavy = Arc::new(HeavySnapshot::capture(state, on_users_tab));
+                heavy_cache.0 = Some((state.data_version, on_users_tab, Arc::clone(&heavy)));
+                heavy
+            }
+        };
+
         Self {
-            // Flags -- Copy types, no allocation
             show_help: state.show_help,
             loading: state.loading,
             is_local_mode: state.is_local_mode,
             gpu_filter_enabled: state.gpu_filter_enabled,
-
-            // Tab state -- cheap Vec<String> clone
             tabs: state.tabs.clone(),
             current_tab: state.current_tab,
             tab_scroll_offset: state.tab_scroll_offset,
-
-            // Scroll/selection -- Copy types
             gpu_scroll_offset: state.gpu_scroll_offset,
             storage_scroll_offset: state.storage_scroll_offset,
             selected_process_index: state.selected_process_index,
             start_index: state.start_index,
             process_horizontal_scroll_offset: state.process_horizontal_scroll_offset,
-
-            // Scroll animation offsets
-            device_name_scroll_offsets: state.device_name_scroll_offsets.clone(),
-            host_id_scroll_offsets: state.host_id_scroll_offsets.clone(),
-            cpu_name_scroll_offsets: state.cpu_name_scroll_offsets.clone(),
-
-            // Frame counter
             frame_counter: state.frame_counter,
-
-            // Sort state -- Copy types
             sort_criteria: state.sort_criteria,
             sort_direction: state.sort_direction,
-
-            // Device data -- Vec clones (main cost of snapshot)
-            gpu_info: state.gpu_info.clone(),
-            cpu_info: state.cpu_info.clone(),
-            memory_info: state.memory_info.clone(),
-            process_info: state.process_info.clone(),
-            chassis_info: state.chassis_info.clone(),
-            storage_info: state.storage_info.clone(),
-            vgpu_info: state.vgpu_info.clone(),
-            mig_info: state.mig_info.clone(),
-
-            // Connection tracking
-            connection_status: state.connection_status.clone(),
-            hostname_to_host_id: state.hostname_to_host_id.clone(),
-
-            // Runtime environment
-            runtime_environment: state.runtime_environment.clone(),
-
-            // History -- convert VecDeque -> Vec (avoids deque ring-buffer clone)
-            utilization_history: state.utilization_history.iter().copied().collect(),
-            memory_history: state.memory_history.iter().copied().collect(),
-            temperature_history: state.temperature_history.iter().copied().collect(),
-            package_power_history: state.package_power_history.iter().copied().collect(),
-            ane_power_history: state.ane_power_history.iter().copied().collect(),
-            dla_utilization_history: state.dla_utilization_history.iter().copied().collect(),
-            cpu_utilization_history: state.cpu_utilization_history.iter().copied().collect(),
-            system_memory_history: state.system_memory_history.iter().copied().collect(),
-            cpu_temperature_history: state.cpu_temperature_history.iter().copied().collect(),
-
-            // Notifications
             notifications: state.notifications.clone(),
-
-            // Loading status
             startup_status_lines: state.startup_status_lines.clone(),
-
-            // Data version
             data_version: state.data_version,
-            collector_data_version: state.collector_data_version,
-
-            // Filter state (issue #186)
             filter_query: state.filter_query.clone(),
             filter_buffer: state.filter_buffer.clone(),
             filter_input_mode: state.filter_input_mode,
-            filter_recent: state.filter_recent.iter().cloned().collect(),
             filter_error: state.filter_error.clone(),
             filter_preview_count: state.filter_preview_count,
             filter_hide_nonmatching: state.filter_hide_nonmatching,
-
-            // Alerter state (issue #186)
-            alerter: state.alerter.clone(),
-            alert_history: state.alert_history.iter().cloned().collect(),
             alert_panel_open: state.alert_panel_open,
-
-            // Replay state (issue #187)
             replay: state.replay.clone(),
-
-            // Users tab (issue #189)
-            remote_process_info: state.remote_process_info.clone(),
             users_tab_state: state.users_tab_state.clone(),
             users_aggregation,
-
-            // Topology tab (issue #190)
+            users_visible_order,
             topology_view_mode: state.topology_view_mode,
             topology_last_host_tab: state.topology_last_host_tab.clone(),
-
-            // Energy accounting (issue #191)
-            energy: state.energy.clone(),
             energy_config: state.energy_config.clone(),
+            heavy,
         }
     }
+}
 
-    /// Reconstruct a temporary `AppState` from this snapshot.
-    ///
-    /// This is used for backward compatibility with existing UI functions
-    /// (e.g., `draw_system_view`, `draw_tabs`, `print_function_keys`) that
-    /// accept `&AppState`. The returned state is a read-only view and should
-    /// never be written back to shared state.
-    ///
-    /// As UI functions are gradually migrated to accept `&RenderSnapshot`
-    /// directly, uses of this method should decrease.
-    pub fn as_app_state(&self) -> AppState {
-        let mut state = AppState::new();
-
-        // Flags
-        state.show_help = self.show_help;
-        state.loading = self.loading;
-        state.is_local_mode = self.is_local_mode;
-        state.gpu_filter_enabled = self.gpu_filter_enabled;
-
-        // Tab state
-        state.tabs = self.tabs.clone();
-        state.current_tab = self.current_tab;
-        state.tab_scroll_offset = self.tab_scroll_offset;
-
-        // Scroll/selection
-        state.gpu_scroll_offset = self.gpu_scroll_offset;
-        state.storage_scroll_offset = self.storage_scroll_offset;
-        state.selected_process_index = self.selected_process_index;
-        state.start_index = self.start_index;
-        state.process_horizontal_scroll_offset = self.process_horizontal_scroll_offset;
-
-        // Scroll offsets
-        state.device_name_scroll_offsets = self.device_name_scroll_offsets.clone();
-        state.host_id_scroll_offsets = self.host_id_scroll_offsets.clone();
-        state.cpu_name_scroll_offsets = self.cpu_name_scroll_offsets.clone();
-
-        // Frame counter
-        state.frame_counter = self.frame_counter;
-
-        // Sort
-        state.sort_criteria = self.sort_criteria;
-        state.sort_direction = self.sort_direction;
-
-        // Device data
-        state.gpu_info = self.gpu_info.clone();
-        state.cpu_info = self.cpu_info.clone();
-        state.memory_info = self.memory_info.clone();
-        state.process_info = self.process_info.clone();
-        state.chassis_info = self.chassis_info.clone();
-        state.storage_info = self.storage_info.clone();
-        state.vgpu_info = self.vgpu_info.clone();
-        state.mig_info = self.mig_info.clone();
-
-        // Connection tracking
-        state.connection_status = self.connection_status.clone();
-        state.hostname_to_host_id = self.hostname_to_host_id.clone();
-
-        // Runtime environment
-        state.runtime_environment = self.runtime_environment.clone();
-
-        // History (Vec -> VecDeque)
-        state.utilization_history = self.utilization_history.iter().copied().collect();
-        state.memory_history = self.memory_history.iter().copied().collect();
-        state.temperature_history = self.temperature_history.iter().copied().collect();
-        state.package_power_history = self.package_power_history.iter().copied().collect();
-        state.ane_power_history = self.ane_power_history.iter().copied().collect();
-        state.dla_utilization_history = self.dla_utilization_history.iter().copied().collect();
-        state.cpu_utilization_history = self.cpu_utilization_history.iter().copied().collect();
-        state.system_memory_history = self.system_memory_history.iter().copied().collect();
-        state.cpu_temperature_history = self.cpu_temperature_history.iter().copied().collect();
-
-        // Notifications
-        state.notifications = self.notifications.clone();
-
-        // Loading
-        state.startup_status_lines = self.startup_status_lines.clone();
-
-        // Data version
-        state.data_version = self.data_version;
-        state.collector_data_version = self.collector_data_version;
-
-        // Filter + alerter state (issue #186)
-        state.filter_query = self.filter_query.clone();
-        state.filter_buffer = self.filter_buffer.clone();
-        state.filter_input_mode = self.filter_input_mode;
-        state.filter_recent = self.filter_recent.iter().cloned().collect();
-        state.filter_error = self.filter_error.clone();
-        state.filter_preview_count = self.filter_preview_count;
-        state.filter_hide_nonmatching = self.filter_hide_nonmatching;
-        state.alerter = self.alerter.clone();
-        state.alert_history = self.alert_history.iter().cloned().collect();
-        state.alert_panel_open = self.alert_panel_open;
-
-        // Replay state (issue #187)
-        state.replay = self.replay.clone();
-
-        // Users tab (issue #189)
-        state.remote_process_info = self.remote_process_info.clone();
-        state.users_tab_state = self.users_tab_state.clone();
-        state.users_aggregation_cache = crate::app_state::UsersAggregationCache {
-            data_version: Some(self.collector_data_version),
-            result: self.users_aggregation.clone(),
-        };
-
-        // Topology tab (issue #190)
-        state.topology_view_mode = self.topology_view_mode;
-        state.topology_last_host_tab = self.topology_last_host_tab.clone();
-
-        // Energy accounting (issue #191)
-        state.energy = self.energy.clone();
-        state.energy_config = self.energy_config.clone();
-
-        state
+impl ViewState for RenderSnapshot {
+    fn is_local_mode(&self) -> bool {
+        self.is_local_mode
+    }
+    fn tabs(&self) -> &[String] {
+        &self.tabs
+    }
+    fn current_tab(&self) -> usize {
+        self.current_tab
+    }
+    fn tab_scroll_offset(&self) -> usize {
+        self.tab_scroll_offset
+    }
+    fn gpu_scroll_offset(&self) -> usize {
+        self.gpu_scroll_offset
+    }
+    fn frame_counter(&self) -> u64 {
+        self.frame_counter
+    }
+    fn gpu_info(&self) -> &[GpuInfo] {
+        &self.heavy.gpu_info
+    }
+    fn cpu_info(&self) -> &[CpuInfo] {
+        &self.heavy.cpu_info
+    }
+    fn memory_info(&self) -> &[MemoryInfo] {
+        &self.heavy.memory_info
+    }
+    fn process_info(&self) -> &[ProcessInfo] {
+        &self.heavy.process_info
+    }
+    fn storage_info(&self) -> &[StorageInfo] {
+        &self.heavy.storage_info
+    }
+    fn vgpu_info(&self) -> &[VgpuHostInfo] {
+        &self.heavy.vgpu_info
+    }
+    fn mig_info(&self) -> &[MigGpuInfo] {
+        &self.heavy.mig_info
+    }
+    fn connection_status(&self) -> &HashMap<String, ConnectionStatus> {
+        &self.heavy.connection_status
+    }
+    fn utilization_history(&self) -> &VecDeque<f64> {
+        &self.heavy.utilization_history
+    }
+    fn memory_history(&self) -> &VecDeque<f64> {
+        &self.heavy.memory_history
+    }
+    fn temperature_history(&self) -> &VecDeque<f64> {
+        &self.heavy.temperature_history
+    }
+    fn package_power_history(&self) -> &VecDeque<f64> {
+        &self.heavy.package_power_history
+    }
+    fn ane_power_history(&self) -> &VecDeque<f64> {
+        &self.heavy.ane_power_history
+    }
+    fn dla_utilization_history(&self) -> &VecDeque<f64> {
+        &self.heavy.dla_utilization_history
+    }
+    fn cpu_utilization_history(&self) -> &VecDeque<f64> {
+        &self.heavy.cpu_utilization_history
+    }
+    fn system_memory_history(&self) -> &VecDeque<f64> {
+        &self.heavy.system_memory_history
+    }
+    fn cpu_temperature_history(&self) -> &VecDeque<f64> {
+        &self.heavy.cpu_temperature_history
+    }
+    fn gpu_filter_enabled(&self) -> bool {
+        self.gpu_filter_enabled
+    }
+    fn sort_criteria(&self) -> SortCriteria {
+        self.sort_criteria
+    }
+    fn filter_query(&self) -> &Option<FilterExpr> {
+        &self.filter_query
+    }
+    fn filter_buffer(&self) -> &str {
+        &self.filter_buffer
+    }
+    fn filter_input_mode(&self) -> FilterInputMode {
+        self.filter_input_mode
+    }
+    fn filter_error(&self) -> &Option<String> {
+        &self.filter_error
+    }
+    fn filter_preview_count(&self) -> Option<(usize, usize)> {
+        self.filter_preview_count
+    }
+    fn notifications(&self) -> &NotificationManager {
+        &self.notifications
+    }
+    fn replay(&self) -> &Option<ReplayState> {
+        &self.replay
     }
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    /// A GPU row with every optional field empty, for render-path tests.
+    pub(crate) fn test_gpu(uuid: &str, name: &str, hostname: &str) -> GpuInfo {
+        GpuInfo {
+            uuid: uuid.to_string(),
+            time: String::new(),
+            name: name.to_string(),
+            device_type: "GPU".to_string(),
+            host_id: hostname.to_string(),
+            hostname: hostname.to_string(),
+            instance: hostname.to_string(),
+            utilization: 10.0,
+            ane_utilization: 0.0,
+            dla_utilization: None,
+            tensorcore_utilization: None,
+            temperature: 40,
+            used_memory: 1024,
+            total_memory: 4096,
+            frequency: 1000,
+            power_consumption: 50.0,
+            gpu_core_count: None,
+            temperature_threshold_slowdown: None,
+            temperature_threshold_shutdown: None,
+            temperature_threshold_max_operating: None,
+            temperature_threshold_acoustic: None,
+            performance_state: None,
+            fan_speed_rpm: None,
+            numa_node_id: None,
+            gsp_firmware_mode: None,
+            gsp_firmware_version: None,
+            nvlink_remote_devices: Vec::new(),
+            gpm_metrics: None,
+            detail: HashMap::new(),
+        }
+    }
 
     #[test]
     fn test_snapshot_capture_preserves_flags() {
@@ -423,7 +452,7 @@ mod tests {
         state.is_local_mode = true;
         state.gpu_filter_enabled = true;
 
-        let snapshot = RenderSnapshot::capture(&mut state);
+        let snapshot = RenderSnapshot::capture(&mut state, &mut HeavyCache::default());
 
         assert!(snapshot.show_help);
         assert!(!snapshot.loading);
@@ -438,7 +467,7 @@ mod tests {
         state.current_tab = 1;
         state.tab_scroll_offset = 0;
 
-        let snapshot = RenderSnapshot::capture(&mut state);
+        let snapshot = RenderSnapshot::capture(&mut state, &mut HeavyCache::default());
 
         assert_eq!(snapshot.tabs.len(), 3);
         assert_eq!(snapshot.current_tab, 1);
@@ -453,7 +482,7 @@ mod tests {
         state.selected_process_index = 10;
         state.process_horizontal_scroll_offset = 20;
 
-        let snapshot = RenderSnapshot::capture(&mut state);
+        let snapshot = RenderSnapshot::capture(&mut state, &mut HeavyCache::default());
 
         assert_eq!(snapshot.gpu_scroll_offset, 5);
         assert_eq!(snapshot.storage_scroll_offset, 3);
@@ -467,7 +496,7 @@ mod tests {
         state.sort_criteria = SortCriteria::Utilization;
         state.sort_direction = SortDirection::Ascending;
 
-        let snapshot = RenderSnapshot::capture(&mut state);
+        let snapshot = RenderSnapshot::capture(&mut state, &mut HeavyCache::default());
 
         assert_eq!(snapshot.sort_criteria, SortCriteria::Utilization);
         assert_eq!(snapshot.sort_direction, SortDirection::Ascending);
@@ -479,21 +508,22 @@ mod tests {
         state.mark_data_changed();
         state.mark_data_changed();
 
-        let snapshot = RenderSnapshot::capture(&mut state);
+        let snapshot = RenderSnapshot::capture(&mut state, &mut HeavyCache::default());
         assert_eq!(snapshot.data_version, 2);
     }
 
     #[test]
-    fn test_snapshot_capture_converts_history_from_vecdeque() {
+    fn test_snapshot_capture_keeps_history_order() {
         let mut state = AppState::new();
         state.utilization_history.push_back(50.0);
         state.utilization_history.push_back(75.0);
         state.memory_history.push_back(40.0);
 
-        let snapshot = RenderSnapshot::capture(&mut state);
+        let snapshot = RenderSnapshot::capture(&mut state, &mut HeavyCache::default());
 
-        assert_eq!(snapshot.utilization_history, vec![50.0, 75.0]);
-        assert_eq!(snapshot.memory_history, vec![40.0]);
+        let util: Vec<f64> = snapshot.utilization_history().iter().copied().collect();
+        assert_eq!(util, vec![50.0, 75.0]);
+        assert_eq!(snapshot.memory_history().len(), 1);
     }
 
     #[test]
@@ -502,7 +532,7 @@ mod tests {
         state.current_tab = 0;
         state.gpu_scroll_offset = 5;
 
-        let snapshot = RenderSnapshot::capture(&mut state);
+        let snapshot = RenderSnapshot::capture(&mut state, &mut HeavyCache::default());
 
         // Mutate source state after snapshot
         state.current_tab = 2;
@@ -514,24 +544,138 @@ mod tests {
     }
 
     #[test]
-    fn test_as_app_state_roundtrip() {
+    fn view_state_reads_the_same_values_from_state_and_snapshot() {
         let mut state = AppState::new();
-        state.show_help = true;
-        state.current_tab = 2;
-        state.gpu_scroll_offset = 10;
+        state.is_local_mode = false;
+        state.tabs = vec!["All".into(), "node-a".into()];
+        state.current_tab = 1;
+        state.gpu_scroll_offset = 3;
         state.sort_criteria = SortCriteria::GpuMemory;
-        state.data_version = 42;
+        state.gpu_info = vec![test_gpu("GPU-0", "H100", "node-a")];
         state.utilization_history.push_back(60.0);
 
-        let snapshot = RenderSnapshot::capture(&mut state);
-        let restored = snapshot.as_app_state();
+        let snapshot = RenderSnapshot::capture(&mut state, &mut HeavyCache::default());
+        let live: &dyn ViewState = &state;
+        let snap: &dyn ViewState = &snapshot;
 
-        assert!(restored.show_help);
-        assert_eq!(restored.current_tab, 2);
-        assert_eq!(restored.gpu_scroll_offset, 10);
-        assert_eq!(restored.sort_criteria, SortCriteria::GpuMemory);
-        assert_eq!(restored.data_version, 42);
-        assert_eq!(restored.utilization_history.len(), 1);
+        assert_eq!(live.is_local_mode(), snap.is_local_mode());
+        assert_eq!(live.tabs(), snap.tabs());
+        assert_eq!(live.current_tab(), snap.current_tab());
+        assert_eq!(live.gpu_scroll_offset(), snap.gpu_scroll_offset());
+        assert_eq!(live.sort_criteria(), snap.sort_criteria());
+        assert_eq!(live.gpu_info().len(), snap.gpu_info().len());
+        assert_eq!(live.gpu_info()[0].uuid, snap.gpu_info()[0].uuid);
+        assert_eq!(live.utilization_history(), snap.utilization_history());
+    }
+
+    #[test]
+    fn heavy_part_is_shared_until_data_version_changes() {
+        let mut state = AppState::new();
+        state.gpu_info = vec![
+            test_gpu("GPU-0", "NVIDIA H100 80GB HBM3", "node-a"),
+            test_gpu("GPU-1", "NVIDIA H100 80GB HBM3", "node-a"),
+        ];
+        state.mark_collector_data_changed();
+        let mut cache = HeavyCache::default();
+
+        let first = RenderSnapshot::capture(&mut state, &mut cache);
+        let second = RenderSnapshot::capture(&mut state, &mut cache);
+        assert!(
+            Arc::ptr_eq(&first.heavy, &second.heavy),
+            "an unchanged data_version must reuse the heavy part"
+        );
+
+        state.gpu_info[0].utilization = 99.0;
+        state.mark_data_changed();
+        let third = RenderSnapshot::capture(&mut state, &mut cache);
+        assert!(
+            !Arc::ptr_eq(&second.heavy, &third.heavy),
+            "a data_version bump must rebuild the heavy part"
+        );
+        assert_eq!(third.heavy.gpu_info[0].utilization, 99.0);
+        assert_eq!(first.heavy.gpu_info[0].utilization, 10.0);
+    }
+
+    fn users_tab_state() -> AppState {
+        use crate::network::metrics_parser::ParsedProcessRow;
+        let mut state = AppState::new();
+        state.is_local_mode = false;
+        state.tabs = vec![
+            "All".into(),
+            crate::ui::tabs::USERS_TAB_NAME.into(),
+            "host-0".into(),
+        ];
+        for (pid, user) in [(1u32, "alice"), (2, "bob")] {
+            state.remote_process_info.push(ParsedProcessRow {
+                host: "host-0".into(),
+                pid,
+                user: user.into(),
+                command: "x".into(),
+                name: "x".into(),
+                gpu_index: 0,
+                gpu_uuid: "GPU-0".into(),
+                gpu_memory_bytes: 1024,
+                cpu_pct_tenths: 0,
+                start_time_seconds: 10,
+            });
+        }
+        state.mark_collector_data_changed();
+        state
+    }
+
+    #[test]
+    fn capture_off_the_users_tab_skips_the_aggregation() {
+        let mut state = users_tab_state();
+        state.current_tab = 0;
+        let mut cache = HeavyCache::default();
+
+        let snapshot = RenderSnapshot::capture(&mut state, &mut cache);
+        assert_eq!(
+            state.users_aggregation_cache.data_version, None,
+            "aggregate_users ran although the Users tab is hidden"
+        );
+        assert!(snapshot.users_aggregation.users.is_empty());
+        assert!(snapshot.heavy.remote_process_info.is_empty());
+
+        // A later collector update while still on another tab stays cold.
+        state.mark_collector_data_changed();
+        let _ = RenderSnapshot::capture(&mut state, &mut cache);
+        assert_eq!(state.users_aggregation_cache.data_version, None);
+    }
+
+    #[test]
+    fn switching_to_the_users_tab_shows_current_data_on_the_first_frame() {
+        let mut state = users_tab_state();
+        state.current_tab = 0;
+        let mut cache = HeavyCache::default();
+        let _ = RenderSnapshot::capture(&mut state, &mut cache);
+
+        // Tab switches do not have to bump data_version for this to work:
+        // the Users-tab flag is part of the heavy cache key.
+        state.current_tab = 1;
+        let snapshot = RenderSnapshot::capture(&mut state, &mut cache);
+        assert_eq!(snapshot.users_aggregation.users.len(), 2);
+        assert_eq!(snapshot.users_visible_order.len(), 2);
+        assert_eq!(snapshot.heavy.remote_process_info.len(), 2);
+    }
+
+    #[test]
+    fn users_tab_frames_share_aggregation_and_order_without_data_change() {
+        let mut state = users_tab_state();
+        state.current_tab = 1;
+        let mut cache = HeavyCache::default();
+
+        let first = RenderSnapshot::capture(&mut state, &mut cache);
+        state.frame_counter += 1;
+        let second = RenderSnapshot::capture(&mut state, &mut cache);
+        assert!(Arc::ptr_eq(
+            &first.users_aggregation,
+            &second.users_aggregation
+        ));
+        assert!(Arc::ptr_eq(
+            &first.users_visible_order,
+            &second.users_visible_order
+        ));
     }
 
     #[test]
@@ -541,31 +685,13 @@ mod tests {
         state.topology_view_mode = TopologyViewMode::Matrix;
         state.topology_last_host_tab = Some("host2".to_string());
 
-        let snapshot = RenderSnapshot::capture(&mut state);
+        let snapshot = RenderSnapshot::capture(&mut state, &mut HeavyCache::default());
 
         assert_eq!(snapshot.topology_view_mode, TopologyViewMode::Matrix);
         assert_eq!(
             snapshot.topology_last_host_tab.as_deref(),
             Some("host2"),
             "last_host_tab must survive the snapshot capture"
-        );
-    }
-
-    #[test]
-    fn test_topology_state_roundtrips_through_as_app_state() {
-        use crate::ui::topology::TopologyViewMode;
-        let mut state = AppState::new();
-        state.topology_view_mode = TopologyViewMode::Matrix;
-        state.topology_last_host_tab = Some("host3".to_string());
-
-        let snapshot = RenderSnapshot::capture(&mut state);
-        let restored = snapshot.as_app_state();
-
-        assert_eq!(restored.topology_view_mode, TopologyViewMode::Matrix);
-        assert_eq!(
-            restored.topology_last_host_tab.as_deref(),
-            Some("host3"),
-            "topology state must survive the snapshot round-trip"
         );
     }
 }

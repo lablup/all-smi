@@ -35,9 +35,9 @@ use std::io::Write;
 
 use crossterm::style::Color;
 
-use crate::app_state::AppState;
 use crate::common::config::ThemeConfig;
 use crate::ui::text::print_colored_text;
+use crate::ui::view_state::ViewState;
 
 /// Maximum number of display rows the LED grid may occupy.
 const MAX_GRID_ROWS: usize = 4;
@@ -67,8 +67,12 @@ struct NodeLed {
 ///
 /// Returns an empty `Vec` when there are no remote nodes or the grid
 /// width is too narrow.
-pub fn render_led_grid_lines(state: &AppState, grid_width: usize, max_rows: usize) -> Vec<String> {
-    if state.is_local_mode || grid_width < MIN_GRID_WIDTH {
+pub fn render_led_grid_lines(
+    state: &dyn ViewState,
+    grid_width: usize,
+    max_rows: usize,
+) -> Vec<String> {
+    if state.is_local_mode() || grid_width < MIN_GRID_WIDTH {
         return Vec::new();
     }
 
@@ -76,7 +80,7 @@ pub fn render_led_grid_lines(state: &AppState, grid_width: usize, max_rows: usiz
     // #189).  After those synthetic tabs the remainder are remote host
     // addresses.
     let nodes: Vec<(usize, &String)> = state
-        .tabs
+        .tabs()
         .iter()
         .enumerate()
         .filter(|(_, name)| {
@@ -97,11 +101,11 @@ pub fn render_led_grid_lines(state: &AppState, grid_width: usize, max_rows: usiz
         .map(|(tab_idx, node)| {
             let util = node_utils.get(*node).copied().unwrap_or(0.0);
             let is_connected = state
-                .connection_status
+                .connection_status()
                 .get(*node)
                 .map(|s| s.is_connected)
                 .unwrap_or(false);
-            let is_selected = state.current_tab == *tab_idx;
+            let is_selected = state.current_tab() == *tab_idx;
             node_led(util, is_selected, is_connected)
         })
         .collect();
@@ -115,7 +119,7 @@ pub fn render_led_grid_lines(state: &AppState, grid_width: usize, max_rows: usiz
 
     let page_capacity = nodes_per_row * effective_max_rows;
     let total_pages = leds.len().div_ceil(page_capacity).max(1);
-    let page_index = ((state.frame_counter / PAGE_ROTATION_FRAMES) as usize) % total_pages;
+    let page_index = ((state.frame_counter() / PAGE_ROTATION_FRAMES) as usize) % total_pages;
     let visible_start = page_index * page_capacity;
     let visible_end = (visible_start + page_capacity).min(leds.len());
     let visible_leds = &leds[visible_start..visible_end];
@@ -157,13 +161,13 @@ pub fn render_led_grid_lines(state: &AppState, grid_width: usize, max_rows: usiz
 /// Compute average GPU utilization per node (host address).
 ///
 /// Uses a single O(G) pass over all GPUs instead of O(N*G) nested filtering.
-fn compute_node_utils(state: &AppState, _nodes: &[&String]) -> HashMap<String, f64> {
+fn compute_node_utils(state: &dyn ViewState, _nodes: &[&String]) -> HashMap<String, f64> {
     // Accumulate (sum, count) per host_id in one pass over gpu_info. GPUs
     // with no utilization reading are left out of both the sum and the
     // count, so a node whose GPUs stopped reporting shows as unlit rather
     // than as a node that is genuinely idle (issue #325).
-    let mut accum: HashMap<&str, (f64, usize)> = HashMap::with_capacity(state.gpu_info.len());
-    for gpu in &state.gpu_info {
+    let mut accum: HashMap<&str, (f64, usize)> = HashMap::with_capacity(state.gpu_info().len());
+    for gpu in state.gpu_info() {
         if let Some(util) = gpu.utilization_reading() {
             let entry = accum.entry(gpu.host_id.as_str()).or_insert((0.0, 0));
             entry.0 += util;

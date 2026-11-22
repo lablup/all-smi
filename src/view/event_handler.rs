@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
@@ -19,7 +20,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent,
 use crate::app_state::{AppState, FilterInputMode, SortCriteria};
 use crate::cli::ViewArgs;
 use crate::record::replay::parse_timecode;
-use crate::ui::aggregation::user::{UserSortKey, sort_users};
+use crate::ui::aggregation::user::UserSortKey;
 use crate::ui::filter_dsl::{apply as apply_filter, parse as parse_filter};
 use crate::ui::layout::LayoutCalculator;
 use crate::ui::tabs::{topology_tab_index, users_tab_index};
@@ -319,24 +320,19 @@ fn handle_users_tab_keys(key_event: KeyEvent, state: &mut AppState) -> bool {
         return false;
     }
 
-    // Cache aggregation length for navigation bounds.  The borrow is
-    // short — we release it before mutating tab_state below.
-    let row_count = {
-        let agg = state.users_aggregation().clone();
-        let filter_sys = state.users_tab_state.filter_sys;
-        if state.users_tab_state.drill_user.is_some() {
-            // Drill-down bounds are the per-host row count.
-            agg.users
-                .iter()
-                .find(|u| Some(&u.user) == state.users_tab_state.drill_user.as_ref())
-                .map(|u| u.per_host.len())
-                .unwrap_or(0)
-        } else {
-            agg.users
-                .iter()
-                .filter(|u| !(filter_sys && u.is_system))
-                .count()
-        }
+    // Row count for navigation bounds. The aggregation and its visible
+    // order are shared `Arc`s, so taking them is a pointer copy that also
+    // ends the borrow on `state` before tab_state is mutated below.
+    let row_count = if state.users_tab_state.drill_user.is_some() {
+        // Drill-down bounds are the per-host row count.
+        let agg = Arc::clone(state.users_aggregation());
+        agg.users
+            .iter()
+            .find(|u| Some(&u.user) == state.users_tab_state.drill_user.as_ref())
+            .map(|u| u.per_host.len())
+            .unwrap_or(0)
+    } else {
+        state.users_visible_order().len()
     };
 
     match code {
@@ -467,20 +463,16 @@ fn handle_topology_tab_keys(key_event: KeyEvent, state: &mut AppState) -> bool {
 /// inside the drill-down.  Two-level navigation keeps the same `Enter`
 /// hotkey working as the issue spec requires.
 fn enter_users_drill_down(state: &mut AppState) {
-    let agg = state.users_aggregation().clone();
+    let agg = Arc::clone(state.users_aggregation());
     if state.users_tab_state.drill_user.is_none() {
-        // Top-level → drill into the selected user.
-        let filter_sys = state.users_tab_state.filter_sys;
-        let sort = state.users_tab_state.sort;
-        let mut visible: Vec<_> = agg
-            .users
-            .iter()
-            .filter(|u| !(filter_sys && u.is_system))
-            .cloned()
-            .collect();
-        sort_users(&mut visible, sort);
-        if let Some(user) = visible.get(state.users_tab_state.selected_row).cloned() {
-            state.users_tab_state.drill_user = Some(user.user);
+        // Top-level → drill into the selected user, in the same row order
+        // the table renders.
+        let order = Arc::clone(state.users_visible_order());
+        if let Some(user) = order
+            .get(state.users_tab_state.selected_row)
+            .and_then(|&i| agg.users.get(i))
+        {
+            state.users_tab_state.drill_user = Some(user.user.clone());
             state.users_tab_state.drill_host = None;
             state.users_tab_state.selected_row = 0;
             state.mark_data_changed();
@@ -517,19 +509,11 @@ fn export_users_csv(state: &mut AppState) -> Result<String, String> {
     use std::fmt::Write as _;
     use std::io::Write as _;
 
-    let agg = state.users_aggregation().clone();
-    let filter_sys = state.users_tab_state.filter_sys;
-    let sort = state.users_tab_state.sort;
-
-    // Compose the filtered, sorted row list the table currently
-    // displays so the CSV matches what the operator sees.
-    let mut rows: Vec<_> = agg
-        .users
-        .iter()
-        .filter(|u| !(filter_sys && u.is_system))
-        .cloned()
-        .collect();
-    crate::ui::aggregation::user::sort_users(&mut rows, sort);
+    // The filtered, sorted row list the table currently displays, so
+    // the CSV matches what the operator sees.
+    let agg = Arc::clone(state.users_aggregation());
+    let order = Arc::clone(state.users_visible_order());
+    let rows: Vec<_> = order.iter().filter_map(|&i| agg.users.get(i)).collect();
 
     // Resolve `<cache>/all-smi/users-<timestamp>.csv` via the shared
     // platform-aware helper (issue #229). The helper goes through
@@ -2065,9 +2049,11 @@ mod tests {
         // `host-1` / alice's process there does NOT.
         let mut buffer: Vec<u8> = Vec::new();
         let agg = state.users_aggregation().clone();
+        let order = state.users_visible_order().clone();
         let result = crate::ui::renderers::user_renderer::render_users_tab(
             &mut buffer,
             &agg,
+            &order,
             &state.users_tab_state,
             &state.remote_process_info,
             120,

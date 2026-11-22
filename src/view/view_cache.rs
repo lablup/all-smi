@@ -20,8 +20,12 @@
 //!
 //! The cache is owned by the UI loop and lives alongside the `RenderSnapshot`.
 
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use crate::app_state::SortCriteria;
 use crate::device::ProcessInfo;
+use crate::view::frame_renderer::{build_mig_lookup, build_vgpu_lookup};
 use crate::view::render_snapshot::RenderSnapshot;
 
 /// Key that determines whether the GPU display cache is still valid.
@@ -92,9 +96,20 @@ pub struct CachedHostDevices {
 #[derive(Clone)]
 pub struct CachedProcessList {
     /// When GPU filter is disabled, this is `None` and callers should use
-    /// `snapshot.process_info` directly to avoid any clone at all.
+    /// `snapshot.heavy.process_info` directly to avoid any clone at all.
     /// When enabled, contains only processes with `used_memory > 0`.
     pub filtered: Option<Vec<ProcessInfo>>,
+}
+
+/// `gpu_uuid -> index` maps into the snapshot's vGPU and MIG slices.
+///
+/// They depend only on collector data, so they are rebuilt when the data
+/// version changes instead of on every frame. Shared through `Arc` so a
+/// test can tell a rebuild from a reuse.
+#[derive(Clone)]
+pub struct CachedDeviceLookups {
+    pub vgpu: Arc<HashMap<String, usize>>,
+    pub mig: Arc<HashMap<String, usize>>,
 }
 
 /// Holds all cached derived view data with their invalidation keys.
@@ -111,6 +126,9 @@ pub struct ViewCache {
 
     process_key: Option<ProcessFilterCacheKey>,
     pub process_list: Option<CachedProcessList>,
+
+    lookup_key: Option<u64>,
+    pub device_lookups: Option<CachedDeviceLookups>,
 }
 
 impl Default for ViewCache {
@@ -130,6 +148,8 @@ impl ViewCache {
             host_devices: None,
             process_key: None,
             process_list: None,
+            lookup_key: None,
+            device_lookups: None,
         }
     }
 
@@ -145,6 +165,7 @@ impl ViewCache {
         recomputed |= self.update_gpu_list(snapshot);
         recomputed |= self.update_host_devices(snapshot);
         recomputed |= self.update_process_list(snapshot);
+        recomputed |= self.update_device_lookups(snapshot);
 
         recomputed
     }
@@ -158,6 +179,8 @@ impl ViewCache {
         self.host_devices = None;
         self.process_key = None;
         self.process_list = None;
+        self.lookup_key = None;
+        self.device_lookups = None;
     }
 
     // ------------------------------------------------------------------
@@ -181,9 +204,10 @@ impl ViewCache {
         let mut indices: Vec<usize> =
             if let Some(tab_name) = snapshot.tabs.get(snapshot.current_tab) {
                 if tab_name == "All" {
-                    (0..snapshot.gpu_info.len()).collect()
+                    (0..snapshot.heavy.gpu_info.len()).collect()
                 } else {
                     snapshot
+                        .heavy
                         .gpu_info
                         .iter()
                         .enumerate()
@@ -193,12 +217,14 @@ impl ViewCache {
                 }
             } else {
                 // Out-of-bounds tab index: show all (defensive)
-                (0..snapshot.gpu_info.len()).collect()
+                (0..snapshot.heavy.gpu_info.len()).collect()
             };
 
         // Sort by the current criteria
         let criteria = snapshot.sort_criteria;
-        indices.sort_by(|&a, &b| criteria.sort_gpus(&snapshot.gpu_info[a], &snapshot.gpu_info[b]));
+        indices.sort_by(|&a, &b| {
+            criteria.sort_gpus(&snapshot.heavy.gpu_info[a], &snapshot.heavy.gpu_info[b])
+        });
 
         self.gpu_key = Some(new_key);
         self.gpu_list = Some(CachedGpuList { indices });
@@ -223,10 +249,10 @@ impl ViewCache {
         let cached = if snapshot.is_local_mode {
             // Local mode: all devices are relevant
             CachedHostDevices {
-                chassis_indices: (0..snapshot.chassis_info.len()).collect(),
-                cpu_indices: (0..snapshot.cpu_info.len()).collect(),
-                memory_indices: (0..snapshot.memory_info.len()).collect(),
-                storage_indices: (0..snapshot.storage_info.len()).collect(),
+                chassis_indices: (0..snapshot.heavy.chassis_info.len()).collect(),
+                cpu_indices: (0..snapshot.heavy.cpu_info.len()).collect(),
+                memory_indices: (0..snapshot.heavy.memory_info.len()).collect(),
+                storage_indices: (0..snapshot.heavy.storage_info.len()).collect(),
             }
         } else if snapshot.current_tab == 0 {
             // Remote "All" tab: chassis are hidden; other devices shown on
@@ -241,6 +267,7 @@ impl ViewCache {
             let hostname = &snapshot.tabs[snapshot.current_tab];
             CachedHostDevices {
                 chassis_indices: snapshot
+                    .heavy
                     .chassis_info
                     .iter()
                     .enumerate()
@@ -248,6 +275,7 @@ impl ViewCache {
                     .map(|(i, _)| i)
                     .collect(),
                 cpu_indices: snapshot
+                    .heavy
                     .cpu_info
                     .iter()
                     .enumerate()
@@ -255,6 +283,7 @@ impl ViewCache {
                     .map(|(i, _)| i)
                     .collect(),
                 memory_indices: snapshot
+                    .heavy
                     .memory_info
                     .iter()
                     .enumerate()
@@ -262,6 +291,7 @@ impl ViewCache {
                     .map(|(i, _)| i)
                     .collect(),
                 storage_indices: snapshot
+                    .heavy
                     .storage_info
                     .iter()
                     .enumerate()
@@ -272,10 +302,10 @@ impl ViewCache {
         } else {
             // Out-of-bounds tab: show all (defensive)
             CachedHostDevices {
-                chassis_indices: (0..snapshot.chassis_info.len()).collect(),
-                cpu_indices: (0..snapshot.cpu_info.len()).collect(),
-                memory_indices: (0..snapshot.memory_info.len()).collect(),
-                storage_indices: (0..snapshot.storage_info.len()).collect(),
+                chassis_indices: (0..snapshot.heavy.chassis_info.len()).collect(),
+                cpu_indices: (0..snapshot.heavy.cpu_info.len()).collect(),
+                memory_indices: (0..snapshot.heavy.memory_info.len()).collect(),
+                storage_indices: (0..snapshot.heavy.storage_info.len()).collect(),
             }
         };
 
@@ -301,6 +331,7 @@ impl ViewCache {
         let filtered = if snapshot.gpu_filter_enabled {
             Some(
                 snapshot
+                    .heavy
                     .process_info
                     .iter()
                     .filter(|p| p.used_memory > 0)
@@ -313,6 +344,22 @@ impl ViewCache {
 
         self.process_key = Some(new_key);
         self.process_list = Some(CachedProcessList { filtered });
+        true
+    }
+
+    // ------------------------------------------------------------------
+    // vGPU / MIG lookup maps
+    // ------------------------------------------------------------------
+
+    fn update_device_lookups(&mut self, snapshot: &RenderSnapshot) -> bool {
+        if self.lookup_key == Some(snapshot.data_version) && self.device_lookups.is_some() {
+            return false;
+        }
+        self.device_lookups = Some(CachedDeviceLookups {
+            vgpu: Arc::new(build_vgpu_lookup(&snapshot.heavy.vgpu_info)),
+            mig: Arc::new(build_mig_lookup(&snapshot.heavy.mig_info)),
+        });
+        self.lookup_key = Some(snapshot.data_version);
         true
     }
 
@@ -337,6 +384,11 @@ impl ViewCache {
     pub fn process_display_list(&self) -> Option<&CachedProcessList> {
         self.process_list.as_ref()
     }
+
+    /// Return the cached vGPU / MIG lookup maps, or `None` if unpopulated.
+    pub fn device_lookups(&self) -> Option<&CachedDeviceLookups> {
+        self.device_lookups.as_ref()
+    }
 }
 
 // ======================================================================
@@ -349,7 +401,7 @@ mod tests {
     use crate::app_state::{AppState, SortCriteria};
     use crate::device::{CpuInfo, GpuInfo, MemoryInfo};
     use crate::storage::info::StorageInfo;
-    use crate::view::render_snapshot::RenderSnapshot;
+    use crate::view::render_snapshot::{HeavyCache, RenderSnapshot};
 
     fn make_snapshot_with_gpus(count: usize) -> RenderSnapshot {
         let mut state = AppState::new();
@@ -405,7 +457,7 @@ mod tests {
         ];
         state.is_local_mode = false;
         state.mark_data_changed();
-        RenderSnapshot::capture(&mut state)
+        RenderSnapshot::capture(&mut state, &mut HeavyCache::default())
     }
 
     // ------------------------------------------------------------------
@@ -484,7 +536,7 @@ mod tests {
             });
         }
         state.mark_data_changed();
-        let snap1 = RenderSnapshot::capture(&mut state);
+        let snap1 = RenderSnapshot::capture(&mut state, &mut HeavyCache::default());
 
         let mut cache = ViewCache::new();
         cache.update(&snap1);
@@ -492,7 +544,7 @@ mod tests {
 
         // Bump version
         state.mark_data_changed();
-        let snap2 = RenderSnapshot::capture(&mut state);
+        let snap2 = RenderSnapshot::capture(&mut state, &mut HeavyCache::default());
         assert!(
             cache.update(&snap2),
             "cache should invalidate on data_version change"
@@ -507,11 +559,11 @@ mod tests {
 
         // Switch to host-a tab
         let mut state = AppState::new();
-        state.gpu_info = snapshot.gpu_info.clone();
+        state.gpu_info = snapshot.heavy.gpu_info.clone();
         state.tabs = snapshot.tabs.clone();
         state.current_tab = 1; // host-a
         state.data_version = snapshot.data_version;
-        let snap2 = RenderSnapshot::capture(&mut state);
+        let snap2 = RenderSnapshot::capture(&mut state, &mut HeavyCache::default());
 
         assert!(
             cache.update(&snap2),
@@ -522,7 +574,7 @@ mod tests {
         let indices = cache.gpu_indices().unwrap();
         for &idx in indices {
             assert_eq!(
-                snap2.gpu_info[idx].host_id, "host-a",
+                snap2.heavy.gpu_info[idx].host_id, "host-a",
                 "filtered GPU should belong to host-a"
             );
         }
@@ -535,11 +587,11 @@ mod tests {
         cache.update(&snapshot);
 
         let mut state = AppState::new();
-        state.gpu_info = snapshot.gpu_info.clone();
+        state.gpu_info = snapshot.heavy.gpu_info.clone();
         state.tabs = snapshot.tabs.clone();
         state.sort_criteria = SortCriteria::Utilization;
         state.data_version = snapshot.data_version;
-        let snap2 = RenderSnapshot::capture(&mut state);
+        let snap2 = RenderSnapshot::capture(&mut state, &mut HeavyCache::default());
 
         assert!(
             cache.update(&snap2),
@@ -577,7 +629,7 @@ mod tests {
             threads: 1,
             uses_gpu: false,
         });
-        let snapshot = RenderSnapshot::capture(&mut state);
+        let snapshot = RenderSnapshot::capture(&mut state, &mut HeavyCache::default());
         let mut cache = ViewCache::new();
         cache.update(&snapshot);
 
@@ -638,7 +690,7 @@ mod tests {
             threads: 1,
             uses_gpu: false,
         });
-        let snapshot = RenderSnapshot::capture(&mut state);
+        let snapshot = RenderSnapshot::capture(&mut state, &mut HeavyCache::default());
         let mut cache = ViewCache::new();
         cache.update(&snapshot);
 
@@ -687,7 +739,7 @@ mod tests {
             utilization: 50.0,
             time: "".into(),
         });
-        let snapshot = RenderSnapshot::capture(&mut state);
+        let snapshot = RenderSnapshot::capture(&mut state, &mut HeavyCache::default());
         let mut cache = ViewCache::new();
         cache.update(&snapshot);
 
@@ -715,7 +767,7 @@ mod tests {
             utilization: 10.0,
             ..CpuInfo::test_default()
         });
-        let snapshot = RenderSnapshot::capture(&mut state);
+        let snapshot = RenderSnapshot::capture(&mut state, &mut HeavyCache::default());
         let mut cache = ViewCache::new();
         cache.update(&snapshot);
 
@@ -750,7 +802,7 @@ mod tests {
             available_bytes: 512,
             index: 0,
         });
-        let snapshot = RenderSnapshot::capture(&mut state);
+        let snapshot = RenderSnapshot::capture(&mut state, &mut HeavyCache::default());
         let mut cache = ViewCache::new();
         cache.update(&snapshot);
 
@@ -761,7 +813,7 @@ mod tests {
             "only host-a storage should be cached"
         );
         assert_eq!(
-            snapshot.storage_info[hd.storage_indices[0]].host_id,
+            snapshot.heavy.storage_info[hd.storage_indices[0]].host_id,
             "host-a"
         );
     }
@@ -808,5 +860,53 @@ mod tests {
         assert_eq!(sort_criteria_ordinal(SortCriteria::User), base);
         assert_eq!(sort_criteria_ordinal(SortCriteria::CpuPercent), base);
         assert_eq!(sort_criteria_ordinal(SortCriteria::MemoryPercent), base);
+    }
+
+    fn vgpu_host(uuid: &str) -> crate::device::VgpuHostInfo {
+        crate::device::VgpuHostInfo {
+            host_id: "host-a".into(),
+            hostname: "host-a".into(),
+            instance: "host-a".into(),
+            gpu_index: 0,
+            gpu_uuid: uuid.into(),
+            gpu_name: "NVIDIA A100".into(),
+            host_mode: "Sriov".into(),
+            scheduler_policy: 0,
+            scheduler_arr_mode: 0,
+            is_arr_supported: false,
+            vgpus: Vec::new(),
+            detail: std::collections::HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn vgpu_lookup_is_built_once_per_data_version() {
+        let mut state = AppState::new();
+        state.vgpu_info = vec![vgpu_host("GPU-A")];
+        state.mark_collector_data_changed();
+        let mut heavy = HeavyCache::default();
+        let snap = RenderSnapshot::capture(&mut state, &mut heavy);
+
+        let mut cache = ViewCache::new();
+        cache.update(&snap);
+        let first = Arc::clone(&cache.device_lookups().expect("populated").vgpu);
+        assert_eq!(first.get("GPU-A"), Some(&0));
+
+        // Same data: the map is reused, not rebuilt.
+        let again = RenderSnapshot::capture(&mut state, &mut heavy);
+        cache.update(&again);
+        assert!(Arc::ptr_eq(
+            &first,
+            &cache.device_lookups().expect("populated").vgpu
+        ));
+
+        // New vGPU data: the map is rebuilt and reflects it.
+        state.vgpu_info.push(vgpu_host("GPU-B"));
+        state.mark_collector_data_changed();
+        let changed = RenderSnapshot::capture(&mut state, &mut heavy);
+        cache.update(&changed);
+        let rebuilt = &cache.device_lookups().expect("populated").vgpu;
+        assert!(!Arc::ptr_eq(&first, rebuilt));
+        assert_eq!(rebuilt.get("GPU-B"), Some(&1));
     }
 }
