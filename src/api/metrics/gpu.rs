@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::{MetricBuilder, MetricExporter};
+use super::{MetricBuilder, MetricExporter, render_labels};
 use crate::device::GpuInfo;
 use crate::device::readers::detail_keys;
 use crate::device::readers::detail_keys::FAN_SPEED_DETAIL_KEY;
@@ -79,12 +79,7 @@ impl<'a> GpuMetricExporter<'a> {
 
     fn export_basic_metrics(&self, builder: &mut MetricBuilder, row: &GpuRow<'a>) {
         let info = row.gpu;
-        let base_labels = [
-            ("gpu", info.name.as_str()),
-            ("instance", info.instance.as_str()),
-            ("gpu_uuid", info.uuid.as_str()),
-            ("gpu_index", row.index_str.as_str()),
-        ];
+        let base_labels = row.labels.as_str();
 
         // GPU utilization.
         //
@@ -103,16 +98,16 @@ impl<'a> GpuMetricExporter<'a> {
                     "GPU utilization percentage (omitted when the device reports no utilization)",
                 )
                 .type_("all_smi_gpu_utilization", "gauge")
-                .metric("all_smi_gpu_utilization", &base_labels, utilization);
+                .metric_with_rendered_labels("all_smi_gpu_utilization", base_labels, utilization);
         }
 
         // Memory metrics
         builder
             .help("all_smi_gpu_memory_used_bytes", "GPU memory used in bytes")
             .type_("all_smi_gpu_memory_used_bytes", "gauge")
-            .metric(
+            .metric_with_rendered_labels(
                 "all_smi_gpu_memory_used_bytes",
-                &base_labels,
+                base_labels,
                 info.used_memory,
             );
 
@@ -122,9 +117,9 @@ impl<'a> GpuMetricExporter<'a> {
                 "GPU memory total in bytes",
             )
             .type_("all_smi_gpu_memory_total_bytes", "gauge")
-            .metric(
+            .metric_with_rendered_labels(
                 "all_smi_gpu_memory_total_bytes",
-                &base_labels,
+                base_labels,
                 info.total_memory,
             );
 
@@ -140,7 +135,11 @@ impl<'a> GpuMetricExporter<'a> {
             builder
                 .help("all_smi_gpu_memory_free_bytes", "GPU memory free in bytes")
                 .type_("all_smi_gpu_memory_free_bytes", "gauge")
-                .metric("all_smi_gpu_memory_free_bytes", &base_labels, free_bytes);
+                .metric_with_rendered_labels(
+                    "all_smi_gpu_memory_free_bytes",
+                    base_labels,
+                    free_bytes,
+                );
         }
 
         // Temperature. Omitted when no sensor answered — a powered die never
@@ -153,7 +152,11 @@ impl<'a> GpuMetricExporter<'a> {
                     "GPU temperature in celsius (omitted when no sensor reports one)",
                 )
                 .type_("all_smi_gpu_temperature_celsius", "gauge")
-                .metric("all_smi_gpu_temperature_celsius", &base_labels, temperature);
+                .metric_with_rendered_labels(
+                    "all_smi_gpu_temperature_celsius",
+                    base_labels,
+                    temperature,
+                );
         }
 
         // Power consumption. Omitted when the device exposes no power rail.
@@ -164,7 +167,11 @@ impl<'a> GpuMetricExporter<'a> {
                     "GPU power consumption in watts (omitted when the device reports no power)",
                 )
                 .type_("all_smi_gpu_power_consumption_watts", "gauge")
-                .metric("all_smi_gpu_power_consumption_watts", &base_labels, power);
+                .metric_with_rendered_labels(
+                    "all_smi_gpu_power_consumption_watts",
+                    base_labels,
+                    power,
+                );
         }
 
         // Board power, repeated identically on every device of a multi-device
@@ -186,7 +193,7 @@ impl<'a> GpuMetricExporter<'a> {
                     "Power of the physical board this device sits on, in watts, for display only. The same board value is repeated on every device of the board, so summing this metric multiplies a board's real draw by its device count (issue #418); sum all_smi_gpu_power_consumption_watts instead, which counts each board exactly once.",
                 )
                 .type_("all_smi_gpu_card_power_watts", "gauge")
-                .metric("all_smi_gpu_card_power_watts", &base_labels, card_watts);
+                .metric_with_rendered_labels("all_smi_gpu_card_power_watts", base_labels, card_watts);
         }
 
         // Frequency. Omitted when the platform has no clock probe. This also
@@ -201,7 +208,7 @@ impl<'a> GpuMetricExporter<'a> {
                     "GPU frequency in MHz (omitted when the device exposes no clock probe)",
                 )
                 .type_("all_smi_gpu_frequency_mhz", "gauge")
-                .metric("all_smi_gpu_frequency_mhz", &base_labels, frequency);
+                .metric_with_rendered_labels("all_smi_gpu_frequency_mhz", base_labels, frequency);
         }
 
         // ANE utilization (Apple Silicon). Non-Apple readers set this to a
@@ -214,7 +221,7 @@ impl<'a> GpuMetricExporter<'a> {
                     "ANE utilization in mW (omitted when the native metrics source is unavailable)",
                 )
                 .type_("all_smi_ane_utilization", "gauge")
-                .metric("all_smi_ane_utilization", &base_labels, ane);
+                .metric_with_rendered_labels("all_smi_ane_utilization", base_labels, ane);
         }
 
         // DLA utilization (if available)
@@ -222,7 +229,7 @@ impl<'a> GpuMetricExporter<'a> {
             builder
                 .help("all_smi_dla_utilization", "DLA utilization percentage")
                 .type_("all_smi_dla_utilization", "gauge")
-                .metric("all_smi_dla_utilization", &base_labels, dla_util);
+                .metric_with_rendered_labels("all_smi_dla_utilization", base_labels, dla_util);
         }
 
         // DLA readings the host SoC GPU row carries in `detail` (the RTX
@@ -259,11 +266,10 @@ impl<'a> GpuMetricExporter<'a> {
             if let Some(value) = info.detail.get(key).and_then(|v| v.parse::<f64>().ok())
                 && value.is_finite()
             {
-                builder.help(metric, help).type_(metric, "gauge").metric(
-                    metric,
-                    &base_labels,
-                    value,
-                );
+                builder
+                    .help(metric, help)
+                    .type_(metric, "gauge")
+                    .metric_with_rendered_labels(metric, base_labels, value);
             }
         }
     }
@@ -274,12 +280,7 @@ impl<'a> GpuMetricExporter<'a> {
             return;
         }
 
-        let base_labels = [
-            ("gpu", info.name.as_str()),
-            ("instance", info.instance.as_str()),
-            ("gpu_uuid", info.uuid.as_str()),
-            ("gpu_index", row.index_str.as_str()),
-        ];
+        let base_labels = row.labels.as_str();
 
         // ANE power in watts. Same source as `all_smi_ane_utilization`, so
         // the two families appear and disappear together.
@@ -290,22 +291,21 @@ impl<'a> GpuMetricExporter<'a> {
                     "ANE power consumption in watts (omitted when the native metrics source is unavailable)",
                 )
                 .type_("all_smi_ane_power_watts", "gauge")
-                .metric("all_smi_ane_power_watts", &base_labels, ane_mw / 1000.0);
+                .metric_with_rendered_labels("all_smi_ane_power_watts", base_labels, ane_mw / 1000.0);
         }
 
         // Thermal pressure level
         if let Some(thermal_level) = info.detail.get("thermal_pressure") {
-            let thermal_labels = [
-                ("gpu", info.name.as_str()),
-                ("instance", info.instance.as_str()),
-                ("gpu_uuid", info.uuid.as_str()),
-                ("gpu_index", row.index_str.as_str()),
-                ("level", thermal_level.as_str()),
-            ];
+            let thermal_labels = [("level", thermal_level.as_str())];
             builder
                 .help("all_smi_thermal_pressure_info", "Thermal pressure level")
                 .type_("all_smi_thermal_pressure_info", "gauge")
-                .metric("all_smi_thermal_pressure_info", &thermal_labels, 1);
+                .metric_with_rendered_labels_and(
+                    "all_smi_thermal_pressure_info",
+                    row.labels.as_str(),
+                    &thermal_labels,
+                    1,
+                );
         }
 
         // Combined power (CPU + GPU + ANE) for Apple Silicon
@@ -319,9 +319,9 @@ impl<'a> GpuMetricExporter<'a> {
                     "Combined power consumption (CPU + GPU + ANE) in watts",
                 )
                 .type_("all_smi_combined_power_watts", "gauge")
-                .metric(
+                .metric_with_rendered_labels(
                     "all_smi_combined_power_watts",
-                    &base_labels,
+                    base_labels,
                     combined_power_watts,
                 );
         }
@@ -331,13 +331,7 @@ impl<'a> GpuMetricExporter<'a> {
         let info = row.gpu;
 
         // Build label string with all detail fields
-        let labels = [
-            ("gpu", info.name.as_str()),
-            ("instance", info.instance.as_str()),
-            ("gpu_uuid", info.uuid.as_str()),
-            ("gpu_index", row.index_str.as_str()),
-            ("type", info.device_type.as_str()),
-        ];
+        let labels = [("type", info.device_type.as_str())];
 
         // Convert detail HashMap to label pairs with sanitized names and values.
         // Values are sanitized to strip control characters and prevent
@@ -387,17 +381,17 @@ impl<'a> GpuMetricExporter<'a> {
         }
 
         // Use the metric method with all labels
-        builder.metric("all_smi_gpu_info", &all_labels, 1);
+        builder.metric_with_rendered_labels_and(
+            "all_smi_gpu_info",
+            row.labels.as_str(),
+            &all_labels,
+            1,
+        );
     }
 
     fn export_cuda_metrics(&self, builder: &mut MetricBuilder, row: &GpuRow<'a>) {
         let info = row.gpu;
-        let base_labels = [
-            ("gpu", info.name.as_str()),
-            ("instance", info.instance.as_str()),
-            ("gpu_uuid", info.uuid.as_str()),
-            ("gpu_index", row.index_str.as_str()),
-        ];
+        let base_labels = row.labels.as_str();
 
         // PCIe metrics. The keys are the shared writer's constants
         // (`detail_keys::insert_pcie_details` writes exactly these), so the
@@ -409,7 +403,11 @@ impl<'a> GpuMetricExporter<'a> {
             builder
                 .help("all_smi_gpu_pcie_gen_current", "Current PCIe generation")
                 .type_("all_smi_gpu_pcie_gen_current", "gauge")
-                .metric("all_smi_gpu_pcie_gen_current", &base_labels, pcie_gen_value);
+                .metric_with_rendered_labels(
+                    "all_smi_gpu_pcie_gen_current",
+                    base_labels,
+                    pcie_gen_value,
+                );
         }
 
         if let Some(pcie_width) = info.detail.get(detail_keys::PCIE_WIDTH_CURRENT_DETAIL_KEY)
@@ -418,7 +416,7 @@ impl<'a> GpuMetricExporter<'a> {
             builder
                 .help("all_smi_gpu_pcie_width_current", "Current PCIe link width")
                 .type_("all_smi_gpu_pcie_width_current", "gauge")
-                .metric("all_smi_gpu_pcie_width_current", &base_labels, width);
+                .metric_with_rendered_labels("all_smi_gpu_pcie_width_current", base_labels, width);
         }
 
         // Clock metrics
@@ -431,7 +429,11 @@ impl<'a> GpuMetricExporter<'a> {
                     "Maximum graphics clock in MHz",
                 )
                 .type_("all_smi_gpu_clock_graphics_max_mhz", "gauge")
-                .metric("all_smi_gpu_clock_graphics_max_mhz", &base_labels, clock);
+                .metric_with_rendered_labels(
+                    "all_smi_gpu_clock_graphics_max_mhz",
+                    base_labels,
+                    clock,
+                );
         }
 
         if let Some(clock_max) = info.detail.get("clock_memory_max")
@@ -443,7 +445,11 @@ impl<'a> GpuMetricExporter<'a> {
                     "Maximum memory clock in MHz",
                 )
                 .type_("all_smi_gpu_clock_memory_max_mhz", "gauge")
-                .metric("all_smi_gpu_clock_memory_max_mhz", &base_labels, clock);
+                .metric_with_rendered_labels(
+                    "all_smi_gpu_clock_memory_max_mhz",
+                    base_labels,
+                    clock,
+                );
         }
 
         // Current memory clock, same shape as the maximum above: the Linux
@@ -464,7 +470,11 @@ impl<'a> GpuMetricExporter<'a> {
                     "Current memory clock in MHz",
                 )
                 .type_("all_smi_gpu_clock_memory_current_mhz", "gauge")
-                .metric("all_smi_gpu_clock_memory_current_mhz", &base_labels, clock);
+                .metric_with_rendered_labels(
+                    "all_smi_gpu_clock_memory_current_mhz",
+                    base_labels,
+                    clock,
+                );
         }
 
         // AMD ADL sensor readings (Windows). Each block reads the shared
@@ -482,9 +492,9 @@ impl<'a> GpuMetricExporter<'a> {
                     "GPU hotspot temperature in celsius, the sensor a modern card actually throttles on (runs 15-30 C above the edge sensor `all_smi_gpu_temperature_celsius` carries)",
                 )
                 .type_("all_smi_gpu_hotspot_temperature_celsius", "gauge")
-                .metric(
+                .metric_with_rendered_labels(
                     "all_smi_gpu_hotspot_temperature_celsius",
-                    &base_labels,
+                    base_labels,
                     temperature,
                 );
         }
@@ -498,9 +508,9 @@ impl<'a> GpuMetricExporter<'a> {
                     "GPU memory die temperature in celsius",
                 )
                 .type_("all_smi_gpu_memory_temperature_celsius", "gauge")
-                .metric(
+                .metric_with_rendered_labels(
                     "all_smi_gpu_memory_temperature_celsius",
-                    &base_labels,
+                    base_labels,
                     temperature,
                 );
         }
@@ -516,9 +526,9 @@ impl<'a> GpuMetricExporter<'a> {
                     "GPU memory controller activity percentage",
                 )
                 .type_("all_smi_gpu_memory_controller_activity", "gauge")
-                .metric(
+                .metric_with_rendered_labels(
                     "all_smi_gpu_memory_controller_activity",
-                    &base_labels,
+                    base_labels,
                     percent,
                 );
         }
@@ -539,7 +549,7 @@ impl<'a> GpuMetricExporter<'a> {
                     "VRAM bytes used by the process running all-smi on this adapter (Windows DXGI, scoped to the exporter's own process)",
                 )
                 .type_("all_smi_gpu_process_vram_used_bytes", "gauge")
-                .metric("all_smi_gpu_process_vram_used_bytes", &base_labels, bytes);
+                .metric_with_rendered_labels("all_smi_gpu_process_vram_used_bytes", base_labels, bytes);
         }
 
         if let Some(budget) = info.detail.get(detail_keys::VRAM_BUDGET_PROCESS_DETAIL_KEY)
@@ -551,7 +561,7 @@ impl<'a> GpuMetricExporter<'a> {
                     "VRAM budget of the process running all-smi on this adapter (Windows DXGI, scoped to the exporter's own process)",
                 )
                 .type_("all_smi_gpu_process_vram_budget_bytes", "gauge")
-                .metric("all_smi_gpu_process_vram_budget_bytes", &base_labels, bytes);
+                .metric_with_rendered_labels("all_smi_gpu_process_vram_budget_bytes", base_labels, bytes);
         }
 
         // Intel engine utilization, one row per discovered engine class.
@@ -572,20 +582,19 @@ impl<'a> GpuMetricExporter<'a> {
             let Some(engine) = key.strip_prefix(detail_keys::ENGINE_DETAIL_KEY_PREFIX) else {
                 continue;
             };
-            let engine_labels = [
-                ("gpu", info.name.as_str()),
-                ("instance", info.instance.as_str()),
-                ("gpu_uuid", info.uuid.as_str()),
-                ("gpu_index", row.index_str.as_str()),
-                ("engine", engine),
-            ];
+            let engine_labels = [("engine", engine)];
             builder
                 .help(
                     "all_smi_gpu_engine_utilization",
                     "GPU engine utilization percentage, one row per engine class",
                 )
                 .type_("all_smi_gpu_engine_utilization", "gauge")
-                .metric("all_smi_gpu_engine_utilization", &engine_labels, pct_value);
+                .metric_with_rendered_labels_and(
+                    "all_smi_gpu_engine_utilization",
+                    row.labels.as_str(),
+                    &engine_labels,
+                    pct_value,
+                );
         }
 
         // Intel Level Zero clock domains, one row per discovered clock
@@ -603,21 +612,16 @@ impl<'a> GpuMetricExporter<'a> {
             else {
                 continue;
             };
-            let domain_labels = [
-                ("gpu", info.name.as_str()),
-                ("instance", info.instance.as_str()),
-                ("gpu_uuid", info.uuid.as_str()),
-                ("gpu_index", row.index_str.as_str()),
-                ("domain", domain),
-            ];
+            let domain_labels = [("domain", domain)];
             builder
                 .help(
                     "all_smi_gpu_clock_domain_current_mhz",
                     "GPU clock domain frequency in MHz, one row per clock domain",
                 )
                 .type_("all_smi_gpu_clock_domain_current_mhz", "gauge")
-                .metric(
+                .metric_with_rendered_labels_and(
                     "all_smi_gpu_clock_domain_current_mhz",
+                    row.labels.as_str(),
                     &domain_labels,
                     mhz_value,
                 );
@@ -633,7 +637,11 @@ impl<'a> GpuMetricExporter<'a> {
                     "Current power limit in watts",
                 )
                 .type_("all_smi_gpu_power_limit_current_watts", "gauge")
-                .metric("all_smi_gpu_power_limit_current_watts", &base_labels, power);
+                .metric_with_rendered_labels(
+                    "all_smi_gpu_power_limit_current_watts",
+                    base_labels,
+                    power,
+                );
         }
 
         if let Some(power_limit) = info.detail.get("power_limit_max")
@@ -645,7 +653,11 @@ impl<'a> GpuMetricExporter<'a> {
                     "Maximum power limit in watts",
                 )
                 .type_("all_smi_gpu_power_limit_max_watts", "gauge")
-                .metric("all_smi_gpu_power_limit_max_watts", &base_labels, power);
+                .metric_with_rendered_labels(
+                    "all_smi_gpu_power_limit_max_watts",
+                    base_labels,
+                    power,
+                );
         }
 
         // Performance state — first prefer the structured per-device field
@@ -662,7 +674,7 @@ impl<'a> GpuMetricExporter<'a> {
                     "GPU performance state (0=P0 fastest, 15=P15 idlest; metric is omitted when the device does not report a P-state)",
                 )
                 .type_("all_smi_gpu_performance_state", "gauge")
-                .metric("all_smi_gpu_performance_state", &base_labels, pstate as f64);
+                .metric_with_rendered_labels("all_smi_gpu_performance_state", base_labels, pstate as f64);
         } else if let Some(pstate_str) = info.detail.get("performance_state")
             && let Some(state_str) = pstate_str.strip_prefix('P')
             && let Ok(state_num) = state_str.parse::<f64>()
@@ -673,7 +685,7 @@ impl<'a> GpuMetricExporter<'a> {
                     "GPU performance state (0=P0 fastest, 15=P15 idlest; metric is omitted when the device does not report a P-state)",
                 )
                 .type_("all_smi_gpu_performance_state", "gauge")
-                .metric("all_smi_gpu_performance_state", &base_labels, state_num);
+                .metric_with_rendered_labels("all_smi_gpu_performance_state", base_labels, state_num);
         }
 
         // Fan speed, same shape as the P-state block above: prefer the
@@ -696,7 +708,7 @@ impl<'a> GpuMetricExporter<'a> {
                     "GPU fan speed in revolutions per minute (metric is omitted when the device reports no tachometer)",
                 )
                 .type_("all_smi_gpu_fan_speed_rpm", "gauge")
-                .metric("all_smi_gpu_fan_speed_rpm", &base_labels, rpm);
+                .metric_with_rendered_labels("all_smi_gpu_fan_speed_rpm", base_labels, rpm);
         } else if let Some(fan) = info.detail.get(FAN_SPEED_DETAIL_KEY)
             && let Some(rpm) = parse_fan_speed_detail(fan)
         {
@@ -706,7 +718,7 @@ impl<'a> GpuMetricExporter<'a> {
                     "GPU fan speed in revolutions per minute (metric is omitted when the device reports no tachometer)",
                 )
                 .type_("all_smi_gpu_fan_speed_rpm", "gauge")
-                .metric("all_smi_gpu_fan_speed_rpm", &base_labels, rpm);
+                .metric_with_rendered_labels("all_smi_gpu_fan_speed_rpm", base_labels, rpm);
         }
 
         // Fan duty cycle, the reading the block above refuses to publish as
@@ -725,7 +737,7 @@ impl<'a> GpuMetricExporter<'a> {
                     "GPU fan duty cycle in percent (metric is omitted when the device reports a tachometer reading instead)",
                 )
                 .type_("all_smi_gpu_fan_duty_cycle", "gauge")
-                .metric("all_smi_gpu_fan_duty_cycle", &base_labels, percent);
+                .metric_with_rendered_labels("all_smi_gpu_fan_duty_cycle", base_labels, percent);
         }
     }
 
@@ -740,12 +752,7 @@ impl<'a> GpuMetricExporter<'a> {
     /// `all_smi_gpu_temperature_celsius` series by the same labels.
     fn export_thermal_thresholds(&self, builder: &mut MetricBuilder, row: &GpuRow<'a>) {
         let info = row.gpu;
-        let base_labels = [
-            ("gpu", info.name.as_str()),
-            ("instance", info.instance.as_str()),
-            ("gpu_uuid", info.uuid.as_str()),
-            ("gpu_index", row.index_str.as_str()),
-        ];
+        let base_labels = row.labels.as_str();
 
         if let Some(slowdown) = info.temperature_threshold_slowdown {
             builder
@@ -757,9 +764,9 @@ impl<'a> GpuMetricExporter<'a> {
                     "all_smi_gpu_temperature_threshold_slowdown_celsius",
                     "gauge",
                 )
-                .metric(
+                .metric_with_rendered_labels(
                     "all_smi_gpu_temperature_threshold_slowdown_celsius",
-                    &base_labels,
+                    base_labels,
                     slowdown,
                 );
         }
@@ -774,9 +781,9 @@ impl<'a> GpuMetricExporter<'a> {
                     "all_smi_gpu_temperature_threshold_shutdown_celsius",
                     "gauge",
                 )
-                .metric(
+                .metric_with_rendered_labels(
                     "all_smi_gpu_temperature_threshold_shutdown_celsius",
-                    &base_labels,
+                    base_labels,
                     shutdown,
                 );
         }
@@ -791,9 +798,9 @@ impl<'a> GpuMetricExporter<'a> {
                     "all_smi_gpu_temperature_threshold_max_operating_celsius",
                     "gauge",
                 )
-                .metric(
+                .metric_with_rendered_labels(
                     "all_smi_gpu_temperature_threshold_max_operating_celsius",
-                    &base_labels,
+                    base_labels,
                     gpu_max,
                 );
         }
@@ -808,17 +815,17 @@ impl<'a> GpuMetricExporter<'a> {
                     "all_smi_gpu_temperature_threshold_acoustic_celsius",
                     "gauge",
                 )
-                .metric(
+                .metric_with_rendered_labels(
                     "all_smi_gpu_temperature_threshold_acoustic_celsius",
-                    &base_labels,
+                    base_labels,
                     acoustic,
                 );
         }
     }
 
-    /// Pre-compute the stringified `gpu_index` label for each eligible GPU.
-    /// Allocates once per scrape regardless of how many metric families are
-    /// later emitted, reducing per-family string allocations from 5*N to N.
+    /// Pre-render the identity label block for each eligible GPU.
+    /// The four labels are escaped and written once per row per render,
+    /// regardless of how many metric families the row later feeds.
     fn collect_rows(&self) -> Vec<GpuRow<'a>> {
         self.gpu_info
             .iter()
@@ -826,36 +833,41 @@ impl<'a> GpuMetricExporter<'a> {
             .filter(|(_, info)| {
                 info.device_type == "GPU" || info.device_type == "NPU" || info.device_type == "TPU"
             })
-            .map(|(idx, gpu)| GpuRow {
-                gpu,
-                index_str: idx.to_string(),
+            .map(|(idx, gpu)| {
+                let index_str = idx.to_string();
+                let labels = render_labels(&[
+                    ("gpu", gpu.name.as_str()),
+                    ("instance", gpu.instance.as_str()),
+                    ("gpu_uuid", gpu.uuid.as_str()),
+                    ("gpu_index", index_str.as_str()),
+                ]);
+                GpuRow { gpu, labels }
             })
             .collect()
     }
 }
 
-/// Borrowed view of a single GPU row with its stringified index cached.
-/// Exists purely to amortise the `.to_string()` on the index label across
-/// the five export methods.
+/// Borrowed view of a single GPU row with its label block rendered.
+/// Exists purely to amortise label escaping across the five export methods.
 struct GpuRow<'a> {
     gpu: &'a GpuInfo,
-    index_str: String,
+    /// The row's identity labels (`gpu`, `instance`, `gpu_uuid`,
+    /// `gpu_index`), escaped and rendered once and reused by every family
+    /// this row feeds (issue #503).
+    labels: String,
 }
 
 impl<'a> MetricExporter for GpuMetricExporter<'a> {
-    fn export_metrics(&self) -> String {
+    fn export_into(&self, builder: &mut MetricBuilder) {
         let rows = self.collect_rows();
-        let mut builder = MetricBuilder::new();
 
         for row in &rows {
-            self.export_basic_metrics(&mut builder, row);
-            self.export_apple_silicon_metrics(&mut builder, row);
-            self.export_device_info(&mut builder, row);
-            self.export_cuda_metrics(&mut builder, row);
-            self.export_thermal_thresholds(&mut builder, row);
+            self.export_basic_metrics(builder, row);
+            self.export_apple_silicon_metrics(builder, row);
+            self.export_device_info(builder, row);
+            self.export_cuda_metrics(builder, row);
+            self.export_thermal_thresholds(builder, row);
         }
-
-        builder.build()
     }
 }
 

@@ -212,15 +212,12 @@ struct Row<'a> {
 }
 
 impl<'a> MetricExporter for MigMetricExporter<'a> {
-    fn export_metrics(&self) -> String {
+    fn export_into(&self, builder: &mut MetricBuilder) {
         if self.mig_info.is_empty() {
-            return String::new();
+            return;
         }
-
-        let mut builder = MetricBuilder::new();
-        self.export_host_info(&mut builder);
-        self.export_instance_metrics(&mut builder);
-        builder.build()
+        self.export_host_info(builder);
+        self.export_instance_metrics(builder);
     }
 }
 

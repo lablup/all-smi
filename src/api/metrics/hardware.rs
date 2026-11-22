@@ -272,19 +272,16 @@ struct Row<'a> {
 }
 
 impl<'a> MetricExporter for HardwareMetricExporter<'a> {
-    fn export_metrics(&self) -> String {
+    fn export_into(&self, builder: &mut MetricBuilder) {
         let rows = self.collect_rows();
         if rows.is_empty() {
-            return String::new();
+            return;
         }
-
-        let mut builder = MetricBuilder::new();
-        self.export_numa_node_id(&mut builder, &rows);
-        self.export_gsp_firmware_mode(&mut builder, &rows);
-        self.export_gsp_firmware_version(&mut builder, &rows);
-        self.export_nvlink_remote_device_type(&mut builder, &rows);
-        self.export_gpm_metrics(&mut builder, &rows);
-        builder.build()
+        self.export_numa_node_id(builder, &rows);
+        self.export_gsp_firmware_mode(builder, &rows);
+        self.export_gsp_firmware_version(builder, &rows);
+        self.export_nvlink_remote_device_type(builder, &rows);
+        self.export_gpm_metrics(builder, &rows);
     }
 }
 

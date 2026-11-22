@@ -25,8 +25,12 @@
 //!
 //! The exporter chain mirrors the original ordering encoded in
 //! `metrics_handler` before extraction (gpu → npu → process → cpu → memory
-//! → disk → runtime → chassis → vgpu → mig → hardware) so any dashboard
-//! that parses line order stays compatible.
+//! → disk → runtime → chassis → vgpu → mig → hardware). Every exporter
+//! writes into one [`MetricBuilder`], which emits each metric family once
+//! (one `# HELP`, one `# TYPE`, contiguous samples) in the order the family
+//! was first seen, so the exporter order above still holds at family
+//! granularity while the body stays valid for strict text-format parsers
+//! on multi-device hosts (issue #503).
 
 use crate::device::{
     ChassisInfo, CpuInfo, GpuInfo, MemoryInfo, MigGpuInfo, ProcessInfo, VgpuHostInfo,
@@ -36,13 +40,21 @@ use crate::storage::info::StorageInfo;
 use crate::utils::RuntimeEnvironment;
 
 use super::{
-    MetricExporter, chassis::ChassisMetricExporter, cpu::CpuMetricExporter,
+    MetricBuilder, MetricExporter, chassis::ChassisMetricExporter, cpu::CpuMetricExporter,
     disk::DiskMetricExporter, energy::EnergyMetricExporter,
     exporter_status::ExporterStatusMetricExporter, gpu::GpuMetricExporter,
     hardware::HardwareMetricExporter, memory::MemoryMetricExporter, mig::MigMetricExporter,
     npu::NpuMetricExporter, process::ProcessMetricExporter, runtime::RuntimeMetricExporter,
     vgpu::VgpuMetricExporter,
 };
+
+#[cfg(test)]
+thread_local! {
+    /// Number of renders performed on the current thread. Lets tests prove
+    /// that `/metrics` serves the body rendered by the collection loop
+    /// instead of rendering per request (issue #503).
+    pub(crate) static RENDER_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 /// Borrowed references to the metric sources that feed the exposition.
 ///
@@ -85,72 +97,78 @@ pub struct MetricsRenderInputs<'a> {
 /// non-applicable hosts (e.g. non-NVIDIA for NVLink/MIG/vGPU) contribute
 /// nothing beyond that baseline.
 pub fn render_prometheus_exposition(inputs: &MetricsRenderInputs<'_>) -> String {
-    let mut all_metrics = String::new();
+    #[cfg(test)]
+    RENDER_COUNT.with(|count| count.set(count.get() + 1));
+
+    // One builder for the whole exposition: it groups samples by family, so
+    // each family is written once even when several devices, or several
+    // exporters, contribute to it (issue #503).
+    let mut builder = MetricBuilder::new();
 
     // Baseline first (issue #324), so a consumer that reads only the head
     // of the response, or scrapes before the first collection cycle has
     // landed, still learns whether this exporter is up and which build it
     // is. Everything below this line self-filters; this block does not.
     let status_exporter = ExporterStatusMetricExporter::new(inputs.ready);
-    all_metrics.push_str(&status_exporter.export_metrics());
+    status_exporter.export_into(&mut builder);
 
     // Export GPU/NPU metrics
     if !inputs.gpu_info.is_empty() {
         // Export GPU/NPU metrics together since the exporters handle filtering
         let gpu_exporter = GpuMetricExporter::new(inputs.gpu_info);
-        all_metrics.push_str(&gpu_exporter.export_metrics());
+        gpu_exporter.export_into(&mut builder);
 
         let npu_exporter = NpuMetricExporter::new(inputs.gpu_info);
-        all_metrics.push_str(&npu_exporter.export_metrics());
+        npu_exporter.export_into(&mut builder);
     }
 
     // Export process metrics
     if !inputs.process_info.is_empty() {
         let process_exporter = ProcessMetricExporter::new(inputs.process_info);
-        all_metrics.push_str(&process_exporter.export_metrics());
+        process_exporter.export_into(&mut builder);
     }
 
     // Export CPU metrics
     if !inputs.cpu_info.is_empty() {
         let cpu_exporter = CpuMetricExporter::new(inputs.cpu_info);
-        all_metrics.push_str(&cpu_exporter.export_metrics());
+        cpu_exporter.export_into(&mut builder);
     }
 
     // Export memory metrics
     if !inputs.memory_info.is_empty() {
         let memory_exporter = MemoryMetricExporter::new(inputs.memory_info);
-        all_metrics.push_str(&memory_exporter.export_metrics());
+        memory_exporter.export_into(&mut builder);
     }
 
     // Export disk metrics
     if !inputs.storage_info.is_empty() {
         let disk_exporter = DiskMetricExporter::new(inputs.storage_info);
-        all_metrics.push_str(&disk_exporter.export_metrics());
+        disk_exporter.export_into(&mut builder);
     }
 
     // Export runtime environment metrics (self-filters: a
     // `RuntimeEnvironment::default()` emits nothing because neither
     // container nor virtualization flags are set).
     let runtime_exporter = RuntimeMetricExporter::new(inputs.runtime_environment);
-    all_metrics.push_str(&runtime_exporter.export_metrics());
+    runtime_exporter.export_into(&mut builder);
 
     // Export chassis metrics
     if !inputs.chassis_info.is_empty() {
         let chassis_exporter = ChassisMetricExporter::new(inputs.chassis_info);
-        all_metrics.push_str(&chassis_exporter.export_metrics());
+        chassis_exporter.export_into(&mut builder);
     }
 
     // Export vGPU metrics (NVIDIA vGPU hosts only; silent no-op otherwise).
     if !inputs.vgpu_info.is_empty() {
         let vgpu_exporter = VgpuMetricExporter::new(inputs.vgpu_info);
-        all_metrics.push_str(&vgpu_exporter.export_metrics());
+        vgpu_exporter.export_into(&mut builder);
     }
 
     // Export MIG metrics (NVIDIA datacenter GPUs with MIG enabled; silent
     // no-op on consumer cards, pre-Ampere GPUs, and non-MIG hosts).
     if !inputs.mig_info.is_empty() {
         let mig_exporter = MigMetricExporter::new(inputs.mig_info);
-        all_metrics.push_str(&mig_exporter.export_metrics());
+        mig_exporter.export_into(&mut builder);
     }
 
     // Export extended hardware details (issue #132): NUMA node id, GSP
@@ -160,7 +178,7 @@ pub fn render_prometheus_exposition(inputs: &MetricsRenderInputs<'_>) -> String 
     // stay silent in the `/metrics` output.
     if !inputs.gpu_info.is_empty() {
         let hw_exporter = HardwareMetricExporter::new(inputs.gpu_info);
-        all_metrics.push_str(&hw_exporter.export_metrics());
+        hw_exporter.export_into(&mut builder);
     }
 
     // Export the energy counter (issue #191). Self-filters to non-empty
@@ -168,10 +186,10 @@ pub fn render_prometheus_exposition(inputs: &MetricsRenderInputs<'_>) -> String 
     // recorded yet) contribute no output.
     if let Some(integrator) = inputs.energy_integrator {
         let energy_exporter = EnergyMetricExporter::new(integrator, inputs.gpu_info);
-        all_metrics.push_str(&energy_exporter.export_metrics());
+        energy_exporter.export_into(&mut builder);
     }
 
-    all_metrics
+    builder.build()
 }
 
 #[cfg(test)]
