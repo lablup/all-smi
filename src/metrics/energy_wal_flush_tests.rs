@@ -63,7 +63,9 @@ async fn a_small_wal_never_collects_lifetime_totals() {
     let writer = WalWriter::open(&wal_path).unwrap();
     let writer = flush_cycle(writer, &wal_path, &state).await;
     add_ten_seconds(&state, origin, 2, 100.0).await;
-    let _writer = flush_cycle(writer, &wal_path, &state).await;
+    // Close the writer before replaying: on Windows it holds the file with
+    // `share_mode(0)`, so a second open fails with a sharing violation.
+    drop(flush_cycle(writer, &wal_path, &state).await);
 
     assert_eq!(
         snapshots() - before,
@@ -91,7 +93,7 @@ async fn a_wal_above_the_threshold_snapshots_once_and_compacts_exactly() {
 
     let before = snapshots();
     let writer = WalWriter::open(&wal_path).unwrap();
-    let writer = flush_cycle(writer, &wal_path, &state).await;
+    drop(flush_cycle(writer, &wal_path, &state).await);
     assert_eq!(snapshots() - before, 1, "compaction takes one snapshot");
 
     let size = std::fs::metadata(&wal_path).unwrap().len();
@@ -104,7 +106,8 @@ async fn a_wal_above_the_threshold_snapshots_once_and_compacts_exactly() {
     // The next cycle is back under the threshold: no further snapshot, and
     // the new delta lands once on top of the compacted record.
     add_ten_seconds(&state, origin, 2, 100.0).await;
-    let _writer = flush_cycle(writer, &wal_path, &state).await;
+    let writer = WalWriter::open(&wal_path).unwrap();
+    drop(flush_cycle(writer, &wal_path, &state).await);
     assert_eq!(snapshots() - before, 1);
     assert!((replayed_total(&wal_path) - 2_000.0).abs() < 1e-6);
 }

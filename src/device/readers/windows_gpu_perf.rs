@@ -621,6 +621,7 @@ where
 
 /// [`gpu_processes_with`] over an explicit snapshot, so the row and PID
 /// shape is testable without Windows.
+#[cfg(test)]
 pub fn gpu_processes_from(
     snapshot: &Snapshot,
     adapter_index: &AdapterIndex,

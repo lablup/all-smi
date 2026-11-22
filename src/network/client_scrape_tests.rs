@@ -72,6 +72,17 @@ fn status_for<'a>(statuses: &'a [ConnectionStatus], host: &str) -> &'a Connectio
         .unwrap_or_else(|| panic!("no status for {host}: {statuses:?}"))
 }
 
+/// State a closed localhost port reports. Windows retries a refused
+/// connect for about two seconds, longer than the test connect timeout,
+/// so there the attempt ends as a timeout instead of a refusal.
+fn refused_port_state() -> &'static str {
+    if cfg!(windows) {
+        "timeout"
+    } else {
+        "disconnected"
+    }
+}
+
 fn short_timeouts() -> ScrapeTimeouts {
     ScrapeTimeouts {
         connect: Duration::from_millis(200),
@@ -154,7 +165,10 @@ async fn backoff_expires_success_clears_it_and_removed_hosts_are_dropped() {
     for _ in 0..2 {
         let data = client.fetch_remote_metrics(&hosts, &semaphore).await;
         let status = status_for(&data.connection_statuses, &refused);
-        assert_eq!(status.connection_state.as_deref(), Some("disconnected"));
+        assert_eq!(
+            status.connection_state.as_deref(),
+            Some(refused_port_state())
+        );
     }
     let entry = client.backoff_entry(&refused_id).expect("backoff entry");
     assert_eq!(entry.consecutive_failures, 2);
@@ -170,7 +184,10 @@ async fn backoff_expires_success_clears_it_and_removed_hosts_are_dropped() {
     client.expire_backoff_for_tests();
     let data = client.fetch_remote_metrics(&hosts, &semaphore).await;
     let status = status_for(&data.connection_statuses, &refused);
-    assert_eq!(status.connection_state.as_deref(), Some("disconnected"));
+    assert_eq!(
+        status.connection_state.as_deref(),
+        Some(refused_port_state())
+    );
     assert_eq!(status.consecutive_failures, 3);
 
     // Removing the host from the configuration drops its history.
