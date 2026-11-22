@@ -402,8 +402,8 @@ fn describe(path: &Path) -> (Option<String>, Option<String>) {
 ///
 /// Order, first readable candidate wins: override, named hwmon driver, named
 /// thermal zone type, motherboard sensor label, hwmon sensor type (PECI or AMD
-/// TSI), legacy fixed paths. An empty or whitespace-only override counts as
-/// unset.
+/// TSI), `asus_wmi_sensors` board label, legacy fixed paths. An empty or
+/// whitespace-only override counts as unset.
 pub(super) fn resolve_cpu_temp(root: &Path, override_value: Option<&str>) -> CpuTempResolution {
     let mut override_rejection = None;
     let mut picked = None;
@@ -419,8 +419,9 @@ pub(super) fn resolve_cpu_temp(root: &Path, override_value: Option<&str>) -> Cpu
     let picked = picked
         .or_else(|| pick_from_hwmon(root).map(|p| (TempRule::Driver, p)))
         .or_else(|| pick_from_thermal_zones(root).map(|p| (TempRule::ThermalZone, p)))
-        .or_else(|| pick_from_board_labels(root).map(|p| (TempRule::BoardLabel, p)))
+        .or_else(|| pick_from_board_labels(root, false).map(|p| (TempRule::BoardLabel, p)))
         .or_else(|| pick_from_sensor_types(root).map(|p| (TempRule::SensorType, p)))
+        .or_else(|| pick_from_board_labels(root, true).map(|p| (TempRule::BoardLabel, p)))
         .or_else(|| pick_from_legacy(root).map(|p| (TempRule::Legacy, p)));
     match picked {
         Some((rule, path)) => {

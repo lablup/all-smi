@@ -147,6 +147,33 @@ fn asusec_wins_over_asus_wmi_sensors() {
     assert_eq!(res.driver.as_deref(), Some(ASUS_WMI_SENSORS_DRIVER));
 }
 
+#[test]
+fn sensor_type_wins_over_asus_wmi_sensors() {
+    let dir = TempDir::new().unwrap();
+    let r = dir.path();
+    hwmon(
+        r,
+        1,
+        "asus_wmi_sensors",
+        &[(1, Some("CPU Temperature"), 47000)],
+    );
+    hwmon(r, 3, "it8689", &[(3, None, 46000)]);
+    write(r, "class/hwmon/hwmon3/temp3_type", "6");
+    let res = resolve_cpu_temp(r, None);
+    assert_pick(&res, TempRule::SensorType, "hwmon3/temp3_input", None);
+    assert_eq!(res.driver.as_deref(), Some("it8689"));
+
+    // With no PECI or TSI input elsewhere, asus_wmi_sensors still resolves.
+    write(r, "class/hwmon/hwmon3/temp3_type", "4");
+    let res = resolve_cpu_temp(r, None);
+    assert_pick(
+        &res,
+        TempRule::BoardLabel,
+        "hwmon1/temp1_input",
+        Some("CPU Temperature"),
+    );
+}
+
 /// Unlabelled it8689 with three inputs and the given `temp*_type` values.
 fn it8689(types: [&str; 3]) -> TempDir {
     let dir = TempDir::new().unwrap();

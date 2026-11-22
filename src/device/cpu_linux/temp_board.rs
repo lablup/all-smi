@@ -44,8 +44,9 @@ const BOARD_CPU_LABELS: &[&str] = &[
 ];
 
 /// hwmon `name` of the ASUS WMI driver. Its BIOS interface can stop or pin the
-/// fans when polled often, so it is a board-label candidate only when no other
-/// hwmon instance offers one (see docs.kernel.org/hwmon/asus_wmi_sensors.html).
+/// fans when polled often, so its board labels are tried only after every other
+/// board label and the sensor type stage find nothing (see
+/// docs.kernel.org/hwmon/asus_wmi_sensors.html).
 #[cfg_attr(not(feature = "cli"), allow(dead_code))]
 pub(crate) const ASUS_WMI_SENSORS_DRIVER: &str = "asus_wmi_sensors";
 
@@ -55,24 +56,32 @@ const CPU_SENSOR_TYPES: &[&str] = &["5", "6"];
 
 /// Board sensor stage: the best-priority label present on any hwmon instance
 /// that reads wins; ties go to the lower hwmon index, then the lower input N.
-/// `asus_wmi_sensors` inputs rank after every other instance's.
-pub(super) fn pick_from_board_labels(root: &Path) -> Option<PathBuf> {
-    let mut candidates: Vec<((bool, usize), PathBuf)> = Vec::new();
+///
+/// `asus_wmi` selects which instances are considered: `false` for every driver
+/// except `asus_wmi_sensors`, `true` for `asus_wmi_sensors` alone. The resolver
+/// runs the `true` pass after the sensor type stage, so a PECI or TSI input on
+/// another chip wins over the hazardous WMI source.
+pub(super) fn pick_from_board_labels(root: &Path, asus_wmi: bool) -> Option<PathBuf> {
+    let mut candidates: Vec<(usize, PathBuf)> = Vec::new();
     for dir in numbered_entries(&root.join("class/hwmon"), "hwmon") {
         let inputs = hwmon_inputs(&dir);
         if inputs.is_empty() {
             continue;
         }
-        let demoted = read_trimmed(&dir.join("name")).as_deref() == Some(ASUS_WMI_SENSORS_DRIVER);
+        let is_asus_wmi =
+            read_trimmed(&dir.join("name")).as_deref() == Some(ASUS_WMI_SENSORS_DRIVER);
+        if is_asus_wmi != asus_wmi {
+            continue;
+        }
         for (n, path) in inputs {
             let priority = hwmon_label(&dir, n)
                 .and_then(|label| BOARD_CPU_LABELS.iter().position(|l| *l == label));
             if let Some(priority) = priority {
-                candidates.push(((demoted, priority), path));
+                candidates.push((priority, path));
             }
         }
     }
-    candidates.sort_by_key(|(key, _)| *key); // stable: keeps index order
+    candidates.sort_by_key(|(priority, _)| *priority); // stable: keeps index order
     candidates
         .into_iter()
         .map(|(_, p)| p)
