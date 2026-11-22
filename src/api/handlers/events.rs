@@ -20,7 +20,6 @@
 //! frames instead of silently missing them.
 
 use std::convert::Infallible;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::extract::{Query, State};
@@ -34,10 +33,9 @@ use serde::Deserialize;
 use tokio::sync::broadcast::Receiver;
 use tokio::sync::broadcast::error::RecvError;
 
-use crate::api::frame_bus::FrameBus;
-use crate::snapshot::Snapshot;
+use crate::api::frame_bus::{FrameBus, LatestFrame};
 
-use super::snapshot::{SectionFilter, filter_snapshot_value, parse_include};
+use super::snapshot::{SectionFilter, parse_include};
 
 /// Default keep-alive interval. Matches the `HTTP2_KEEPALIVE_SECS` figure
 /// referenced in the issue body; reverse proxies typically idle-timeout
@@ -163,7 +161,7 @@ pub async fn events_handler(
         );
     }
 
-    let stream = build_sse_stream(bus.subscribe(), filter, throttle);
+    let stream = build_sse_stream(bus.clone(), bus.subscribe(), filter, throttle);
     let sse = Sse::new(stream).keep_alive(KeepAlive::new().interval(heartbeat).text("keep-alive"));
 
     // Discourage reverse proxies (nginx, cloudfront, etc.) from
@@ -207,7 +205,8 @@ fn resolve_heartbeat(user: Option<u64>) -> Duration {
 
 /// Per-stream state carried through `futures_util::stream::unfold`.
 struct StreamState {
-    rx: Receiver<Arc<Snapshot>>,
+    bus: FrameBus,
+    rx: Receiver<LatestFrame>,
     filter: SectionFilter,
     throttle: Duration,
     last_emit: Option<Instant>,
@@ -215,13 +214,19 @@ struct StreamState {
 
 /// Build the per-client event stream. Isolated from the handler so the
 /// test module can drive it with a synthetic channel.
+///
+/// `bus` is the bus `rx` was subscribed on; the stream asks it for each
+/// frame's serialized body, which is shared by every client with the same
+/// filter (issue #503).
 pub fn build_sse_stream(
-    rx: Receiver<Arc<Snapshot>>,
+    bus: FrameBus,
+    rx: Receiver<LatestFrame>,
     filter: SectionFilter,
     throttle: Duration,
 ) -> impl Stream<Item = Result<Event, Infallible>> {
     unfold(
         StreamState {
+            bus,
             rx,
             filter,
             throttle,
@@ -242,7 +247,7 @@ pub fn build_sse_stream(
                         {
                             continue;
                         }
-                        let event = build_snapshot_event(&frame, &state.filter);
+                        let event = build_snapshot_event(&state.bus, &frame, &state.filter);
                         state.last_emit = Some(Instant::now());
                         return Some((Ok(event), state));
                     }
@@ -266,13 +271,15 @@ pub fn build_sse_stream(
     )
 }
 
-fn build_snapshot_event(snapshot: &Arc<Snapshot>, filter: &SectionFilter) -> Event {
-    let value = filter_snapshot_value(snapshot, filter);
-    let event = Event::default()
-        .event("snapshot")
-        .id(event_id_for(snapshot));
-    match event.clone().json_data(&value) {
-        Ok(e) => e,
+fn build_snapshot_event(bus: &FrameBus, frame: &LatestFrame, filter: &SectionFilter) -> Event {
+    // Compact JSON holds no raw newline or carriage return (both are
+    // escaped inside strings), so it is a valid single-line `data:` field,
+    // byte for byte what `json_data` wrote here before.
+    match bus.body_for(frame, filter, false) {
+        Ok(body) => Event::default()
+            .event("snapshot")
+            .id(event_id_for(frame))
+            .data(&*body),
         Err(err) => error_event(&err.to_string()),
     }
 }
@@ -302,8 +309,8 @@ fn error_event(message: &str) -> Event {
 /// the frame's `timestamp` field in the body — enough for reconnect
 /// diagnostics even though the server intentionally ignores the
 /// `Last-Event-ID` header on resume.
-fn event_id_for(snapshot: &Arc<Snapshot>) -> String {
-    snapshot.timestamp.clone()
+fn event_id_for(frame: &LatestFrame) -> String {
+    frame.snapshot.timestamp.clone()
 }
 
 #[cfg(test)]
@@ -384,7 +391,7 @@ mod tests {
         let filter = SectionFilter::default_http();
         let rx = bus.subscribe();
         bus.publish(minimal_snapshot()).await;
-        let stream = build_sse_stream(rx, filter, Duration::from_millis(10));
+        let stream = build_sse_stream(bus.clone(), rx, filter, Duration::from_millis(10));
         futures_util::pin_mut!(stream);
         let next = stream.next().await.expect("stream yields at least once");
         assert!(next.is_ok());
@@ -400,7 +407,7 @@ mod tests {
         for _ in 0..(crate::api::frame_bus::FRAME_BUFFER + 4) {
             bus.publish(minimal_snapshot()).await;
         }
-        let stream = build_sse_stream(rx, filter, Duration::from_millis(10));
+        let stream = build_sse_stream(bus.clone(), rx, filter, Duration::from_millis(10));
         futures_util::pin_mut!(stream);
         let first = stream.next().await.expect("stream yields at least once");
         assert!(first.is_ok());

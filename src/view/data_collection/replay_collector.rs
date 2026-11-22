@@ -25,9 +25,10 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use tokio::sync::Mutex;
+use tokio::time::Instant;
 
 use crate::app_state::{AppState, ReplayState};
 use crate::record::replay::{ReplayError, Replayer};
@@ -133,8 +134,18 @@ impl ReplayDriver {
         // prev() back to cache start so this is cheap while the next
         // frame is close in time.
         let prev_seq = current.seq;
-        let next_frame = self.replayer.next()?;
+        // The anchor for the next frame's offset is the recording's first
+        // frame, the same one `elapsed()` uses, so `delta` below is the
+        // recorded gap between the two frames.
+        let first_ts = self.replayer.first_timestamp();
+        let next_frame = self.replayer.next()?.map(|next| next.timestamp);
         let (due, reached_end) = match next_frame {
+            None if !self.replayer.at_eof() => {
+                // No frame this tick (the scan budget ran out on
+                // malformed lines), but the file has more. Try again on
+                // the next tick; the cursor has not moved.
+                return Ok(());
+            }
             None => {
                 // EOF: either loop or stop.
                 if control.replay_loop {
@@ -147,9 +158,9 @@ impl ReplayDriver {
                 pause_at_end(app_state.clone()).await;
                 return Ok(());
             }
-            Some(next) => {
-                let next_offset = (next.timestamp - first_frame_ts(&self.replayer))
-                    .to_std()
+            Some(next_ts) => {
+                let next_offset = first_ts
+                    .and_then(|first| (next_ts - first).to_std().ok())
                     .unwrap_or(Duration::ZERO);
                 let delta = next_offset.saturating_sub(current_offset);
                 // `Duration::from_secs_f32` panics on NaN or negative
@@ -197,24 +208,6 @@ impl ReplayDriver {
         apply_frame_to_state(app_state.clone(), &mut self.replayer, reached_end).await;
         Ok(())
     }
-}
-
-/// Best-effort: we need the first-frame timestamp as an anchor for
-/// delta calculations. `Replayer::elapsed()` already factors this in,
-/// but when we materialise the *next* frame we need the same anchor
-/// to compute its elapsed.  We do NOT rewind the stream here — we
-/// just compute the next-frame delta relative to the cache-front.
-fn first_frame_ts(replayer: &Replayer) -> chrono::DateTime<chrono::Utc> {
-    // Replayer keeps the first frame in cache after priming (or after
-    // any seek to offset 0), which is what ReplayDriver ensures before
-    // calling this helper. When evicted, fall back to the current
-    // frame's timestamp — the resulting elapsed will be zero, which
-    // makes the scheduler render immediately. That's acceptable: the
-    // worst case is a single-frame stutter after a long back-scroll.
-    replayer
-        .current()
-        .map(|f| f.timestamp)
-        .unwrap_or_else(chrono::Utc::now)
 }
 
 /// Copy the Replayer's current frame into `AppState` fields the TUI
@@ -366,3 +359,7 @@ pub fn initial_replay_state(speed: f32, replay_loop: bool) -> ReplayState {
         timecode_error: None,
     }
 }
+
+#[cfg(test)]
+#[path = "replay_collector_tests.rs"]
+mod tests;

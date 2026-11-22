@@ -55,13 +55,9 @@ impl<'a> DiskMetricExporter<'a> {
 }
 
 impl<'a> MetricExporter for DiskMetricExporter<'a> {
-    fn export_metrics(&self) -> String {
-        let mut builder = MetricBuilder::new();
-
+    fn export_into(&self, builder: &mut MetricBuilder) {
         for info in self.storage_info {
-            self.export_disk_metrics(&mut builder, info);
+            self.export_disk_metrics(builder, info);
         }
-
-        builder.build()
     }
 }

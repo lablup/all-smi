@@ -156,7 +156,9 @@ pub struct SnapshotError {
     /// Short section identifier (`"gpu"`, `"cpu"`, `"memory"`,
     /// `"chassis"`, `"process"`, `"storage"`).
     pub section: String,
-    /// Error kind: `"timeout"`, `"panic"`, or `"error"`.
+    /// Error kind: `"timeout"`, `"panic"`, `"error"`, or `"busy"` (a gated
+    /// collection skipped the section because its previous reader call is
+    /// still running).
     pub kind: String,
     pub message: String,
 }

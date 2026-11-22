@@ -144,18 +144,14 @@ impl<'a> NpuMetricExporter<'a> {
 }
 
 impl<'a> MetricExporter for NpuMetricExporter<'a> {
-    fn export_metrics(&self) -> String {
-        let mut builder = MetricBuilder::new();
-
+    fn export_into(&self, builder: &mut MetricBuilder) {
         // Filter NPU devices and export metrics
         for (i, info) in self.npu_info.iter().enumerate() {
             // Only process NPU or TPU devices
             if info.device_type == "NPU" || info.device_type == "TPU" {
-                self.export_device_metrics(&mut builder, info, i);
+                self.export_device_metrics(builder, info, i);
             }
         }
-
-        builder.build()
     }
 }
 

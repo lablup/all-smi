@@ -159,15 +159,11 @@ impl<'a> MemoryMetricExporter<'a> {
 }
 
 impl<'a> MetricExporter for MemoryMetricExporter<'a> {
-    fn export_metrics(&self) -> String {
-        let mut builder = MetricBuilder::new();
-
+    fn export_into(&self, builder: &mut MetricBuilder) {
         for (i, info) in self.memory_info.iter().enumerate() {
-            self.export_basic_metrics(&mut builder, info, i);
-            self.export_swap_metrics(&mut builder, info, i);
-            self.export_linux_specific_metrics(&mut builder, info, i);
+            self.export_basic_metrics(builder, info, i);
+            self.export_swap_metrics(builder, info, i);
+            self.export_linux_specific_metrics(builder, info, i);
         }
-
-        builder.build()
     }
 }

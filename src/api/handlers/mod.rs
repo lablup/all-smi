@@ -18,13 +18,16 @@
 //!
 //! * [`metrics_render`] — legacy Prometheus `/metrics` endpoint.
 //! * [`events`] — Server-Sent Events `/events` stream (issue #193).
-//! * [`snapshot`] — one-shot `/snapshot` JSON endpoint (issue #193).
+//! * [`snapshot`] — one-shot `/snapshot` JSON endpoint (issue #193); the
+//!   `?include=` filter and body serializer it shares with [`events`] live
+//!   in `snapshot_filter` and are re-exported from it.
 //! * [`ready`] — `/-/ready` readiness endpoint (issue #324).
 
 pub mod events;
 pub mod metrics_render;
 pub mod ready;
 pub mod snapshot;
+mod snapshot_filter;
 
-pub use metrics_render::{SharedState, metrics_handler};
+pub use metrics_render::{SharedState, metrics_handler, refresh_metrics_body};
 pub use ready::ready_handler;

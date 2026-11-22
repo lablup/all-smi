@@ -168,8 +168,11 @@ pub struct ReplayFrame {
 ///   beginning, re-filling the cache up to the requested frame. That is
 ///   the one path that can hit disk twice — but only for seeks outside
 ///   the cache window, which are rare in interactive use.
-/// * `seek()` can use index frames for O(1) jumps (when the file has
-///   them) and otherwise scans forward from the last known position.
+/// * `seek()` moves the cursor without I/O when the target is inside the
+///   cache, walks forward from the cache when the target is ahead of it,
+///   and otherwise estimates the target frame from the header's
+///   `interval_ms` so the re-open can skip ahead from the nearest index
+///   frame. Without `interval_ms` it scans from the start.
 pub struct Replayer {
     path: PathBuf,
     header: Option<ReplayHeader>,
@@ -182,6 +185,12 @@ pub struct Replayer {
     /// Index (within `cache`) of the frame currently being displayed.
     /// `None` until the first frame has been materialised.
     cursor: Option<usize>,
+    /// Timestamp of data frame 0, stored when the stream is primed.
+    /// Elapsed time and seek targets are measured from it. It cannot be
+    /// read back from the cache: frame 0 is evicted once more than
+    /// [`FRAME_CACHE_MAX`] frames have been read, and is never cached
+    /// after a re-open that skipped ahead from an index frame.
+    first_ts: Option<DateTime<Utc>>,
     /// Sequence number of the next fresh data frame to materialise from
     /// disk (i.e., the next one the reader has not yet seen).
     next_disk_seq: u64,
@@ -204,6 +213,11 @@ struct IndexPoint {
     /// Line number at which the index frame *itself* sits. The following
     /// data frame is at `line + 1`.
     line: u64,
+    /// Timestamp of data frame `seq`, when it was the frame read just
+    /// before the index frame (always, for files the recorder wrote). A
+    /// seek uses it to pick the checkpoint right before its target
+    /// without decoding anything.
+    timestamp: Option<DateTime<Utc>>,
 }
 
 impl Replayer {
@@ -221,6 +235,7 @@ impl Replayer {
             reader,
             cache: VecDeque::new(),
             cursor: None,
+            first_ts: None,
             next_disk_seq: 0,
             eof: false,
             index_points: Vec::new(),
@@ -261,6 +276,7 @@ impl Replayer {
                             .ok_or(ReplayError::SeqOverflow {
                                 line: self.line_number,
                             })?;
+                    self.first_ts = Some(frame.timestamp);
                     self.cache.push_back(frame);
                     self.cursor = Some(0);
                     return Ok(());
@@ -462,6 +478,8 @@ impl Replayer {
         }
 
         // Data frame: full `Snapshot` parse.
+        #[cfg(test)]
+        DECODED_FRAMES.with(|count| count.set(count.get() + 1));
         let snap: Snapshot = match serde_json::from_str(trimmed) {
             Ok(s) => s,
             Err(e) => {
@@ -488,8 +506,19 @@ impl Replayer {
         self.cursor.and_then(|c| self.cache.get(c))
     }
 
+    /// Timestamp of the recording's first data frame, or `None` for a
+    /// file with no data frames.
+    pub fn first_timestamp(&self) -> Option<DateTime<Utc>> {
+        self.first_ts
+    }
+
     /// Advance to the next frame. Returns the new current frame, or
-    /// `None` if the stream has been fully consumed.
+    /// `None` when there is no next frame to move to, in which case the
+    /// cursor stays where it is.
+    ///
+    /// `None` means end of file when [`Self::at_eof`] is true. Otherwise
+    /// the per-call scan budget ran out on malformed lines and the caller
+    /// should simply call again.
     ///
     /// When the cursor is not at the end of the cache we advance without
     /// touching disk. When it is, we read one more line (skipping
@@ -503,7 +532,7 @@ impl Replayer {
             _ => {
                 // Need a fresh frame from disk.
                 if !self.read_next_data_frame()? {
-                    return Ok(self.current());
+                    return Ok(None);
                 }
                 // After a successful read, cursor lands on the new frame
                 // at the end of the cache.
@@ -536,38 +565,195 @@ impl Replayer {
         }
     }
 
-    /// Seek to the frame whose timestamp is closest to
-    /// `start + offset_from_start`. Uses index frames where available
-    /// and falls back to linear scan. Returns the frame landed on, or
-    /// `None` if the file is empty.
+    /// Seek to the first frame whose timestamp is at or after
+    /// `start + offset_from_start` (the last frame when the offset is past
+    /// the end). Returns the frame landed on, or `None` if the file is
+    /// empty.
+    ///
+    /// Cost, cheapest first:
+    ///
+    /// * target inside the cached window: the cursor moves, no I/O;
+    /// * target ahead of the cache: frames are read forward from where the
+    ///   reader already is, unless a known index frame lets a re-open skip
+    ///   more of them;
+    /// * otherwise the file is re-opened. When an index frame already read
+    ///   is at or after the target, the re-open skips to the last index
+    ///   frame before the target and decodes at most one index spacing of
+    ///   frames. Past every known index frame, the target frame number is
+    ///   estimated from the header's `interval_ms` as `offset / interval`.
+    ///   The landing is then corrected by walking to the right timestamp,
+    ///   so a recording whose real cadence differs from the header (slow
+    ///   remote cycles, a suspended host) still lands correctly, and a
+    ///   correction that has to go back past the cache re-opens once at
+    ///   the index frame before the target instead of once per index
+    ///   spacing. Without `interval_ms` or index frames the scan starts at
+    ///   frame 0.
     pub fn seek(
         &mut self,
         offset_from_start: Duration,
     ) -> Result<Option<&ReplayFrame>, ReplayError> {
-        // Always re-resolve from frame 0 so the math is consistent whether
-        // the cursor was previously ahead or behind.
         let first_ts = self.first_frame_timestamp()?;
         let target = first_ts + chrono::Duration::from_std(offset_from_start).unwrap_or_default();
 
-        // Walk forward until frame.timestamp >= target; we then pick the
-        // closer of (prev, current) to minimise jitter.
-        self.rewind_and_seek_to(0)?;
-        loop {
-            let done = {
-                let cur = match self.current() {
-                    Some(f) => f,
-                    None => return Ok(None),
-                };
-                cur.timestamp >= target
-            };
-            if done {
-                break;
-            }
-            if self.next()?.is_none() {
-                break;
-            }
+        if !self.seek_within_cache(target) {
+            self.reposition_for(target, offset_from_start)?;
+            self.walk_to(target)?;
         }
         Ok(self.current())
+    }
+
+    /// Move the cursor to the first cached frame at or after `target`,
+    /// when the cache is known to contain it. No I/O.
+    fn seek_within_cache(&mut self, target: DateTime<Utc>) -> bool {
+        let (Some(front), Some(back)) = (self.cache.front(), self.cache.back()) else {
+            return false;
+        };
+        if back.timestamp < target {
+            // Past everything cached. That is only an answer when nothing
+            // is left on disk either: the last frame.
+            if self.eof {
+                self.cursor = Some(self.cache.len() - 1);
+                return true;
+            }
+            return false;
+        }
+        // Some cached frame qualifies. It is the first such frame of the
+        // recording only if no earlier, uncached frame qualifies too.
+        if front.seq != 0 && front.timestamp >= target {
+            return false;
+        }
+        self.cursor = self.cache.iter().position(|f| f.timestamp >= target);
+        self.cursor.is_some()
+    }
+
+    /// Put the cursor near `target` when it is outside the cache, so
+    /// [`Self::walk_to`] has a short way to go.
+    fn reposition_for(
+        &mut self,
+        target: DateTime<Utc>,
+        offset_from_start: Duration,
+    ) -> Result<(), ReplayError> {
+        let floor = self.index_floor(target);
+        let bounded = self
+            .index_points
+            .iter()
+            .any(|p| p.timestamp.is_some_and(|ts| ts >= target));
+        let land = if bounded {
+            // The target lies between two known checkpoints: start right
+            // after the last one that is still earlier than the target.
+            floor.map_or(0, |seq| seq.saturating_add(1))
+        } else {
+            // Past every known checkpoint. Frame number to land on, one
+            // before the estimate so the usual correction is a single
+            // step forward, and never before the floor.
+            let estimate = self
+                .header
+                .as_ref()
+                .and_then(|h| h.interval_ms)
+                .filter(|interval_ms| *interval_ms > 0)
+                .map(|interval_ms| {
+                    let offset_ms =
+                        u64::try_from(offset_from_start.as_millis()).unwrap_or(u64::MAX);
+                    (offset_ms / interval_ms).saturating_sub(1)
+                });
+            let after_floor = floor.map(|seq| seq.saturating_add(1));
+            match (estimate, after_floor) {
+                (Some(estimate), Some(after_floor)) => estimate.max(after_floor),
+                (estimate, after_floor) => estimate.or(after_floor).unwrap_or(0),
+            }
+        };
+
+        if let Some(back) = self.cache.back()
+            && back.timestamp < target
+        {
+            // Ahead of the cache: the reader is already positioned right
+            // after `back`. Re-opening only pays when an index frame
+            // beyond `back` gets us closer than reading on would
+            // (`rewind_and_seek_to` only uses a checkpoint before `land`).
+            let back_seq = back.seq;
+            let index_helps = self
+                .index_points
+                .iter()
+                .any(|p| p.seq > back_seq && p.seq < land);
+            if !index_helps {
+                self.cursor = Some(self.cache.len() - 1);
+                return Ok(());
+            }
+        }
+        self.rewind_and_seek_to(land)
+    }
+
+    /// The last known checkpoint whose data frame is earlier than `target`.
+    /// The first frame at or after `target` comes after it.
+    fn index_floor(&self, target: DateTime<Utc>) -> Option<u64> {
+        self.index_points
+            .iter()
+            .rev()
+            .find(|p| p.timestamp.is_some_and(|ts| ts < target))
+            .map(|p| p.seq)
+    }
+
+    /// Step the cursor forward to the first frame at or after `target`.
+    /// Returns whether it moved, which tells the caller the frame before
+    /// the landing is earlier than the target.
+    fn walk_forward(&mut self, target: DateTime<Utc>) -> Result<bool, ReplayError> {
+        let mut stepped_forward = false;
+        loop {
+            match self.current() {
+                None => return Ok(stepped_forward),
+                Some(cur) if cur.timestamp >= target => return Ok(stepped_forward),
+                Some(_) => {}
+            }
+            if self.next()?.is_none() {
+                if self.eof {
+                    // Target is past the end: stay on the last frame.
+                    return Ok(stepped_forward);
+                }
+                // Scan budget ran out on malformed lines; keep reading.
+                continue;
+            }
+            stepped_forward = true;
+        }
+    }
+
+    /// Step the cursor to the first frame at or after `target`, forward or
+    /// backward from wherever it is.
+    fn walk_to(&mut self, target: DateTime<Utc>) -> Result<(), ReplayError> {
+        if self.walk_forward(target)? {
+            // The frame before this one was earlier than the target.
+            return Ok(());
+        }
+        // Landed at or past the target without stepping, so earlier frames
+        // may qualify as well. Walk back through the cache to the first one
+        // that does.
+        loop {
+            let (Some(cursor), Some(seq)) = (self.cursor, self.current().map(|f| f.seq)) else {
+                return Ok(());
+            };
+            if seq == 0 {
+                return Ok(());
+            }
+            if cursor == 0 {
+                // Going further back means leaving the cache. Stepping with
+                // `prev()` would re-open the file once per index spacing,
+                // each time skipping every line up to the checkpoint, which
+                // made a seek that overshot by many frames re-read the
+                // recording over and over. Every checkpoint up to here has
+                // been read, so one re-open at the last checkpoint before
+                // the target, followed by a forward walk, lands directly.
+                match self.index_floor(target) {
+                    Some(floor) => self.rewind_and_seek_to(floor.saturating_add(1))?,
+                    None => self.rewind_and_seek_to(0)?,
+                }
+                self.walk_forward(target)?;
+                return Ok(());
+            }
+            self.cursor = Some(cursor - 1);
+            if self.current().is_some_and(|cur| cur.timestamp < target) {
+                self.cursor = Some(cursor);
+                return Ok(());
+            }
+        }
     }
 
     /// Total frame count discovered so far. Exact only after the stream
@@ -593,21 +779,11 @@ impl Replayer {
     /// Duration from frame 0 to the currently-displayed frame.
     pub fn elapsed(&self) -> Option<Duration> {
         let cur = self.current()?;
-        let first = self.cache.front()?;
-        (cur.timestamp - first.timestamp).to_std().ok()
+        (cur.timestamp - self.first_ts?).to_std().ok()
     }
 
-    fn first_frame_timestamp(&mut self) -> Result<DateTime<Utc>, ReplayError> {
-        // The first frame is always cached (priming guarantees that when
-        // the file has any data). Rewind if the head has been evicted.
-        if let Some(first) = self.cache.front()
-            && first.seq == 0
-        {
-            return Ok(first.timestamp);
-        }
-        self.rewind_and_seek_to(0)?;
-        self.current()
-            .map(|f| f.timestamp)
+    fn first_frame_timestamp(&self) -> Result<DateTime<Utc>, ReplayError> {
+        self.first_ts
             .ok_or_else(|| ReplayError::Empty(self.path.clone()))
     }
 
@@ -626,10 +802,15 @@ impl Replayer {
         // Preserve index_points — they remain valid across re-opens.
 
         // Use the nearest index checkpoint to skip ahead without parsing.
+        // Skipping past the index frame for `p.seq` leaves the reader at
+        // data frame `p.seq + 1`, so a checkpoint is only usable for a
+        // target strictly after it. With `<=` a target equal to a
+        // checkpoint's seq landed one frame late, and `prev()` from the
+        // frame after a checkpoint could not step back onto it.
         let mut nearest_line: u64 = 0;
         let mut nearest_seq: u64 = 0;
         for p in &self.index_points {
-            if p.seq <= target_seq && p.seq > nearest_seq {
+            if p.seq < target_seq && p.seq > nearest_seq {
                 nearest_seq = p.seq;
                 nearest_line = p.line;
             }
@@ -813,9 +994,15 @@ impl Replayer {
             );
             return;
         }
+        let timestamp = self
+            .cache
+            .back()
+            .filter(|frame| frame.seq == seq)
+            .map(|frame| frame.timestamp);
         self.index_points.push(IndexPoint {
             seq,
             line: self.line_number,
+            timestamp,
         });
     }
 }
@@ -837,8 +1024,19 @@ fn parse_ts(ts: &str) -> DateTime<Utc> {
         .unwrap_or_else(|_| Utc.timestamp_opt(0, 0).single().unwrap_or_else(Utc::now))
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Data frames fully decoded on the current thread. Lets tests bound
+    /// how much of a recording a seek reads (issue #503).
+    pub(crate) static DECODED_FRAMES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Recording files opened on the current thread.
+    pub(crate) static FILE_OPENS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Pick the right decoder for a file based on its extension.
 fn open_reader(path: &Path) -> io::Result<BufReader<Box<dyn Read + Send>>> {
+    #[cfg(test)]
+    FILE_OPENS.with(|count| count.set(count.get() + 1));
     let file = File::open(path)?;
     let ext = path
         .extension()
@@ -1024,6 +1222,16 @@ mod tests {
 
         let back = r.prev().unwrap().expect("prev lands on frame 0");
         assert_eq!(back.seq, 0);
+
+        // The fixture has three frames. Past the last one `next()`
+        // returns `None`, reports EOF, and leaves the cursor in place.
+        assert_eq!(r.next().unwrap().expect("frame 1").seq, 1);
+        assert_eq!(r.next().unwrap().expect("frame 2").seq, 2);
+        assert!(!r.at_eof());
+        assert!(r.next().unwrap().is_none(), "no frame after the last");
+        assert!(r.at_eof());
+        assert_eq!(r.current().unwrap().seq, 2);
+        assert!(r.next().unwrap().is_none());
     }
 
     #[test]
@@ -1121,9 +1329,8 @@ mod tests {
             }
         }
         // Open and walk to EOF so `index_points` is populated with the
-        // seq=5 checkpoint. `next()` returns `Ok(None)` only before the
-        // first frame has been materialised; after EOF it keeps returning
-        // the last cached frame, so drive the walk via `at_eof()`.
+        // seq=5 checkpoint. `next()` returns `Ok(None)` once there is no
+        // further frame.
         let mut r = Replayer::open(&path).unwrap();
         while !r.at_eof() {
             if r.next().unwrap().is_none() {
@@ -1445,3 +1652,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "replay_seek_tests.rs"]
+mod seek_tests;

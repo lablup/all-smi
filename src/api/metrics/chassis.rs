@@ -92,11 +92,9 @@ impl MetricPresenceFlags {
 }
 
 impl<'a> MetricExporter for ChassisMetricExporter<'a> {
-    fn export_metrics(&self) -> String {
-        let mut builder = MetricBuilder::new();
-
+    fn export_into(&self, builder: &mut MetricBuilder) {
         if self.chassis_info.is_empty() {
-            return builder.build();
+            return;
         }
 
         // Single pass to determine which metrics are present
@@ -328,8 +326,6 @@ impl<'a> MetricExporter for ChassisMetricExporter<'a> {
                 }
             }
         }
-
-        builder.build()
     }
 }
 
