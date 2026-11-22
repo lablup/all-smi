@@ -16,7 +16,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       # Install AMD GPU development libraries
       - name: Install AMD GPU dependencies
@@ -32,7 +32,7 @@ jobs:
           platform: linux-x86_64
 
       - name: Cache cargo
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -225,7 +225,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: debian/ copies must match packaging/systemd/
         run: |
@@ -371,7 +371,7 @@ jobs:
     needs: test
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Install AMD GPU dependencies
         run: |
@@ -385,7 +385,7 @@ jobs:
           platform: linux-x86_64
 
       - name: Cache cargo
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -842,7 +842,7 @@ jobs:
     runs-on: macos-15
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Setup protoc
         uses: ./.github/actions/setup-protoc
@@ -853,7 +853,7 @@ jobs:
       # Its own key: `launchd-service` saves the same paths under the plain
       # `-cargo-` key, and only the first job to finish gets to save it.
       - name: Cache cargo
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -896,7 +896,7 @@ jobs:
     needs: test
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Setup protoc
         uses: ./.github/actions/setup-protoc
@@ -905,7 +905,7 @@ jobs:
           platform: osx-aarch_64
 
       - name: Cache cargo
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -1153,7 +1153,7 @@ jobs:
     needs: test
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       # Install AMD GPU development libraries
       - name: Install AMD GPU dependencies
@@ -1169,7 +1169,7 @@ jobs:
           platform: linux-x86_64
 
       - name: Cache cargo
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -1249,7 +1249,7 @@ jobs:
     runs-on: windows-11-arm
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -1260,7 +1260,7 @@ jobs:
         uses: ./.github/actions/setup-clang-windows-arm64
 
       - name: Cache cargo
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry

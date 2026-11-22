@@ -138,7 +138,7 @@ jobs:
       #   - workflow_dispatch  -> the release_tag input, when provided
       #   - otherwise          -> the exact commit that triggered the run
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           ref: ${{ github.event.release.tag_name || github.event.inputs.release_tag || github.sha }}
 
@@ -156,7 +156,7 @@ jobs:
       # workflow and the actions it calls from drifting apart, which is what
       # the self-healing design was after in the first place.
       - name: Checkout workflow actions
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           ref: ${{ github.sha }}
           sparse-checkout: .github/actions
@@ -188,7 +188,7 @@ jobs:
       # real build times if the Intel job becomes the critical path.
       - name: Cache cargo
         if: matrix.target != 'x86_64-pc-windows-msvc' && matrix.target != 'x86_64-apple-darwin'
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -573,7 +573,7 @@ jobs:
       # 11) Upload release artifacts and checksum
       - name: Upload release artifacts
         if: (github.event_name == 'release' || github.event_name == 'workflow_dispatch') && matrix.target != 'aarch64-pc-windows-msvc'
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.event.release.tag_name || github.event.inputs.release_tag }}
           files: |
@@ -611,7 +611,7 @@ jobs:
       # "could not find Cargo.toml" and both windows-selfhosted and the
       # release build leg go red (issue #486).
       - name: Checkout signing script
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           ref: ${{ github.sha }}
           sparse-checkout: scripts/sign-windows.ps1
@@ -676,7 +676,7 @@ jobs:
 
       - name: Upload release artifacts
         if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.event.release.tag_name || github.event.inputs.release_tag }}
           files: |
