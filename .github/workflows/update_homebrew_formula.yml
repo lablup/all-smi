@@ -391,14 +391,25 @@ jobs:
           # (lablup/homebrew-tap 9969ec4). Nothing here depends on layout now,
           # and the guards abort instead of editing the wrong line.
 
-          set_version() {  # file version
-            local file="$1" version="$2" n
-            n=$(grep -c "^[[:space:]]*version " "$file" || true)
-            if [ "$n" -ne 1 ]; then
-              echo "::error::${file}: expected exactly one version stanza, found ${n}."
+          # The formula carries a `version` stanza only when Homebrew cannot
+          # read the version from the release url. `brew audit` rejects one that
+          # repeats the scanned version (lablup/homebrew-tap#5), but a tag such
+          # as v0.29.0+build.1 is scanned as a different number, and there the
+          # stanza is what keeps the formula's version right. Asking Homebrew's
+          # own Version.detect decides it, rather than guessing from the tag.
+          sync_version() {  # file version url
+            local file="$1" version="$2" url="$3" n detected
+            n=$(grep -c '^  version "' "$file" || true)
+            if [ "$n" -gt 1 ]; then
+              echo "::error::${file}: expected at most one version stanza, found ${n}."
               exit 1
             fi
-            gsed -i "s|^\([[:space:]]*\)version .*|\1version \"${version}\"|" "$file"
+            gsed -i '/^  version "/d' "$file"
+            detected=$(brew ruby -e 'puts Version.detect(ARGV.first)' "$url")
+            if [ "$detected" != "$version" ]; then
+              echo "::notice::${file}: Homebrew reads ${url} as ${detected}, so the formula pins version ${version}."
+              gsed -i "/^  homepage /a\  version \"${version}\"" "$file"
+            fi
           }
 
           # Number of url stanzas naming ARTIFACT. Artifact file names are what
@@ -476,7 +487,7 @@ jobs:
             mv "${file}.new" "$file"
           }
 
-          set_version  Formula/all-smi.rb "$VERSION"
+          sync_version Formula/all-smi.rb "$VERSION" "$mac_url"
           set_artifact Formula/all-smi.rb all-smi-macos-aarch64.zip    "$mac_url"       "$mac_sha"
           set_artifact Formula/all-smi.rb all-smi-linux-aarch64.tar.gz "$linux_arm_url" "$linux_arm_sha"
           set_artifact Formula/all-smi.rb all-smi-linux-x86_64.tar.gz  "$linux_x86_url" "$linux_x86_sha"
@@ -543,8 +554,18 @@ jobs:
           ruby -c Formula/all-smi.rb
           brew style Formula/all-smi.rb
 
-          if ! grep -q "^[[:space:]]*version \"${VERSION}\"$" Formula/all-smi.rb; then
-            echo "::error::Formula/all-smi.rb: version stanza is not ${VERSION}."
+          # The formula's version comes from its urls unless it pins one. The
+          # release-url check at the end of this step holds every url to this
+          # release; here a pinned version has to be both this release and one
+          # the url misreads, since audit rejects a pin that repeats the url.
+          detected=$(brew ruby -e 'puts Version.detect(ARGV.first)' "$mac_url")
+          pins=$(grep -c '^  version "' Formula/all-smi.rb || true)
+          if [ "$detected" = "$VERSION" ] && [ "$pins" -ne 0 ]; then
+            echo "::error::Formula/all-smi.rb: carries a version stanza that repeats the one Homebrew reads from the url."
+            exit 1
+          fi
+          if [ "$detected" != "$VERSION" ] && ! grep -qx "  version \"${VERSION}\"" Formula/all-smi.rb; then
+            echo "::error::Formula/all-smi.rb: Homebrew reads the url as ${detected}, and the formula does not pin version ${VERSION}."
             exit 1
           fi
 

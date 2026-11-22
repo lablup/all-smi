@@ -81,7 +81,10 @@ case_state1_asset_and_stanza() {
     assert_status "validate step succeeds" 0 "$status" "$box/validate.log"
 
     formula="$box/homebrew-tap/Formula/all-smi.rb"
-    assert_file_has "version bumped" "$formula" "version \"${NEW_VERSION}\""
+    # The fixture still carries the `version` stanza the tap used to have.
+    # Homebrew reads 0.26.0 from the url, so the stanza is redundant, and
+    # `brew audit` rejects it (lablup/homebrew-tap#5).
+    assert_file_lacks "redundant version stanza removed" "$formula" '  version "'
     assert_file_has "Linux installs the AMD companion" "$formula" '(lib/"all-smi").install "liball_smi_amd.so" if OS.linux?'
     assert_eq "four sha256 stanzas" 4 "$(count_sha_stanzas "$formula")"
     assert_eq "aarch64 macOS url rewritten" "$mac_url" "$(url_of "$formula" all-smi-macos-aarch64.zip)"
@@ -243,6 +246,34 @@ case_stale_url() {
         "all-smi-linux-x86_64.tar.gz"
 }
 
+# Homebrew reads a tag such as v0.26.0-rc.1 as 64, so for that release the
+# formula has to pin its version, and validation has to accept the pin.
+case_misread_tag_pins_version() {
+    begin_case "misread tag: the formula pins the version Homebrew cannot scan"
+    local box status formula saved_version="$NEW_VERSION" saved_base="$NEW_BASE"
+    NEW_VERSION="0.26.0-rc.1"
+    NEW_BASE="https://github.com/lablup/all-smi/releases/download/v${NEW_VERSION}"
+    box=$(new_sandbox "${FIXTURES}/two-stanza.rb")
+    export_artifact_env true
+
+    run_formula_step 'Update formula' "$box" "$box/update.log"
+    status=$?
+    assert_status "update step succeeds" 0 "$status" "$box/update.log"
+    assert_file_has "explains the pin" "$box/update.log" "so the formula pins version ${NEW_VERSION}"
+
+    apply_github_env "$box/github_env"
+    run_formula_step 'Validate updated formula' "$box" "$box/validate.log"
+    status=$?
+    assert_status "validate step succeeds" 0 "$status" "$box/validate.log"
+
+    formula="$box/homebrew-tap/Formula/all-smi.rb"
+    assert_eq "exactly one version stanza" 1 "$(grep -c '^  version "' "$formula")"
+    assert_file_has "pins the release version" "$formula" "  version \"${NEW_VERSION}\""
+
+    NEW_VERSION="$saved_version"
+    NEW_BASE="$saved_base"
+}
+
 run_formula_cases() {
     case_state1_asset_and_stanza
     case_state2_neither
@@ -251,4 +282,5 @@ run_formula_cases() {
     case_malformed_duplicate_stanza
     case_swapped_checksums
     case_stale_url
+    case_misread_tag_pins_version
 }
