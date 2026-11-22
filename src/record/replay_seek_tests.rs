@@ -236,3 +236,51 @@ fn prev_steps_back_across_an_index_frame() {
     assert_eq!(r.seek(secs(2000)).unwrap().unwrap().seq, 2000);
     assert_eq!(r.seek(secs(1000)).unwrap().unwrap().seq, 1000);
 }
+
+/// A recording that ran slower than its header claims (slow remote
+/// cycles, a suspended host) makes the `interval_ms` estimate overshoot.
+/// Correcting it re-opens the file once at the index frame before the
+/// target. It used to step back with `prev()`, which re-opened the file
+/// once per index spacing and skipped every line up to the checkpoint
+/// each time.
+#[test]
+fn an_overshooting_estimate_is_corrected_with_one_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("slow.ndjson");
+    // Real cadence 2 s, header claims 1 s: the estimate for any target is
+    // twice the real frame number.
+    write_fixture(&path, 20_000, 2, Some(1000));
+
+    // Checkpoints known up to frame 11 000 (the one after frame 12 000 is
+    // not read yet), cursor back near the start.
+    let mut r = Replayer::open(&path).unwrap();
+    assert_eq!(r.seek(secs(24_000)).unwrap().unwrap().seq, 12_000);
+    assert_eq!(r.seek(secs(200)).unwrap().unwrap().seq, 100);
+
+    // Past every known checkpoint, so the estimate decides: frame 29 999,
+    // beyond the end. The landing is the last frame, 4 999 frames past the
+    // target; the correction goes back to frame 15 000 with one re-open.
+    let (decoded_before, opens_before) = (decoded(), opens());
+    assert_eq!(r.seek(secs(30_000)).unwrap().unwrap().seq, 15_000);
+    assert_eq!(r.elapsed(), Some(secs(30_000)));
+    assert_eq!(opens() - opens_before, 2, "overshoot, then one correction");
+    // From checkpoint 11 000 to the end, then at most one index spacing.
+    assert!(
+        decoded() - decoded_before <= 9_000 + INDEX_EVERY as usize + 10,
+        "decoded {}",
+        decoded() - decoded_before
+    );
+
+    // With every checkpoint known, a seek goes straight to the index
+    // frame before the target.
+    for (target, frame) in [(4_000, 2_000), (39_000, 19_500), (21_000, 10_500)] {
+        let (decoded_before, opens_before) = (decoded(), opens());
+        assert_eq!(r.seek(secs(target)).unwrap().unwrap().seq, frame);
+        assert!(opens() - opens_before <= 1);
+        assert!(
+            decoded() - decoded_before <= INDEX_EVERY as usize + 10,
+            "seek to {target} s decoded {}",
+            decoded() - decoded_before
+        );
+    }
+}
