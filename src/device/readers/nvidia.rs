@@ -14,14 +14,15 @@
 
 use crate::device::GpuReader;
 use crate::device::common::constants::BYTES_PER_MB;
-use crate::device::common::{execute_command_default, parse_csv_line};
+use crate::device::common::parse_csv_line;
 use crate::device::process_list::{get_all_processes, merge_gpu_processes};
 use crate::device::readers::common_cache::{DetailBuilder, DeviceStaticInfo, MAX_DEVICES};
 use crate::device::readers::detail_keys;
 use crate::device::readers::nvidia_hardware::{
-    HardwareDetailCache, collect_gpm_metrics, collect_nvlink_remote_devices,
+    HardwareDetailCache, NotSupportedSkipSet, collect_nvlink_remote_devices,
 };
 use crate::device::readers::nvidia_mig::collect_mig_info;
+use crate::device::readers::nvidia_smi_fallback::run_nvidia_smi_fallback;
 use crate::device::readers::nvidia_soc::{
     DlaReading, MemoryClass, NvmlDeviceKind, apply_dla_reading, c2c_enabled, classify_memory,
     classify_nvml_device, dla_engine_clocks, is_soc_device_name, pair_dla_with_gpu, raw_brand,
@@ -37,6 +38,10 @@ use nvml_wrapper::enums::device::{DeviceArchitecture, UsedGpuMemory};
 use nvml_wrapper::{Nvml, cuda_driver_version_major, cuda_driver_version_minor};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
+
+/// Name used when NVML cannot report one. A cached static name equal to this
+/// is treated as "not read yet" and queried again.
+const UNKNOWN_GPU_NAME: &str = "Unknown GPU";
 
 // Global status for NVML error messages
 static NVML_STATUS: Mutex<Option<String>> = Mutex::new(None);
@@ -95,6 +100,12 @@ pub struct NvidiaGpuReader {
     /// call that observes any supported value, following the same "don't
     /// cache an all-empty snapshot" policy as [`Self::thermal_thresholds`].
     hardware_details: HardwareDetailCache,
+    /// Device indices whose `vgpu_host_mode()` answered `NotSupported`
+    /// (every GPU on a bare-metal host). They are not probed again.
+    vgpu_not_supported: NotSupportedSkipSet,
+    /// Device indices whose `mig_mode()` answered `NotSupported`. A GPU
+    /// reporting MIG disabled is not in here and is probed every poll.
+    mig_not_supported: NotSupportedSkipSet,
 }
 
 /// Map the NVML [`PerformanceState`] enum to the integer used by the
@@ -143,6 +154,8 @@ impl NvidiaGpuReader {
             device_static_info: OnceLock::new(),
             thermal_thresholds: Mutex::new(HashMap::new()),
             hardware_details: HardwareDetailCache::new(),
+            vgpu_not_supported: NotSupportedSkipSet::new(),
+            mig_not_supported: NotSupportedSkipSet::new(),
         }
     }
 
@@ -240,7 +253,9 @@ impl NvidiaGpuReader {
 
                 for i in 0..device_count {
                     if let Ok(device) = nvml.device_by_index(i) {
-                        let name = device.name().unwrap_or_else(|_| "Unknown GPU".to_string());
+                        let name = device
+                            .name()
+                            .unwrap_or_else(|_| UNKNOWN_GPU_NAME.to_string());
                         let uuid = device.uuid().ok();
                         let kind = classify_nvml_device(&name, uuid.as_deref(), raw_brand(&device));
                         let mem_total = device.memory_info().map(|m| m.total).unwrap_or(0);
@@ -274,7 +289,8 @@ impl NvidiaGpuReader {
 
     /// Get GPU processes using cached NVML handle, falling back to nvidia-smi
     fn get_gpu_processes_cached(&self) -> (Vec<ProcessInfo>, HashSet<u32>) {
-        match self.with_nvml(get_gpu_processes_nvml) {
+        match self.with_nvml(|nvml| get_gpu_processes_nvml(nvml, self.get_device_static_info(nvml)))
+        {
             Ok(result) => result,
             Err(e) => {
                 set_nvml_status(e);
@@ -318,7 +334,10 @@ impl NvidiaGpuReader {
                             reading,
                             dla_node_clock,
                         );
-                        dla_readings.push((reading, device.uuid().ok()));
+                        // The UUID never changes; ask NVML only when the
+                        // static pass could not read it.
+                        let dla_uuid = dla.info.uuid.clone().or_else(|| device.uuid().ok());
+                        dla_readings.push((reading, dla_uuid));
                         continue;
                     }
                     let memory_class = static_device
@@ -359,16 +378,31 @@ impl NvidiaGpuReader {
                     // Active NvLinks are queried every poll — link state
                     // can change at runtime if a cable is disconnected.
                     let nvlink_remote_devices = collect_nvlink_remote_devices(nvml, &device);
-                    // GPM metrics are opt-in (Hopper+). `collect_gpm_metrics`
-                    // returns `None` everywhere else and a populated-but-empty
-                    // snapshot on supported hardware (full two-sample
-                    // implementation deferred to a follow-up).
-                    let gpm_metrics = collect_gpm_metrics(&device);
+                    // GPM metrics are opt-in (Hopper+). This is `None`
+                    // everywhere else and a populated-but-empty snapshot on
+                    // supported hardware (full two-sample implementation
+                    // deferred to a follow-up). The support probe is cached
+                    // per device.
+                    let gpm_metrics = self.hardware_details.gpm_metrics(&device, i);
+                    // UUID and name are fixed per device: reuse the static
+                    // copies and ask NVML only when that pass failed.
+                    let uuid = static_device
+                        .and_then(|d| d.info.uuid.clone())
+                        .unwrap_or_else(|| device.uuid().unwrap_or_else(|_| format!("GPU-{i}")));
+                    let name = static_device
+                        .map(|d| d.info.name.as_str())
+                        .filter(|name| *name != UNKNOWN_GPU_NAME)
+                        .map(str::to_string)
+                        .unwrap_or_else(|| {
+                            device
+                                .name()
+                                .unwrap_or_else(|_| UNKNOWN_GPU_NAME.to_string())
+                        });
 
                     let info = GpuInfo {
-                        uuid: device.uuid().unwrap_or_else(|_| format!("GPU-{i}")),
+                        uuid,
                         time: Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
-                        name: device.name().unwrap_or_else(|_| "Unknown GPU".to_string()),
+                        name,
                         device_type: "GPU".to_string(),
                         host_id: get_hostname(),
                         hostname: get_hostname(),
@@ -478,7 +512,8 @@ impl GpuReader for NvidiaGpuReader {
     fn get_vgpu_info(&self) -> Vec<VgpuHostInfo> {
         // Degrade to an empty vector on any NVML failure. Callers MUST treat
         // an empty response as "not vGPU-capable" and render nothing.
-        self.with_nvml(collect_vgpu_info).unwrap_or_default()
+        self.with_nvml(|nvml| collect_vgpu_info(nvml, &self.vgpu_not_supported))
+            .unwrap_or_default()
     }
 
     fn get_mig_info(&self) -> Vec<MigGpuInfo> {
@@ -486,7 +521,8 @@ impl GpuReader for NvidiaGpuReader {
         // pre-Ampere GPUs, MIG not enabled, missing permissions). Callers
         // MUST treat an empty response as "not MIG-capable" and render
         // nothing.
-        self.with_nvml(collect_mig_info).unwrap_or_default()
+        self.with_nvml(|nvml| collect_mig_info(nvml, &self.mig_not_supported))
+            .unwrap_or_default()
     }
 }
 
@@ -610,7 +646,13 @@ pub fn get_nvml_status_message() -> Option<String> {
 }
 
 // Get GPU processes using NVML
-fn get_gpu_processes_nvml(nvml: &Nvml) -> (Vec<ProcessInfo>, HashSet<u32>) {
+//
+// `static_devices` supplies each device's UUID, which never changes, so the
+// poll does not ask NVML for it again.
+fn get_gpu_processes_nvml(
+    nvml: &Nvml,
+    static_devices: &HashMap<u32, NvmlStaticDevice>,
+) -> (Vec<ProcessInfo>, HashSet<u32>) {
     let mut gpu_process_map: HashMap<(u32, String), ProcessInfo> = HashMap::new();
     let mut gpu_pids = HashSet::new();
     // `(pid, device uuid)` rows whose memory NVML could not report (WDDM),
@@ -622,9 +664,14 @@ fn get_gpu_processes_nvml(nvml: &Nvml) -> (Vec<ProcessInfo>, HashSet<u32>) {
     if let Ok(device_count) = nvml.device_count() {
         for device_index in 0..device_count {
             if let Ok(device) = nvml.device_by_index(device_index) {
-                let device_uuid = device
-                    .uuid()
-                    .unwrap_or_else(|_| format!("GPU-{device_index}"));
+                let device_uuid = static_devices
+                    .get(&device_index)
+                    .and_then(|d| d.info.uuid.clone())
+                    .unwrap_or_else(|| {
+                        device
+                            .uuid()
+                            .unwrap_or_else(|_| format!("GPU-{device_index}"))
+                    });
                 #[cfg(target_os = "windows")]
                 pci_identities.push(cached_pci_identity(&device, &device_uuid));
 
@@ -916,15 +963,12 @@ fn get_gpu_info_nvidia_smi() -> Vec<GpuInfo> {
     // Before `nvidia-smi` wakes the NPU, as on the NVML path (issue #461).
     #[cfg(target_os = "windows")]
     let dla_node_clock = crate::device::readers::nvidia_dla_clock::read_npu_node_clock();
-    let output = match execute_command_default(
-        "nvidia-smi",
-        &[
-            "--query-gpu=index,uuid,name,utilization.gpu,temperature.gpu,memory.used,memory.total,clocks.gr,power.draw",
-            "--format=csv,noheader,nounits",
-        ],
-    ) {
-        Ok(output) => output.stdout,
-        Err(_) => return Vec::new(),
+    // Backed off after a failed spawn; see `nvidia_smi_fallback`.
+    let Some(output) = run_nvidia_smi_fallback(&[
+        "--query-gpu=index,uuid,name,utilization.gpu,temperature.gpu,memory.used,memory.total,clocks.gr,power.draw",
+        "--format=csv,noheader,nounits",
+    ]) else {
+        return Vec::new();
     };
 
     let time = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
@@ -1025,15 +1069,12 @@ fn get_gpu_processes_nvidia_smi() -> (Vec<ProcessInfo>, HashSet<u32>) {
     let mut gpu_processes = Vec::new();
     let mut gpu_pids = HashSet::new();
 
-    let output = match execute_command_default(
-        "nvidia-smi",
-        &[
-            "--query-compute-apps=gpu_uuid,pid,used_memory",
-            "--format=csv,noheader,nounits",
-        ],
-    ) {
-        Ok(output) => output.stdout,
-        Err(_) => return (gpu_processes, gpu_pids),
+    // Shares the back-off of the device query above.
+    let Some(output) = run_nvidia_smi_fallback(&[
+        "--query-compute-apps=gpu_uuid,pid,used_memory",
+        "--format=csv,noheader,nounits",
+    ]) else {
+        return (gpu_processes, gpu_pids);
     };
 
     for line in output.lines() {

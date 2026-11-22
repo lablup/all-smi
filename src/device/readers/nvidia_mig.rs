@@ -43,6 +43,7 @@ use std::os::raw::c_uint;
 use nvml_wrapper::Nvml;
 use nvml_wrapper::error::nvml_try;
 
+use crate::device::readers::nvidia_hardware::NotSupportedSkipSet;
 use crate::device::types::{MigGpuInfo, MigInstanceInfo};
 use crate::utils::get_hostname;
 
@@ -67,7 +68,11 @@ const MIG_NAME_BUFFER: usize = 64;
 /// the current live state and `instances` empty whenever MIG mode is
 /// disabled. This lets consumers observe disabled GPUs in dashboards and
 /// catch runtime MIG toggles via `all_smi_gpu_mig_mode = 0`.
-pub fn collect_mig_info(nvml: &Nvml) -> Vec<MigGpuInfo> {
+///
+/// `skip` holds the device indices whose `mig_mode()` already answered
+/// `NotSupported`; they are not probed again. A GPU that answers with MIG
+/// disabled is never added, so a runtime toggle is still observed.
+pub fn collect_mig_info(nvml: &Nvml, skip: &NotSupportedSkipSet) -> Vec<MigGpuInfo> {
     let mut out = Vec::new();
 
     let device_count = match nvml.device_count() {
@@ -78,6 +83,9 @@ pub fn collect_mig_info(nvml: &Nvml) -> Vec<MigGpuInfo> {
     let hostname = get_hostname();
 
     for index in 0..device_count {
+        if skip.contains(index) {
+            continue;
+        }
         let device = match nvml.device_by_index(index) {
             Ok(d) => d,
             Err(_) => continue,
@@ -86,7 +94,7 @@ pub fn collect_mig_info(nvml: &Nvml) -> Vec<MigGpuInfo> {
         // Probe MIG mode. `NotSupported` is the expected response on consumer
         // cards and pre-Ampere datacenter GPUs — silently skip those, they
         // have no MIG story at all to report.
-        let mode = match device.mig_mode() {
+        let mode = match skip.observe(index, device.mig_mode()) {
             Ok(m) => m,
             Err(_) => continue,
         };

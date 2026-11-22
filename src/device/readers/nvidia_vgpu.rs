@@ -36,6 +36,7 @@ use nvml_wrapper::Nvml;
 use nvml_wrapper::enum_wrappers::device::HostVgpuMode;
 use nvml_wrapper::error::{nvml_try, nvml_try_count};
 
+use crate::device::readers::nvidia_hardware::NotSupportedSkipSet;
 use crate::device::types::{VgpuHostInfo, VgpuInfo};
 use crate::utils::get_hostname;
 
@@ -78,7 +79,10 @@ fn host_mode_code(mode: HostVgpuMode) -> u32 {
 /// * NVML reports zero devices.
 /// * No device responds to `vgpu_host_mode()` (bare-metal host or driver
 ///   too old to expose the vGPU API family).
-pub fn collect_vgpu_info(nvml: &Nvml) -> Vec<VgpuHostInfo> {
+///
+/// `skip` holds the device indices that already answered `NotSupported`;
+/// they are not probed again (see [`NotSupportedSkipSet`]).
+pub fn collect_vgpu_info(nvml: &Nvml, skip: &NotSupportedSkipSet) -> Vec<VgpuHostInfo> {
     let mut out = Vec::new();
 
     let device_count = match nvml.device_count() {
@@ -89,6 +93,9 @@ pub fn collect_vgpu_info(nvml: &Nvml) -> Vec<VgpuHostInfo> {
     let hostname = get_hostname();
 
     for index in 0..device_count {
+        if skip.contains(index) {
+            continue;
+        }
         let device = match nvml.device_by_index(index) {
             Ok(d) => d,
             Err(_) => continue,
@@ -96,7 +103,7 @@ pub fn collect_vgpu_info(nvml: &Nvml) -> Vec<VgpuHostInfo> {
 
         // Probe whether this device is vGPU-capable. `NotSupported` is the
         // normal response on bare-metal; we intentionally do not log.
-        let host_mode = match device.vgpu_host_mode() {
+        let host_mode = match skip.observe(index, device.vgpu_host_mode()) {
             Ok(m) => m,
             Err(_) => continue,
         };

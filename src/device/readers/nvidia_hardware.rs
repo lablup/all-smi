@@ -102,6 +102,9 @@ pub struct HardwareDetailCache {
     numa: FieldCache<i32>,
     gsp_mode: FieldCache<u8>,
     gsp_version: FieldCache<String>,
+    /// Whether the device answers the GPM probe. A hardware capability, so
+    /// one `gpm_support()` call per device serves the process lifetime.
+    gpm_supported: FieldCache<bool>,
 }
 
 impl Default for HardwareDetailCache {
@@ -116,7 +119,18 @@ impl HardwareDetailCache {
             numa: Mutex::new(HashMap::new()),
             gsp_mode: Mutex::new(HashMap::new()),
             gsp_version: Mutex::new(HashMap::new()),
+            gpm_supported: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// GPM metrics for `index`, probing `gpm_support()` only until it gives
+    /// a definite answer. A transient NVML error is not cached, so the next
+    /// poll probes again; see [`collect_gpm_metrics`] for what is returned.
+    pub fn gpm_metrics(&self, device: &nvml_wrapper::Device, index: u32) -> Option<GpmMetrics> {
+        let supported = self
+            .get_or_fetch_field(&self.gpm_supported, index, || device.gpm_support())
+            .unwrap_or(false);
+        gpm_metrics_for(supported)
     }
 
     /// Fetch hardware details for `index`, consulting and updating the
@@ -336,6 +350,55 @@ pub(crate) fn nvlink_remote_type_from_wrapper(value: IntDeviceType) -> NvLinkRem
     }
 }
 
+/// Device indices whose capability probe answered `NotSupported`.
+///
+/// `vgpu_host_mode()` on a bare-metal GPU and `mig_mode()` on a GPU without
+/// MIG answer `NotSupported` on every call, for as long as the process runs.
+/// The collectors record those indices here and stop probing them.
+///
+/// Only `NotSupported` is recorded. Any other error may be transient, and an
+/// `Ok` must keep being probed: a GPU that reports MIG disabled can have MIG
+/// enabled at runtime, which the exporter tracks through
+/// `all_smi_gpu_mig_mode`.
+#[derive(Debug, Default)]
+pub struct NotSupportedSkipSet {
+    indices: Mutex<std::collections::HashSet<u32>>,
+}
+
+impl NotSupportedSkipSet {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Whether the probe for `index` is known to be unsupported.
+    pub fn contains(&self, index: u32) -> bool {
+        self.indices
+            .lock()
+            .map(|set| set.contains(&index))
+            .unwrap_or(false)
+    }
+
+    /// Record the outcome of one probe and hand the result back.
+    pub fn observe<T>(&self, index: u32, result: Result<T, NvmlError>) -> Result<T, NvmlError> {
+        if let Ok(mut set) = self.indices.lock() {
+            note_probe_result(&mut set, index, &result);
+        }
+        result
+    }
+}
+
+/// Add `index` to `skip` when its probe answered `NotSupported`; leave the
+/// set alone for `Ok` and for every other error.
+fn note_probe_result<T>(
+    skip: &mut std::collections::HashSet<u32>,
+    index: u32,
+    result: &Result<T, NvmlError>,
+) {
+    if matches!(result, Err(NvmlError::NotSupported)) {
+        skip.insert(index);
+    }
+}
+
 /// Return `true` when the device reports GPM support via NVML's probe.
 /// Any error (symbol missing, `NotSupported`, `InvalidArg`) degrades to
 /// `false` so the caller never emits GPM metrics for a non-GPM device.
@@ -360,8 +423,14 @@ pub fn gpm_is_supported(device: &nvml_wrapper::Device) -> bool {
 /// When the two-sample implementation lands we will populate
 /// [`GpmMetrics::sm_occupancy`] and
 /// [`GpmMetrics::memory_bandwidth_utilization`] here.
+#[allow(dead_code)] // The reader goes through `HardwareDetailCache::gpm_metrics`.
 pub fn collect_gpm_metrics(device: &nvml_wrapper::Device) -> Option<GpmMetrics> {
-    if !gpm_is_supported(device) {
+    gpm_metrics_for(gpm_is_supported(device))
+}
+
+/// The GPM value for a device whose support flag is already known.
+fn gpm_metrics_for(supported: bool) -> Option<GpmMetrics> {
+    if !supported {
         return None;
     }
     // Supported but unsampled — the two-sample handshake is deferred to a
@@ -381,6 +450,49 @@ fn err_unsupported() -> NvmlError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ------------------------------------------------------------------
+    // NotSupportedSkipSet
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn only_not_supported_adds_an_index_to_the_skip_set() {
+        let mut skip = std::collections::HashSet::new();
+
+        note_probe_result(&mut skip, 0, &Ok::<u32, NvmlError>(0));
+        note_probe_result::<u32>(&mut skip, 1, &Err(NvmlError::Unknown));
+        note_probe_result::<u32>(&mut skip, 2, &Err(NvmlError::GpuLost));
+        note_probe_result::<u32>(&mut skip, 3, &Err(NvmlError::FunctionNotFound));
+        assert!(skip.is_empty());
+
+        note_probe_result::<u32>(&mut skip, 4, &Err(NvmlError::NotSupported));
+        assert_eq!(skip, std::collections::HashSet::from([4]));
+    }
+
+    #[test]
+    fn skip_set_keeps_probing_a_device_that_answers_ok() {
+        let skip = NotSupportedSkipSet::new();
+
+        // MIG disabled is an `Ok`: the GPU must stay probed every poll.
+        assert!(skip.observe(0, Ok::<u32, NvmlError>(0)).is_ok());
+        assert!(!skip.contains(0));
+        // A transient error does not retire the probe either.
+        assert!(skip.observe::<u32>(0, Err(NvmlError::Unknown)).is_err());
+        assert!(!skip.contains(0));
+
+        assert!(
+            skip.observe::<u32>(1, Err(NvmlError::NotSupported))
+                .is_err()
+        );
+        assert!(skip.contains(1));
+        assert!(!skip.contains(0));
+    }
+
+    #[test]
+    fn gpm_metrics_follow_the_cached_support_flag() {
+        assert!(gpm_metrics_for(false).is_none());
+        assert!(gpm_metrics_for(true).is_some());
+    }
 
     // ------------------------------------------------------------------
     // HardwareDetailCache field-level caching behaviour
