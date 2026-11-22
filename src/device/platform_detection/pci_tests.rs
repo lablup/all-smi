@@ -40,6 +40,9 @@ garbage line without ids
     );
 }
 
+// The fixture mirrors /sys/bus/pci/devices, whose entry names contain ':',
+// which Windows rejects in file names. sysfs only exists on Linux anyway.
+#[cfg(unix)]
 #[test]
 fn sysfs_devices_are_read_and_malformed_entries_skipped() {
     let dir = tempfile::tempdir().unwrap();

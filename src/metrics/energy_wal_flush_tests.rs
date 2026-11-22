@@ -63,7 +63,10 @@ async fn a_small_wal_never_collects_lifetime_totals() {
     let writer = WalWriter::open(&wal_path).unwrap();
     let writer = flush_cycle(writer, &wal_path, &state).await;
     add_ten_seconds(&state, origin, 2, 100.0).await;
-    let _writer = flush_cycle(writer, &wal_path, &state).await;
+    let writer = flush_cycle(writer, &wal_path, &state).await;
+    // On Windows the writer holds the file with share_mode(0), so replay can
+    // only open it once the writer is closed.
+    drop(writer);
 
     assert_eq!(
         snapshots() - before,
@@ -99,12 +102,18 @@ async fn a_wal_above_the_threshold_snapshots_once_and_compacts_exactly() {
         size < 1024,
         "compaction must rewrite the file to one record per device, got {size} bytes"
     );
+    // On Windows the writer holds the file with share_mode(0), so replay can
+    // only open it once the writer is closed. Reopen it afterwards, as a
+    // restart would.
+    drop(writer);
     assert!((replayed_total(&wal_path) - 1_000.0).abs() < 1e-6);
+    let writer = WalWriter::open(&wal_path).unwrap();
 
     // The next cycle is back under the threshold: no further snapshot, and
     // the new delta lands once on top of the compacted record.
     add_ten_seconds(&state, origin, 2, 100.0).await;
-    let _writer = flush_cycle(writer, &wal_path, &state).await;
+    let writer = flush_cycle(writer, &wal_path, &state).await;
+    drop(writer);
     assert_eq!(snapshots() - before, 1);
     assert!((replayed_total(&wal_path) - 2_000.0).abs() < 1e-6);
 }

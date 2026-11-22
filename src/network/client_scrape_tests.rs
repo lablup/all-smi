@@ -137,6 +137,21 @@ async fn hung_host_times_out_then_backs_off_without_delaying_the_tick() {
     );
 }
 
+/// A connection to the closed port is refused at once on Linux and macOS.
+/// Windows retries a refused SYN before giving up, which outlasts the short
+/// test timeouts, so there the same attempt ends as a timeout. Either is a
+/// failed attempt, which is all the backoff logic under test depends on.
+fn assert_failed_connect(state: Option<&str>) {
+    if cfg!(windows) {
+        assert!(
+            matches!(state, Some("disconnected" | "timeout")),
+            "expected a failed connection, got {state:?}"
+        );
+    } else {
+        assert_eq!(state, Some("disconnected"));
+    }
+}
+
 #[tokio::test]
 async fn backoff_expires_success_clears_it_and_removed_hosts_are_dropped() {
     let healthy = format!("http://{}", spawn_healthy_server().await);
@@ -154,7 +169,7 @@ async fn backoff_expires_success_clears_it_and_removed_hosts_are_dropped() {
     for _ in 0..2 {
         let data = client.fetch_remote_metrics(&hosts, &semaphore).await;
         let status = status_for(&data.connection_statuses, &refused);
-        assert_eq!(status.connection_state.as_deref(), Some("disconnected"));
+        assert_failed_connect(status.connection_state.as_deref());
     }
     let entry = client.backoff_entry(&refused_id).expect("backoff entry");
     assert_eq!(entry.consecutive_failures, 2);
@@ -170,7 +185,7 @@ async fn backoff_expires_success_clears_it_and_removed_hosts_are_dropped() {
     client.expire_backoff_for_tests();
     let data = client.fetch_remote_metrics(&hosts, &semaphore).await;
     let status = status_for(&data.connection_statuses, &refused);
-    assert_eq!(status.connection_state.as_deref(), Some("disconnected"));
+    assert_failed_connect(status.connection_state.as_deref());
     assert_eq!(status.consecutive_failures, 3);
 
     // Removing the host from the configuration drops its history.
