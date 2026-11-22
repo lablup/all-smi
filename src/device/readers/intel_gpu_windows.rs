@@ -50,50 +50,14 @@ use crate::device::GpuReader;
 use crate::device::readers::intel_gpu_names::{
     classify_intel_architecture, classify_intel_variant,
 };
+use crate::device::readers::windows_video_controller::VideoControllerCache;
 use crate::device::types::{GPU_METRIC_UNAVAILABLE, GpuInfo, ProcessInfo};
 use crate::utils::get_hostname;
 use chrono::Local;
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use wmi::WMIConnection;
-
-// Thread-local WMI connection for reuse within the same thread —
-// identical pattern to amd_windows.rs so we don't pay the COM init cost
-// per request.
-thread_local! {
-    static WMI_CONNECTION: std::cell::RefCell<Option<WMIConnection>> =
-        const { std::cell::RefCell::new(None) };
-}
-
-fn with_wmi_connection<T, F: FnOnce(&WMIConnection) -> T>(f: F) -> Option<T> {
-    WMI_CONNECTION.with(|cell| {
-        let mut conn_ref = cell.borrow_mut();
-        if conn_ref.is_none() {
-            match WMIConnection::new() {
-                Ok(wmi_con) => {
-                    *conn_ref = Some(wmi_con);
-                }
-                Err(e) => {
-                    eprintln!("Intel GPU: Failed to create WMI connection: {e}");
-                }
-            }
-        }
-        conn_ref.as_ref().map(f)
-    })
-}
-
-#[derive(Deserialize, Debug, Clone)]
-#[serde(rename_all = "PascalCase")]
-struct Win32VideoController {
-    name: Option<String>,
-    adapter_r_a_m: Option<u64>,
-    driver_version: Option<String>,
-    video_processor: Option<String>,
-    pnp_device_i_d: Option<String>,
-    status: Option<String>,
-    adapter_d_a_c_type: Option<String>,
-}
 
 #[derive(Deserialize, Debug)]
 #[serde(rename_all = "PascalCase")]
@@ -116,6 +80,11 @@ pub struct IntelWindowsGpuReader {
     /// `get_gpu_info` so `get_process_info` can attribute a PDH
     /// per-process row to the right card.
     adapter_index: Mutex<crate::device::readers::windows_gpu_perf::AdapterIndex>,
+    /// `Win32_VideoController` rows, re-queried every 300 s at most.
+    controllers: VideoControllerCache,
+    /// Devices whose `AdapterRAM` warning was already printed, so it fires
+    /// once per device per process instead of on every tick.
+    vram_warned: Mutex<HashSet<String>>,
 }
 
 impl Default for IntelWindowsGpuReader {
@@ -126,150 +95,174 @@ impl Default for IntelWindowsGpuReader {
 
 impl IntelWindowsGpuReader {
     pub fn new() -> Self {
+        Self::with_controllers(VideoControllerCache::default())
+    }
+
+    fn with_controllers(controllers: VideoControllerCache) -> Self {
         Self {
             #[cfg(all_smi_level_zero)]
             level_zero_state: Mutex::new(HashMap::new()),
             adapter_index: Mutex::new(Default::default()),
+            controllers,
+            vram_warned: Mutex::new(HashSet::new()),
         }
     }
 
+    /// Whether the `AdapterRAM` warning for `uuid` is still to be printed;
+    /// records it as printed.
+    fn first_vram_warning(&self, uuid: &str) -> bool {
+        self.vram_warned
+            .lock()
+            .map(|mut warned| warned.insert(uuid.to_string()))
+            .unwrap_or(false)
+    }
+
+    /// Intel cards from the cached controller rows. The rows are static; the
+    /// `GpuInfo` (time stamp included) is rebuilt on every call.
     fn query_intel_gpus(&self) -> Vec<GpuInfo> {
-        with_wmi_connection(|wmi_con| {
-            let mut gpu_list = Vec::new();
+        let controllers = self.controllers.rows();
+        let mut gpu_list = Vec::new();
+        let hostname = get_hostname();
+        let time = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
 
-            let result: Result<Vec<Win32VideoController>, _> = wmi_con.raw_query(
-                "SELECT Name, AdapterRAM, DriverVersion, VideoProcessor, PNPDeviceID, Status, AdapterDACType FROM Win32_VideoController",
-            );
-
-            if let Ok(controllers) = result {
-                let hostname = get_hostname();
-                let time = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
-
-                for (idx, controller) in controllers.iter().enumerate() {
-                    let name = controller.name.clone().unwrap_or_default();
-                    if !is_intel_gpu_name(&name) {
-                        continue;
-                    }
-
-                    let uuid = controller
-                        .pnp_device_i_d
-                        .clone()
-                        .unwrap_or_else(|| format!("Intel-GPU-{idx}"));
-
-                    // LIMITATION: Win32_VideoController.AdapterRAM is a
-                    // 32-bit uint32 in WMI, capped at 4GB. For an
-                    // Intel Arc A770 16GB or B580 12GB the value will
-                    // be clipped or wrapped — the same gotcha applies
-                    // here as in amd_windows.rs. We warn on the same
-                    // thresholds so downstream operators can identify
-                    // it from logs.
-                    let total_memory = controller.adapter_r_a_m.unwrap_or(0);
-                    const FOUR_GB: u64 = 4 * 1024 * 1024 * 1024;
-                    if total_memory == 0 {
-                        eprintln!("Intel GPU '{name}': VRAM size unavailable (reported as 0)");
-                    } else if total_memory >= FOUR_GB - (512 * 1024 * 1024) {
-                        eprintln!(
-                            "Intel GPU '{name}': VRAM reported as {total_memory} bytes, may be inaccurate for >4GB GPUs due to WMI 32-bit limitation"
-                        );
-                    }
-
-                    let mut detail = HashMap::new();
-                    if let Some(ref driver) = controller.driver_version {
-                        detail.insert("Driver Version".to_string(), driver.clone());
-                    }
-                    if let Some(ref processor) = controller.video_processor {
-                        detail.insert("Video Processor".to_string(), processor.clone());
-                    }
-                    if let Some(ref status) = controller.status {
-                        detail.insert("Status".to_string(), status.clone());
-                    }
-                    if let Some(ref dac_type) = controller.adapter_d_a_c_type {
-                        detail.insert("DAC Type".to_string(), dac_type.clone());
-                    }
-                    // `None` means the name carries a model number this
-                    // table does not know. Leave the field unset rather
-                    // than guessing: the DXGI memory layout fills it in
-                    // `windows_gpu_perf::apply_to_gpu_info`, and it knows
-                    // the answer for real (issue #364).
-                    if let Some(variant) = classify_intel_variant(&name) {
-                        detail.insert("Variant".to_string(), variant.to_string());
-                    }
-                    // Architecture / SYCL classification — shared with
-                    // the Linux reader via `intel_gpu_names::classify_*`
-                    // so a single source of truth drives downstream
-                    // accelerator-selection logic (Backend.AI's
-                    // accelerator picker, llama.cpp SYCL backend, etc.)
-                    // on both Linux and Windows.
-                    let arch = classify_intel_architecture(&name);
-                    detail.insert("Architecture".to_string(), arch.label().to_string());
-                    detail.insert(
-                        "SYCL Capable".to_string(),
-                        arch.sycl_capable_label().to_string(),
-                    );
-                    // `Metrics Source` advertises which backends
-                    // produced the metrics; the DXGI/PDH and Level Zero
-                    // layers append themselves as they run. The `Note`
-                    // key is written afterwards by
-                    // `annotate_missing_metrics`, once we know what those
-                    // layers actually managed to supply.
-                    detail.insert("Metrics Source".to_string(), "WMI".to_string());
-                    detail.insert("Source: Utilization".to_string(), "unavailable".to_string());
-                    detail.insert("Source: Temperature".to_string(), "unavailable".to_string());
-                    detail.insert("Source: Power".to_string(), "unavailable".to_string());
-                    detail.insert("Source: Frequency".to_string(), "unavailable".to_string());
-                    detail.insert(
-                        "Source: Memory".to_string(),
-                        if total_memory > 0 { "WMI" } else { "unavailable" }.to_string(),
-                    );
-                    detail.insert("Source: Fan".to_string(), "unavailable".to_string());
-
-                    gpu_list.push(GpuInfo {
-                        uuid,
-                        time: time.clone(),
-                        name,
-                        device_type: "GPU".to_string(),
-                        host_id: hostname.clone(),
-                        hostname: hostname.clone(),
-                        instance: hostname.clone(),
-                        // WMI cannot source utilization or power. These f64
-                        // fields use the unavailable sentinel because zero is
-                        // a legitimate reading; PDH / Level Zero overwrite it
-                        // when they answer. ANE is not applicable off Apple,
-                        // while the u32 temperature and frequency accessors
-                        // deliberately use zero as their unavailable marker.
-                        utilization: GPU_METRIC_UNAVAILABLE,
-                        ane_utilization: 0.0,
-                        dla_utilization: None,
-                        tensorcore_utilization: None,
-                        temperature: 0,
-                        used_memory: 0,
-                        total_memory,
-                        frequency: 0,
-                        power_consumption: GPU_METRIC_UNAVAILABLE,
-                        gpu_core_count: None,
-                        // Intel-on-Windows surfaces nothing beyond the
-                        // basic WMI query — NVML thermal thresholds /
-                        // P-states and NVIDIA hardware details (NUMA,
-                        // GSP firmware, NvLink, GPM) do not apply.
-                        temperature_threshold_slowdown: None,
-                        temperature_threshold_shutdown: None,
-                        temperature_threshold_max_operating: None,
-                        temperature_threshold_acoustic: None,
-                        performance_state: None,
-                        fan_speed_rpm: None,
-                        numa_node_id: None,
-                        gsp_firmware_mode: None,
-                        gsp_firmware_version: None,
-                        nvlink_remote_devices: Vec::new(),
-                        gpm_metrics: None,
-                        detail,
-                    });
-                }
+        for (idx, controller) in controllers.iter().enumerate() {
+            let name = controller.name.clone().unwrap_or_default();
+            if !is_intel_gpu_name(&name) {
+                continue;
             }
 
-            gpu_list
-        })
-        .unwrap_or_default()
+            let uuid = controller
+                .pnp_device_i_d
+                .clone()
+                .unwrap_or_else(|| format!("Intel-GPU-{idx}"));
+
+            // LIMITATION: Win32_VideoController.AdapterRAM is a
+            // 32-bit uint32 in WMI, capped at 4GB. For an
+            // Intel Arc A770 16GB or B580 12GB the value will
+            // be clipped or wrapped — the same gotcha applies
+            // here as in amd_windows.rs. We warn on the same
+            // thresholds so downstream operators can identify
+            // it from logs.
+            let total_memory = controller.adapter_r_a_m.unwrap_or(0);
+            const FOUR_GB: u64 = 4 * 1024 * 1024 * 1024;
+            let warning = if total_memory == 0 {
+                Some(format!(
+                    "Intel GPU '{name}': VRAM size unavailable (reported as 0)"
+                ))
+            } else if total_memory >= FOUR_GB - (512 * 1024 * 1024) {
+                Some(format!(
+                    "Intel GPU '{name}': VRAM reported as {total_memory} bytes, may be inaccurate for >4GB GPUs due to WMI 32-bit limitation"
+                ))
+            } else {
+                None
+            };
+            // Once per device per process: the rows are cached, so the same
+            // value would otherwise be reported on every tick.
+            if let Some(warning) = warning
+                && self.first_vram_warning(&uuid)
+            {
+                eprintln!("{warning}");
+            }
+
+            let mut detail = HashMap::new();
+            if let Some(ref driver) = controller.driver_version {
+                detail.insert("Driver Version".to_string(), driver.clone());
+            }
+            if let Some(ref processor) = controller.video_processor {
+                detail.insert("Video Processor".to_string(), processor.clone());
+            }
+            if let Some(ref status) = controller.status {
+                detail.insert("Status".to_string(), status.clone());
+            }
+            if let Some(ref dac_type) = controller.adapter_d_a_c_type {
+                detail.insert("DAC Type".to_string(), dac_type.clone());
+            }
+            // `None` means the name carries a model number this
+            // table does not know. Leave the field unset rather
+            // than guessing: the DXGI memory layout fills it in
+            // `windows_gpu_perf::apply_to_gpu_info`, and it knows
+            // the answer for real (issue #364).
+            if let Some(variant) = classify_intel_variant(&name) {
+                detail.insert("Variant".to_string(), variant.to_string());
+            }
+            // Architecture / SYCL classification — shared with
+            // the Linux reader via `intel_gpu_names::classify_*`
+            // so a single source of truth drives downstream
+            // accelerator-selection logic (Backend.AI's
+            // accelerator picker, llama.cpp SYCL backend, etc.)
+            // on both Linux and Windows.
+            let arch = classify_intel_architecture(&name);
+            detail.insert("Architecture".to_string(), arch.label().to_string());
+            detail.insert(
+                "SYCL Capable".to_string(),
+                arch.sycl_capable_label().to_string(),
+            );
+            // `Metrics Source` advertises which backends
+            // produced the metrics; the DXGI/PDH and Level Zero
+            // layers append themselves as they run. The `Note`
+            // key is written afterwards by
+            // `annotate_missing_metrics`, once we know what those
+            // layers actually managed to supply.
+            detail.insert("Metrics Source".to_string(), "WMI".to_string());
+            detail.insert("Source: Utilization".to_string(), "unavailable".to_string());
+            detail.insert("Source: Temperature".to_string(), "unavailable".to_string());
+            detail.insert("Source: Power".to_string(), "unavailable".to_string());
+            detail.insert("Source: Frequency".to_string(), "unavailable".to_string());
+            detail.insert(
+                "Source: Memory".to_string(),
+                if total_memory > 0 {
+                    "WMI"
+                } else {
+                    "unavailable"
+                }
+                .to_string(),
+            );
+            detail.insert("Source: Fan".to_string(), "unavailable".to_string());
+
+            gpu_list.push(GpuInfo {
+                uuid,
+                time: time.clone(),
+                name,
+                device_type: "GPU".to_string(),
+                host_id: hostname.clone(),
+                hostname: hostname.clone(),
+                instance: hostname.clone(),
+                // WMI cannot source utilization or power. These f64
+                // fields use the unavailable sentinel because zero is
+                // a legitimate reading; PDH / Level Zero overwrite it
+                // when they answer. ANE is not applicable off Apple,
+                // while the u32 temperature and frequency accessors
+                // deliberately use zero as their unavailable marker.
+                utilization: GPU_METRIC_UNAVAILABLE,
+                ane_utilization: 0.0,
+                dla_utilization: None,
+                tensorcore_utilization: None,
+                temperature: 0,
+                used_memory: 0,
+                total_memory,
+                frequency: 0,
+                power_consumption: GPU_METRIC_UNAVAILABLE,
+                gpu_core_count: None,
+                // Intel-on-Windows surfaces nothing beyond the
+                // basic WMI query — NVML thermal thresholds /
+                // P-states and NVIDIA hardware details (NUMA,
+                // GSP firmware, NvLink, GPM) do not apply.
+                temperature_threshold_slowdown: None,
+                temperature_threshold_shutdown: None,
+                temperature_threshold_max_operating: None,
+                temperature_threshold_acoustic: None,
+                performance_state: None,
+                fan_speed_rpm: None,
+                numa_node_id: None,
+                gsp_firmware_mode: None,
+                gsp_firmware_version: None,
+                nvlink_remote_devices: Vec::new(),
+                gpm_metrics: None,
+                detail,
+            });
+        }
+
+        gpu_list
     }
 }
 

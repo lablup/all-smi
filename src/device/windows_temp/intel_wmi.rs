@@ -18,6 +18,7 @@
 //! This is available on some Intel systems with proper chipset drivers.
 
 use super::{TemperatureResult, is_wmi_not_found_error};
+use crate::device::windows_wmi_worker::INTEL;
 use once_cell::sync::OnceCell;
 use serde::Deserialize;
 use wmi::WMIConnection;
@@ -35,9 +36,9 @@ struct IntelThermalZone {
 
 /// Intel WMI temperature source.
 ///
-/// Note: WMIConnection is not Send + Sync, so we cannot cache it.
-/// Instead, we cache only whether the Intel namespace is available,
-/// and create a new connection on each temperature query.
+/// The `root\Intel` connection itself is owned and reused by the WMI worker
+/// (`windows_wmi_worker`); this source caches only whether the namespace
+/// exists at all.
 pub struct IntelWmiSource {
     /// Whether the Intel WMI namespace is available
     namespace_available: OnceCell<bool>,
@@ -61,32 +62,29 @@ impl IntelWmiSource {
     fn is_namespace_available(&self) -> bool {
         *self
             .namespace_available
-            .get_or_init(|| WMIConnection::with_namespace_path("root\\Intel").is_ok())
+            .get_or_init(|| WMIConnection::with_namespace_path(INTEL).is_ok())
     }
 
-    /// Create a new WMI connection to the Intel namespace.
-    fn create_connection(&self) -> Option<WMIConnection> {
-        WMIConnection::with_namespace_path("root\\Intel").ok()
-    }
-
-    /// Get temperature from Intel WMI.
+    /// Get temperature from Intel WMI over the cached `root\Intel`
+    /// connection (`None` when it could not be opened).
     ///
     /// # Returns
     /// * `TemperatureResult::Success(temp)` - Temperature in Celsius
     /// * `TemperatureResult::NotFound` - Intel WMI namespace not available
     /// * `TemperatureResult::Error` - Transient error during query
     /// * `TemperatureResult::NoValidReading` - Query succeeded but returned invalid data
-    pub fn get_temperature(&self) -> TemperatureResult {
+    pub fn get_temperature(&self, connection: Option<&WMIConnection>) -> TemperatureResult {
         // Check if namespace is available (cached)
         if !self.is_namespace_available() {
             return TemperatureResult::NotFound;
         }
 
-        // Create a new connection for this query
-        let connection = match self.create_connection() {
-            Some(conn) => conn,
-            None => return TemperatureResult::Error,
+        let Some(connection) = connection else {
+            return TemperatureResult::Error;
         };
+        // A query that failed for a reason other than a missing class: the
+        // connection may be stale, so report it and let the owner reconnect.
+        let mut query_failed = false;
 
         // Try different Intel thermal zone classes
         // Intel implementations vary - try common class names
@@ -123,11 +121,15 @@ impl IntelWmiSource {
                 }
                 Ok(_) => continue, // Empty result, try next query
                 Err(e) if is_wmi_not_found_error(&e) => continue,
-                Err(_) => continue,
+                Err(_) => query_failed = true,
             }
         }
 
-        // If we connected but no queries worked, the namespace exists but no thermal data
-        TemperatureResult::NotFound
+        if query_failed {
+            TemperatureResult::Error
+        } else {
+            // The namespace exists but has no usable thermal data.
+            TemperatureResult::NotFound
+        }
     }
 }

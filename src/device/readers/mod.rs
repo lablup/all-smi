@@ -124,6 +124,11 @@ pub mod intel_gpu_sysfs;
 #[cfg(target_os = "windows")]
 pub mod intel_gpu_windows;
 
+// Cached `Win32_VideoController` rows shared by the AMD and Intel Windows
+// readers (issue #501).
+#[cfg(target_os = "windows")]
+pub mod windows_video_controller;
+
 // Vendor-neutral Windows GPU metrics (DXGI + PDH).
 //
 // The `test` arm is load-bearing, not incidental. No CI job builds this

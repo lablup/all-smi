@@ -48,6 +48,15 @@ pub mod cpu_windows_arm;
 // Windows temperature fallback chain
 #[cfg(target_os = "windows")]
 pub mod windows_temp;
+// Scheduling and backoff for that chain (issue #501); pure, so compiled
+// under `test` everywhere.
+#[cfg(any(target_os = "windows", test))]
+pub mod windows_temp_chain;
+// Dedicated WMI worker thread owning one connection per namespace (issue
+// #501). The connection cache is generic and tested everywhere; the worker
+// itself is Windows-only.
+#[cfg(any(target_os = "windows", test))]
+pub mod windows_wmi_worker;
 // ACPI thermal-zone conversion used by `windows_temp`; pure, so compiled
 // under `test` everywhere (issue #459).
 #[cfg(any(target_os = "windows", test))]
