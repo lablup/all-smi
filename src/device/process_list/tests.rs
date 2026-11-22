@@ -236,3 +236,171 @@ fn process_rows_have_full_commands_and_no_thread_rows() {
     assert_eq!(only[0].command, "sleep 30");
     assert!(only[0].uses_gpu);
 }
+
+/// A reader whose `get_process_info` returns fixed rows (issue #505).
+struct FakeReader {
+    rows: Vec<ProcessInfo>,
+    system_list: bool,
+}
+
+impl crate::device::traits::GpuReader for FakeReader {
+    fn get_gpu_info(&self) -> Vec<crate::device::types::GpuInfo> {
+        Vec::new()
+    }
+
+    fn get_process_info(&self) -> Vec<ProcessInfo> {
+        self.rows.clone()
+    }
+
+    fn includes_system_processes(&self) -> bool {
+        self.system_list
+    }
+}
+
+fn fake(rows: Vec<ProcessInfo>, system_list: bool) -> Box<dyn crate::device::traits::GpuReader> {
+    Box::new(FakeReader { rows, system_list })
+}
+
+fn baseline_rows() -> Vec<ProcessInfo> {
+    [10, 20, 30]
+        .into_iter()
+        .map(|pid| process(pid, "", 0, false))
+        .collect()
+}
+
+fn keys(rows: &[ProcessInfo]) -> Vec<(u32, String, bool)> {
+    rows.iter()
+        .map(|r| (r.pid, r.device_uuid.clone(), r.uses_gpu))
+        .collect()
+}
+
+#[test]
+fn collect_rows_dedups_two_system_list_readers() {
+    let readers = vec![
+        fake(
+            merge_gpu_processes(baseline_rows(), vec![process(10, "uuid-a", 100, true)]),
+            true,
+        ),
+        fake(
+            merge_gpu_processes(
+                baseline_rows(),
+                vec![
+                    process(20, "uuid-b", 200, true),
+                    process(10, "uuid-b", 300, true),
+                ],
+            ),
+            true,
+        ),
+    ];
+    let mut calls = 0;
+    let rows = collect::collect_process_rows_with(&readers, |pids| {
+        calls += 1;
+        assert_eq!(pids, &HashSet::from([10, 20]));
+        baseline_rows()
+    });
+
+    assert_eq!(calls, 1);
+    assert_eq!(
+        keys(&rows),
+        vec![
+            (10, "uuid-a".to_string(), true),
+            (10, "uuid-b".to_string(), true),
+            (20, "uuid-b".to_string(), true),
+            (30, String::new(), false),
+        ]
+    );
+    let memory: Vec<u64> = rows.iter().map(|r| r.used_memory).collect();
+    assert_eq!(memory, vec![100, 300, 200, 0]);
+}
+
+#[test]
+fn collect_rows_has_no_baseline_row_for_gpu_only_reader_pid() {
+    let readers = vec![
+        fake(
+            merge_gpu_processes(baseline_rows(), vec![process(10, "uuid-a", 100, true)]),
+            true,
+        ),
+        fake(vec![process(20, "npu-0", 50, true)], false),
+    ];
+    let mut calls = 0;
+    let rows = collect::collect_process_rows_with(&readers, |_| {
+        calls += 1;
+        baseline_rows()
+    });
+
+    assert_eq!(calls, 1);
+    assert!(
+        !rows.iter().any(|r| r.pid == 20 && !r.uses_gpu),
+        "PID 20 has a GPU row, so it must not also have a baseline row"
+    );
+    assert_eq!(
+        keys(&rows),
+        vec![
+            (10, "uuid-a".to_string(), true),
+            (20, "npu-0".to_string(), true),
+            (30, String::new(), false),
+        ]
+    );
+    // The baseline enriches the GPU-only reader's row.
+    assert_eq!(rows[1].process_name, "proc-20");
+}
+
+#[test]
+fn collect_rows_without_system_list_reader_is_deduped_gpu_union() {
+    let readers = vec![
+        fake(
+            vec![
+                process(10, "npu-0", 100, true),
+                process(11, "npu-1", 10, true),
+            ],
+            false,
+        ),
+        fake(
+            vec![
+                process(10, "npu-0", 150, true),
+                process(12, "gpu-0", 20, true),
+            ],
+            false,
+        ),
+    ];
+    let mut calls = 0;
+    let rows = collect::collect_process_rows_with(&readers, |_| {
+        calls += 1;
+        Vec::new()
+    });
+
+    assert_eq!(calls, 0);
+    assert_eq!(
+        keys(&rows),
+        vec![
+            (10, "npu-0".to_string(), true),
+            (11, "npu-1".to_string(), true),
+            (12, "gpu-0".to_string(), true),
+        ]
+    );
+    assert_eq!(rows[0].used_memory, 150);
+}
+
+#[test]
+fn collect_rows_skips_system_pass_for_gpu_only_readers() {
+    let readers = vec![fake(vec![process(10, "npu-0", 100, true)], false)];
+    let before = crate::utils::system::global_system_calls_on_this_thread();
+    let rows = collect_process_rows(&readers);
+    assert_eq!(
+        crate::utils::system::global_system_calls_on_this_thread(),
+        before
+    );
+    assert_eq!(rows.len(), 1);
+}
+
+#[test]
+fn collect_rows_runs_one_system_pass_for_system_list_readers() {
+    let readers = vec![fake(Vec::new(), true), fake(Vec::new(), true)];
+    let before = crate::utils::system::global_system_calls_on_this_thread();
+    let rows = collect_process_rows(&readers);
+    assert_eq!(
+        crate::utils::system::global_system_calls_on_this_thread(),
+        before + 1
+    );
+    assert!(rows.iter().any(|r| r.pid == std::process::id()));
+}

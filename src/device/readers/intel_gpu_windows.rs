@@ -312,6 +312,10 @@ impl GpuReader for IntelWindowsGpuReader {
             windows_gpu_perf::augment_gpus(&mut gpus)
         })
     }
+
+    fn includes_system_processes(&self) -> bool {
+        true
+    }
 }
 
 #[cfg(all_smi_level_zero)]

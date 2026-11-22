@@ -245,6 +245,10 @@ impl GpuReader for AmdWindowsGpuReader {
             windows_gpu_perf::augment_gpus(&mut gpus)
         })
     }
+
+    fn includes_system_processes(&self) -> bool {
+        true
+    }
 }
 
 /// Check if AMD GPU is present on Windows using WMI

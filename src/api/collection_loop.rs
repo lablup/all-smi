@@ -102,10 +102,7 @@ impl CollectionReaders {
     /// Deliberately the single place the loop assembles processes, so a
     /// different process source can replace this one call.
     fn collect_processes(&self) -> Vec<ProcessInfo> {
-        self.gpu_readers
-            .iter()
-            .flat_map(|reader| reader.get_process_info())
-            .collect()
+        crate::device::process_list::collect_process_rows(&self.gpu_readers)
     }
 
     /// Run the whole read phase of one tick. Blocking.
