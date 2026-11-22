@@ -97,10 +97,15 @@ impl VideoControllerCache {
 /// as a failure: a reader exists only because a controller was detected.
 fn query_video_controllers() -> Option<Vec<Win32VideoController>> {
     with_wmi(|connections| {
-        connections
+        let queried = connections
             .get(CIMV2)?
-            .raw_query::<Win32VideoController>(CONTROLLER_QUERY)
-            .ok()
+            .raw_query::<Win32VideoController>(CONTROLLER_QUERY);
+        if queried.is_err() {
+            // The connection may be stale (winmgmt restarted): reconnect
+            // on the next attempt instead of failing against it forever.
+            connections.invalidate(CIMV2);
+        }
+        queried.ok()
     })
     .flatten()
     .filter(|rows| !rows.is_empty())

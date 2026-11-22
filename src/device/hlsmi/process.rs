@@ -310,7 +310,11 @@ impl ProcessManager {
         if let Some(tx) = self.monitor_shutdown_tx.take() {
             let _ = tx.send(());
         }
-        if let Some(handle) = self.monitor_handle.take() {
+        if let Some(handle) = self.monitor_handle.take()
+            && handle.thread().id() != thread::current().id()
+        {
+            // Never self-join: if shutdown ever runs on the monitor thread
+            // itself, the signal above already ends its loop.
             let _ = handle.join();
         }
 

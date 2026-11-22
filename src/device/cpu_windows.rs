@@ -338,10 +338,15 @@ fn processor_info_from_probe(
 /// Query `Win32_Processor` on the WMI worker.
 fn query_processor_info() -> Option<ProcessorInfo> {
     with_wmi(|connections| {
-        let procs: Vec<Win32Processor> = connections
+        let queried: Result<Vec<Win32Processor>, _> = connections
             .get(CIMV2)?
-            .raw_query("SELECT MaxClockSpeed, L2CacheSize, L3CacheSize FROM Win32_Processor")
-            .ok()?;
+            .raw_query("SELECT MaxClockSpeed, L2CacheSize, L3CacheSize FROM Win32_Processor");
+        let Ok(procs) = queried else {
+            // The connection may be stale (winmgmt restarted): reconnect
+            // on the next attempt instead of failing against it forever.
+            connections.invalidate(CIMV2);
+            return None;
+        };
         // One Win32_Processor instance per physical processor (socket).
         let socket_count = procs.len().max(1) as u32;
         let proc = procs.first()?;

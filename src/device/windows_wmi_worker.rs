@@ -23,10 +23,21 @@
 //! [`REPLY_TIMEOUT`], so a wedged WMI provider costs a missing reading, never
 //! a hung collection tick.
 //!
-//! [`ConnectionCache`] is generic over the connection type so its caching
-//! and invalidation are unit-tested on every runner with a counting factory.
+//! A caller that stops waiting marks its job cancelled, and the worker skips
+//! a cancelled job instead of running it late: while a provider is wedged
+//! the queue would otherwise grow by one job per tick, and once it cleared
+//! the worker would run a backlog of queries nobody reads.
+//!
+//! [`ConnectionCache`], [`CancellableJob`], [`run_jobs`] and [`submit`] are
+//! generic over the connection type, so caching, invalidation and the
+//! cancel-on-timeout path are unit-tested on every runner with fakes.
 
 use std::collections::HashMap;
+use std::panic::{self, AssertUnwindSafe};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::time::Duration;
 
 /// Opens a connection to a namespace; `None` when it cannot right now.
 type ConnectionFactory<C> = Box<dyn FnMut(&str) -> Option<C>>;
@@ -68,13 +79,73 @@ impl<C> ConnectionCache<C> {
     }
 }
 
+/// A queued closure plus the flag its caller sets once it stops waiting.
+pub struct CancellableJob<C> {
+    cancelled: Arc<AtomicBool>,
+    run: Box<dyn FnOnce(&mut C) + Send>,
+}
+
+impl<C> CancellableJob<C> {
+    /// Wrap `run`; the returned flag cancels the job while it is queued.
+    pub fn new(run: impl FnOnce(&mut C) + Send + 'static) -> (Self, Arc<AtomicBool>) {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let job = Self {
+            cancelled: Arc::clone(&cancelled),
+            run: Box::new(run),
+        };
+        (job, cancelled)
+    }
+
+    /// Run the job against `target` unless its caller already gave up.
+    /// Returns whether it ran.
+    pub fn run_unless_cancelled(self, target: &mut C) -> bool {
+        if self.cancelled.load(Ordering::Acquire) {
+            return false;
+        }
+        (self.run)(target);
+        true
+    }
+}
+
+/// The worker loop: run each job in arrival order until every sender is
+/// gone, skipping cancelled ones.
+pub fn run_jobs<C>(jobs: Receiver<CancellableJob<C>>, target: &mut C) {
+    for job in jobs {
+        // A panicking job must not take the worker, and with it every later
+        // reading, down too.
+        let _ = panic::catch_unwind(AssertUnwindSafe(|| job.run_unless_cancelled(target)));
+    }
+}
+
+/// Queue `f` on the worker behind `jobs` and wait up to `timeout` for its
+/// answer. On timeout the job is cancelled, so a worker that is stuck on an
+/// earlier job drops it instead of running it after nobody is waiting.
+pub fn submit<C: 'static, T: Send + 'static>(
+    jobs: &Sender<CancellableJob<C>>,
+    timeout: Duration,
+    f: impl FnOnce(&mut C) -> T + Send + 'static,
+) -> Option<T> {
+    let (reply_tx, reply_rx) = mpsc::sync_channel(1);
+    let (job, cancelled) = CancellableJob::new(move |target: &mut C| {
+        // The caller may have timed out and dropped the receiver.
+        let _ = reply_tx.send(f(target));
+    });
+    jobs.send(job).ok()?;
+    match reply_rx.recv_timeout(timeout) {
+        Ok(answer) => Some(answer),
+        Err(_) => {
+            cancelled.store(true, Ordering::Release);
+            None
+        }
+    }
+}
+
 #[cfg(target_os = "windows")]
 pub use worker::*;
 
 #[cfg(target_os = "windows")]
 mod worker {
-    use super::ConnectionCache;
-    use std::panic::{self, AssertUnwindSafe};
+    use super::{CancellableJob, ConnectionCache, run_jobs, submit};
     use std::sync::OnceLock;
     use std::sync::mpsc::{self, Sender};
     use std::thread;
@@ -98,7 +169,7 @@ mod worker {
     /// The worker's connections, one per namespace.
     pub type WmiConnections = ConnectionCache<WMIConnection>;
 
-    type Job = Box<dyn FnOnce(&mut WmiConnections) + Send>;
+    type Job = CancellableJob<WmiConnections>;
 
     /// Job queue of the worker thread, started on first use. `None` when the
     /// thread could not be spawned.
@@ -114,11 +185,7 @@ mod worker {
                         let mut connections = WmiConnections::with_factory(|namespace| {
                             WMIConnection::with_namespace_path(namespace).ok()
                         });
-                        for job in rx {
-                            // A panicking job must not take the worker, and
-                            // with it every later WMI reading, down too.
-                            let _ = panic::catch_unwind(AssertUnwindSafe(|| job(&mut connections)));
-                        }
+                        run_jobs(rx, &mut connections);
                     })
                     .ok()
                     .map(|_| tx)
@@ -142,13 +209,7 @@ mod worker {
         timeout: Duration,
         f: impl FnOnce(&mut WmiConnections) -> T + Send + 'static,
     ) -> Option<T> {
-        let (reply_tx, reply_rx) = mpsc::sync_channel(1);
-        let job: Job = Box::new(move |connections| {
-            // The caller may have timed out and dropped the receiver.
-            let _ = reply_tx.send(f(connections));
-        });
-        worker()?.send(job).ok()?;
-        reply_rx.recv_timeout(timeout).ok()
+        submit(worker()?, timeout, f)
     }
 }
 
@@ -199,6 +260,79 @@ mod tests {
         assert_eq!(calls.get(), 2);
         cache.invalidate("root\\NeverOpened");
         assert_eq!(calls.get(), 2);
+    }
+
+    /// Issue #501 review: a job whose caller timed out must not run later.
+    /// The first job wedges the worker past three callers' timeouts; once it
+    /// clears, only the job whose caller is still waiting runs.
+    #[test]
+    fn timed_out_jobs_are_skipped_when_the_worker_clears() {
+        use std::sync::atomic::AtomicUsize;
+        use std::time::Instant;
+
+        let (jobs, rx) = mpsc::channel::<CancellableJob<Vec<u32>>>();
+        let worker = std::thread::spawn(move || {
+            let mut ran = Vec::new();
+            run_jobs(rx, &mut ran);
+            ran
+        });
+
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let (wedged_tx, wedged_rx) = mpsc::channel::<()>();
+        let (job, _) = CancellableJob::new(move |ran: &mut Vec<u32>| {
+            let _ = wedged_tx.send(());
+            // Bounded: the test releases it, and a lost release ends it too.
+            let _ = release_rx.recv_timeout(Duration::from_secs(10));
+            ran.push(0);
+        });
+        jobs.send(job).unwrap();
+        wedged_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("worker started the wedged job");
+
+        let late_runs = Arc::new(AtomicUsize::new(0));
+        for tick in 1..=3 {
+            let late_runs = Arc::clone(&late_runs);
+            let started = Instant::now();
+            let answer = submit(
+                &jobs,
+                Duration::from_millis(50),
+                move |ran: &mut Vec<u32>| {
+                    late_runs.fetch_add(1, Ordering::Relaxed);
+                    ran.push(tick);
+                    tick
+                },
+            );
+            assert_eq!(answer, None, "tick {tick} must time out");
+            assert!(started.elapsed() < Duration::from_secs(2));
+        }
+
+        release_tx.send(()).unwrap();
+        let answer = submit(&jobs, Duration::from_secs(5), |ran: &mut Vec<u32>| {
+            ran.push(99);
+            99
+        });
+        assert_eq!(answer, Some(99));
+        drop(jobs);
+        let ran = worker.join().unwrap();
+        assert_eq!(ran, [0, 99], "timed-out jobs ran late");
+        assert_eq!(late_runs.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn a_panicking_job_does_not_stop_the_loop() {
+        let (jobs, rx) = mpsc::channel::<CancellableJob<u32>>();
+        let (bad, _) = CancellableJob::new(|_: &mut u32| panic!("job panicked"));
+        let (good, _) = CancellableJob::new(|n: &mut u32| *n += 1);
+        let (cancelled, flag) = CancellableJob::new(|n: &mut u32| *n += 100);
+        flag.store(true, Ordering::Release);
+        jobs.send(bad).unwrap();
+        jobs.send(cancelled).unwrap();
+        jobs.send(good).unwrap();
+        drop(jobs);
+        let mut count = 0;
+        run_jobs(rx, &mut count);
+        assert_eq!(count, 1);
     }
 
     #[test]
