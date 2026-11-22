@@ -223,8 +223,8 @@ loginctl enable\-linger "$USER"   # boot persistence for a user service
 .RE
 .PP
 The subcommand default is root rather than a dedicated account, because vendor
-CLIs (\fBhl\-smi\fR, \fBrbln\-stat\fR, \fBfuriosa\-smi\fR,
-\fBtegrastats\fR) differ in the permissions they require and a wrong guess
+CLIs (\fBhl\-smi\fR, \fBrbln\-stat\fR, \fBfuriosa\-smi\fR)
+differ in the permissions they require and a wrong guess
 yields a silently empty metrics page. Pass \fB\-\-service\-user\fR where your
 vendor stack permits a dedicated account.
 .PP
