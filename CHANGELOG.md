@@ -10,6 +10,11 @@
 - Fixed the Linux TUI command column showing `[name]` instead of the full command line for processes it discovered (#504).
 - Hardware detection reads the PCI inventory once from `/sys/bus/pci/devices` and runs `lspci -nn` only when sysfs is unreadable, instead of spawning `lspci` up to eight times at startup; Apple Silicon no longer runs `system_profiler SPPCIDataType` to look for an NVIDIA GPU (#504).
 - On Linux hosts with cpufreq, the reported base CPU frequency is now the average `scaling_cur_freq` over all counted CPUs (previously cpu0 on ARM and the `cpu MHz` average on x86) (#504).
+- Fixed the `/metrics` and `snapshot --format prometheus` exposition repeating `# HELP` and `# TYPE` once per device and interleaving metric families. Each family is now written once with contiguous samples, so the body is valid for strict text-format parsers such as `promtool check metrics` and OpenMetrics consumers on hosts with several GPUs, processes, or volumes. Sample lines are unchanged; their order in the body changes (#503).
+- Fixed replay playback ignoring the recorded frame spacing and the speed setting, never pausing or looping at the end of a recording, and showing the wrong elapsed time after 1024 frames or a seek (#503).
+- API mode collects on the blocking pool with a fixed tick period, renders `/metrics` once per collection instead of once per scrape, and serializes each `/events` and `/snapshot` frame once per filter instead of once per client (#503).
+- A hung reader no longer leaks one blocking thread per tick in `record` and `/snapshot`; the section is reported with `kind: "busy"` until the reader returns. `snapshot`, `record`, and the `/snapshot` fallback collect sections concurrently (#503).
+- Replay seeks inside the cached window do no I/O, and far seeks use the recording's index frames (#503).
 
 ### Library API
 

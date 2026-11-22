@@ -41,7 +41,12 @@ pub trait MetricExporter {
     /// `# TYPE`, and contiguous samples (issue #503).
     fn export_into(&self, builder: &mut MetricBuilder);
 
-    /// Export metrics to Prometheus format string
+    /// Export metrics to Prometheus format string.
+    ///
+    /// Standalone form for one exporter. The live render path goes through
+    /// [`MetricExporter::export_into`], so the binary target itself never
+    /// calls this; library callers and the tests do.
+    #[allow(dead_code)]
     fn export_metrics(&self) -> String {
         let mut builder = MetricBuilder::new();
         self.export_into(&mut builder);

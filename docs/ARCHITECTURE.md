@@ -114,6 +114,10 @@ NetworkClient → Remote /metrics endpoints → MetricsParser → Shared AppStat
 DataCollector → Device Readers → API State → HTTP Handlers → Prometheus Export
 ```
 
+One collection task (`src/api/collection_loop.rs`) is the only producer. Each tick runs the whole read phase (every device reader and the disk capacity refresh) in a single `spawn_blocking` task, so no reader runs on an async worker, and ticks come from `tokio::time::interval`, so their spacing does not include the collection time. The async half of the tick integrates energy, renders the Prometheus exposition once into `AppState::metrics_body`, and publishes the frame on the `FrameBus`. The HTTP handlers do no per-request work on that data: `/metrics` clones the stored body, and `/events` and `/snapshot` share one serialized JSON body per frame and `?include=` filter (`FrameBus::body_for`). The exposition is written through one `MetricBuilder` that groups samples by metric family, so each family has one `# HELP`, one `# TYPE`, and contiguous samples regardless of how many devices or exporters feed it.
+
+`/snapshot` serves the published frame. When that frame is missing or older than two intervals it waits up to one interval for the next publish, and only then collects for itself through a collector built once per process (`src/api/snapshot_fallback.rs`). That fallback and `all-smi record` both collect through `snapshot::collect_once_gated` with a long-lived `SectionGate`: a reader that hangs keeps one blocking thread, and later collections report the section as `busy` instead of starting another call into it.
+
 ### Unix Domain Socket Support
 
 API mode supports Unix Domain Sockets (UDS) as an alternative to TCP for local IPC scenarios:

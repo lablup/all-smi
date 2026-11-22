@@ -17,6 +17,8 @@ all-smi api --port 9090 --processes
 
 Metrics are available at `http://localhost:9090/metrics`
 
+The body follows the Prometheus text exposition format strictly: each metric family has one `# HELP` line, one `# TYPE` line, and all of its samples directly after them, so it passes `promtool check metrics` on hosts with any number of devices. Families appear in the order they are first produced; identify series by name and labels, not by line position.
+
 ### Unix Domain Socket Support (Unix Only)
 
 For local IPC scenarios, API mode supports Unix Domain Sockets:
@@ -102,8 +104,16 @@ same schema as the `snapshot` subcommand (`schema: 1`).
 
 One-shot JSON payload reflecting the latest collection cycle. When the
 last cached frame is older than `2 × interval` (or no cycle has
-completed yet), the handler forces a fresh collection so the response
-never silently serves stale data.
+completed yet), the handler waits up to one interval for the next
+collection cycle and, if none arrives, runs a fresh collection so the
+response never silently serves stale data. A fresh collection is reused
+for requests that arrive within the next interval and ask for sections it
+covers.
+
+Each entry of `errors` has a `section`, a `kind` (`timeout`, `panic`,
+`error`, or `busy`) and a `message`. `busy` means the section was skipped
+because its previous reader call has not returned yet; the section is
+absent from that response and comes back once the reader does.
 
 ```
 GET /snapshot
