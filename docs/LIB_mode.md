@@ -841,7 +841,7 @@ If NVML cannot initialise (for example the device nodes are hidden), `get_gpu_in
 
 ### CPU Temperature Sensor (Linux)
 
-On Linux, `CpuInfo::temperature` comes from one sysfs file chosen once per process, at the first CPU read: a CPU driver (`coretemp`, `k10temp`, ...), then a CPU thermal zone, then a motherboard sensor chip input labelled for the CPU (`CPU Package`, `PECI Agent 0`, `CPUTIN`, ...), then legacy fixed paths. Set `ALL_SMI_CPU_TEMP_SENSOR` before the first read to choose the sensor yourself, as `<driver>:temp<N>`, `<driver>:<label>`, or an absolute `/sys` path. An invalid value is ignored and automatic selection continues. See [Wrong or missing CPU temperature on Linux](troubleshooting.md#wrong-or-missing-cpu-temperature-on-linux).
+On Linux, `CpuInfo::temperature` comes from one sysfs file chosen once per process, at the first CPU read: a CPU driver (`coretemp`, `k10temp`, ...), then a CPU thermal zone (the original four types, then ARM SoC types, then `bigcore0-thermal`; zone index order within each), then a motherboard sensor chip input labelled for the CPU (`CPU Package`, `PECI Agent 0`, `TSI0_TEMP`, `CPUTIN`, ...) on any chip except `asus_wmi_sensors`, then an input whose `temp*_type` reports Intel PECI or AMD SB-TSI (for unlabelled chips such as `it87`), then a CPU label on an `asus_wmi_sensors` input (last, because polling it can upset some BIOSes), then legacy fixed paths. Set `ALL_SMI_CPU_TEMP_SENSOR` before the first read to choose the sensor yourself, as `<driver>:temp<N>`, `<driver>:<label>`, or an absolute `/sys` path. An invalid value is ignored and automatic selection continues. See [Wrong or missing CPU temperature on Linux](troubleshooting.md#wrong-or-missing-cpu-temperature-on-linux).
 
 ### Low-Level Access
 

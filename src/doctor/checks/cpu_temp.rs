@@ -16,7 +16,9 @@
 //! why (issue #495). Registered through [`super::platform::checks`].
 
 #[cfg(target_os = "linux")]
-use crate::device::cpu_linux::{CpuTempResolution, TempRule, cpu_temp_status};
+use crate::device::cpu_linux::{
+    ASUS_WMI_SENSORS_DRIVER, CpuTempResolution, TempRule, cpu_temp_status,
+};
 use crate::doctor::types::{Check, CheckCtx, CheckResult, Severity};
 #[cfg(target_os = "linux")]
 use crate::parsing::common::strip_control_chars;
@@ -30,6 +32,9 @@ pub(super) static CPU_TEMP: Check = Check {
 
 #[cfg(target_os = "linux")]
 const OVERRIDE_HINT: &str = "set ALL_SMI_CPU_TEMP_SENSOR to <driver>:temp<N>, <driver>:<label>, or a /sys path; find candidates with `sensors` or /sys/class/hwmon/*/name and temp*_label";
+
+#[cfg(target_os = "linux")]
+const ASUS_WMI_HINT: &str = "pin another sensor with ALL_SMI_CPU_TEMP_SENSOR=<driver>:temp<N> if the board has one; see the asus_wmi_sensors note in docs/troubleshooting.md";
 
 #[cfg(target_os = "linux")]
 fn check_cpu_temp(_ctx: &CheckCtx) -> CheckResult {
@@ -80,6 +85,18 @@ fn describe(res: &CpuTempResolution, reading: Option<u32>) -> CheckResult {
         return CheckResult::Warn(
             msg,
             Some("the sensor chosen at startup no longer reads; restart all-smi or set ALL_SMI_CPU_TEMP_SENSOR".into()),
+        );
+    }
+    let asus_wmi = res.driver.as_deref() == Some(ASUS_WMI_SENSORS_DRIVER);
+    if asus_wmi && res.rule == TempRule::Override {
+        // The user chose it; note the hazard without warning.
+        msg.push_str(" (asus_wmi_sensors: frequent polling can upset some ASUS BIOSes)");
+    } else if asus_wmi {
+        return CheckResult::Warn(
+            format!(
+                "{msg}; asus_wmi_sensors is the only CPU source, and polling its BIOS WMI interface often can stop or pin the fans on some ASUS boards"
+            ),
+            Some(ASUS_WMI_HINT.into()),
         );
     }
     if res.rule == TempRule::Legacy {
@@ -175,6 +192,58 @@ mod tests {
             panic!("expected a warning");
         };
         assert!(!msg.chars().any(char::is_control), "{msg:?}");
+    }
+
+    fn asus_wmi(rule: TempRule) -> CpuTempResolution {
+        CpuTempResolution {
+            rule,
+            driver: Some("asus_wmi_sensors".to_string()),
+            label: Some("CPU Temperature".to_string()),
+            path: Some(PathBuf::from("/sys/class/hwmon/hwmon4/temp3_input")),
+            override_rejection: None,
+        }
+    }
+
+    #[test]
+    fn automatic_asus_wmi_pick_is_a_warning() {
+        let r = describe(&asus_wmi(TempRule::BoardLabel), Some(47));
+        let CheckResult::Warn(msg, Some(hint)) = r else {
+            panic!("expected a warning with a hint, got {r:?}");
+        };
+        assert!(msg.starts_with("board-label asus_wmi_sensors"), "{msg}");
+        assert!(msg.contains("polling"), "{msg}");
+        assert!(hint.contains("ALL_SMI_CPU_TEMP_SENSOR"), "{hint}");
+        assert!(hint.contains("docs/troubleshooting.md"), "{hint}");
+    }
+
+    #[test]
+    fn overridden_asus_wmi_pick_passes_with_a_note() {
+        let r = describe(&asus_wmi(TempRule::Override), Some(47));
+        let CheckResult::Pass(msg) = r else {
+            panic!("expected a pass, got {r:?}");
+        };
+        assert!(
+            msg.ends_with("frequent polling can upset some ASUS BIOSes)"),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn sensor_type_pick_shows_driver_and_input() {
+        let r = CpuTempResolution {
+            rule: TempRule::SensorType,
+            driver: Some("it8689".to_string()),
+            label: None,
+            path: Some(PathBuf::from("/sys/class/hwmon/hwmon3/temp3_input")),
+            override_rejection: None,
+        };
+        let CheckResult::Pass(msg) = describe(&r, Some(46)) else {
+            panic!("expected a pass");
+        };
+        assert_eq!(
+            msg,
+            "sensor-type it8689 at /sys/class/hwmon/hwmon3/temp3_input, 46°C"
+        );
     }
 
     #[test]
