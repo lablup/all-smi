@@ -207,6 +207,9 @@ impl FrameBus {
             Err(poisoned) => poisoned.into_inner(),
         };
         if frame.seq < cache.seq {
+            // Not cached and never will be: release the lock first so this
+            // one-off serialization does not hold up current-frame callers.
+            drop(cache);
             return serialize_filtered(&frame.snapshot, filter, pretty).map(Arc::from);
         }
         if frame.seq > cache.seq {
