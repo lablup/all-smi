@@ -16,6 +16,10 @@
 #[allow(dead_code)] // Many constants used across modules but clippy may not detect cross-module usage
 pub struct AppConfig;
 
+// One remote scrape attempt must end inside the tick budget (issue #500).
+const _: () =
+    assert!(AppConfig::CONNECTION_TIMEOUT_SECS * 1000 < AppConfig::REMOTE_SCRAPE_BUDGET_MS);
+
 impl AppConfig {
     // UI Rendering Constants
     // Optimized for CPU efficiency: 10 FPS is sufficient for monitoring tools
@@ -37,7 +41,14 @@ impl AppConfig {
     // Network Configuration
     pub const BACKEND_AI_DEFAULT_PORT: u16 = 9090;
     pub const MAX_CONCURRENT_CONNECTIONS: usize = 128;
-    pub const CONNECTION_TIMEOUT_SECS: u64 = 5;
+    /// Whole-request timeout for one remote scrape attempt. Kept below
+    /// [`Self::REMOTE_SCRAPE_BUDGET_MS`] so one attempt always ends inside
+    /// the tick budget (issue #500).
+    pub const CONNECTION_TIMEOUT_SECS: u64 = 3;
+    /// TCP connect timeout for one remote scrape attempt.
+    pub const CONNECT_TIMEOUT_MS: u64 = 1000;
+    /// Deadline for one remote collection tick across every host.
+    pub const REMOTE_SCRAPE_BUDGET_MS: u64 = 4000;
     pub const POOL_IDLE_TIMEOUT_SECS: u64 = 60;
     pub const POOL_MAX_IDLE_PER_HOST: usize = 200;
     pub const TCP_KEEPALIVE_SECS: u64 = 30;
@@ -551,7 +562,9 @@ mod tests {
         assert_eq!(AppConfig::MIN_RENDER_INTERVAL_MS, 100);
         assert_eq!(AppConfig::EVENT_POLL_TIMEOUT_MS, 100);
         assert_eq!(AppConfig::MAX_CONCURRENT_CONNECTIONS, 128);
-        assert_eq!(AppConfig::CONNECTION_TIMEOUT_SECS, 5);
+        assert_eq!(AppConfig::CONNECTION_TIMEOUT_SECS, 3);
+        assert_eq!(AppConfig::CONNECT_TIMEOUT_MS, 1000);
+        assert_eq!(AppConfig::REMOTE_SCRAPE_BUDGET_MS, 4000);
         assert_eq!(AppConfig::RETRY_ATTEMPTS, 3);
         assert_eq!(AppConfig::RETRY_BASE_DELAY_MS, 50);
         assert_eq!(AppConfig::DEFAULT_UPDATE_INTERVAL_SECS, 2);

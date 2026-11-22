@@ -1,0 +1,109 @@
+# HELP all_smi_gpu_utilization GPU utilization percentage
+# TYPE all_smi_gpu_utilization gauge
+all_smi_gpu_utilization{gpu="Intel Arc B580 12GB", instance="node-0001", gpu_uuid="71682D13-500C-69F9-D1FF-5CE9A4B08C5C", gpu_index="0"} 29.71
+all_smi_gpu_utilization{gpu="Intel Arc B580 12GB", instance="node-0001", gpu_uuid="F7917A70-C48D-DBF0-C44D-5D929952286D", gpu_index="1"} 33.00
+all_smi_gpu_utilization{gpu="Intel Arc B580 12GB", instance="node-0001", gpu_uuid="F6999CCC-5651-A300-2CD0-9733B1DE9DCF", gpu_index="2"} 59.56
+all_smi_gpu_utilization{gpu="Intel Arc B580 12GB", instance="node-0001", gpu_uuid="08C95CF3-C0ED-8353-AAE7-DE63A619C83A", gpu_index="3"} 35.18
+all_smi_gpu_utilization{gpu="Intel Arc B580 12GB", instance="node-0001", gpu_uuid="15F8DE42-4A9E-232A-4777-ACC21F6C619D", gpu_index="4"} 51.63
+all_smi_gpu_utilization{gpu="Intel Arc B580 12GB", instance="node-0001", gpu_uuid="289003A5-BAEA-0E8B-C762-74A18E559B9C", gpu_index="5"} 17.40
+all_smi_gpu_utilization{gpu="Intel Arc B580 12GB", instance="node-0001", gpu_uuid="05C6B8A5-262C-295C-19A6-79293F6552DF", gpu_index="6"} 51.93
+all_smi_gpu_utilization{gpu="Intel Arc B580 12GB", instance="node-0001", gpu_uuid="8D3EBAEB-7C9E-D51C-58FF-2304A516E7AD", gpu_index="7"} 60.44
+# HELP all_smi_gpu_memory_used_bytes GPU memory used in bytes
+# TYPE all_smi_gpu_memory_used_bytes gauge
+all_smi_gpu_memory_used_bytes{gpu="Intel Arc B580 12GB", instance="node-0001", gpu_uuid="71682D13-500C-69F9-D1FF-5CE9A4B08C5C", gpu_index="0"} 9684940921
+all_smi_gpu_memory_used_bytes{gpu="Intel Arc B580 12GB", instance="node-0001", gpu_uuid="F7917A70-C48D-DBF0-C44D-5D929952286D", gpu_index="1"} 10503299334
+all_smi_gpu_memory_used_bytes{gpu="Intel Arc B580 12GB", instance="node-0001", gpu_uuid="F6999CCC-5651-A300-2CD0-9733B1DE9DCF", gpu_index="2"} 9972143238
+all_smi_gpu_memory_used_bytes{gpu="Intel Arc B580 12GB", instance="node-0001", gpu_uuid="08C95CF3-C0ED-8353-AAE7-DE63A619C83A", gpu_index="3"} 9283340721
+all_smi_gpu_memory_used_bytes{gpu="Intel Arc B580 12GB", instance="node-0001", gpu_uuid="15F8DE42-4A9E-232A-4777-ACC21F6C619D", gpu_index="4"} 10135750224
+all_smi_gpu_memory_used_bytes{gpu="Intel Arc B580 12GB", instance="node-0001", gpu_uuid="289003A5-BAEA-0E8B-C762-74A18E559B9C", gpu_index="5"} 6210285772
+all_smi_gpu_memory_used_bytes{gpu="Intel Arc B580 12GB", instance="node-0001", gpu_uuid="05C6B8A5-262C-295C-19A6-79293F6552DF", gpu_index="6"} 5756715176
+all_smi_gpu_memory_used_bytes{gpu="Intel Arc B580 12GB", instance="node-0001", gpu_uuid="8D3EBAEB-7C9E-D51C-58FF-2304A516E7AD", gpu_index="7"} 7119915885
+# HELP all_smi_gpu_memory_total_bytes GPU memory total in bytes
+# TYPE all_smi_gpu_memory_total_bytes gauge
+all_smi_gpu_memory_total_bytes{gpu="Intel Arc B580 12GB", instance="node-0001", gpu_uuid="71682D13-500C-69F9-D1FF-5CE9A4B08C5C", gpu_index="0"} 12884901888
+all_smi_gpu_memory_total_bytes{gpu="Intel Arc B580 12GB", instance="node-0001", gpu_uuid="F7917A70-C48D-DBF0-C44D-5D929952286D", gpu_index="1"} 12884901888
+all_smi_gpu_memory_total_bytes{gpu="Intel Arc B580 12GB", instance="node-0001", gpu_uuid="F6999CCC-5651-A300-2CD0-9733B1DE9DCF", gpu_index="2"} 12884901888
+all_smi_gpu_memory_total_bytes{gpu="Intel Arc B580 12GB", instance="node-0001", gpu_uuid="08C95CF3-C0ED-8353-AAE7-DE63A619C83A", gpu_index="3"} 12884901888
+all_smi_gpu_memory_total_bytes{gpu="Intel Arc B580 12GB", instance="node-0001", gpu_uuid="15F8DE42-4A9E-232A-4777-ACC21F6C619D", gpu_index="4"} 12884901888
+all_smi_gpu_memory_total_bytes{gpu="Intel Arc B580 12GB", instance="node-0001", gpu_uuid="289003A5-BAEA-0E8B-C762-74A18E559B9C", gpu_index="5"} 12884901888
+all_smi_gpu_memory_total_bytes{gpu="Intel Arc B580 12GB", instance="node-0001", gpu_uuid="05C6B8A5-262C-295C-19A6-79293F6552DF", gpu_index="6"} 12884901888
+all_smi_gpu_memory_total_bytes{gpu="Intel Arc B580 12GB", instance="node-0001", gpu_uuid="8D3EBAEB-7C9E-D51C-58FF-2304A516E7AD", gpu_index="7"} 12884901888
+# HELP all_smi_gpu_temperature_celsius GPU temperature in celsius
+# TYPE all_smi_gpu_temperature_celsius gauge
+all_smi_gpu_temperature_celsius{gpu="Intel Arc B580 12GB", instance="node-0001", gpu_uuid="71682D13-500C-69F9-D1FF-5CE9A4B08C5C", gpu_index="0"} 55
+all_smi_gpu_temperature_celsius{gpu="Intel Arc B580 12GB", instance="node-0001", gpu_uuid="F7917A70-C48D-DBF0-C44D-5D929952286D", gpu_index="1"} 63
+all_smi_gpu_temperature_celsius{gpu="Intel Arc B580 12GB", instance="node-0001", gpu_uuid="F6999CCC-5651-A300-2CD0-9733B1DE9DCF", gpu_index="2"} 74
+all_smi_gpu_temperature_celsius{gpu="Intel Arc B580 12GB", instance="node-0001", gpu_uuid="08C95CF3-C0ED-8353-AAE7-DE63A619C83A", gpu_index="3"} 64
+all_smi_gpu_temperature_celsius{gpu="Intel Arc B580 12GB", instance="node-0001", gpu_uuid="15F8DE42-4A9E-232A-4777-ACC21F6C619D", gpu_index="4"} 72
+all_smi_gpu_temperature_celsius{gpu="Intel Arc B580 12GB", instance="node-0001", gpu_uuid="289003A5-BAEA-0E8B-C762-74A18E559B9C", gpu_index="5"} 51
+all_smi_gpu_temperature_celsius{gpu="Intel Arc B580 12GB", instance="node-0001", gpu_uuid="05C6B8A5-262C-295C-19A6-79293F6552DF", gpu_index="6"} 69
+all_smi_gpu_temperature_celsius{gpu="Intel Arc B580 12GB", instance="node-0001", gpu_uuid="8D3EBAEB-7C9E-D51C-58FF-2304A516E7AD", gpu_index="7"} 78
+# HELP all_smi_gpu_power_consumption_watts GPU power consumption in watts
+# TYPE all_smi_gpu_power_consumption_watts gauge
+all_smi_gpu_power_consumption_watts{gpu="Intel Arc B580 12GB", instance="node-0001", gpu_uuid="71682D13-500C-69F9-D1FF-5CE9A4B08C5C", gpu_index="0"} 295.740
+all_smi_gpu_power_consumption_watts{gpu="Intel Arc B580 12GB", instance="node-0001", gpu_uuid="F7917A70-C48D-DBF0-C44D-5D929952286D", gpu_index="1"} 400.353
+all_smi_gpu_power_consumption_watts{gpu="Intel Arc B580 12GB", instance="node-0001", gpu_uuid="F6999CCC-5651-A300-2CD0-9733B1DE9DCF", gpu_index="2"} 514.267
+all_smi_gpu_power_consumption_watts{gpu="Intel Arc B580 12GB", instance="node-0001", gpu_uuid="08C95CF3-C0ED-8353-AAE7-DE63A619C83A", gpu_index="3"} 435.457
+all_smi_gpu_power_consumption_watts{gpu="Intel Arc B580 12GB", instance="node-0001", gpu_uuid="15F8DE42-4A9E-232A-4777-ACC21F6C619D", gpu_index="4"} 532.669
+all_smi_gpu_power_consumption_watts{gpu="Intel Arc B580 12GB", instance="node-0001", gpu_uuid="289003A5-BAEA-0E8B-C762-74A18E559B9C", gpu_index="5"} 242.673
+all_smi_gpu_power_consumption_watts{gpu="Intel Arc B580 12GB", instance="node-0001", gpu_uuid="05C6B8A5-262C-295C-19A6-79293F6552DF", gpu_index="6"} 463.123
+all_smi_gpu_power_consumption_watts{gpu="Intel Arc B580 12GB", instance="node-0001", gpu_uuid="8D3EBAEB-7C9E-D51C-58FF-2304A516E7AD", gpu_index="7"} 525.703
+# HELP all_smi_gpu_frequency_mhz GPU frequency in MHz
+# TYPE all_smi_gpu_frequency_mhz gauge
+all_smi_gpu_frequency_mhz{gpu="Intel Arc B580 12GB", instance="node-0001", gpu_uuid="71682D13-500C-69F9-D1FF-5CE9A4B08C5C", gpu_index="0"} 1282
+all_smi_gpu_frequency_mhz{gpu="Intel Arc B580 12GB", instance="node-0001", gpu_uuid="F7917A70-C48D-DBF0-C44D-5D929952286D", gpu_index="1"} 1479
+all_smi_gpu_frequency_mhz{gpu="Intel Arc B580 12GB", instance="node-0001", gpu_uuid="F6999CCC-5651-A300-2CD0-9733B1DE9DCF", gpu_index="2"} 1532
+all_smi_gpu_frequency_mhz{gpu="Intel Arc B580 12GB", instance="node-0001", gpu_uuid="08C95CF3-C0ED-8353-AAE7-DE63A619C83A", gpu_index="3"} 1460
+all_smi_gpu_frequency_mhz{gpu="Intel Arc B580 12GB", instance="node-0001", gpu_uuid="15F8DE42-4A9E-232A-4777-ACC21F6C619D", gpu_index="4"} 1535
+all_smi_gpu_frequency_mhz{gpu="Intel Arc B580 12GB", instance="node-0001", gpu_uuid="289003A5-BAEA-0E8B-C762-74A18E559B9C", gpu_index="5"} 1373
+all_smi_gpu_frequency_mhz{gpu="Intel Arc B580 12GB", instance="node-0001", gpu_uuid="05C6B8A5-262C-295C-19A6-79293F6552DF", gpu_index="6"} 1501
+all_smi_gpu_frequency_mhz{gpu="Intel Arc B580 12GB", instance="node-0001", gpu_uuid="8D3EBAEB-7C9E-D51C-58FF-2304A516E7AD", gpu_index="7"} 1513
+# HELP all_smi_gpu_info GPU device information
+# TYPE all_smi_gpu_info gauge
+all_smi_gpu_info{gpu="Intel Arc B580 12GB", instance="node-0001", gpu_uuid="71682D13-500C-69F9-D1FF-5CE9A4B08C5C", gpu_index="0", type="GPU", driver_version="32.0.101.6299", variant="Discrete", lib_name="Intel Graphics Driver", lib_version="32.0.101.6299"} 1
+all_smi_gpu_info{gpu="Intel Arc B580 12GB", instance="node-0001", gpu_uuid="F7917A70-C48D-DBF0-C44D-5D929952286D", gpu_index="1", type="GPU", driver_version="32.0.101.6299", variant="Discrete", lib_name="Intel Graphics Driver", lib_version="32.0.101.6299"} 1
+all_smi_gpu_info{gpu="Intel Arc B580 12GB", instance="node-0001", gpu_uuid="F6999CCC-5651-A300-2CD0-9733B1DE9DCF", gpu_index="2", type="GPU", driver_version="32.0.101.6299", variant="Discrete", lib_name="Intel Graphics Driver", lib_version="32.0.101.6299"} 1
+all_smi_gpu_info{gpu="Intel Arc B580 12GB", instance="node-0001", gpu_uuid="08C95CF3-C0ED-8353-AAE7-DE63A619C83A", gpu_index="3", type="GPU", driver_version="32.0.101.6299", variant="Discrete", lib_name="Intel Graphics Driver", lib_version="32.0.101.6299"} 1
+all_smi_gpu_info{gpu="Intel Arc B580 12GB", instance="node-0001", gpu_uuid="15F8DE42-4A9E-232A-4777-ACC21F6C619D", gpu_index="4", type="GPU", driver_version="32.0.101.6299", variant="Discrete", lib_name="Intel Graphics Driver", lib_version="32.0.101.6299"} 1
+all_smi_gpu_info{gpu="Intel Arc B580 12GB", instance="node-0001", gpu_uuid="289003A5-BAEA-0E8B-C762-74A18E559B9C", gpu_index="5", type="GPU", driver_version="32.0.101.6299", variant="Discrete", lib_name="Intel Graphics Driver", lib_version="32.0.101.6299"} 1
+all_smi_gpu_info{gpu="Intel Arc B580 12GB", instance="node-0001", gpu_uuid="05C6B8A5-262C-295C-19A6-79293F6552DF", gpu_index="6", type="GPU", driver_version="32.0.101.6299", variant="Discrete", lib_name="Intel Graphics Driver", lib_version="32.0.101.6299"} 1
+all_smi_gpu_info{gpu="Intel Arc B580 12GB", instance="node-0001", gpu_uuid="8D3EBAEB-7C9E-D51C-58FF-2304A516E7AD", gpu_index="7", type="GPU", driver_version="32.0.101.6299", variant="Discrete", lib_name="Intel Graphics Driver", lib_version="32.0.101.6299"} 1
+# HELP all_smi_intel_driver_version Intel Graphics Driver version
+# TYPE all_smi_intel_driver_version gauge
+all_smi_intel_driver_version{instance="node-0001", version="32.0.101.6299"} 1
+# HELP all_smi_cpu_utilization CPU utilization percentage
+# TYPE all_smi_cpu_utilization gauge
+all_smi_cpu_utilization{instance="node-0001"} 47.04
+# HELP all_smi_cpu_core_count Total number of CPU cores
+# TYPE all_smi_cpu_core_count gauge
+all_smi_cpu_core_count{instance="node-0001"} 29
+# HELP all_smi_cpu_model CPU model name
+# TYPE all_smi_cpu_model info
+all_smi_cpu_model{instance="node-0001", model="Intel Xeon Gold 6248R"} 1
+# HELP all_smi_cpu_frequency_mhz CPU frequency in MHz
+# TYPE all_smi_cpu_frequency_mhz gauge
+all_smi_cpu_frequency_mhz{instance="node-0001"} 3639
+# HELP all_smi_cpu_temperature_celsius CPU temperature in celsius
+# TYPE all_smi_cpu_temperature_celsius gauge
+all_smi_cpu_temperature_celsius{instance="node-0001"} 65
+# HELP all_smi_memory_used_bytes System memory used in bytes
+# TYPE all_smi_memory_used_bytes gauge
+all_smi_memory_used_bytes{instance="node-0001"} 181985481850
+# HELP all_smi_memory_total_bytes System memory total in bytes
+# TYPE all_smi_memory_total_bytes gauge
+all_smi_memory_total_bytes{instance="node-0001"} 274877906944
+# HELP all_smi_disk_total_bytes Total disk space in bytes
+# TYPE all_smi_disk_total_bytes gauge
+all_smi_disk_total_bytes{instance="node-0001", mount_point="/", index="0"} 1099511627776
+# HELP all_smi_disk_available_bytes Available disk space in bytes
+# TYPE all_smi_disk_available_bytes gauge
+all_smi_disk_available_bytes{instance="node-0001", mount_point="/", index="0"} 694986275381
+# HELP all_smi_disk_utilization_percent Disk utilization percentage
+# TYPE all_smi_disk_utilization_percent gauge
+all_smi_disk_utilization_percent{instance="node-0001", mount_point="/", index="0"} 36.79
+# HELP all_smi_disk_read_bytes_per_sec Disk read bytes per second
+# TYPE all_smi_disk_read_bytes_per_sec gauge
+all_smi_disk_read_bytes_per_sec{instance="node-0001", mount_point="/", index="0"} 71270678
+# HELP all_smi_disk_write_bytes_per_sec Disk write bytes per second
+# TYPE all_smi_disk_write_bytes_per_sec gauge
+all_smi_disk_write_bytes_per_sec{instance="node-0001", mount_point="/", index="0"} 31374080

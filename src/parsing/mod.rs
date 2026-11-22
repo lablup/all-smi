@@ -17,3 +17,6 @@
 pub mod common;
 #[macro_use]
 pub mod macros;
+pub mod prometheus;
+#[cfg(test)]
+pub(crate) mod prometheus_fixtures;

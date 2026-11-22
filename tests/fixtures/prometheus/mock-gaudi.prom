@@ -1,0 +1,133 @@
+# HELP all_smi_gpu_utilization GPU utilization percentage
+# TYPE all_smi_gpu_utilization gauge
+all_smi_gpu_utilization{gpu="NVIDIA B200 192GB HBM3", instance="node-0001", gpu_uuid="696464F5-BD07-889D-C959-EBE3AB3995C9", gpu_index="0"} 13.25
+all_smi_gpu_utilization{gpu="NVIDIA B200 192GB HBM3", instance="node-0001", gpu_uuid="6396A5B3-768A-2B14-1AFE-5A8A27612A8D", gpu_index="1"} 25.12
+all_smi_gpu_utilization{gpu="NVIDIA B200 192GB HBM3", instance="node-0001", gpu_uuid="770E4563-6EC3-CDD4-F057-1CEBA6183388", gpu_index="2"} 55.39
+all_smi_gpu_utilization{gpu="NVIDIA B200 192GB HBM3", instance="node-0001", gpu_uuid="58BE8702-E035-AB53-B0CD-308D65059240", gpu_index="3"} 25.37
+all_smi_gpu_utilization{gpu="NVIDIA B200 192GB HBM3", instance="node-0001", gpu_uuid="9DC6B4A5-9981-4E63-246D-BD12B7A00F12", gpu_index="4"} 28.82
+all_smi_gpu_utilization{gpu="NVIDIA B200 192GB HBM3", instance="node-0001", gpu_uuid="439D96B6-E91B-57EA-957C-D7BEFA69C317", gpu_index="5"} 38.65
+all_smi_gpu_utilization{gpu="NVIDIA B200 192GB HBM3", instance="node-0001", gpu_uuid="73E512B6-31C8-582F-8BEC-1172714FBFED", gpu_index="6"} 62.99
+all_smi_gpu_utilization{gpu="NVIDIA B200 192GB HBM3", instance="node-0001", gpu_uuid="F7D10B5D-FB7E-36E7-90EA-CEB4B7B04A94", gpu_index="7"} 79.57
+# HELP all_smi_gpu_memory_used_bytes GPU memory used in bytes
+# TYPE all_smi_gpu_memory_used_bytes gauge
+all_smi_gpu_memory_used_bytes{gpu="NVIDIA B200 192GB HBM3", instance="node-0001", gpu_uuid="696464F5-BD07-889D-C959-EBE3AB3995C9", gpu_index="0"} 47964143580
+all_smi_gpu_memory_used_bytes{gpu="NVIDIA B200 192GB HBM3", instance="node-0001", gpu_uuid="6396A5B3-768A-2B14-1AFE-5A8A27612A8D", gpu_index="1"} 117539384807
+all_smi_gpu_memory_used_bytes{gpu="NVIDIA B200 192GB HBM3", instance="node-0001", gpu_uuid="770E4563-6EC3-CDD4-F057-1CEBA6183388", gpu_index="2"} 68100322176
+all_smi_gpu_memory_used_bytes{gpu="NVIDIA B200 192GB HBM3", instance="node-0001", gpu_uuid="58BE8702-E035-AB53-B0CD-308D65059240", gpu_index="3"} 116519525849
+all_smi_gpu_memory_used_bytes{gpu="NVIDIA B200 192GB HBM3", instance="node-0001", gpu_uuid="9DC6B4A5-9981-4E63-246D-BD12B7A00F12", gpu_index="4"} 102631243849
+all_smi_gpu_memory_used_bytes{gpu="NVIDIA B200 192GB HBM3", instance="node-0001", gpu_uuid="439D96B6-E91B-57EA-957C-D7BEFA69C317", gpu_index="5"} 117229635537
+all_smi_gpu_memory_used_bytes{gpu="NVIDIA B200 192GB HBM3", instance="node-0001", gpu_uuid="73E512B6-31C8-582F-8BEC-1172714FBFED", gpu_index="6"} 114564599224
+all_smi_gpu_memory_used_bytes{gpu="NVIDIA B200 192GB HBM3", instance="node-0001", gpu_uuid="F7D10B5D-FB7E-36E7-90EA-CEB4B7B04A94", gpu_index="7"} 34107691900
+# HELP all_smi_gpu_memory_total_bytes GPU memory total in bytes
+# TYPE all_smi_gpu_memory_total_bytes gauge
+all_smi_gpu_memory_total_bytes{gpu="NVIDIA B200 192GB HBM3", instance="node-0001", gpu_uuid="696464F5-BD07-889D-C959-EBE3AB3995C9", gpu_index="0"} 137438953472
+all_smi_gpu_memory_total_bytes{gpu="NVIDIA B200 192GB HBM3", instance="node-0001", gpu_uuid="6396A5B3-768A-2B14-1AFE-5A8A27612A8D", gpu_index="1"} 137438953472
+all_smi_gpu_memory_total_bytes{gpu="NVIDIA B200 192GB HBM3", instance="node-0001", gpu_uuid="770E4563-6EC3-CDD4-F057-1CEBA6183388", gpu_index="2"} 137438953472
+all_smi_gpu_memory_total_bytes{gpu="NVIDIA B200 192GB HBM3", instance="node-0001", gpu_uuid="58BE8702-E035-AB53-B0CD-308D65059240", gpu_index="3"} 137438953472
+all_smi_gpu_memory_total_bytes{gpu="NVIDIA B200 192GB HBM3", instance="node-0001", gpu_uuid="9DC6B4A5-9981-4E63-246D-BD12B7A00F12", gpu_index="4"} 137438953472
+all_smi_gpu_memory_total_bytes{gpu="NVIDIA B200 192GB HBM3", instance="node-0001", gpu_uuid="439D96B6-E91B-57EA-957C-D7BEFA69C317", gpu_index="5"} 137438953472
+all_smi_gpu_memory_total_bytes{gpu="NVIDIA B200 192GB HBM3", instance="node-0001", gpu_uuid="73E512B6-31C8-582F-8BEC-1172714FBFED", gpu_index="6"} 137438953472
+all_smi_gpu_memory_total_bytes{gpu="NVIDIA B200 192GB HBM3", instance="node-0001", gpu_uuid="F7D10B5D-FB7E-36E7-90EA-CEB4B7B04A94", gpu_index="7"} 137438953472
+# HELP all_smi_gpu_temperature_celsius GPU temperature in celsius
+# TYPE all_smi_gpu_temperature_celsius gauge
+all_smi_gpu_temperature_celsius{gpu="NVIDIA B200 192GB HBM3", instance="node-0001", gpu_uuid="696464F5-BD07-889D-C959-EBE3AB3995C9", gpu_index="0"} 46
+all_smi_gpu_temperature_celsius{gpu="NVIDIA B200 192GB HBM3", instance="node-0001", gpu_uuid="6396A5B3-768A-2B14-1AFE-5A8A27612A8D", gpu_index="1"} 57
+all_smi_gpu_temperature_celsius{gpu="NVIDIA B200 192GB HBM3", instance="node-0001", gpu_uuid="770E4563-6EC3-CDD4-F057-1CEBA6183388", gpu_index="2"} 73
+all_smi_gpu_temperature_celsius{gpu="NVIDIA B200 192GB HBM3", instance="node-0001", gpu_uuid="58BE8702-E035-AB53-B0CD-308D65059240", gpu_index="3"} 65
+all_smi_gpu_temperature_celsius{gpu="NVIDIA B200 192GB HBM3", instance="node-0001", gpu_uuid="9DC6B4A5-9981-4E63-246D-BD12B7A00F12", gpu_index="4"} 62
+all_smi_gpu_temperature_celsius{gpu="NVIDIA B200 192GB HBM3", instance="node-0001", gpu_uuid="439D96B6-E91B-57EA-957C-D7BEFA69C317", gpu_index="5"} 70
+all_smi_gpu_temperature_celsius{gpu="NVIDIA B200 192GB HBM3", instance="node-0001", gpu_uuid="73E512B6-31C8-582F-8BEC-1172714FBFED", gpu_index="6"} 78
+all_smi_gpu_temperature_celsius{gpu="NVIDIA B200 192GB HBM3", instance="node-0001", gpu_uuid="F7D10B5D-FB7E-36E7-90EA-CEB4B7B04A94", gpu_index="7"} 79
+# HELP all_smi_gpu_power_consumption_watts GPU power consumption in watts
+# TYPE all_smi_gpu_power_consumption_watts gauge
+all_smi_gpu_power_consumption_watts{gpu="NVIDIA B200 192GB HBM3", instance="node-0001", gpu_uuid="696464F5-BD07-889D-C959-EBE3AB3995C9", gpu_index="0"} 205.337
+all_smi_gpu_power_consumption_watts{gpu="NVIDIA B200 192GB HBM3", instance="node-0001", gpu_uuid="6396A5B3-768A-2B14-1AFE-5A8A27612A8D", gpu_index="1"} 359.975
+all_smi_gpu_power_consumption_watts{gpu="NVIDIA B200 192GB HBM3", instance="node-0001", gpu_uuid="770E4563-6EC3-CDD4-F057-1CEBA6183388", gpu_index="2"} 495.358
+all_smi_gpu_power_consumption_watts{gpu="NVIDIA B200 192GB HBM3", instance="node-0001", gpu_uuid="58BE8702-E035-AB53-B0CD-308D65059240", gpu_index="3"} 422.367
+all_smi_gpu_power_consumption_watts{gpu="NVIDIA B200 192GB HBM3", instance="node-0001", gpu_uuid="9DC6B4A5-9981-4E63-246D-BD12B7A00F12", gpu_index="4"} 380.343
+all_smi_gpu_power_consumption_watts{gpu="NVIDIA B200 192GB HBM3", instance="node-0001", gpu_uuid="439D96B6-E91B-57EA-957C-D7BEFA69C317", gpu_index="5"} 501.598
+all_smi_gpu_power_consumption_watts{gpu="NVIDIA B200 192GB HBM3", instance="node-0001", gpu_uuid="73E512B6-31C8-582F-8BEC-1172714FBFED", gpu_index="6"} 502.493
+all_smi_gpu_power_consumption_watts{gpu="NVIDIA B200 192GB HBM3", instance="node-0001", gpu_uuid="F7D10B5D-FB7E-36E7-90EA-CEB4B7B04A94", gpu_index="7"} 493.276
+# HELP all_smi_gpu_frequency_mhz GPU frequency in MHz
+# TYPE all_smi_gpu_frequency_mhz gauge
+all_smi_gpu_frequency_mhz{gpu="NVIDIA B200 192GB HBM3", instance="node-0001", gpu_uuid="696464F5-BD07-889D-C959-EBE3AB3995C9", gpu_index="0"} 1198
+all_smi_gpu_frequency_mhz{gpu="NVIDIA B200 192GB HBM3", instance="node-0001", gpu_uuid="6396A5B3-768A-2B14-1AFE-5A8A27612A8D", gpu_index="1"} 1359
+all_smi_gpu_frequency_mhz{gpu="NVIDIA B200 192GB HBM3", instance="node-0001", gpu_uuid="770E4563-6EC3-CDD4-F057-1CEBA6183388", gpu_index="2"} 1542
+all_smi_gpu_frequency_mhz{gpu="NVIDIA B200 192GB HBM3", instance="node-0001", gpu_uuid="58BE8702-E035-AB53-B0CD-308D65059240", gpu_index="3"} 1369
+all_smi_gpu_frequency_mhz{gpu="NVIDIA B200 192GB HBM3", instance="node-0001", gpu_uuid="9DC6B4A5-9981-4E63-246D-BD12B7A00F12", gpu_index="4"} 1319
+all_smi_gpu_frequency_mhz{gpu="NVIDIA B200 192GB HBM3", instance="node-0001", gpu_uuid="439D96B6-E91B-57EA-957C-D7BEFA69C317", gpu_index="5"} 1346
+all_smi_gpu_frequency_mhz{gpu="NVIDIA B200 192GB HBM3", instance="node-0001", gpu_uuid="73E512B6-31C8-582F-8BEC-1172714FBFED", gpu_index="6"} 1639
+all_smi_gpu_frequency_mhz{gpu="NVIDIA B200 192GB HBM3", instance="node-0001", gpu_uuid="F7D10B5D-FB7E-36E7-90EA-CEB4B7B04A94", gpu_index="7"} 1597
+# HELP all_smi_gaudi_aip_utilization Gaudi AIP utilization percentage
+# TYPE all_smi_gaudi_aip_utilization gauge
+all_smi_gaudi_aip_utilization{npu="NVIDIA B200 192GB HBM3", instance="node-0001", npu_uuid="696464F5-BD07-889D-C959-EBE3AB3995C9", npu_index="0"} 13.25
+all_smi_gaudi_aip_utilization{npu="NVIDIA B200 192GB HBM3", instance="node-0001", npu_uuid="6396A5B3-768A-2B14-1AFE-5A8A27612A8D", npu_index="1"} 25.12
+all_smi_gaudi_aip_utilization{npu="NVIDIA B200 192GB HBM3", instance="node-0001", npu_uuid="770E4563-6EC3-CDD4-F057-1CEBA6183388", npu_index="2"} 55.39
+all_smi_gaudi_aip_utilization{npu="NVIDIA B200 192GB HBM3", instance="node-0001", npu_uuid="58BE8702-E035-AB53-B0CD-308D65059240", npu_index="3"} 25.37
+all_smi_gaudi_aip_utilization{npu="NVIDIA B200 192GB HBM3", instance="node-0001", npu_uuid="9DC6B4A5-9981-4E63-246D-BD12B7A00F12", npu_index="4"} 28.82
+all_smi_gaudi_aip_utilization{npu="NVIDIA B200 192GB HBM3", instance="node-0001", npu_uuid="439D96B6-E91B-57EA-957C-D7BEFA69C317", npu_index="5"} 38.65
+all_smi_gaudi_aip_utilization{npu="NVIDIA B200 192GB HBM3", instance="node-0001", npu_uuid="73E512B6-31C8-582F-8BEC-1172714FBFED", npu_index="6"} 62.99
+all_smi_gaudi_aip_utilization{npu="NVIDIA B200 192GB HBM3", instance="node-0001", npu_uuid="F7D10B5D-FB7E-36E7-90EA-CEB4B7B04A94", npu_index="7"} 79.57
+# HELP all_smi_gaudi_memory_bandwidth_percent Gaudi memory bandwidth utilization percentage
+# TYPE all_smi_gaudi_memory_bandwidth_percent gauge
+all_smi_gaudi_memory_bandwidth_percent{npu="NVIDIA B200 192GB HBM3", instance="node-0001", npu_uuid="696464F5-BD07-889D-C959-EBE3AB3995C9", npu_index="0"} 17.34
+all_smi_gaudi_memory_bandwidth_percent{npu="NVIDIA B200 192GB HBM3", instance="node-0001", npu_uuid="6396A5B3-768A-2B14-1AFE-5A8A27612A8D", npu_index="1"} 36.83
+all_smi_gaudi_memory_bandwidth_percent{npu="NVIDIA B200 192GB HBM3", instance="node-0001", npu_uuid="770E4563-6EC3-CDD4-F057-1CEBA6183388", npu_index="2"} 70.67
+all_smi_gaudi_memory_bandwidth_percent{npu="NVIDIA B200 192GB HBM3", instance="node-0001", npu_uuid="58BE8702-E035-AB53-B0CD-308D65059240", npu_index="3"} 35.52
+all_smi_gaudi_memory_bandwidth_percent{npu="NVIDIA B200 192GB HBM3", instance="node-0001", npu_uuid="9DC6B4A5-9981-4E63-246D-BD12B7A00F12", npu_index="4"} 42.72
+all_smi_gaudi_memory_bandwidth_percent{npu="NVIDIA B200 192GB HBM3", instance="node-0001", npu_uuid="439D96B6-E91B-57EA-957C-D7BEFA69C317", npu_index="5"} 40.65
+all_smi_gaudi_memory_bandwidth_percent{npu="NVIDIA B200 192GB HBM3", instance="node-0001", npu_uuid="73E512B6-31C8-582F-8BEC-1172714FBFED", npu_index="6"} 76.77
+all_smi_gaudi_memory_bandwidth_percent{npu="NVIDIA B200 192GB HBM3", instance="node-0001", npu_uuid="F7D10B5D-FB7E-36E7-90EA-CEB4B7B04A94", npu_index="7"} 62.57
+# HELP all_smi_gaudi_power_max_watts Gaudi maximum power limit in watts
+# TYPE all_smi_gaudi_power_max_watts gauge
+all_smi_gaudi_power_max_watts{npu="NVIDIA B200 192GB HBM3", instance="node-0001", npu_uuid="696464F5-BD07-889D-C959-EBE3AB3995C9", npu_index="0"} 850
+all_smi_gaudi_power_max_watts{npu="NVIDIA B200 192GB HBM3", instance="node-0001", npu_uuid="6396A5B3-768A-2B14-1AFE-5A8A27612A8D", npu_index="1"} 850
+all_smi_gaudi_power_max_watts{npu="NVIDIA B200 192GB HBM3", instance="node-0001", npu_uuid="770E4563-6EC3-CDD4-F057-1CEBA6183388", npu_index="2"} 850
+all_smi_gaudi_power_max_watts{npu="NVIDIA B200 192GB HBM3", instance="node-0001", npu_uuid="58BE8702-E035-AB53-B0CD-308D65059240", npu_index="3"} 850
+all_smi_gaudi_power_max_watts{npu="NVIDIA B200 192GB HBM3", instance="node-0001", npu_uuid="9DC6B4A5-9981-4E63-246D-BD12B7A00F12", npu_index="4"} 850
+all_smi_gaudi_power_max_watts{npu="NVIDIA B200 192GB HBM3", instance="node-0001", npu_uuid="439D96B6-E91B-57EA-957C-D7BEFA69C317", npu_index="5"} 850
+all_smi_gaudi_power_max_watts{npu="NVIDIA B200 192GB HBM3", instance="node-0001", npu_uuid="73E512B6-31C8-582F-8BEC-1172714FBFED", npu_index="6"} 850
+all_smi_gaudi_power_max_watts{npu="NVIDIA B200 192GB HBM3", instance="node-0001", npu_uuid="F7D10B5D-FB7E-36E7-90EA-CEB4B7B04A94", npu_index="7"} 850
+# HELP all_smi_gaudi_power_efficiency Performance per watt
+# TYPE all_smi_gaudi_power_efficiency gauge
+all_smi_gaudi_power_efficiency{npu="NVIDIA B200 192GB HBM3", instance="node-0001", npu_uuid="696464F5-BD07-889D-C959-EBE3AB3995C9", npu_index="0"} 0.0645
+all_smi_gaudi_power_efficiency{npu="NVIDIA B200 192GB HBM3", instance="node-0001", npu_uuid="6396A5B3-768A-2B14-1AFE-5A8A27612A8D", npu_index="1"} 0.0698
+all_smi_gaudi_power_efficiency{npu="NVIDIA B200 192GB HBM3", instance="node-0001", npu_uuid="770E4563-6EC3-CDD4-F057-1CEBA6183388", npu_index="2"} 0.1118
+all_smi_gaudi_power_efficiency{npu="NVIDIA B200 192GB HBM3", instance="node-0001", npu_uuid="58BE8702-E035-AB53-B0CD-308D65059240", npu_index="3"} 0.0601
+all_smi_gaudi_power_efficiency{npu="NVIDIA B200 192GB HBM3", instance="node-0001", npu_uuid="9DC6B4A5-9981-4E63-246D-BD12B7A00F12", npu_index="4"} 0.0758
+all_smi_gaudi_power_efficiency{npu="NVIDIA B200 192GB HBM3", instance="node-0001", npu_uuid="439D96B6-E91B-57EA-957C-D7BEFA69C317", npu_index="5"} 0.0771
+all_smi_gaudi_power_efficiency{npu="NVIDIA B200 192GB HBM3", instance="node-0001", npu_uuid="73E512B6-31C8-582F-8BEC-1172714FBFED", npu_index="6"} 0.1254
+all_smi_gaudi_power_efficiency{npu="NVIDIA B200 192GB HBM3", instance="node-0001", npu_uuid="F7D10B5D-FB7E-36E7-90EA-CEB4B7B04A94", npu_index="7"} 0.1613
+# HELP all_smi_cpu_utilization CPU utilization percentage
+# TYPE all_smi_cpu_utilization gauge
+all_smi_cpu_utilization{instance="node-0001"} 69.53
+# HELP all_smi_cpu_core_count Total number of CPU cores
+# TYPE all_smi_cpu_core_count gauge
+all_smi_cpu_core_count{instance="node-0001"} 128
+# HELP all_smi_cpu_temperature_celsius CPU temperature in celsius
+# TYPE all_smi_cpu_temperature_celsius gauge
+all_smi_cpu_temperature_celsius{instance="node-0001"} 36
+# HELP all_smi_memory_used_bytes System memory used in bytes
+# TYPE all_smi_memory_used_bytes gauge
+all_smi_memory_used_bytes{instance="node-0001"} 385903276260
+# HELP all_smi_memory_total_bytes System memory total in bytes
+# TYPE all_smi_memory_total_bytes gauge
+all_smi_memory_total_bytes{instance="node-0001"} 1099511627776
+# HELP all_smi_gaudi_driver_version Intel Gaudi (Habana) driver version
+# TYPE all_smi_gaudi_driver_version gauge
+all_smi_gaudi_driver_version{instance="node-0001"} 1
+# HELP all_smi_disk_total_bytes Total disk space in bytes
+# TYPE all_smi_disk_total_bytes gauge
+all_smi_disk_total_bytes{instance="node-0001", mount_point="/", index="0"} 1099511627776
+# HELP all_smi_disk_available_bytes Available disk space in bytes
+# TYPE all_smi_disk_available_bytes gauge
+all_smi_disk_available_bytes{instance="node-0001", mount_point="/", index="0"} 347974147431
+# HELP all_smi_disk_utilization_percent Disk utilization percentage
+# TYPE all_smi_disk_utilization_percent gauge
+all_smi_disk_utilization_percent{instance="node-0001", mount_point="/", index="0"} 68.35
+# HELP all_smi_disk_read_bytes_per_sec Disk read bytes per second
+# TYPE all_smi_disk_read_bytes_per_sec gauge
+all_smi_disk_read_bytes_per_sec{instance="node-0001", mount_point="/", index="0"} 6929120
+# HELP all_smi_disk_write_bytes_per_sec Disk write bytes per second
+# TYPE all_smi_disk_write_bytes_per_sec gauge
+all_smi_disk_write_bytes_per_sec{instance="node-0001", mount_point="/", index="0"} 44009377

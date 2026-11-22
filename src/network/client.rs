@@ -12,11 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::str::FromStr;
-use std::sync::Arc;
-use std::sync::Once;
+use std::sync::{Arc, Mutex, Once, PoisonError};
 use std::time::{Duration, Instant};
 
 use futures_util::stream::{FuturesUnordered, StreamExt};
@@ -26,12 +25,15 @@ use tokio::sync::RwLock;
 use crate::app_state::ConnectionStatus;
 use crate::common::config::{AppConfig, EnvConfig};
 use crate::device::{ChassisInfo, CpuInfo, GpuInfo, MemoryInfo};
-use crate::network::metrics_parser::{MAX_METRICS_TEXT_BYTES, ParsedProcessRow};
+use crate::network::metrics_parser::{ParsedProcessRow, ParsedRemoteMetrics};
+
+use super::host_backoff::{BackoffTable, ScrapeTimeouts, backing_off_message};
+use super::scrape_task::{ScrapeJob, ScrapeOutcome};
 use crate::storage::info::StorageInfo;
 
 const INITIAL_METRICS_BODY_CAPACITY: usize = 64 * 1024;
 
-async fn read_response_text_with_limit(
+pub(crate) async fn read_response_text_with_limit(
     mut response: reqwest::Response,
     max_bytes: usize,
 ) -> Result<String, reqwest::Error> {
@@ -67,25 +69,56 @@ async fn read_response_text_with_limit(
     Ok(String::from_utf8_lossy(&body).into_owned())
 }
 
-async fn abort_pending_tasks<T>(tasks: &mut FuturesUnordered<tokio::task::JoinHandle<T>>) {
-    for task in tasks.iter() {
-        task.abort();
-    }
+/// Collect task results until every handle has been awaited or `budget`
+/// elapses. When the budget elapses once, every remaining handle is aborted
+/// and collection continues: a task that finished before the abort still
+/// delivers its result, and a cancelled one is skipped. Every handle has been
+/// awaited before this returns, so no aborted task can overlap with a later
+/// collector tick. Returns whether the deadline fired.
+async fn collect_until_deadline<T>(
+    tasks: &mut FuturesUnordered<tokio::task::JoinHandle<T>>,
+    budget: Duration,
+    mut on_result: impl FnMut(T),
+) -> bool {
+    let mut deadline_hit = false;
+    let timeout_future = tokio::time::sleep(budget);
+    tokio::pin!(timeout_future);
 
-    // Await every aborted handle so cancellation has taken effect before the
-    // collector returns and the next polling tick can begin.
-    while tasks.next().await.is_some() {}
+    while !tasks.is_empty() {
+        tokio::select! {
+            biased;
+            _ = &mut timeout_future, if !deadline_hit => {
+                deadline_hit = true;
+                for task in tasks.iter() {
+                    task.abort();
+                }
+            }
+            Some(task_result) = tasks.next() => {
+                // An Err is a task cancelled by the abort above (or a
+                // panic): no result to merge.
+                if let Ok(value) = task_result {
+                    on_result(value);
+                }
+            }
+        }
+    }
+    deadline_hit
 }
 
 pub struct NetworkClient {
     client: reqwest::Client,
     auth_token: Option<String>,
     rate_limiter: Arc<RwLock<RateLimiter>>,
+    timeouts: ScrapeTimeouts,
+    /// Per-host failure history. Kept here rather than in `AppState` so
+    /// `record --source=remote`, which has no `AppState`, backs off too.
+    backoff: Arc<Mutex<BackoffTable>>,
 }
 
 /// Internal structured result used by the remote view collector. The public
 /// [`NetworkClient::fetch_remote_data`] tuple remains unchanged for embedding
 /// callers while the in-crate pipeline can carry chassis records as well.
+#[derive(Default)]
 pub(crate) struct RemoteScrapeData {
     pub(crate) gpu_info: Vec<GpuInfo>,
     pub(crate) cpu_info: Vec<CpuInfo>,
@@ -102,7 +135,7 @@ pub(crate) struct RemoteScrapeData {
 }
 
 /// Simple rate limiter to prevent DoS attacks
-struct RateLimiter {
+pub(crate) struct RateLimiter {
     /// Map of host to (last_request_time, request_count)
     host_requests: HashMap<String, (Instant, u32)>,
     /// Maximum requests per host per second
@@ -121,7 +154,7 @@ impl RateLimiter {
     }
 
     /// Check if a request to a host is allowed
-    async fn check_rate_limit(&mut self, host: &str) -> bool {
+    pub(crate) async fn check_rate_limit(&mut self, host: &str) -> bool {
         let now = Instant::now();
         let window = Duration::from_secs(self.window_seconds);
 
@@ -152,37 +185,33 @@ impl RateLimiter {
 
 impl NetworkClient {
     pub fn new() -> Self {
-        // Validate connection pool limits against system resources
-        let max_idle_per_host = Self::validate_pool_limits(AppConfig::POOL_MAX_IDLE_PER_HOST);
-
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(AppConfig::CONNECTION_TIMEOUT_SECS))
-            .pool_idle_timeout(Duration::from_secs(AppConfig::POOL_IDLE_TIMEOUT_SECS))
-            .pool_max_idle_per_host(max_idle_per_host)
-            .tcp_keepalive(Duration::from_secs(AppConfig::TCP_KEEPALIVE_SECS))
-            .http2_keep_alive_interval(Duration::from_secs(AppConfig::HTTP2_KEEPALIVE_SECS))
-            .build()
-            .unwrap();
-
         // Check for authentication token in environment variable
         let auth_token = std::env::var("ALL_SMI_AUTH_TOKEN").ok();
         if auth_token.is_some() {
             eprintln!("Using authentication token from ALL_SMI_AUTH_TOKEN environment variable");
         }
-
-        Self {
-            client,
-            auth_token,
-            rate_limiter: Arc::new(RwLock::new(RateLimiter::new())),
-        }
+        Self::build(auth_token, ScrapeTimeouts::default())
     }
 
     #[allow(dead_code)]
     pub fn with_auth_token(auth_token: Option<String>) -> Self {
+        Self::build(auth_token, ScrapeTimeouts::default())
+    }
+
+    /// Client with explicit scrape time bounds, for tests that cannot wait
+    /// out the production budget.
+    #[allow(dead_code)] // Used by the binary's remote-view tests.
+    pub(crate) fn with_timeouts(timeouts: ScrapeTimeouts) -> Self {
+        Self::build(None, timeouts)
+    }
+
+    fn build(auth_token: Option<String>, timeouts: ScrapeTimeouts) -> Self {
+        // Validate connection pool limits against system resources
         let max_idle_per_host = Self::validate_pool_limits(AppConfig::POOL_MAX_IDLE_PER_HOST);
 
         let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(AppConfig::CONNECTION_TIMEOUT_SECS))
+            .connect_timeout(timeouts.connect)
+            .timeout(timeouts.request)
             .pool_idle_timeout(Duration::from_secs(AppConfig::POOL_IDLE_TIMEOUT_SECS))
             .pool_max_idle_per_host(max_idle_per_host)
             .tcp_keepalive(Duration::from_secs(AppConfig::TCP_KEEPALIVE_SECS))
@@ -194,11 +223,13 @@ impl NetworkClient {
             client,
             auth_token,
             rate_limiter: Arc::new(RwLock::new(RateLimiter::new())),
+            timeouts,
+            backoff: Arc::new(Mutex::new(BackoffTable::default())),
         }
     }
 
     /// Validate and build a secure URL from the host string
-    fn validate_and_build_url(host: &str) -> Result<String, String> {
+    pub(crate) fn validate_and_build_url(host: &str) -> Result<String, String> {
         // Use the same syntax contract as startup validation so collector
         // retries cannot reinterpret an endpoint that was accepted earlier.
         let mut url = crate::common::http_hosts::parse_http_host_url(host)
@@ -308,6 +339,10 @@ impl NetworkClient {
         }
     }
 
+    /// Scrape every host once.
+    ///
+    /// `re` is unused since issue #500 (the parser no longer runs a regex)
+    /// and is kept only for source compatibility.
     #[allow(clippy::type_complexity, dead_code)]
     pub async fn fetch_remote_data(
         &self,
@@ -324,7 +359,8 @@ impl NetworkClient {
         Vec<ParsedProcessRow>,
         Vec<ConnectionStatus>,
     ) {
-        let data = self.fetch_remote_metrics(hosts, semaphore, re).await;
+        let _ = re;
+        let data = self.fetch_remote_metrics(hosts, semaphore).await;
         (
             data.gpu_info,
             data.cpu_info,
@@ -337,238 +373,170 @@ impl NetworkClient {
         )
     }
 
+    fn lock_backoff(&self) -> std::sync::MutexGuard<'_, BackoffTable> {
+        self.backoff.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Scrape every host once within `ScrapeTimeouts::budget`.
+    ///
+    /// Hosts in backoff are not contacted and report a `backing-off`
+    /// status; hosts still pending at the deadline report `timeout`. Every
+    /// configured host therefore gets exactly one status per call, in the
+    /// order of `hosts`.
     pub(crate) async fn fetch_remote_metrics(
         &self,
         hosts: &[String],
         semaphore: &Arc<tokio::sync::Semaphore>,
-        re: &Regex,
     ) -> RemoteScrapeData {
-        let mut all_gpu_info = Vec::new();
-        let mut all_cpu_info = Vec::new();
-        let mut all_memory_info = Vec::new();
-        let mut all_storage_info = Vec::new();
-        let mut all_chassis_info = Vec::new();
-        let mut all_vgpu_info: Vec<crate::device::VgpuHostInfo> = Vec::new();
-        let mut all_mig_info: Vec<crate::device::MigGpuInfo> = Vec::new();
-        let mut all_process_info: Vec<ParsedProcessRow> = Vec::new();
-        let mut connection_statuses = Vec::new();
+        let mut data = RemoteScrapeData::default();
+        let host_ids: Vec<String> = hosts
+            .iter()
+            .map(|host| crate::common::http_hosts::http_host_identifier(host))
+            .collect();
+        let mut statuses: Vec<Option<ConnectionStatus>> = vec![None; hosts.len()];
 
-        // Parallel data collection with concurrency limiting and retries
-        let total_hosts = hosts.len();
-        let mut fetch_futures = FuturesUnordered::new();
-
-        for (i, host) in hosts.iter().enumerate() {
-            let client = self.client.clone();
-            let host = host.clone();
-            let semaphore = semaphore.clone();
-            let auth_token = self.auth_token.clone();
-            let rate_limiter = self.rate_limiter.clone();
-
-            let future = tokio::spawn(async move {
-                // Stagger connection attempts to avoid overwhelming the listen queue
-                let stagger_delay = EnvConfig::connection_stagger_delay(i, total_hosts);
-                tokio::time::sleep(Duration::from_millis(stagger_delay)).await;
-
-                // Acquire semaphore permit to limit concurrency
-                let _permit = semaphore.acquire().await.unwrap();
-
-                // Check rate limit before making request
-                {
-                    let mut limiter = rate_limiter.write().await;
-                    if !limiter.check_rate_limit(&host).await {
-                        return Some((
-                            host,
-                            String::new(),
-                            Some("Rate limit exceeded".to_string()),
-                        ));
+        // Pick the hosts to contact this tick and drop backoff entries for
+        // hosts that left the configuration.
+        let mut to_scrape: Vec<usize> = Vec::with_capacity(hosts.len());
+        {
+            let now = Instant::now();
+            let mut table = self.lock_backoff();
+            let configured: HashSet<&str> = host_ids.iter().map(String::as_str).collect();
+            table.retain_configured(&configured);
+            for (index, host_id) in host_ids.iter().enumerate() {
+                match table.pending_backoff(host_id, now) {
+                    Some((remaining, failures)) => {
+                        let mut status =
+                            ConnectionStatus::new(host_id.clone(), hosts[index].clone());
+                        status.mark_failure(backing_off_message(remaining, failures));
+                        status.consecutive_failures = failures;
+                        statuses[index] = Some(status);
                     }
-                }
-
-                // Validate and sanitize the URL
-                let url = match Self::validate_and_build_url(&host) {
-                    Ok(u) => u,
-                    Err(e) => {
-                        return Some((host, String::new(), Some(format!("Invalid URL: {e}"))));
-                    }
-                };
-
-                // Retry logic with exponential backoff
-                for attempt in 1..=AppConfig::RETRY_ATTEMPTS {
-                    // Build request with optional authentication
-                    let mut request = client.get(&url);
-                    if let Some(ref token) = auth_token {
-                        request = request.header("Authorization", format!("Bearer {token}"));
-                    }
-
-                    // Bind the send result to a local variable to ensure
-                    // temporaries are dropped before surrounding locals (Rust 2024 drop order).
-                    let send_result = request.send().await;
-                    match send_result {
-                        Ok(response) => {
-                            if response.status().is_success() {
-                                let text_result =
-                                    read_response_text_with_limit(response, MAX_METRICS_TEXT_BYTES)
-                                        .await;
-                                match text_result {
-                                    Ok(text) => return Some((host, text, None)),
-                                    Err(e) => {
-                                        if attempt == 3 {
-                                            return Some((
-                                                host,
-                                                String::new(),
-                                                Some(format!("Text parse error: {e}")),
-                                            ));
-                                        }
-                                    }
-                                }
-                            } else if attempt == 3 {
-                                return Some((
-                                    host,
-                                    String::new(),
-                                    Some(format!("HTTP {}", response.status())),
-                                ));
-                            }
-                        }
-                        Err(e) => {
-                            if attempt == 3 {
-                                return Some((
-                                    host,
-                                    String::new(),
-                                    Some(format!("Connection error after {attempt} attempts: {e}")),
-                                ));
-                            }
-                        }
-                    }
-
-                    // Exponential backoff
-                    tokio::time::sleep(Duration::from_millis(EnvConfig::retry_delay(attempt)))
-                        .await;
-                }
-
-                Some((
-                    host,
-                    String::new(),
-                    Some("All retry attempts failed".to_string()),
-                ))
-            });
-
-            fetch_futures.push(future);
-        }
-
-        // Process results as they arrive using streaming with overall timeout
-        let mut _successful_connections = 0;
-        let mut _failed_connections = 0;
-        let mut responses_received = 0;
-
-        // Set overall timeout for collecting results (4 seconds)
-        let overall_timeout = Duration::from_secs(4);
-        let timeout_future = tokio::time::sleep(overall_timeout);
-        tokio::pin!(timeout_future);
-
-        loop {
-            tokio::select! {
-                // Process next result if available
-                Some(task_result) = fetch_futures.next() => {
-                    responses_received += 1;
-
-                    match task_result {
-                        Ok(Some((host, text, error))) => {
-                            let host_identifier =
-                                crate::common::http_hosts::http_host_identifier(&host);
-                            let mut connection_status =
-                                ConnectionStatus::new(host_identifier.clone(), host.clone());
-
-                            if let Some(error_msg) = error {
-                                _failed_connections += 1;
-                                connection_status.mark_failure(error_msg);
-                                connection_statuses.push(connection_status);
-                            } else {
-                                _successful_connections += 1;
-                                connection_status.mark_success();
-
-                                if text.is_empty() {
-                                    connection_statuses.push(connection_status);
-                                } else {
-                                    let parser = super::metrics_parser::MetricsParser::new();
-                                    let parsed = parser.parse_metrics_with_chassis(
-                                        &text,
-                                        &host_identifier,
-                                        re,
-                                    );
-
-                                    // Extract the instance name from device info if available
-                                    let instance_name = if let Some(first_gpu) = parsed.metrics.gpu_info.first() {
-                                        Some(first_gpu.instance.clone())
-                                    } else if let Some(first_cpu) = parsed.metrics.cpu_info.first() {
-                                        Some(first_cpu.instance.clone())
-                                    } else if let Some(first_memory) = parsed.metrics.memory_info.first() {
-                                        Some(first_memory.instance.clone())
-                                    } else {
-                                        parsed
-                                            .chassis_info
-                                            .first()
-                                            .map(|chassis| chassis.instance.clone())
-                                    };
-
-                                    // Store the instance name as actual_hostname for display purposes
-                                    connection_status.actual_hostname = instance_name;
-                                    connection_statuses.push(connection_status);
-
-                                    all_gpu_info.extend(parsed.metrics.gpu_info);
-                                    all_cpu_info.extend(parsed.metrics.cpu_info);
-                                    all_memory_info.extend(parsed.metrics.memory_info);
-                                    all_storage_info.extend(parsed.metrics.storage_info);
-                                    all_chassis_info.extend(parsed.chassis_info);
-                                    all_vgpu_info.extend(parsed.metrics.vgpu_info);
-                                    all_mig_info.extend(parsed.metrics.mig_info);
-                                    all_process_info.extend(parsed.metrics.process_info);
-                                }
-                            }
-                        }
-                        Ok(None) => {
-                            _failed_connections += 1;
-                            // We don't have host information for None results, so we can't create a connection status
-                        }
-                        Err(_) => {
-                            _failed_connections += 1;
-                            // We don't have host information for Err results, so we can't create a connection status
-                        }
-                    }
-
-                    // Check if we've received responses from all hosts
-                    if responses_received >= total_hosts {
-                        break;
-                    }
-                }
-                // Timeout reached - return partial results
-                _ = &mut timeout_future => {
-                    // A dropped JoinHandle detaches its task. Explicitly abort
-                    // and drain every remaining handle so retry/download tasks
-                    // cannot overlap with a later collector tick.
-                    abort_pending_tasks(&mut fetch_futures).await;
-                    break;
+                    None => to_scrape.push(index),
                 }
             }
         }
 
-        // Debug logging for connection success rate - commented out to avoid interfering with TUI
-        // if failed_connections > 0 {
-        //     eprintln!(
-        //         "Connection stats: {successful_connections} successful, {failed_connections} failed out of {total_hosts} total"
-        //     );
-        // }
-
-        RemoteScrapeData {
-            gpu_info: all_gpu_info,
-            cpu_info: all_cpu_info,
-            memory_info: all_memory_info,
-            storage_info: all_storage_info,
-            chassis_info: all_chassis_info,
-            vgpu_info: all_vgpu_info,
-            mig_info: all_mig_info,
-            process_info: all_process_info,
-            connection_statuses,
+        // Parallel data collection with concurrency limiting and retries
+        let mut fetch_futures = FuturesUnordered::new();
+        let spawn_count = to_scrape.len();
+        for (spawn_index, &index) in to_scrape.iter().enumerate() {
+            let job = ScrapeJob {
+                client: self.client.clone(),
+                auth_token: self.auth_token.clone(),
+                rate_limiter: self.rate_limiter.clone(),
+                semaphore: semaphore.clone(),
+                host: hosts[index].clone(),
+                host_id: host_ids[index].clone(),
+                stagger: Duration::from_millis(EnvConfig::connection_stagger_delay(
+                    spawn_index,
+                    spawn_count,
+                )),
+                request_timeout: self.timeouts.request,
+            };
+            fetch_futures.push(tokio::spawn(async move { (index, job.run().await) }));
         }
+
+        let mut pending: HashSet<usize> = to_scrape.iter().copied().collect();
+        let deadline_hit = collect_until_deadline(
+            &mut fetch_futures,
+            self.timeouts.budget,
+            |(index, outcome)| {
+                pending.remove(&index);
+                let mut status =
+                    ConnectionStatus::new(host_ids[index].clone(), hosts[index].clone());
+                match outcome {
+                    ScrapeOutcome::Failed(message) => status.mark_failure(message),
+                    ScrapeOutcome::Empty => status.mark_success(),
+                    ScrapeOutcome::Parsed(parsed) => {
+                        status.mark_success();
+                        status.actual_hostname = instance_name(&parsed);
+                        data.merge(*parsed);
+                    }
+                }
+                statuses[index] = Some(status);
+            },
+        )
+        .await;
+
+        for &index in &pending {
+            let mut status = ConnectionStatus::new(host_ids[index].clone(), hosts[index].clone());
+            status.mark_failure(if deadline_hit {
+                format!(
+                    "timeout: no response within {} ms",
+                    self.timeouts.budget.as_millis()
+                )
+            } else {
+                "Scrape task failed".to_string()
+            });
+            statuses[index] = Some(status);
+        }
+
+        // Feed this tick's results into the backoff table. Hosts skipped
+        // while backing off keep their schedule untouched.
+        {
+            let now = Instant::now();
+            let mut table = self.lock_backoff();
+            for &index in &to_scrape {
+                let Some(status) = statuses[index].as_mut() else {
+                    continue;
+                };
+                if status.is_connected {
+                    table.record_success(&host_ids[index]);
+                } else {
+                    status.consecutive_failures = table.record_failure(&host_ids[index], now);
+                }
+            }
+        }
+
+        data.connection_statuses = statuses.into_iter().flatten().collect();
+        data
+    }
+
+    #[cfg(test)]
+    pub(crate) fn backoff_entry(&self, host_id: &str) -> Option<super::host_backoff::HostBackoff> {
+        self.lock_backoff().get(host_id).copied()
+    }
+
+    /// Make every backed-off host eligible again, as if its window passed.
+    #[cfg(test)]
+    pub(crate) fn expire_backoff_for_tests(&self) {
+        self.lock_backoff().expire_all();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn record_failure_for_tests(&self, host_id: &str) {
+        self.lock_backoff().record_failure(host_id, Instant::now());
+    }
+}
+
+/// Display name for a host: the `instance` label of its first device row.
+fn instance_name(parsed: &ParsedRemoteMetrics) -> Option<String> {
+    let metrics = &parsed.metrics;
+    metrics
+        .gpu_info
+        .first()
+        .map(|gpu| gpu.instance.clone())
+        .or_else(|| metrics.cpu_info.first().map(|cpu| cpu.instance.clone()))
+        .or_else(|| metrics.memory_info.first().map(|mem| mem.instance.clone()))
+        .or_else(|| {
+            parsed
+                .chassis_info
+                .first()
+                .map(|chassis| chassis.instance.clone())
+        })
+}
+
+impl RemoteScrapeData {
+    fn merge(&mut self, parsed: ParsedRemoteMetrics) {
+        self.gpu_info.extend(parsed.metrics.gpu_info);
+        self.cpu_info.extend(parsed.metrics.cpu_info);
+        self.memory_info.extend(parsed.metrics.memory_info);
+        self.storage_info.extend(parsed.metrics.storage_info);
+        self.chassis_info.extend(parsed.chassis_info);
+        self.vgpu_info.extend(parsed.metrics.vgpu_info);
+        self.mig_info.extend(parsed.metrics.mig_info);
+        self.process_info.extend(parsed.metrics.process_info);
     }
 }
 
@@ -577,6 +545,10 @@ impl Default for NetworkClient {
         Self::new()
     }
 }
+
+#[cfg(test)]
+#[path = "client_scrape_tests.rs"]
+mod scrape_tests;
 
 #[cfg(test)]
 mod tests {
@@ -620,7 +592,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn abort_pending_tasks_waits_for_cancellation() {
+    async fn collect_until_deadline_waits_for_cancellation() {
         struct DropCounter(Arc<AtomicUsize>);
 
         impl Drop for DropCounter {
@@ -641,9 +613,47 @@ mod tests {
 
         let mut tasks = FuturesUnordered::new();
         tasks.push(task);
-        abort_pending_tasks(&mut tasks).await;
+        let mut results = 0;
+        let hit =
+            collect_until_deadline(&mut tasks, Duration::from_millis(10), |_| results += 1).await;
 
+        assert!(hit);
+        assert_eq!(results, 0);
         assert!(tasks.is_empty());
         assert_eq!(dropped.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn collect_until_deadline_keeps_results_finished_before_abort() {
+        let mut tasks = FuturesUnordered::new();
+        tasks.push(tokio::spawn(async { 1_u32 }));
+        tasks.push(tokio::spawn(async {
+            pending::<()>().await;
+            2_u32
+        }));
+        // Let the first task finish; its handle is complete but not yet
+        // polled by the collector when the zero budget fires.
+        tokio::task::yield_now().await;
+
+        let mut results = Vec::new();
+        let hit = collect_until_deadline(&mut tasks, Duration::ZERO, |v| results.push(v)).await;
+
+        assert!(hit);
+        assert_eq!(results, vec![1]);
+        assert!(tasks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn collect_until_deadline_without_timeout_returns_all_results() {
+        let mut tasks = FuturesUnordered::new();
+        for value in 0..3_u32 {
+            tasks.push(tokio::spawn(async move { value }));
+        }
+        let mut results = Vec::new();
+        let hit =
+            collect_until_deadline(&mut tasks, Duration::from_secs(30), |v| results.push(v)).await;
+        results.sort_unstable();
+        assert!(!hit);
+        assert_eq!(results, vec![0, 1, 2]);
     }
 }

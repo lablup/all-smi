@@ -1,0 +1,119 @@
+# HELP all_smi_gpu_utilization GPU utilization percentage
+# TYPE all_smi_gpu_utilization gauge
+all_smi_gpu_utilization{gpu="AMD Instinct MI355X 288GB HBM3", instance="node-0001", gpu_uuid="428A8115-84CB-BB67-298B-0B904D412E00", gpu_index="0"} 41.83
+all_smi_gpu_utilization{gpu="AMD Instinct MI355X 288GB HBM3", instance="node-0001", gpu_uuid="79803882-1301-970B-4AE3-852520D6B3FD", gpu_index="1"} 18.80
+all_smi_gpu_utilization{gpu="AMD Instinct MI355X 288GB HBM3", instance="node-0001", gpu_uuid="DBFE951F-31B2-A330-C15B-236D154E8BEF", gpu_index="2"} 58.26
+all_smi_gpu_utilization{gpu="AMD Instinct MI355X 288GB HBM3", instance="node-0001", gpu_uuid="D30901B5-2CC0-167F-325A-8D75408BC98A", gpu_index="3"} 46.53
+all_smi_gpu_utilization{gpu="AMD Instinct MI355X 288GB HBM3", instance="node-0001", gpu_uuid="ADD49060-DEFB-3F4F-194E-D745656A3330", gpu_index="4"} 41.46
+all_smi_gpu_utilization{gpu="AMD Instinct MI355X 288GB HBM3", instance="node-0001", gpu_uuid="7B07E298-8D2F-BEC2-910E-1C9CF2762A80", gpu_index="5"} 63.23
+all_smi_gpu_utilization{gpu="AMD Instinct MI355X 288GB HBM3", instance="node-0001", gpu_uuid="DA9286F2-B4E8-B7B5-A8E9-3CFE0460AA01", gpu_index="6"} 82.88
+all_smi_gpu_utilization{gpu="AMD Instinct MI355X 288GB HBM3", instance="node-0001", gpu_uuid="E75377E7-E8A4-6FA9-912D-B0FF402EF46D", gpu_index="7"} 84.42
+# HELP all_smi_gpu_memory_used_bytes GPU memory used in bytes
+# TYPE all_smi_gpu_memory_used_bytes gauge
+all_smi_gpu_memory_used_bytes{gpu="AMD Instinct MI355X 288GB HBM3", instance="node-0001", gpu_uuid="428A8115-84CB-BB67-298B-0B904D412E00", gpu_index="0"} 184135509938
+all_smi_gpu_memory_used_bytes{gpu="AMD Instinct MI355X 288GB HBM3", instance="node-0001", gpu_uuid="79803882-1301-970B-4AE3-852520D6B3FD", gpu_index="1"} 209733363215
+all_smi_gpu_memory_used_bytes{gpu="AMD Instinct MI355X 288GB HBM3", instance="node-0001", gpu_uuid="DBFE951F-31B2-A330-C15B-236D154E8BEF", gpu_index="2"} 198763728974
+all_smi_gpu_memory_used_bytes{gpu="AMD Instinct MI355X 288GB HBM3", instance="node-0001", gpu_uuid="D30901B5-2CC0-167F-325A-8D75408BC98A", gpu_index="3"} 201640825509
+all_smi_gpu_memory_used_bytes{gpu="AMD Instinct MI355X 288GB HBM3", instance="node-0001", gpu_uuid="ADD49060-DEFB-3F4F-194E-D745656A3330", gpu_index="4"} 225494534915
+all_smi_gpu_memory_used_bytes{gpu="AMD Instinct MI355X 288GB HBM3", instance="node-0001", gpu_uuid="7B07E298-8D2F-BEC2-910E-1C9CF2762A80", gpu_index="5"} 210277155501
+all_smi_gpu_memory_used_bytes{gpu="AMD Instinct MI355X 288GB HBM3", instance="node-0001", gpu_uuid="DA9286F2-B4E8-B7B5-A8E9-3CFE0460AA01", gpu_index="6"} 246478694452
+all_smi_gpu_memory_used_bytes{gpu="AMD Instinct MI355X 288GB HBM3", instance="node-0001", gpu_uuid="E75377E7-E8A4-6FA9-912D-B0FF402EF46D", gpu_index="7"} 73217194538
+# HELP all_smi_gpu_memory_total_bytes GPU memory total in bytes
+# TYPE all_smi_gpu_memory_total_bytes gauge
+all_smi_gpu_memory_total_bytes{gpu="AMD Instinct MI355X 288GB HBM3", instance="node-0001", gpu_uuid="428A8115-84CB-BB67-298B-0B904D412E00", gpu_index="0"} 309237645312
+all_smi_gpu_memory_total_bytes{gpu="AMD Instinct MI355X 288GB HBM3", instance="node-0001", gpu_uuid="79803882-1301-970B-4AE3-852520D6B3FD", gpu_index="1"} 309237645312
+all_smi_gpu_memory_total_bytes{gpu="AMD Instinct MI355X 288GB HBM3", instance="node-0001", gpu_uuid="DBFE951F-31B2-A330-C15B-236D154E8BEF", gpu_index="2"} 309237645312
+all_smi_gpu_memory_total_bytes{gpu="AMD Instinct MI355X 288GB HBM3", instance="node-0001", gpu_uuid="D30901B5-2CC0-167F-325A-8D75408BC98A", gpu_index="3"} 309237645312
+all_smi_gpu_memory_total_bytes{gpu="AMD Instinct MI355X 288GB HBM3", instance="node-0001", gpu_uuid="ADD49060-DEFB-3F4F-194E-D745656A3330", gpu_index="4"} 309237645312
+all_smi_gpu_memory_total_bytes{gpu="AMD Instinct MI355X 288GB HBM3", instance="node-0001", gpu_uuid="7B07E298-8D2F-BEC2-910E-1C9CF2762A80", gpu_index="5"} 309237645312
+all_smi_gpu_memory_total_bytes{gpu="AMD Instinct MI355X 288GB HBM3", instance="node-0001", gpu_uuid="DA9286F2-B4E8-B7B5-A8E9-3CFE0460AA01", gpu_index="6"} 309237645312
+all_smi_gpu_memory_total_bytes{gpu="AMD Instinct MI355X 288GB HBM3", instance="node-0001", gpu_uuid="E75377E7-E8A4-6FA9-912D-B0FF402EF46D", gpu_index="7"} 309237645312
+# HELP all_smi_gpu_temperature_celsius GPU temperature in celsius
+# TYPE all_smi_gpu_temperature_celsius gauge
+all_smi_gpu_temperature_celsius{gpu="AMD Instinct MI355X 288GB HBM3", instance="node-0001", gpu_uuid="428A8115-84CB-BB67-298B-0B904D412E00", gpu_index="0"} 66
+all_smi_gpu_temperature_celsius{gpu="AMD Instinct MI355X 288GB HBM3", instance="node-0001", gpu_uuid="79803882-1301-970B-4AE3-852520D6B3FD", gpu_index="1"} 51
+all_smi_gpu_temperature_celsius{gpu="AMD Instinct MI355X 288GB HBM3", instance="node-0001", gpu_uuid="DBFE951F-31B2-A330-C15B-236D154E8BEF", gpu_index="2"} 72
+all_smi_gpu_temperature_celsius{gpu="AMD Instinct MI355X 288GB HBM3", instance="node-0001", gpu_uuid="D30901B5-2CC0-167F-325A-8D75408BC98A", gpu_index="3"} 64
+all_smi_gpu_temperature_celsius{gpu="AMD Instinct MI355X 288GB HBM3", instance="node-0001", gpu_uuid="ADD49060-DEFB-3F4F-194E-D745656A3330", gpu_index="4"} 62
+all_smi_gpu_temperature_celsius{gpu="AMD Instinct MI355X 288GB HBM3", instance="node-0001", gpu_uuid="7B07E298-8D2F-BEC2-910E-1C9CF2762A80", gpu_index="5"} 71
+all_smi_gpu_temperature_celsius{gpu="AMD Instinct MI355X 288GB HBM3", instance="node-0001", gpu_uuid="DA9286F2-B4E8-B7B5-A8E9-3CFE0460AA01", gpu_index="6"} 85
+all_smi_gpu_temperature_celsius{gpu="AMD Instinct MI355X 288GB HBM3", instance="node-0001", gpu_uuid="E75377E7-E8A4-6FA9-912D-B0FF402EF46D", gpu_index="7"} 82
+# HELP all_smi_gpu_power_consumption_watts GPU power consumption in watts
+# TYPE all_smi_gpu_power_consumption_watts gauge
+all_smi_gpu_power_consumption_watts{gpu="AMD Instinct MI355X 288GB HBM3", instance="node-0001", gpu_uuid="428A8115-84CB-BB67-298B-0B904D412E00", gpu_index="0"} 414.756
+all_smi_gpu_power_consumption_watts{gpu="AMD Instinct MI355X 288GB HBM3", instance="node-0001", gpu_uuid="79803882-1301-970B-4AE3-852520D6B3FD", gpu_index="1"} 252.637
+all_smi_gpu_power_consumption_watts{gpu="AMD Instinct MI355X 288GB HBM3", instance="node-0001", gpu_uuid="DBFE951F-31B2-A330-C15B-236D154E8BEF", gpu_index="2"} 486.136
+all_smi_gpu_power_consumption_watts{gpu="AMD Instinct MI355X 288GB HBM3", instance="node-0001", gpu_uuid="D30901B5-2CC0-167F-325A-8D75408BC98A", gpu_index="3"} 399.560
+all_smi_gpu_power_consumption_watts{gpu="AMD Instinct MI355X 288GB HBM3", instance="node-0001", gpu_uuid="ADD49060-DEFB-3F4F-194E-D745656A3330", gpu_index="4"} 390.688
+all_smi_gpu_power_consumption_watts{gpu="AMD Instinct MI355X 288GB HBM3", instance="node-0001", gpu_uuid="7B07E298-8D2F-BEC2-910E-1C9CF2762A80", gpu_index="5"} 466.618
+all_smi_gpu_power_consumption_watts{gpu="AMD Instinct MI355X 288GB HBM3", instance="node-0001", gpu_uuid="DA9286F2-B4E8-B7B5-A8E9-3CFE0460AA01", gpu_index="6"} 662.262
+all_smi_gpu_power_consumption_watts{gpu="AMD Instinct MI355X 288GB HBM3", instance="node-0001", gpu_uuid="E75377E7-E8A4-6FA9-912D-B0FF402EF46D", gpu_index="7"} 554.089
+# HELP all_smi_gpu_frequency_mhz GPU frequency in MHz
+# TYPE all_smi_gpu_frequency_mhz gauge
+all_smi_gpu_frequency_mhz{gpu="AMD Instinct MI355X 288GB HBM3", instance="node-0001", gpu_uuid="428A8115-84CB-BB67-298B-0B904D412E00", gpu_index="0"} 1490
+all_smi_gpu_frequency_mhz{gpu="AMD Instinct MI355X 288GB HBM3", instance="node-0001", gpu_uuid="79803882-1301-970B-4AE3-852520D6B3FD", gpu_index="1"} 1319
+all_smi_gpu_frequency_mhz{gpu="AMD Instinct MI355X 288GB HBM3", instance="node-0001", gpu_uuid="DBFE951F-31B2-A330-C15B-236D154E8BEF", gpu_index="2"} 1596
+all_smi_gpu_frequency_mhz{gpu="AMD Instinct MI355X 288GB HBM3", instance="node-0001", gpu_uuid="D30901B5-2CC0-167F-325A-8D75408BC98A", gpu_index="3"} 1434
+all_smi_gpu_frequency_mhz{gpu="AMD Instinct MI355X 288GB HBM3", instance="node-0001", gpu_uuid="ADD49060-DEFB-3F4F-194E-D745656A3330", gpu_index="4"} 1389
+all_smi_gpu_frequency_mhz{gpu="AMD Instinct MI355X 288GB HBM3", instance="node-0001", gpu_uuid="7B07E298-8D2F-BEC2-910E-1C9CF2762A80", gpu_index="5"} 1521
+all_smi_gpu_frequency_mhz{gpu="AMD Instinct MI355X 288GB HBM3", instance="node-0001", gpu_uuid="DA9286F2-B4E8-B7B5-A8E9-3CFE0460AA01", gpu_index="6"} 1769
+all_smi_gpu_frequency_mhz{gpu="AMD Instinct MI355X 288GB HBM3", instance="node-0001", gpu_uuid="E75377E7-E8A4-6FA9-912D-B0FF402EF46D", gpu_index="7"} 1649
+# HELP all_smi_gpu_info GPU device information
+# TYPE all_smi_gpu_info gauge
+all_smi_gpu_info{gpu="AMD Instinct MI355X 288GB HBM3", instance="node-0001", gpu_uuid="428A8115-84CB-BB67-298B-0B904D412E00", gpu_index="0", type="GPU", driver_version="30.10.1", rocm_version="7.0.2", lib_name="ROCm", lib_version="7.0.2"} 1
+all_smi_gpu_info{gpu="AMD Instinct MI355X 288GB HBM3", instance="node-0001", gpu_uuid="79803882-1301-970B-4AE3-852520D6B3FD", gpu_index="1", type="GPU", driver_version="30.10.1", rocm_version="7.0.2", lib_name="ROCm", lib_version="7.0.2"} 1
+all_smi_gpu_info{gpu="AMD Instinct MI355X 288GB HBM3", instance="node-0001", gpu_uuid="DBFE951F-31B2-A330-C15B-236D154E8BEF", gpu_index="2", type="GPU", driver_version="30.10.1", rocm_version="7.0.2", lib_name="ROCm", lib_version="7.0.2"} 1
+all_smi_gpu_info{gpu="AMD Instinct MI355X 288GB HBM3", instance="node-0001", gpu_uuid="D30901B5-2CC0-167F-325A-8D75408BC98A", gpu_index="3", type="GPU", driver_version="30.10.1", rocm_version="7.0.2", lib_name="ROCm", lib_version="7.0.2"} 1
+all_smi_gpu_info{gpu="AMD Instinct MI355X 288GB HBM3", instance="node-0001", gpu_uuid="ADD49060-DEFB-3F4F-194E-D745656A3330", gpu_index="4", type="GPU", driver_version="30.10.1", rocm_version="7.0.2", lib_name="ROCm", lib_version="7.0.2"} 1
+all_smi_gpu_info{gpu="AMD Instinct MI355X 288GB HBM3", instance="node-0001", gpu_uuid="7B07E298-8D2F-BEC2-910E-1C9CF2762A80", gpu_index="5", type="GPU", driver_version="30.10.1", rocm_version="7.0.2", lib_name="ROCm", lib_version="7.0.2"} 1
+all_smi_gpu_info{gpu="AMD Instinct MI355X 288GB HBM3", instance="node-0001", gpu_uuid="DA9286F2-B4E8-B7B5-A8E9-3CFE0460AA01", gpu_index="6", type="GPU", driver_version="30.10.1", rocm_version="7.0.2", lib_name="ROCm", lib_version="7.0.2"} 1
+all_smi_gpu_info{gpu="AMD Instinct MI355X 288GB HBM3", instance="node-0001", gpu_uuid="E75377E7-E8A4-6FA9-912D-B0FF402EF46D", gpu_index="7", type="GPU", driver_version="30.10.1", rocm_version="7.0.2", lib_name="ROCm", lib_version="7.0.2"} 1
+# HELP all_smi_amd_rocm_version AMD ROCm version
+# TYPE all_smi_amd_rocm_version gauge
+all_smi_amd_rocm_version{instance="node-0001"} 1
+# HELP all_smi_gpu_fan_speed_rpm GPU fan speed in RPM
+# TYPE all_smi_gpu_fan_speed_rpm gauge
+all_smi_gpu_fan_speed_rpm{gpu="AMD Instinct MI355X 288GB HBM3", instance="node-0001", gpu_uuid="428A8115-84CB-BB67-298B-0B904D412E00", gpu_index="0"} 1271
+all_smi_gpu_fan_speed_rpm{gpu="AMD Instinct MI355X 288GB HBM3", instance="node-0001", gpu_uuid="79803882-1301-970B-4AE3-852520D6B3FD", gpu_index="1"} 1843
+all_smi_gpu_fan_speed_rpm{gpu="AMD Instinct MI355X 288GB HBM3", instance="node-0001", gpu_uuid="DBFE951F-31B2-A330-C15B-236D154E8BEF", gpu_index="2"} 2077
+all_smi_gpu_fan_speed_rpm{gpu="AMD Instinct MI355X 288GB HBM3", instance="node-0001", gpu_uuid="D30901B5-2CC0-167F-325A-8D75408BC98A", gpu_index="3"} 1995
+all_smi_gpu_fan_speed_rpm{gpu="AMD Instinct MI355X 288GB HBM3", instance="node-0001", gpu_uuid="ADD49060-DEFB-3F4F-194E-D745656A3330", gpu_index="4"} 1457
+all_smi_gpu_fan_speed_rpm{gpu="AMD Instinct MI355X 288GB HBM3", instance="node-0001", gpu_uuid="7B07E298-8D2F-BEC2-910E-1C9CF2762A80", gpu_index="5"} 2201
+all_smi_gpu_fan_speed_rpm{gpu="AMD Instinct MI355X 288GB HBM3", instance="node-0001", gpu_uuid="DA9286F2-B4E8-B7B5-A8E9-3CFE0460AA01", gpu_index="6"} 2043
+all_smi_gpu_fan_speed_rpm{gpu="AMD Instinct MI355X 288GB HBM3", instance="node-0001", gpu_uuid="E75377E7-E8A4-6FA9-912D-B0FF402EF46D", gpu_index="7"} 2308
+# HELP all_smi_cpu_utilization CPU utilization percentage
+# TYPE all_smi_cpu_utilization gauge
+all_smi_cpu_utilization{instance="node-0001"} 47.48
+# HELP all_smi_cpu_core_count Total number of CPU cores
+# TYPE all_smi_cpu_core_count gauge
+all_smi_cpu_core_count{instance="node-0001"} 114
+# HELP all_smi_cpu_model CPU model name
+# TYPE all_smi_cpu_model info
+all_smi_cpu_model{instance="node-0001", model="AMD EPYC 9554"} 1
+# HELP all_smi_cpu_frequency_mhz CPU frequency in MHz
+# TYPE all_smi_cpu_frequency_mhz gauge
+all_smi_cpu_frequency_mhz{instance="node-0001"} 3766
+# HELP all_smi_cpu_temperature_celsius CPU temperature in celsius
+# TYPE all_smi_cpu_temperature_celsius gauge
+all_smi_cpu_temperature_celsius{instance="node-0001"} 66
+# HELP all_smi_memory_used_bytes System memory used in bytes
+# TYPE all_smi_memory_used_bytes gauge
+all_smi_memory_used_bytes{instance="node-0001"} 618221073858
+# HELP all_smi_memory_total_bytes System memory total in bytes
+# TYPE all_smi_memory_total_bytes gauge
+all_smi_memory_total_bytes{instance="node-0001"} 1099511627776
+# HELP all_smi_disk_total_bytes Total disk space in bytes
+# TYPE all_smi_disk_total_bytes gauge
+all_smi_disk_total_bytes{instance="node-0001", mount_point="/", index="0"} 1099511627776
+# HELP all_smi_disk_available_bytes Available disk space in bytes
+# TYPE all_smi_disk_available_bytes gauge
+all_smi_disk_available_bytes{instance="node-0001", mount_point="/", index="0"} 371750332775
+# HELP all_smi_disk_utilization_percent Disk utilization percentage
+# TYPE all_smi_disk_utilization_percent gauge
+all_smi_disk_utilization_percent{instance="node-0001", mount_point="/", index="0"} 66.19
+# HELP all_smi_disk_read_bytes_per_sec Disk read bytes per second
+# TYPE all_smi_disk_read_bytes_per_sec gauge
+all_smi_disk_read_bytes_per_sec{instance="node-0001", mount_point="/", index="0"} 50275983
+# HELP all_smi_disk_write_bytes_per_sec Disk write bytes per second
+# TYPE all_smi_disk_write_bytes_per_sec gauge
+all_smi_disk_write_bytes_per_sec{instance="node-0001", mount_point="/", index="0"} 43504483

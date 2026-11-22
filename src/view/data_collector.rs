@@ -24,6 +24,7 @@ use crate::ui::alerts::WebhookPayload;
 use crate::ui::notification::NotificationType;
 
 // Re-export for backward compatibility
+use super::data_collection::hostfile::{HostfileWatcher, merge_hosts};
 pub use super::data_collection::{
     CollectionConfig, DataCollectionStrategy, LocalCollector, RemoteCollectorBuilder, SshStrategy,
 };
@@ -227,60 +228,36 @@ impl DataCollector {
         hosts: Vec<String>,
         hostfile: Option<String>,
     ) {
-        // Load hosts from file if specified
-        let mut builder = RemoteCollectorBuilder::new().with_hosts(hosts.clone());
-
-        if let Some(ref file_path) = hostfile {
-            match builder.load_hosts_from_file(file_path) {
-                Ok(b) => builder = b,
+        // Load the hostfile once up front; a bad path is fatal, as before.
+        // Later ticks go through the watcher, which re-reads the file only
+        // when its modification time or length changed (issue #500).
+        let mut watcher = match hostfile.as_deref() {
+            Some(file_path) => match HostfileWatcher::open(file_path) {
+                Ok((watcher, warnings)) => {
+                    for warning in warnings {
+                        tracing::warn!(hostfile = file_path, "{warning}");
+                    }
+                    Some(watcher)
+                }
                 Err(e) => {
                     eprintln!("Error loading hosts from file {file_path}: {e}");
                     return;
                 }
-            }
-        }
+            },
+            None => None,
+        };
 
-        let collector = builder.build();
+        let initial_hosts = merge_hosts(&hosts, watcher.as_ref().map_or(&[], |w| w.hosts()));
+        let collector = RemoteCollectorBuilder::new()
+            .with_hosts(initial_hosts)
+            .build();
 
         loop {
-            // Get the current hosts from builder with validation
-            let hosts_list = if let Some(file_path) = &hostfile {
-                let mut hosts_vec = hosts.clone();
-
-                // Validate file path
-                match std::fs::metadata(file_path) {
-                    Ok(metadata) => {
-                        const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024; // 10MB
-                        if metadata.len() > MAX_FILE_SIZE {
-                            eprintln!("Warning: Hostfile too large, skipping reload");
-                            hosts_vec
-                        } else if let Ok(content) = std::fs::read_to_string(file_path) {
-                            const MAX_HOSTS: usize = 1000;
-                            let file_hosts: Vec<String> = content
-                                .lines()
-                                .map(|s| s.trim())
-                                .filter(|s| !s.is_empty())
-                                .filter(|s| !s.starts_with('#'))
-                                .take(MAX_HOSTS)
-                                .filter_map(|s| {
-                                    crate::common::http_hosts::parse_http_host_url(s)
-                                        .ok()
-                                        .map(|_| s.to_string())
-                                })
-                                .collect();
-                            hosts_vec.extend(file_hosts);
-                            hosts_vec
-                        } else {
-                            hosts_vec
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("Warning: Cannot access hostfile: {e}");
-                        hosts_vec
-                    }
-                }
-            } else {
-                hosts.clone()
+            // `--hosts` first, then hostfile hosts, de-duplicated by
+            // endpoint identity so a host listed in both is scraped once.
+            let hosts_list = match watcher.as_mut() {
+                Some(watcher) => merge_hosts(&hosts, watcher.refresh().await),
+                None => hosts.clone(),
             };
 
             let config = CollectionConfig {
@@ -300,7 +277,9 @@ impl DataCollector {
                     self.evaluate_alerts().await;
                 }
                 Err(e) => {
-                    eprintln!("Error collecting remote data: {e}");
+                    // The TUI owns the terminal; stderr output would tear
+                    // the frame.
+                    tracing::warn!(error = %e, "remote collection failed");
                 }
             }
 

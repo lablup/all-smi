@@ -97,6 +97,9 @@ all-smi record --source remote \
   --hosts http://gpu-node1:9090,http://gpu-node2:9090 \
   --output cluster.ndjson.gz --compress gzip --duration 1h
 
+# Remote targets from a hostfile (merged with any --hosts; read once at start).
+all-smi record --source remote --hostfile hosts.txt --output cluster.ndjson.zst
+
 # Replay a captured file — identical TUI to the live view.
 all-smi view --replay incident.ndjson.zst
 

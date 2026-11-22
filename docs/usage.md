@@ -38,6 +38,8 @@ all-smi view --hosts http://gpu-node1:9090 --hide-storage
 
 **Note:** HTTP view mode needs endpoints from `--hosts`, `--hostfile`, or configuration. SSH and replay use their own inputs. `--hosts` accepts endpoints separated by spaces, commas, or a mixture of both; explicit `http://` and `https://` schemes are preserved. Invalid endpoint syntax is reported before the TUI starts. For local monitoring, use `all-smi local` instead.
 
+The view re-checks `--hostfile` on every refresh and re-reads it only when the file changed: added hosts get a tab on the next refresh, removed hosts leave, and a file that briefly cannot be read keeps the previous host list. A host that fails twice in a row is not contacted for 2 seconds, doubling up to 60 seconds, so one dead host no longer slows every refresh; it stays shown as disconnected meanwhile, and one successful scrape clears the backoff. A host that does not answer within the 4-second scrape budget is shown as disconnected on that refresh.
+
 Host file format (CSV):
 ```
 http://gpu-node1:9090

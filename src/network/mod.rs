@@ -14,9 +14,12 @@
 
 mod chassis_metrics_parser;
 pub mod client;
+pub(crate) mod host_backoff;
 pub mod metrics_parser;
 pub mod nvidia_smi_shim;
+mod prometheus_labels;
 pub mod rocm_smi_shim;
+mod scrape_task;
 pub mod ssh_client;
 pub mod ssh_decision;
 pub mod ssh_host_key;

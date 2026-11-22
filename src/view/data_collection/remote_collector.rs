@@ -13,14 +13,14 @@
 // limitations under the License.
 
 use async_trait::async_trait;
-use regex::{Regex, RegexBuilder};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use crate::app_state::{AppState, ConnectionStatus};
-use crate::common::config::EnvConfig;
+use crate::common::config::AppConfig;
 use crate::network::NetworkClient;
+use crate::network::host_backoff::ScrapeTimeouts;
 use crate::storage::info::StorageInfo;
 
 use super::aggregator::DataAggregator;
@@ -36,32 +36,33 @@ fn extract_host_identifier(url: &str) -> String {
 pub struct RemoteCollector {
     network_client: NetworkClient,
     semaphore: Arc<tokio::sync::Semaphore>,
-    regex: Regex,
     aggregator: DataAggregator,
 }
 
 impl RemoteCollector {
+    /// `max_connections` caps concurrent scrapes. Each tick spawns one task
+    /// per configured host, so the effective concurrency is
+    /// `min(current host count, max_connections)` and follows hostfile
+    /// reloads without rebuilding the semaphore.
     pub fn new(max_connections: usize) -> Self {
-        // Use simpler quantifiers to avoid DFA explosion
-        // The + quantifier is much more efficient than bounded quantifiers
-        let regex = RegexBuilder::new(r"^all_smi_([^\{]+)\{([^}]+)\} ([\d\.]+)$")
-            .size_limit(10_485_760) // 10MB size limit for DFA (increased for safety)
-            .dfa_size_limit(10_485_760) // 10MB DFA limit
-            .build()
-            .expect("Failed to compile metrics regex");
+        Self::with_network_client(NetworkClient::new(), max_connections)
+    }
 
+    pub(crate) fn with_network_client(
+        network_client: NetworkClient,
+        max_connections: usize,
+    ) -> Self {
         Self {
-            network_client: NetworkClient::new(),
-            semaphore: Arc::new(tokio::sync::Semaphore::new(max_connections)),
-            regex,
+            network_client,
+            semaphore: Arc::new(tokio::sync::Semaphore::new(max_connections.max(1))),
             aggregator: DataAggregator::new(),
         }
     }
 
     #[allow(dead_code)]
     pub fn with_hosts(hosts: Vec<String>) -> Self {
-        let max_connections = EnvConfig::max_concurrent_connections(hosts.len());
-        Self::new(max_connections)
+        let _ = hosts;
+        Self::new(AppConfig::MAX_CONCURRENT_CONNECTIONS)
     }
 
     fn deduplicate_storage_info(storage_info: Vec<StorageInfo>) -> Vec<StorageInfo> {
@@ -86,16 +87,31 @@ impl RemoteCollector {
         connection_statuses: Vec<ConnectionStatus>,
         hosts: &[String],
     ) {
-        // Initialize known hosts if not already set
-        if state.known_hosts.is_empty() {
-            state.known_hosts = hosts.iter().map(|h| extract_host_identifier(h)).collect();
+        // Follow the configured host list: a hostfile reload can add or
+        // remove hosts between ticks, and tabs, the Users coverage count,
+        // and the status map are all keyed off `known_hosts` (issue #500).
+        let mut configured: Vec<String> = Vec::with_capacity(hosts.len());
+        let mut configured_set: HashSet<String> = HashSet::with_capacity(hosts.len());
+        for host in hosts {
+            let host_id = extract_host_identifier(host);
+            if configured_set.insert(host_id.clone()) {
+                configured.push(host_id);
+            }
         }
+        if state.known_hosts != configured {
+            state.known_hosts = configured;
+        }
+        state
+            .connection_status
+            .retain(|host_id, _| configured_set.contains(host_id));
 
-        // Clear the reverse lookup map before rebuilding it
-        state.hostname_to_host_id.clear();
+        let mut reported: HashSet<String> = HashSet::with_capacity(connection_statuses.len());
 
         // Update connection status for each received status
         for mut status in connection_statuses {
+            if !configured_set.contains(&status.host_id) {
+                continue;
+            }
             // Preserve actual_hostname from previous successful connection if current doesn't have it
             if status.actual_hostname.is_none()
                 && let Some(existing_status) = state.connection_status.get(&status.host_id)
@@ -103,31 +119,36 @@ impl RemoteCollector {
             {
                 status.actual_hostname = Some(existing_hostname.clone());
             }
-
-            // Update the reverse lookup map if we have an actual hostname
-            if let Some(actual_hostname) = &status.actual_hostname {
-                state
-                    .hostname_to_host_id
-                    .insert(actual_hostname.clone(), status.host_id.clone());
-            }
-
+            reported.insert(status.host_id.clone());
             state
                 .connection_status
                 .insert(status.host_id.clone(), status);
         }
 
-        // For hosts that didn't return a status (e.g., Ok(None) or Err cases),
-        // mark them as failed if we don't have recent status
+        // A configured host without a status this tick did not answer. Mark
+        // it failed even when the previous tick saw it connected, so a host
+        // that goes dark cannot keep a stale "connected" entry.
         for host in hosts {
             let host_id = extract_host_identifier(host);
-            state
+            if reported.contains(&host_id) {
+                continue;
+            }
+            let status = state
                 .connection_status
                 .entry(host_id.clone())
-                .or_insert_with(|| {
-                    let mut status = ConnectionStatus::new(host_id, host.clone());
-                    status.mark_failure("No response received".to_string());
-                    status
-                });
+                .or_insert_with(|| ConnectionStatus::new(host_id, host.clone()));
+            status.mark_failure("No response received".to_string());
+            reported.insert(status.host_id.clone());
+        }
+
+        // Rebuild the reverse lookup from the retained statuses.
+        state.hostname_to_host_id.clear();
+        for status in state.connection_status.values() {
+            if let Some(actual_hostname) = &status.actual_hostname {
+                state
+                    .hostname_to_host_id
+                    .insert(actual_hostname.clone(), status.host_id.clone());
+            }
         }
     }
 
@@ -181,7 +202,7 @@ impl DataCollectionStrategy for RemoteCollector {
 
         let remote = self
             .network_client
-            .fetch_remote_metrics(&config.hosts, &self.semaphore, &self.regex)
+            .fetch_remote_metrics(&config.hosts, &self.semaphore)
             .await;
 
         let deduplicated_storage = Self::deduplicate_storage_info(remote.storage_info);
@@ -258,6 +279,7 @@ impl DataCollectionStrategy for RemoteCollector {
 pub struct RemoteCollectorBuilder {
     hosts: Vec<String>,
     max_connections: Option<usize>,
+    timeouts: Option<ScrapeTimeouts>,
 }
 
 impl RemoteCollectorBuilder {
@@ -265,9 +287,13 @@ impl RemoteCollectorBuilder {
         Self {
             hosts: Vec::new(),
             max_connections: None,
+            timeouts: None,
         }
     }
 
+    /// Hosts known at startup. Kept for API compatibility: the host list
+    /// itself travels in `CollectionConfig` on every tick, and concurrency
+    /// no longer depends on the startup count.
     pub fn with_hosts(mut self, hosts: Vec<String>) -> Self {
         self.hosts = hosts;
         self
@@ -279,85 +305,23 @@ impl RemoteCollectorBuilder {
         self
     }
 
-    pub fn load_hosts_from_file(mut self, file_path: &str) -> Result<Self, std::io::Error> {
-        use std::path::Path;
-
-        // Expand a leading `~/` before canonicalizing. Without this
-        // step a config value like `hostfile = "~/.config/all-smi/hosts"`
-        // would be passed verbatim to `canonicalize()`, which never
-        // performs tilde expansion itself and returns `NotFound`.
-        // Uses the shared helper so every path-consuming site applies
-        // the same expansion rules.
-        let expanded = crate::common::paths::expand_tilde(Path::new(file_path));
-
-        // Resolve to absolute path and check it exists
-        let canonical_path = expanded.canonicalize().map_err(|e| {
-            std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!("Invalid hostfile path: {e}"),
-            )
-        })?;
-
-        // Ensure it's a file, not a directory
-        if !canonical_path.is_file() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "Hostfile path is not a regular file",
-            ));
-        }
-
-        // Check file size to prevent loading huge files
-        let metadata = std::fs::metadata(&canonical_path)?;
-        const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024; // 10MB max
-        if metadata.len() > MAX_FILE_SIZE {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!(
-                    "Hostfile too large: {} bytes (max: {MAX_FILE_SIZE} bytes)",
-                    metadata.len()
-                ),
-            ));
-        }
-
-        let content = std::fs::read_to_string(&canonical_path)?;
-
-        // Limit number of hosts to prevent memory exhaustion
-        const MAX_HOSTS: usize = 1000;
-        let mut host_count = 0;
-
-        let file_hosts: Vec<String> = content
-            .lines()
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
-            .filter(|s| !s.starts_with('#'))
-            .take(MAX_HOSTS)
-            .filter_map(|s| {
-                host_count += 1;
-                if host_count > MAX_HOSTS {
-                    eprintln!("Warning: Hostfile contains more than {MAX_HOSTS} hosts, truncating");
-                    return None;
-                }
-
-                match crate::common::http_hosts::parse_http_host_url(s) {
-                    Ok(_) => Some(s.to_string()),
-                    Err(error) => {
-                        eprintln!("Warning: {error}; skipping hostfile entry");
-                        None
-                    }
-                }
-            })
-            .collect();
-
-        self.hosts.extend(file_hosts);
-        Ok(self)
+    /// Override the scrape time bounds (tests use short ones).
+    #[allow(dead_code)]
+    pub(crate) fn with_timeouts(mut self, timeouts: ScrapeTimeouts) -> Self {
+        self.timeouts = Some(timeouts);
+        self
     }
 
     pub fn build(self) -> RemoteCollector {
+        let _ = self.hosts;
         let max_connections = self
             .max_connections
-            .unwrap_or_else(|| EnvConfig::max_concurrent_connections(self.hosts.len()));
-
-        RemoteCollector::new(max_connections)
+            .unwrap_or(AppConfig::MAX_CONCURRENT_CONNECTIONS);
+        let client = match self.timeouts {
+            Some(timeouts) => NetworkClient::with_timeouts(timeouts),
+            None => NetworkClient::new(),
+        };
+        RemoteCollector::with_network_client(client, max_connections)
     }
 }
 
