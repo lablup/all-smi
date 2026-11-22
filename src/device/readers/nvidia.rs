@@ -471,6 +471,10 @@ impl GpuReader for NvidiaGpuReader {
         self.get_gpu_processes_cached()
     }
 
+    fn includes_system_processes(&self) -> bool {
+        true
+    }
+
     fn get_vgpu_info(&self) -> Vec<VgpuHostInfo> {
         // Degrade to an empty vector on any NVML failure. Callers MUST treat
         // an empty response as "not vGPU-capable" and render nothing.

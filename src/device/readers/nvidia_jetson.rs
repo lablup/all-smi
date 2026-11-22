@@ -210,6 +210,10 @@ impl GpuReader for NvidiaJetsonGpuReader {
     fn get_gpu_processes(&self) -> (Vec<ProcessInfo>, HashSet<u32>) {
         get_gpu_processes()
     }
+
+    fn includes_system_processes(&self) -> bool {
+        true
+    }
 }
 
 /// Get GPU processes for Jetson

@@ -380,7 +380,12 @@ impl AllSmi {
     /// about processes using GPU resources. This includes process ID, name,
     /// GPU memory usage, and other metrics.
     ///
-    /// Returns an empty vector if no GPU processes are found.
+    /// Rows are unique per `(pid, device_uuid)`: a process with contexts on
+    /// several devices has one row per device, and a PID without a GPU row
+    /// appears exactly once. On hosts with a reader that lists system
+    /// processes (NVIDIA, Jetson, Tenstorrent, and Windows AMD and Intel),
+    /// non-GPU processes are included too; elsewhere only GPU processes are
+    /// returned, and the vector is empty when there are none.
     ///
     /// # Example
     ///
@@ -397,11 +402,7 @@ impl AllSmi {
     /// # Ok::<(), all_smi::Error>(())
     /// ```
     pub fn get_process_info(&self) -> Vec<ProcessInfo> {
-        let mut all_processes = Vec::new();
-        for reader in &self.gpu_readers {
-            all_processes.extend(reader.get_process_info());
-        }
-        all_processes
+        crate::device::process_list::collect_process_rows(&self.gpu_readers)
     }
 
     /// Get NVIDIA vGPU information for every vGPU-enabled host GPU.

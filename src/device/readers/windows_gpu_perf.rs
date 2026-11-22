@@ -574,10 +574,9 @@ pub fn augment_gpus(gpus: &mut [GpuInfo]) -> AdapterIndex {
 ///    `refresh`.
 /// 2. The GPU rows are merged against the system process table, matching
 ///    what `nvidia`, `nvidia_jetson`, and `tenstorrent` do inside their
-///    own `get_process_info`. The API and snapshot collectors consume
-///    `get_process_info` directly without merging, so returning bare
-///    skeleton rows would export processes with empty names and zeroed
-///    CPU and RSS.
+///    own `get_process_info`, so a caller of one reader's
+///    `get_process_info` gets named rows with CPU and RSS rather than bare
+///    skeleton rows.
 pub fn process_rows_with<F>(adapter_index: &AdapterIndex, refresh: F) -> Vec<ProcessInfo>
 where
     F: FnOnce() -> AdapterIndex,

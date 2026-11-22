@@ -77,6 +77,20 @@ pub trait GpuReader: Send + Sync {
         (gpu_only, pids)
     }
 
+    /// Whether [`GpuReader::get_process_info`] merges this reader's GPU rows
+    /// into the system process table, rather than returning GPU rows only.
+    /// A reader that reports `true` may still return an empty list when no
+    /// process uses its GPU (the Windows AMD and Intel readers do).
+    ///
+    /// When any reader in a set reports `true`,
+    /// [`crate::device::process_list::collect_process_rows`] runs one system
+    /// process pass for the whole set and merges every reader's
+    /// [`GpuReader::get_gpu_processes`] rows into it, instead of
+    /// concatenating per-reader system lists.
+    fn includes_system_processes(&self) -> bool {
+        false
+    }
+
     /// Collect per-GPU vGPU host and instance information.
     ///
     /// Returns an empty vector on non-vGPU hardware or when the reader does

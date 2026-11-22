@@ -16,8 +16,12 @@ use crate::device::types::ProcessInfo;
 use std::collections::{HashMap, HashSet};
 use sysinfo::{Pid, ProcessRefreshKind, ProcessStatus, System, ThreadKind, UpdateKind};
 
+#[path = "process_list/collect.rs"]
+mod collect;
 #[path = "process_list/row_caches.rs"]
 mod row_caches;
+
+pub use collect::collect_process_rows;
 
 #[cfg(target_os = "macos")]
 #[path = "process_list/pidinfo_macos.rs"]

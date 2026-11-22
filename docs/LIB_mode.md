@@ -179,7 +179,7 @@ fn main() -> Result<()> {
 | `new()` | `Result<AllSmi>` | Create instance with default config |
 | `with_config(config)` | `Result<AllSmi>` | Create instance with custom config |
 | `get_gpu_info()` | `Vec<GpuInfo>` | Get all GPU/NPU information |
-| `get_process_info()` | `Vec<ProcessInfo>` | Get GPU process information |
+| `get_process_info()` | `Vec<ProcessInfo>` | Get process information, one row per (PID, device); a PID without a GPU row appears once |
 | `get_vgpu_info()` | `Vec<VgpuHostInfo>` | NVIDIA vGPU host/instance metrics; empty when unavailable |
 | `get_mig_info()` | `Vec<MigGpuInfo>` | NVIDIA MIG mode/instance metrics; empty when unavailable |
 | `get_cpu_info()` | `Vec<CpuInfo>` | Get CPU information |

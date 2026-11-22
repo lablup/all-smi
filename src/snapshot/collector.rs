@@ -115,10 +115,7 @@ impl SnapshotCollector for DefaultSnapshotCollector {
     }
 
     fn collect_processes(&self) -> Vec<ProcessInfo> {
-        self.gpu_readers
-            .iter()
-            .flat_map(|r| r.get_process_info())
-            .collect()
+        crate::device::process_list::collect_process_rows(&self.gpu_readers)
     }
 
     fn collect_storage(&self) -> Vec<StorageInfo> {

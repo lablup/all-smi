@@ -250,6 +250,10 @@ impl GpuReader for TenstorrentReader {
     fn get_gpu_processes(&self) -> (Vec<ProcessInfo>, HashSet<u32>) {
         self.get_npu_processes()
     }
+
+    fn includes_system_processes(&self) -> bool {
+        true
+    }
 }
 
 // Helper functions
