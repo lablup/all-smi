@@ -171,6 +171,11 @@ pub async fn run_api_mode(args: &ApiArgs, settings: &Settings) {
             }
         }
     }
+    // `/metrics` serves a body rendered by the collection loop (issue
+    // #503). Re-render the not-ready body now that the WAL replay may have
+    // seeded lifetime energy counters, so a scrape that lands before the
+    // first tick reports them as it always has.
+    crate::api::handlers::refresh_metrics_body(&mut initial_state);
     let state = SharedState::new(RwLock::new(initial_state));
     let state_clone = state.clone();
     // `args.processes` is now `Option<bool>` so the CLI can force

@@ -416,18 +416,14 @@ impl<'a> CpuMetricExporter<'a> {
 }
 
 impl<'a> MetricExporter for CpuMetricExporter<'a> {
-    fn export_metrics(&self) -> String {
-        let mut builder = MetricBuilder::new();
-
+    fn export_into(&self, builder: &mut MetricBuilder) {
         for (i, info) in self.cpu_info.iter().enumerate() {
-            self.export_basic_metrics(&mut builder, info, i);
-            self.export_socket_metrics(&mut builder, info, i);
-            self.export_apple_silicon_metrics(&mut builder, info, i);
-            self.export_tier_metrics(&mut builder, info, i);
-            self.export_per_core_metrics(&mut builder, info, i);
+            self.export_basic_metrics(builder, info, i);
+            self.export_socket_metrics(builder, info, i);
+            self.export_apple_silicon_metrics(builder, info, i);
+            self.export_tier_metrics(builder, info, i);
+            self.export_per_core_metrics(builder, info, i);
         }
-
-        builder.build()
     }
 }
 

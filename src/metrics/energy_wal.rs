@@ -425,29 +425,83 @@ pub fn spawn_wal_flush_task(
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Number of lifetime snapshots taken on the current thread. Lets the
+    /// tests prove [`flush_cycle`] only collects lifetime totals when it
+    /// is about to compact (issue #503).
+    pub(crate) static LIFETIME_SNAPSHOTS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
+/// Take what a compaction needs, under one write lock: the lifetime total
+/// of every device, and any deltas integrated since the cycle's first
+/// drain.
+///
+/// The second drain is what keeps the WAL exact. The lifetime totals
+/// already include those late deltas, so leaving them pending would write
+/// them again on the next cycle, on top of the compacted record, and a
+/// replay would count them twice. The caller writes them only if the
+/// compaction fails and the old file stays in place.
+#[cfg(feature = "cli")]
+#[allow(clippy::type_complexity)]
+async fn compaction_snapshot(
+    shared_state: &std::sync::Arc<tokio::sync::RwLock<crate::app_state::AppState>>,
+) -> (Vec<(EnergyKey, f64)>, Vec<(EnergyKey, f64)>) {
+    #[cfg(test)]
+    LIFETIME_SNAPSHOTS.with(|count| count.set(count.get() + 1));
+
+    let mut state = shared_state.write().await;
+    let late_deltas = state.energy.integrator_mut().drain_wal_deltas();
+    let lifetime: Vec<(EnergyKey, f64)> = state
+        .energy
+        .integrator()
+        .iter_stats()
+        .map(|s| (s.key.clone(), s.lifetime_joules))
+        .collect();
+    (late_deltas, lifetime)
+}
+
+/// Writer to continue with after a blocking WAL task panicked.
+#[cfg(feature = "cli")]
+fn reopen_after_panic(wal_path: &Path, e: &tokio::task::JoinError) -> WalWriter {
+    tracing::error!("energy WAL: blocking flush task panicked: {e}");
+    // Reopen a fresh writer. If reopen fails we return a sentinel
+    // "closed" writer so the task will keep trying next cycle rather
+    // than exiting.
+    match WalWriter::open(wal_path) {
+        Ok(w) => w,
+        Err(open_err) => {
+            tracing::error!(
+                "energy WAL: reopen after panic failed: {open_err}; subsequent flushes are no-ops until restart"
+            );
+            WalWriter {
+                path: wal_path.to_path_buf(),
+                writer: None,
+            }
+        }
+    }
+}
+
 /// Perform one drain + write + fsync cycle, returning the (possibly
 /// replaced) writer. The blocking write/fsync + optional compaction is
 /// executed on `spawn_blocking` so a hanging filesystem does not stall
 /// the tokio worker.
+///
+/// The lifetime totals of every device are only needed to compact, which
+/// happens when the file passes [`WAL_MAX_BYTES`] (16 MiB). The file size
+/// is therefore checked first, in the blocking closure, and the totals are
+/// collected under a second short lock only when compaction is due,
+/// instead of cloning every device's key on every cycle (issue #503).
 #[cfg(feature = "cli")]
 async fn flush_cycle(
     writer: WalWriter,
     wal_path: &Path,
     shared_state: &std::sync::Arc<tokio::sync::RwLock<crate::app_state::AppState>>,
 ) -> WalWriter {
-    // Snapshot the per-device deltas AND a point-in-time lifetime
-    // total. The lifetime total is only needed if compaction fires;
-    // taking it now avoids a second lock hop later.
-    let (deltas, lifetime_snapshot) = {
+    let deltas = {
         let mut state = shared_state.write().await;
-        let deltas = state.energy.integrator_mut().drain_wal_deltas();
-        let lifetime: Vec<(EnergyKey, f64)> = state
-            .energy
-            .integrator()
-            .iter_stats()
-            .map(|s| (s.key.clone(), s.lifetime_joules))
-            .collect();
-        (deltas, lifetime)
+        state.energy.integrator_mut().drain_wal_deltas()
     };
 
     let wal_path_owned = wal_path.to_path_buf();
@@ -467,46 +521,54 @@ async fn flush_cycle(
             Ok(meta) => meta.len() > WAL_MAX_BYTES,
             Err(_) => false,
         };
-        let (w_out, compact_result) = if should_compact {
-            match compact_wal(w, &wal_path_owned, &lifetime_snapshot) {
-                Ok(new_w) => (new_w, Ok(())),
-                Err((old_w, e)) => (old_w, Err(e)),
+        (w, fsync_result, should_compact)
+    })
+    .await;
+
+    let (writer, should_compact) = match result {
+        Ok((w, fsync_result, should_compact)) => {
+            if let Err(e) = fsync_result {
+                tracing::warn!("energy WAL: fsync failed: {e}");
             }
-        } else {
-            (w, Ok(()))
-        };
-        (w_out, fsync_result, compact_result)
+            (w, should_compact)
+        }
+        Err(e) => return reopen_after_panic(wal_path, &e),
+    };
+    if !should_compact {
+        return writer;
+    }
+
+    let (late_deltas, lifetime_snapshot) = compaction_snapshot(shared_state).await;
+    let wal_path_owned = wal_path.to_path_buf();
+    let result = tokio::task::spawn_blocking(move || {
+        match compact_wal(writer, &wal_path_owned, &lifetime_snapshot) {
+            Ok(new_w) => (new_w, Ok(())),
+            Err((mut old_w, e)) => {
+                // The old file is still the WAL, and it does not contain
+                // the deltas drained with the snapshot. Append them so
+                // they are not lost.
+                for (key, joules) in late_deltas {
+                    if let Err(e) = old_w.write_record(key.host_hash(), key.device_hash(), joules) {
+                        tracing::warn!("energy WAL: write failed: {e}");
+                    }
+                }
+                if let Err(e) = old_w.flush_and_fsync() {
+                    tracing::warn!("energy WAL: fsync failed: {e}");
+                }
+                (old_w, Err(e))
+            }
+        }
     })
     .await;
 
     match result {
-        Ok((w, fsync_result, compact_result)) => {
-            if let Err(e) = fsync_result {
-                tracing::warn!("energy WAL: fsync failed: {e}");
-            }
+        Ok((w, compact_result)) => {
             if let Err(e) = compact_result {
                 tracing::warn!("energy WAL: compaction failed: {e}");
             }
             w
         }
-        Err(e) => {
-            tracing::error!("energy WAL: blocking flush task panicked: {e}");
-            // Reopen a fresh writer. If reopen fails we return a
-            // sentinel "closed" writer so the task will keep trying
-            // next cycle rather than exiting.
-            match WalWriter::open(wal_path) {
-                Ok(w) => w,
-                Err(open_err) => {
-                    tracing::error!(
-                        "energy WAL: reopen after panic failed: {open_err}; subsequent flushes are no-ops until restart"
-                    );
-                    WalWriter {
-                        path: wal_path.to_path_buf(),
-                        writer: None,
-                    }
-                }
-            }
-        }
+        Err(e) => reopen_after_panic(wal_path, &e),
     }
 }
 
@@ -1009,3 +1071,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(all(test, feature = "cli"))]
+#[path = "energy_wal_flush_tests.rs"]
+mod flush_tests;

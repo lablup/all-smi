@@ -105,7 +105,11 @@ fn split_response(raw: &str) -> (&str, &str) {
 
 /// Simulate the collection loop finishing its first iteration.
 async fn complete_first_collection(shared: &Shared) {
-    shared.write().await.loading = false;
+    // The loop clears `loading` and stores the exposition it rendered for
+    // that cycle; `/metrics` serves the stored body (issue #503).
+    let mut state = shared.write().await;
+    state.loading = false;
+    all_smi::api::handlers::refresh_metrics_body(&mut state);
 }
 
 // ---------------------------------------------------------------------

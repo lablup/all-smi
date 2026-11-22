@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::{MetricBuilder, MetricExporter};
+use super::{MetricBuilder, MetricExporter, render_labels};
 use crate::device::ProcessInfo;
 
 /// Maximum length (in bytes) of a single label value the process
@@ -133,7 +133,10 @@ impl<'a> ProcessMetricExporter<'a> {
         // AMD / others; keeping both lets dashboards that already query
         // `device_id` keep working while the new column-first clients
         // can use `gpu_index`.
-        let labels = [
+        // Rendered once per process and reused by all three families, so
+        // the up-to-256-byte `command` label is escaped once, not three
+        // times (issue #503).
+        let labels = render_labels(&[
             ("pid", pid_str.as_str()),
             ("name", name_label.as_ref()),
             ("user", user_label.as_ref()),
@@ -141,7 +144,8 @@ impl<'a> ProcessMetricExporter<'a> {
             ("gpu_index", device_id_str.as_str()),
             ("device_uuid", process.device_uuid.as_str()),
             ("command", command_label.as_ref()),
-        ];
+        ]);
+        let labels = labels.as_str();
 
         // Process GPU memory usage.
         builder
@@ -150,9 +154,9 @@ impl<'a> ProcessMetricExporter<'a> {
                 "Process GPU memory used in bytes",
             )
             .type_("all_smi_process_memory_used_bytes", "gauge")
-            .metric(
+            .metric_with_rendered_labels(
                 "all_smi_process_memory_used_bytes",
-                &labels,
+                labels,
                 process.used_memory,
             );
 
@@ -173,7 +177,11 @@ impl<'a> ProcessMetricExporter<'a> {
                  equivalent)",
             )
             .type_("all_smi_process_start_time_seconds", "gauge")
-            .metric("all_smi_process_start_time_seconds", &labels, start_seconds);
+            .metric_with_rendered_labels(
+                "all_smi_process_start_time_seconds",
+                labels,
+                start_seconds,
+            );
 
         // CPU percent — handy for dashboards but not required by the
         // Users tab; still emitted so the tab can fall back when a
@@ -184,27 +192,23 @@ impl<'a> ProcessMetricExporter<'a> {
                 "Process CPU utilization percentage",
             )
             .type_("all_smi_process_cpu_percent", "gauge")
-            .metric(
+            .metric_with_rendered_labels(
                 "all_smi_process_cpu_percent",
-                &labels,
+                labels,
                 format!("{:.2}", process.cpu_percent),
             );
     }
 }
 
 impl<'a> MetricExporter for ProcessMetricExporter<'a> {
-    fn export_metrics(&self) -> String {
+    fn export_into(&self, builder: &mut MetricBuilder) {
         if self.process_info.is_empty() {
-            return String::new();
+            return;
         }
-
-        let mut builder = MetricBuilder::new();
 
         for process in self.process_info {
-            self.export_process_metrics(&mut builder, process);
+            self.export_process_metrics(builder, process);
         }
-
-        builder.build()
     }
 }
 

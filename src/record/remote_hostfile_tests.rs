@@ -17,13 +17,12 @@
 //! header with no frames).
 
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use axum::{Router, routing::get};
 
 use super::writer::Codec;
-use super::{RecorderOptions, run_remote};
+use super::{RecorderOptions, StopSignal, run_remote};
 use crate::cli::{RecordSource, SnapshotIncludes};
 
 const METRICS: &str = r#"
@@ -68,7 +67,7 @@ async fn hostfile_only_recording_scrapes_the_hostfile_hosts() {
     };
     tokio::time::timeout(
         Duration::from_secs(30),
-        run_remote(opts, Arc::new(AtomicBool::new(false))),
+        run_remote(opts, Arc::new(StopSignal::default())),
     )
     .await
     .expect("recording finished")

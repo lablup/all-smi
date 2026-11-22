@@ -14,7 +14,7 @@
 
 use crate::utils::RuntimeEnvironment;
 
-use super::MetricExporter;
+use super::{MetricBuilder, MetricExporter};
 
 pub struct RuntimeMetricExporter<'a> {
     runtime_env: &'a RuntimeEnvironment,
@@ -31,33 +31,50 @@ impl<'a> RuntimeMetricExporter<'a> {
 }
 
 impl<'a> MetricExporter for RuntimeMetricExporter<'a> {
-    fn export_metrics(&self) -> String {
-        let mut output = String::new();
+    fn export_into(&self, builder: &mut MetricBuilder) {
+        // The label blocks below are written verbatim (comma separated with
+        // no space) to keep these families byte-identical to what this
+        // exporter has always produced.
 
         // Container environment metrics
         if self.runtime_env.container.is_containerized() {
             let runtime_name = self.runtime_env.container.runtime.as_str();
 
             // Container runtime info metric
-            output.push_str(&format!(
-                "# HELP all_smi_container_runtime_info Container runtime environment information\n\
-                 # TYPE all_smi_container_runtime_info gauge\n\
-                 all_smi_container_runtime_info{{hostname=\"{}\",runtime=\"{runtime_name}\",container_id=\"{}\"}} 1\n",
+            let labels = format!(
+                "hostname=\"{}\",runtime=\"{runtime_name}\",container_id=\"{}\"",
                 self.hostname,
-                self.runtime_env.container.container_id.as_deref().unwrap_or("unknown")
-            ));
+                self.runtime_env
+                    .container
+                    .container_id
+                    .as_deref()
+                    .unwrap_or("unknown")
+            );
+            builder
+                .help(
+                    "all_smi_container_runtime_info",
+                    "Container runtime environment information",
+                )
+                .type_("all_smi_container_runtime_info", "gauge")
+                .metric_with_rendered_labels("all_smi_container_runtime_info", &labels, 1);
 
             // Additional Kubernetes-specific metrics
             if let crate::utils::ContainerRuntime::Kubernetes = self.runtime_env.container.runtime
                 && let Some(pod_name) = &self.runtime_env.container.pod_name
             {
-                output.push_str(&format!(
-                        "# HELP all_smi_kubernetes_pod_info Kubernetes pod information\n\
-                         # TYPE all_smi_kubernetes_pod_info gauge\n\
-                         all_smi_kubernetes_pod_info{{hostname=\"{}\",pod_name=\"{pod_name}\",namespace=\"{}\"}} 1\n",
-                        self.hostname,
-                        self.runtime_env.container.namespace.as_deref().unwrap_or("default")
-                    ));
+                let labels = format!(
+                    "hostname=\"{}\",pod_name=\"{pod_name}\",namespace=\"{}\"",
+                    self.hostname,
+                    self.runtime_env
+                        .container
+                        .namespace
+                        .as_deref()
+                        .unwrap_or("default")
+                );
+                builder
+                    .help("all_smi_kubernetes_pod_info", "Kubernetes pod information")
+                    .type_("all_smi_kubernetes_pod_info", "gauge")
+                    .metric_with_rendered_labels("all_smi_kubernetes_pod_info", &labels, 1);
             }
         }
 
@@ -65,25 +82,34 @@ impl<'a> MetricExporter for RuntimeMetricExporter<'a> {
         if self.runtime_env.virtualization.is_virtual {
             let vm_type = self.runtime_env.virtualization.vm_type.as_str();
 
-            output.push_str(&format!(
-                "# HELP all_smi_virtualization_info Virtualization environment information\n\
-                 # TYPE all_smi_virtualization_info gauge\n\
-                 all_smi_virtualization_info{{hostname=\"{}\",vm_type=\"{vm_type}\",hypervisor=\"{}\"}} 1\n",
+            let labels = format!(
+                "hostname=\"{}\",vm_type=\"{vm_type}\",hypervisor=\"{}\"",
                 self.hostname,
-                self.runtime_env.virtualization.hypervisor.as_deref().unwrap_or(vm_type)
-            ));
+                self.runtime_env
+                    .virtualization
+                    .hypervisor
+                    .as_deref()
+                    .unwrap_or(vm_type)
+            );
+            builder
+                .help(
+                    "all_smi_virtualization_info",
+                    "Virtualization environment information",
+                )
+                .type_("all_smi_virtualization_info", "gauge")
+                .metric_with_rendered_labels("all_smi_virtualization_info", &labels, 1);
         }
 
         // Combined runtime environment metric (what would be displayed in UI)
         if let Some((name, _color)) = self.runtime_env.display_info() {
-            output.push_str(&format!(
-                "# HELP all_smi_runtime_environment Current runtime environment (container or VM)\n\
-                 # TYPE all_smi_runtime_environment gauge\n\
-                 all_smi_runtime_environment{{hostname=\"{}\",environment=\"{name}\"}} 1\n",
-                self.hostname
-            ));
+            let labels = format!("hostname=\"{}\",environment=\"{name}\"", self.hostname);
+            builder
+                .help(
+                    "all_smi_runtime_environment",
+                    "Current runtime environment (container or VM)",
+                )
+                .type_("all_smi_runtime_environment", "gauge")
+                .metric_with_rendered_labels("all_smi_runtime_environment", &labels, 1);
         }
-
-        output
     }
 }

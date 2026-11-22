@@ -23,6 +23,8 @@ pub mod server;
 pub mod server_state;
 /// Graceful-shutdown and readiness signalling (issue #311).
 pub mod shutdown;
+/// State of the `/snapshot` fresh-collect fallback (issue #503).
+pub(crate) mod snapshot_fallback;
 
 pub use frame_bus::FrameBus;
 pub use server::*;

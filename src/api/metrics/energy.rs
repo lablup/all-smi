@@ -56,15 +56,13 @@ impl<'a> EnergyMetricExporter<'a> {
 }
 
 impl<'a> MetricExporter for EnergyMetricExporter<'a> {
-    fn export_metrics(&self) -> String {
-        let mut builder = MetricBuilder::new();
-
+    fn export_into(&self, builder: &mut MetricBuilder) {
         // Collect stats eagerly so we can detect "nothing to emit" and
         // skip the HELP / TYPE header entirely. An empty metric family
         // pollutes the exposition without buying anything.
         let stats: Vec<_> = self.integrator.iter_stats().collect();
         if stats.is_empty() {
-            return builder.build();
+            return;
         }
 
         builder
@@ -127,8 +125,6 @@ impl<'a> MetricExporter for EnergyMetricExporter<'a> {
                 }
             }
         }
-
-        builder.build()
     }
 }
 

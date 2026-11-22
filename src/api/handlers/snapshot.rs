@@ -17,8 +17,9 @@
 //! Serves the most recent frame published through the shared
 //! [`FrameBus`]. If the last frame is older than `2 × collection_interval`
 //! (for example, the background collector is hung or the server just
-//! started and no cycle has completed yet), the handler falls back to a
-//! fresh collection so the response never silently serves stale data.
+//! started and no cycle has completed yet), the handler waits up to one
+//! interval for the next publish and, failing that, falls back to a fresh
+//! collection so the response never silently serves stale data.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -28,16 +29,19 @@ use axum::extract::{Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
-use serde_json::Value;
+use tokio::sync::broadcast::Receiver;
+use tokio::sync::broadcast::error::RecvError;
 
-use crate::api::frame_bus::FrameBus;
-use crate::api::metrics::process::{
-    MAX_COMMAND_LABEL_LEN, MAX_NAME_LABEL_LEN, MAX_USER_LABEL_LEN, ProcessMetricExporter,
-};
-use crate::cli::SnapshotIncludes;
-use crate::snapshot::{
-    DefaultSnapshotCollector, SNAPSHOT_SCHEMA_VERSION, Snapshot, collect_once, sanitize_json_floats,
-};
+use crate::api::frame_bus::{FrameBus, LatestFrame};
+use crate::snapshot::{SNAPSHOT_SCHEMA_VERSION, Snapshot};
+
+#[cfg(test)]
+pub(crate) use super::snapshot_filter::SERIALIZE_COUNT;
+// `filter_snapshot_value` stays exported for library callers; the binary
+// target, whose module tree is private, has no use for it.
+#[allow(unused_imports)]
+pub use super::snapshot_filter::filter_snapshot_value;
+pub use super::snapshot_filter::{SectionFilter, parse_include, serialize_filtered};
 
 /// Per-reader timeout used when `/snapshot` forces a fresh collection.
 /// Matches the CLI `snapshot --timeout-ms` default so operators see the
@@ -66,7 +70,7 @@ pub async fn snapshot_handler(
         Some("1") | Some("true") | Some("yes")
     );
 
-    let snapshot = match resolve_snapshot(&bus, &filter).await {
+    let resolved = match resolve_snapshot(&bus, &filter).await {
         Ok(s) => s,
         Err(err) => {
             tracing::warn!("/snapshot: fresh collect failed: {err}");
@@ -74,13 +78,17 @@ pub async fn snapshot_handler(
         }
     };
 
-    let value = filter_snapshot_value(&snapshot, &filter);
-    let body = match if pretty {
-        serde_json::to_string_pretty(&value)
-    } else {
-        serde_json::to_string(&value)
-    } {
-        Ok(s) => s,
+    let body = match &resolved {
+        // A published frame: the body is shared with every other client
+        // that asks for the same sections of the same frame.
+        Resolved::Frame(frame) => bus.body_for(frame, &filter, pretty),
+        // A fallback snapshot has no sequence number to cache under.
+        Resolved::Fallback(snapshot) => {
+            serialize_filtered(snapshot, &filter, pretty).map(Arc::from)
+        }
+    };
+    let body = match body {
+        Ok(body) => body,
         Err(err) => {
             tracing::warn!("/snapshot: JSON serialization failed: {err}");
             return error_response(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string());
@@ -93,7 +101,7 @@ pub async fn snapshot_handler(
         HeaderValue::from_static("application/json"),
     );
 
-    (StatusCode::OK, headers, body).into_response()
+    (StatusCode::OK, headers, String::from(&*body)).into_response()
 }
 
 /// Common no-cache header set shared between the success and error
@@ -116,484 +124,105 @@ fn error_response(status: StatusCode, message: &str) -> Response {
     (status, no_cache_headers(), body).into_response()
 }
 
+/// What `/snapshot` serves: a frame the collection loop published, or the
+/// result of the fresh-collect fallback.
+pub(crate) enum Resolved {
+    Frame(LatestFrame),
+    Fallback(Arc<Snapshot>),
+}
+
+impl Resolved {
+    #[cfg(test)]
+    pub(crate) fn snapshot(&self) -> &Arc<Snapshot> {
+        match self {
+            Resolved::Frame(frame) => &frame.snapshot,
+            Resolved::Fallback(snapshot) => snapshot,
+        }
+    }
+}
+
+/// The latest published frame, unless it is older than
+/// `2 × collection_interval` (or nothing has been published yet).
+async fn fresh_frame(bus: &FrameBus) -> Option<LatestFrame> {
+    let stale_after = bus.collection_interval().saturating_mul(2);
+    bus.latest()
+        .await
+        .filter(|frame| frame.published_at.elapsed() <= stale_after)
+}
+
+/// Wait up to `interval` for the next frame on `rx`.
+async fn next_publish(rx: &mut Receiver<LatestFrame>, interval: Duration) -> Option<LatestFrame> {
+    let recv = async {
+        loop {
+            match rx.recv().await {
+                Ok(frame) => return Some(frame),
+                // Frames were dropped from this receiver's buffer; the
+                // next `recv` returns the newest one still held.
+                Err(RecvError::Lagged(_)) => continue,
+                Err(RecvError::Closed) => return None,
+            }
+        }
+    };
+    tokio::time::timeout(interval, recv).await.ok().flatten()
+}
+
 /// Resolve the frame served to the caller.
 ///
-/// Reads the last published frame from the bus. If that frame is older
-/// than `2 × collection_interval` (or no frame has been published yet),
-/// a fresh collection is performed synchronously honouring the caller's
-/// `?include=` filter so the stale-fallback path is observationally
-/// indistinguishable from the cached path (issue #193). Fresh collections
-/// never race the background task because `DefaultSnapshotCollector::new()`
-/// builds its own reader set each call.
-async fn resolve_snapshot(bus: &FrameBus, filter: &SectionFilter) -> Result<Arc<Snapshot>, String> {
+/// 1. The last published frame, when it is fresh.
+/// 2. A recent fallback result that covers the requested sections.
+/// 3. The next frame the collection loop publishes, waiting up to one
+///    collection interval. At startup the first tick is usually moments
+///    away, and waiting for it costs no hardware read at all. The
+///    receiver is subscribed *before* `latest()` is re-read so a publish
+///    between the two cannot be missed.
+/// 4. A fresh collection honouring the caller's `?include=` filter, so the
+///    fallback is observationally indistinguishable from the cached path
+///    (issue #193). It runs under a single-flight lock, through a
+///    collector built once per process on the blocking pool, and its
+///    result is kept for requests that arrive within the next interval
+///    (issue #503). The fallback snapshot is not published on the bus.
+pub(crate) async fn resolve_snapshot(
+    bus: &FrameBus,
+    filter: &SectionFilter,
+) -> Result<Resolved, String> {
     let interval = bus.collection_interval();
-    let stale_after = interval.saturating_mul(2);
-    if let Some(frame) = bus.latest().await
-        && frame.published_at.elapsed() <= stale_after
+    if let Some(frame) = fresh_frame(bus).await {
+        return Ok(Resolved::Frame(frame));
+    }
+    if let Some(snapshot) = bus.fallback().cached(filter, interval) {
+        return Ok(Resolved::Fallback(snapshot));
+    }
+
     {
-        return Ok(frame.snapshot);
+        let mut rx = bus.subscribe();
+        if let Some(frame) = fresh_frame(bus).await {
+            return Ok(Resolved::Frame(frame));
+        }
+        if let Some(frame) = next_publish(&mut rx, interval).await {
+            return Ok(Resolved::Frame(frame));
+        }
     }
 
     // Serialise fresh collects with a single-flight lock. A burst of
-    // `/snapshot` requests against a freshly-started server, or against
-    // a server whose collection loop has stalled, would otherwise each
-    // spawn their own `DefaultSnapshotCollector` and saturate the Tokio
-    // blocking pool — an amplification attack on an otherwise cheap
-    // HTTP endpoint. Holding the lock while we re-check `latest()`
-    // means a winning collector's output is observed by every queued
-    // caller without any of them issuing their own hardware read.
+    // `/snapshot` requests against a server whose collection loop has
+    // stalled would otherwise each issue their own hardware read and
+    // saturate the Tokio blocking pool — an amplification attack on an
+    // otherwise cheap HTTP endpoint. Re-checking under the lock means a
+    // winning collector's output is observed by every queued caller
+    // without any of them reading hardware again.
     let _guard = bus.lock_fresh_collect().await;
-
-    // Re-check `latest()` under the lock: another task may have
-    // refreshed the frame while we were queued, or the background
-    // collection loop may have published a cycle concurrently.
-    if let Some(frame) = bus.latest().await
-        && frame.published_at.elapsed() <= stale_after
-    {
-        return Ok(frame.snapshot);
+    if let Some(frame) = fresh_frame(bus).await {
+        return Ok(Resolved::Frame(frame));
     }
-
-    // Fall back to a fresh collection. Map the caller-visible
-    // `SectionFilter` onto the collector-level `SnapshotIncludes` so the
-    // response carries exactly the sections the client asked for — the
-    // cached path does the same via the always-collected background
-    // frame, so matching behaviour here keeps the two paths
-    // observationally identical.
-    let includes = SnapshotIncludes {
-        gpu: filter.gpu,
-        cpu: filter.cpu,
-        memory: filter.memory,
-        chassis: filter.chassis,
-        process: filter.process,
-        storage: filter.storage,
-    };
-    let collector = Arc::new(DefaultSnapshotCollector::new());
-    let snap = collect_once(collector, &includes, FRESH_COLLECT_TIMEOUT).await;
-    Ok(Arc::new(snap))
-}
-
-// ---------------------------------------------------------------------
-// Include filter — shared with the SSE handler.
-// ---------------------------------------------------------------------
-
-/// Section filter parsed from the `?include=` query parameter.
-///
-/// The filter is applied at serialization time (rather than at collection
-/// time) so the background collector does not need to know which mix of
-/// sections the next client will request — every collection cycle
-/// populates every section once and every client reads the subset it
-/// asked for.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SectionFilter {
-    pub gpu: bool,
-    pub cpu: bool,
-    pub memory: bool,
-    pub chassis: bool,
-    pub process: bool,
-    pub storage: bool,
-}
-
-impl SectionFilter {
-    /// Default HTTP-surface filter: `gpu,cpu,memory,chassis` per the
-    /// issue spec. `process` and `storage` are expensive / noisy and
-    /// stay opt-in.
-    pub fn default_http() -> Self {
-        Self {
-            gpu: true,
-            cpu: true,
-            memory: true,
-            chassis: true,
-            process: false,
-            storage: false,
-        }
+    if let Some(snapshot) = bus.fallback().cached(filter, interval) {
+        return Ok(Resolved::Fallback(snapshot));
     }
-
-    /// Whether `section` is requested. Unknown section names return
-    /// `false` so they simply do not appear in the filtered output.
-    pub fn allows(&self, section: &str) -> bool {
-        match section {
-            "gpus" => self.gpu,
-            "cpus" => self.cpu,
-            "memory" => self.memory,
-            "chassis" => self.chassis,
-            "processes" => self.process,
-            "storage" => self.storage,
-            _ => true, // Non-section metadata (schema, timestamp, errors)
-        }
-    }
-}
-
-/// Parse an `?include=...` query parameter into a [`SectionFilter`].
-///
-/// * Missing / empty value → [`SectionFilter::default_http`].
-/// * Unknown section names → silently dropped so client-side typos don't
-///   produce a 400.
-pub fn parse_include(raw: Option<&str>) -> SectionFilter {
-    let Some(raw) = raw else {
-        return SectionFilter::default_http();
-    };
-    if raw.trim().is_empty() {
-        return SectionFilter::default_http();
-    }
-    let mut filter = SectionFilter {
-        gpu: false,
-        cpu: false,
-        memory: false,
-        chassis: false,
-        process: false,
-        storage: false,
-    };
-    for raw_name in raw.split(',') {
-        match raw_name.trim().to_ascii_lowercase().as_str() {
-            "" => continue,
-            "gpu" | "gpus" => filter.gpu = true,
-            "cpu" | "cpus" => filter.cpu = true,
-            "memory" | "mem" => filter.memory = true,
-            "chassis" => filter.chassis = true,
-            "process" | "processes" => filter.process = true,
-            "storage" | "disk" => filter.storage = true,
-            _ => {
-                // Ignore unknown names but trace them so the operator
-                // can spot typos without a failed request.
-                tracing::debug!(unknown_section = raw_name, "unknown /snapshot include name");
-            }
-        }
-    }
-    // If the filter ended up entirely empty (e.g. `?include=unknown`),
-    // fall back to the default so the response is still useful.
-    if !(filter.gpu
-        || filter.cpu
-        || filter.memory
-        || filter.chassis
-        || filter.process
-        || filter.storage)
-    {
-        return SectionFilter::default_http();
-    }
-    filter
-}
-
-/// Apply a [`SectionFilter`] to a snapshot and produce the wire-format
-/// `serde_json::Value`. Non-finite floats are sanitised through
-/// [`sanitize_json_floats`] so NVML / TPU driver quirks cannot fail
-/// serialization.
-pub fn filter_snapshot_value(snapshot: &Snapshot, filter: &SectionFilter) -> Value {
-    let mut value = serde_json::to_value(snapshot).unwrap_or(Value::Null);
-    sanitize_json_floats(&mut value);
-    if let Value::Object(ref mut map) = value {
-        // Apply the same per-field byte caps the Prometheus exporter uses
-        // for process labels (`api::metrics::process`). Without this the
-        // JSON/SSE path would broadcast full argv strings — a privacy
-        // leak (DB URLs, API tokens) and a response-size amplification
-        // vector that is already mitigated on the `/metrics` surface.
-        if let Some(Value::Array(procs)) = map.get_mut("processes") {
-            truncate_process_labels_in_place(procs);
-        }
-        for section in ["gpus", "cpus", "memory", "chassis", "processes", "storage"] {
-            if !filter.allows(section) {
-                map.remove(section);
-            }
-        }
-    }
-    value
-}
-
-/// Apply `MAX_COMMAND_LABEL_LEN` / `MAX_NAME_LABEL_LEN` /
-/// `MAX_USER_LABEL_LEN` to the `command`, `process_name`, and `user`
-/// fields of a serialized `ProcessInfo` array. Mirrors the Prometheus
-/// exporter's truncation so the same privacy + amplification guarantees
-/// apply to the JSON/SSE surfaces. Every other field (PIDs, memory
-/// counters, timings) is left untouched.
-fn truncate_process_labels_in_place(procs: &mut [Value]) {
-    for proc in procs.iter_mut() {
-        if let Value::Object(ref mut fields) = *proc {
-            truncate_string_field(fields, "command", MAX_COMMAND_LABEL_LEN);
-            truncate_string_field(fields, "process_name", MAX_NAME_LABEL_LEN);
-            truncate_string_field(fields, "user", MAX_USER_LABEL_LEN);
-        }
-    }
-}
-
-fn truncate_string_field(fields: &mut serde_json::Map<String, Value>, key: &str, max_len: usize) {
-    if let Some(Value::String(s)) = fields.get(key) {
-        let truncated = ProcessMetricExporter::truncate_for_label(s, max_len);
-        if let std::borrow::Cow::Owned(new_value) = truncated {
-            fields.insert(key.to_string(), Value::String(new_value));
-        }
-    }
+    bus.fallback()
+        .collect(filter, FRESH_COLLECT_TIMEOUT)
+        .await
+        .map(Resolved::Fallback)
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::snapshot::Snapshot;
-
-    fn sample_snapshot() -> Snapshot {
-        Snapshot {
-            schema: 1,
-            timestamp: "2026-04-20T00:00:00Z".to_string(),
-            hostname: "host".to_string(),
-            gpus: Some(Vec::new()),
-            cpus: Some(Vec::new()),
-            memory: Some(Vec::new()),
-            chassis: Some(Vec::new()),
-            processes: None,
-            storage: None,
-            errors: Vec::new(),
-        }
-    }
-
-    #[test]
-    fn parse_include_default_when_missing() {
-        let f = parse_include(None);
-        assert_eq!(f, SectionFilter::default_http());
-    }
-
-    #[test]
-    fn parse_include_default_when_empty() {
-        let f = parse_include(Some(""));
-        assert_eq!(f, SectionFilter::default_http());
-        let f = parse_include(Some("   "));
-        assert_eq!(f, SectionFilter::default_http());
-    }
-
-    #[test]
-    fn parse_include_accepts_gpu_only() {
-        let f = parse_include(Some("gpu"));
-        assert!(f.gpu);
-        assert!(!f.cpu);
-        assert!(!f.memory);
-        assert!(!f.chassis);
-        assert!(!f.process);
-        assert!(!f.storage);
-    }
-
-    #[test]
-    fn parse_include_accepts_aliases() {
-        let f = parse_include(Some("gpus,cpus,processes,disk"));
-        assert!(f.gpu);
-        assert!(f.cpu);
-        assert!(f.process);
-        assert!(f.storage);
-    }
-
-    #[test]
-    fn parse_include_unknown_only_falls_back_to_default() {
-        let f = parse_include(Some("bogus"));
-        assert_eq!(f, SectionFilter::default_http());
-    }
-
-    #[test]
-    fn filter_removes_unrequested_sections() {
-        let snap = sample_snapshot();
-        let filter = parse_include(Some("gpu"));
-        let value = filter_snapshot_value(&snap, &filter);
-        assert!(value.get("gpus").is_some());
-        assert!(value.get("cpus").is_none());
-        assert!(value.get("memory").is_none());
-        assert!(value.get("chassis").is_none());
-        // Metadata is always kept.
-        assert_eq!(value["schema"], serde_json::json!(1));
-        assert_eq!(
-            value["timestamp"],
-            serde_json::json!("2026-04-20T00:00:00Z")
-        );
-    }
-
-    #[test]
-    fn filter_keeps_errors_array_regardless_of_section_filter() {
-        // Errors are snapshot metadata, not a device section, and must be
-        // preserved even when only one section is requested so clients
-        // can still see reader failures.
-        let mut snap = sample_snapshot();
-        snap.errors.push(crate::snapshot::SnapshotError {
-            section: "gpu".to_string(),
-            kind: "timeout".to_string(),
-            message: "fake".to_string(),
-        });
-        let filter = parse_include(Some("gpu"));
-        let value = filter_snapshot_value(&snap, &filter);
-        assert!(value["errors"].is_array());
-        assert_eq!(value["errors"].as_array().unwrap().len(), 1);
-    }
-
-    /// Regression for the security review of #193: a process with a 4
-    /// KiB command line must not appear verbatim in the JSON body. The
-    /// Prometheus exporter already caps these labels (see
-    /// `api::metrics::process`); the JSON/SSE surface must inherit the
-    /// same guarantee so an attacker cannot exfiltrate secrets embedded
-    /// in argv through the cross-origin SSE stream.
-    #[test]
-    fn filter_truncates_long_process_command_line() {
-        use crate::device::ProcessInfo;
-
-        let long_cmd = "python ".to_string() + &"A".repeat(4096);
-        let proc = ProcessInfo {
-            device_id: 0,
-            device_uuid: "uuid-0".to_string(),
-            pid: 42,
-            process_name: "python".to_string(),
-            used_memory: 0,
-            cpu_percent: 0.0,
-            memory_percent: 0.0,
-            memory_rss: 0,
-            memory_vms: 0,
-            user: "alice".to_string(),
-            state: "R".to_string(),
-            start_time: "00:00:00".to_string(),
-            cpu_time: 0,
-            command: long_cmd.clone(),
-            ppid: 1,
-            threads: 1,
-            uses_gpu: true,
-            priority: 0,
-            nice_value: 0,
-            gpu_utilization: 0.0,
-        };
-        let mut snap = sample_snapshot();
-        snap.processes = Some(vec![proc]);
-        // The include must request `process`; the default HTTP filter
-        // drops the processes section entirely.
-        let filter = parse_include(Some("gpu,cpu,memory,chassis,process"));
-        let value = filter_snapshot_value(&snap, &filter);
-        let procs = value["processes"].as_array().expect("processes array");
-        assert_eq!(procs.len(), 1);
-        let rendered_command = procs[0]["command"].as_str().expect("command string");
-        assert!(
-            rendered_command.len() < long_cmd.len(),
-            "command must be truncated; got {} bytes",
-            rendered_command.len()
-        );
-        assert!(
-            rendered_command.contains("bytes truncated"),
-            "truncation marker missing: {rendered_command}"
-        );
-        assert!(
-            !rendered_command.contains(&"A".repeat(4096)),
-            "full argv must not leak verbatim"
-        );
-    }
-
-    /// Regression: a `process_name` longer than `MAX_NAME_LABEL_LEN`
-    /// must also be truncated. Name fields can grow on Windows (long
-    /// service paths) and through Linux namespaces.
-    #[test]
-    fn filter_truncates_long_process_name() {
-        use crate::device::ProcessInfo;
-
-        let long_name = "N".repeat(512);
-        let proc = ProcessInfo {
-            device_id: 0,
-            device_uuid: String::new(),
-            pid: 1,
-            process_name: long_name.clone(),
-            used_memory: 0,
-            cpu_percent: 0.0,
-            memory_percent: 0.0,
-            memory_rss: 0,
-            memory_vms: 0,
-            user: "root".to_string(),
-            state: "S".to_string(),
-            start_time: "00:00:00".to_string(),
-            cpu_time: 0,
-            command: String::new(),
-            ppid: 1,
-            threads: 1,
-            uses_gpu: false,
-            priority: 0,
-            nice_value: 0,
-            gpu_utilization: 0.0,
-        };
-        let mut snap = sample_snapshot();
-        snap.processes = Some(vec![proc]);
-        let filter = parse_include(Some("gpu,cpu,memory,chassis,process"));
-        let value = filter_snapshot_value(&snap, &filter);
-        let rendered = value["processes"][0]["process_name"]
-            .as_str()
-            .expect("process_name string");
-        assert!(rendered.len() < long_name.len());
-        assert!(rendered.contains("bytes truncated"));
-    }
-
-    /// Regression: a `user` field longer than `MAX_USER_LABEL_LEN` must
-    /// also be truncated. Long LDAP DNs and Windows SIDs can overflow
-    /// this on enterprise clusters.
-    #[test]
-    fn filter_truncates_long_user_field() {
-        use crate::device::ProcessInfo;
-
-        let long_user = "U".repeat(512);
-        let proc = ProcessInfo {
-            device_id: 0,
-            device_uuid: String::new(),
-            pid: 1,
-            process_name: "p".to_string(),
-            used_memory: 0,
-            cpu_percent: 0.0,
-            memory_percent: 0.0,
-            memory_rss: 0,
-            memory_vms: 0,
-            user: long_user.clone(),
-            state: "S".to_string(),
-            start_time: "00:00:00".to_string(),
-            cpu_time: 0,
-            command: String::new(),
-            ppid: 1,
-            threads: 1,
-            uses_gpu: false,
-            priority: 0,
-            nice_value: 0,
-            gpu_utilization: 0.0,
-        };
-        let mut snap = sample_snapshot();
-        snap.processes = Some(vec![proc]);
-        let filter = parse_include(Some("gpu,cpu,memory,chassis,process"));
-        let value = filter_snapshot_value(&snap, &filter);
-        let rendered = value["processes"][0]["user"].as_str().expect("user string");
-        assert!(rendered.len() < long_user.len());
-        assert!(rendered.contains("bytes truncated"));
-    }
-
-    /// Short process fields must round-trip unchanged so normal
-    /// operators still see the full executable name and argv.
-    #[test]
-    fn filter_leaves_short_process_fields_intact() {
-        use crate::device::ProcessInfo;
-
-        let proc = ProcessInfo {
-            device_id: 0,
-            device_uuid: "uuid".to_string(),
-            pid: 1,
-            process_name: "python".to_string(),
-            used_memory: 0,
-            cpu_percent: 0.0,
-            memory_percent: 0.0,
-            memory_rss: 0,
-            memory_vms: 0,
-            user: "alice".to_string(),
-            state: "R".to_string(),
-            start_time: "00:00:00".to_string(),
-            cpu_time: 0,
-            command: "python train.py".to_string(),
-            ppid: 1,
-            threads: 1,
-            uses_gpu: true,
-            priority: 0,
-            nice_value: 0,
-            gpu_utilization: 0.0,
-        };
-        let mut snap = sample_snapshot();
-        snap.processes = Some(vec![proc]);
-        let filter = parse_include(Some("gpu,cpu,memory,chassis,process"));
-        let value = filter_snapshot_value(&snap, &filter);
-        assert_eq!(
-            value["processes"][0]["command"].as_str(),
-            Some("python train.py")
-        );
-        assert_eq!(value["processes"][0]["user"].as_str(), Some("alice"));
-        assert_eq!(
-            value["processes"][0]["process_name"].as_str(),
-            Some("python")
-        );
-    }
-}
+#[path = "snapshot_tests.rs"]
+mod tests;

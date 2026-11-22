@@ -419,6 +419,13 @@ pub struct AppState {
     /// seeds the integrator's lifetime counter so Prometheus stays
     /// monotonic across restarts.
     pub energy_wal_replay: WalReplayIndex,
+    /// The Prometheus exposition served by `/metrics` in api mode,
+    /// rendered once per collection tick by the collection loop instead of
+    /// once per scrape (issue #503). Starts as the not-ready render
+    /// (`all_smi_up 0` plus build info), so the endpoint is never
+    /// byte-empty before the first tick (issue #324). Unused by the TUI
+    /// modes.
+    pub metrics_body: axum::body::Bytes,
     /// Resolved `[display]` config (color scheme / gauge style / LED
     /// grid toggle) from the merged `Settings`. Renderers consult this
     /// to decide whether to draw the LED grid, which glyph set the
@@ -484,7 +491,7 @@ impl AppState {
         let energy = EnergyAccountant::new(std::time::Duration::from_secs(
             energy_config.gap_interpolate_seconds,
         ));
-        AppState {
+        let mut state = AppState {
             gpu_info: Vec::new(),
             cpu_info: Vec::new(),
             memory_info: Vec::new(),
@@ -557,12 +564,15 @@ impl AppState {
             energy,
             energy_config,
             energy_wal_replay: WalReplayIndex::default(),
+            metrics_body: axum::body::Bytes::new(),
             display_config: DisplaySettings {
                 color_scheme: "default".to_string(),
                 gauge_style: "blocks".to_string(),
                 show_led_grid: true,
             },
-        }
+        };
+        crate::api::handlers::refresh_metrics_body(&mut state);
+        state
     }
 
     /// Helper used by the event handler: push a query onto the

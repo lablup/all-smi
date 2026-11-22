@@ -63,7 +63,7 @@ impl ExporterStatusMetricExporter {
 }
 
 impl MetricExporter for ExporterStatusMetricExporter {
-    fn export_metrics(&self) -> String {
+    fn export_into(&self, builder: &mut MetricBuilder) {
         // `get_hostname` reads a process-wide `Lazy<String>`, so this is a
         // clone rather than a syscall per scrape. It is also the exact
         // source every device reader uses for its own `instance` /
@@ -83,8 +83,6 @@ impl MetricExporter for ExporterStatusMetricExporter {
             ("instance", hostname.as_str()),
             ("hostname", hostname.as_str()),
         ];
-
-        let mut builder = MetricBuilder::new();
         builder
             .help(
                 UP_METRIC,
@@ -115,8 +113,6 @@ impl MetricExporter for ExporterStatusMetricExporter {
             )
             .type_(BUILD_INFO_METRIC, "gauge")
             .metric(BUILD_INFO_METRIC, &build_labels, 1);
-
-        builder.build()
     }
 }
 
