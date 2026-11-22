@@ -12,6 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Retry policy for expensive one-time probes (issue #501). Only the Windows
+// and macOS readers use it; compiled under `test` so Linux runs its tests.
+#[cfg(any(target_os = "windows", target_os = "macos", test))]
+pub mod cached_probe;
 pub mod command;
 pub mod command_timeout;
 pub mod disk_filter;

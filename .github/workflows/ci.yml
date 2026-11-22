@@ -887,6 +887,9 @@ jobs:
       - name: Process list
         run: cargo test --lib device::process_list
 
+      - name: macOS CPU reader
+        run: cargo test --lib device::cpu_macos
+
   launchd-service:
     name: launchd Service Smoke Test
     runs-on: macos-15
