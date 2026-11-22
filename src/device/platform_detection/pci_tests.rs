@@ -44,6 +44,12 @@ garbage line without ids
 fn sysfs_devices_are_read_and_malformed_entries_skipped() {
     let dir = tempfile::tempdir().unwrap();
     let device = |name: &str, vendor: &str, device: &str, class: &str| {
+        // Windows rejects `:` in file names; the reader ignores the name.
+        let name = if cfg!(windows) {
+            name.replace(':', "_")
+        } else {
+            name.to_string()
+        };
         let path = dir.path().join(name);
         std::fs::create_dir_all(&path).unwrap();
         std::fs::write(path.join("vendor"), vendor).unwrap();
