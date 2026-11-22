@@ -1,3 +1,25 @@
+all-smi (0.29.0-0) jammy; urgency=medium
+
+  * Added N-tier CPU topology on Linux and Windows ARM with cpu_tier metrics (#474).
+  * Added the ALL_SMI_CPU_TEMP_SENSOR override and board/ARM CPU temperature sensors (#496, #498).
+  * Added the amd.gpu_metrics.revision doctor check (#481).
+  * Added VRAM used/total to the local GPU row (#469).
+  * Fixed AMD MI300X process list, utilization and temperature (#469).
+  * Fixed ROCm 7.x version detection in doctor (#469).
+  * Fixed base M5 core tiers from perflevel names (#472).
+  * Fixed Linux CPU temperature sensor selection by driver name (#493).
+  * Shared one NVML handle per process with init back-off (#490).
+  * Fixed duplicate HELP/TYPE lines in /metrics and replay timing (#510).
+  * Fixed duplicate and per-thread process rows across GPU readers (#508, #511).
+  * Fixed remote hostfile reload and record --hostfile bugs (#509).
+  * Fixed the hl-smi monitor thread leak and Furiosa devices hidden after a failed first query (#507, #513).
+  * Cut per-tick collection work in the TUI, API, remote mode and readers (#506-#510, #513).
+  * Moved the NVIDIA driver from Recommends to Suggests (#476, #480).
+  * Raised the minimum Rust version to 1.97 (#468).
+  * Updated sysinfo to 0.40.4 and russh to 0.65.2 (#470, #494).
+
+ -- Jeongkyu Shin <inureyes@gmail.com>  Mon, 23 Nov 2026 00:00:00 +0900
+
 all-smi (0.28.1-0) jammy; urgency=medium
 
   * Added Rebellions REBEL100 (RBLN-CR13) support (#466).

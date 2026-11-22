@@ -114,7 +114,7 @@ Configuration is optional. To keep an exporter running across reboots, follow th
 
 ## Recent Updates
 
-- **v0.28.1 (2026/10/20):** Added Rebellions REBEL100 support with per-process NPU utilization and SKU-based model labels, stopped reporting non-Habana accel nodes as Intel Gaudi, and updated russh and luwen.
+- **v0.29.0 (2026/11/23):** Added N-tier CPU topology and wider Linux CPU temperature sensor coverage, fixed AMD MI300X metrics and ROCm 7.x detection, and cut per-tick collection, API and TUI overhead across platforms.
 
 ## Documentation
 

@@ -2,8 +2,30 @@
 
 [Home](README.md) · [Release downloads](https://github.com/lablup/all-smi/releases)
 
-## Unreleased
+## v0.29.0 (2026/11/23)
 
+- Added N-tier CPU topology on Linux and Windows ARM. Linux detects tiers once per reader from Intel hybrid PMU cpumasks, arm64 MIDR part numbers, or the firmware `cpu_capacity` table (honoring the container cpuset), Windows ARM reports P/M/E clusters, and the local TUI renders every tier (#474).
+- Added the `all_smi_cpu_tier_core_count`, `all_smi_cpu_tier_utilization`, `all_smi_cpu_tier_frequency_mhz` and `all_smi_cpu_tier_l2_cache_mb` metrics and a `cpu_tier` label on `all_smi_cpu_core_utilization`. Tier frequency and cache are reported only on Apple Silicon; existing metric names and the Apple s/p/e series are unchanged (#474).
+- Added the `ALL_SMI_CPU_TEMP_SENSOR` override for the Linux CPU temperature sensor (`<driver>:temp<N>`, `<driver>:<label>`, or an absolute `/sys` path); `all-smi doctor` shows which sensor was picked and whether the override took effect (#496).
+- Added Linux CPU temperature selection from motherboard sensor chips by `tempN_label` (PECI, AMD TSI, `CPU Package`, `SoC Temperature` on Ampere, and others), from the kernel `temp*_type` value on unlabelled Super I/O chips, and from ARM thermal zone types (#496, #498).
+- Added the `amd.gpu_metrics.revision` doctor check, which warns when a card's `gpu_metrics` revision is newer than the bundled parser reads and names the fallbacks in use (#481).
+- Added `VRAM used/total` to the local TUI GPU row (#469).
+- Fixed the AMD GPU process list being empty on every Linux host that had a GPU process: the plugin computed memory percent against an unrefreshed total and sent `null`, which the host rejected (#469).
+- Fixed AMD utilization reading 0% on drivers that emit `gpu_metrics` newer than the parser supports, such as MI300X with v1.9; it falls back to sysfs `gpu_busy_percent` (#469).
+- Fixed MI300 temperature reading 0 °C on boards without an edge sensor; it falls back to the junction sensor (#469).
+- Fixed doctor reporting "ROCm not detected" on ROCm 7.x; the version now comes from `librocm-core`, then the legacy version files, then the 7.x `core-*` files (#469).
+- Fixed the header showing `0°C` on hosts without a CPU temperature sensor (now `Tmp N/A`) and the GPU Metrics panel truncating power range badges wider than 5 characters (#469).
+- Fixed a base M5 being reported as Super + Performance with no efficiency cores, which dropped its E-cluster frequency and L2 cache; Apple Silicon tiers now come from every perflevel name (#472).
+- Fixed the Linux CPU temperature reader taking the first of four fixed sysfs paths, which could report a motherboard sensor; it selects `coretemp`, `k10temp`/`zenpower` or `cpu_thermal` by driver name and resolves the sensor once per process (#493).
+- Automatic Linux CPU temperature selection no longer prefers `asus_wmi_sensors`, whose BIOS can stop or pin fans when polled often (#498).
+- Fixed NVML being initialized and shut down each time an `AllSmi` was built and dropped. One NVML handle is shared per process, and a failed init backs off from 30 s to 5 min while readers use the `nvidia-smi` fallback (#490).
+- Fixed the macOS GPU core estimate reading a CPU model cached only after the call; the estimate is now parsed from the chip generation and tier (#507).
+- Fixed the hl-smi monitor thread leaking on shutdown; `shutdown()` now wakes and joins it (#507).
+- Fixed hosts added by a hostfile reload getting no tab, `record --hostfile` scraping nothing, a `~/` hostfile path breaking reloads, and a stale "connected" status after a deadline abort in remote mode (#509).
+- Fixed installing the Debian package on a host whose NVIDIA driver came from NVIDIA's CUDA repository replacing that driver: the driver moved from `Recommends` to `Suggests`. The docs warn that `--install-suggests` installs it again (#476, #480).
+- Remote collection bounds each tick: 1 s connect and 3 s request timeouts inside a 4 s budget, no retry after a timeout, and per-host backoff from 2 s to 60 s shown as `backing-off`. Bodies are parsed in each host task without a regex, the hostfile is re-read only when it changes, and the line cap rose from 1024 bytes to 32 KiB (#509).
+- The TUI no longer deep-clones `AppState` every frame, and local mode idles at the 1 s tick instead of a permanent 5 Hz tick when nothing animates; mouse motion no longer triggers redraws (#506).
+- Windows: one WMI worker thread owns a cached connection per namespace, CPU temperature sources back off for 30 s to 300 s after 3 consecutive failures, and `Win32_VideoController` and `Win32_Processor` results are cached (#507).
 - Cut per-tick Linux CPU collection work: the machine string comes from `uname(2)` once instead of spawning `uname -m` every sample, the static `/proc/cpuinfo` fields are parsed once when the reader is built, the current frequency is read from `scaling_cur_freq` (or only the `cpu MHz` lines when cpufreq is absent), and the CPU reader no longer reads `/proc/stat` itself (#504).
 - Cut per-tick process collection work: GPU readers refresh only CPU, memory, user and command line instead of `ProcessRefreshKind::everything()`, priority/nice and user names are cached per process, the merge with GPU rows no longer clones every baseline row, and the AMD and Intel readers on Windows and the Intel reader on Linux return their GPU rows to the TUI without a second full process pass (#504).
 - Fixed the API and library process lists from the NVIDIA, Jetson, Tenstorrent, Intel and Windows GPU readers containing one row per thread; they now list processes only (#504).
@@ -23,6 +45,9 @@
 - NVIDIA: device UUID and name come from the cached static info, the GPM support probe runs once per device, and `vgpu_host_mode()` / `mig_mode()` are not probed again on a GPU that answered `NotSupported`. A GPU reporting MIG disabled is still probed every tick (#502).
 - Fixed Furiosa devices staying hidden for the rest of the process when the first `furiosa-smi info` call failed (#502).
 
+- Raised the minimum supported Rust version to 1.97, matching the Launchpad PPA toolchain (#468).
+- Updated sysinfo from 0.39.6 to 0.40.4 and russh from 0.64.1 to 0.65.2, with semver-compatible lockfile refreshes; sysinfo's new default `gpu` feature stays disabled (#470, #494).
+
 ### Library API
 
 - Removed `all_smi::device::is_running_in_container` and `all_smi::device::get_container_pid_namespace` (also under `all_smi::device::platform_detection`), which nothing in all-smi used (#504).
@@ -30,6 +55,11 @@
 - Removed the unused `all_smi::utils::refresh_global_processes` (#504).
 - `all_smi::device::process_list::get_all_processes` no longer returns rows for userland threads (#504).
 - `all_smi::device::readers::nvidia_vgpu::collect_vgpu_info` and `nvidia_mig::collect_mig_info` take a second argument, `&nvidia_hardware::NotSupportedSkipSet`, holding the device indices that already answered `NotSupported`; pass a fresh `NotSupportedSkipSet::new()` to probe every device (#502).
+- Renamed `all_smi::ui::activity_panel::CollapseStrategy::PECluster` to `TierCluster` (#474).
+- Added the public `CpuInfo::cpu_tiers` and `CoreUtilization::tier_index` fields; struct literals must set them or use `..CpuInfo::test_default()`. Serde defaults keep older snapshots and remote payloads readable (#474, #482).
+- Added `GpuReader::includes_system_processes`, defaulting to `false` (#505).
+
+[Full changelog](https://github.com/lablup/all-smi/compare/v0.28.1...v0.29.0)
 
 ## v0.28.1 (2026/10/20)
 
@@ -78,6 +108,7 @@
 [Full changelog](https://github.com/lablup/all-smi/compare/v0.27.0...v0.27.1)
 
 ## Release history
+- **v0.29.0 (2026/11/23):** Added N-tier CPU topology and wider Linux CPU temperature sensor coverage, fixed AMD MI300X metrics and ROCm 7.x detection, and cut per-tick collection, API and TUI overhead across platforms.
 - **v0.28.1 (2026/10/20):** Added Rebellions REBEL100 support with per-process NPU utilization and SKU-based model labels, stopped reporting non-Habana accel nodes as Intel Gaudi, and updated russh and luwen.
 - **v0.28.0 (2026/10/17):** Added NVIDIA RTX Spark N1X and native Windows ARM64 support with DLA metrics on the GPU row, read the N1X DLA engine clock, and fixed false 100% Intel Xe utilization from frozen GT idle counters.
 - **v0.27.1 (2026/10/11):** Added storage hiding, fixed remote host tabs and energy accounting, hardened HTTP collection, repaired Launchpad AMD packaging, refreshed documentation, and updated dependencies.
