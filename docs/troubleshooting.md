@@ -103,9 +103,10 @@ all-smi picks the CPU temperature file once per process, at the first sample, an
 1. The `ALL_SMI_CPU_TEMP_SENSOR` override, if set (see below).
 2. A CPU driver by hwmon `name`: `coretemp`, `k10temp`, `zenpower`, `cpu_thermal`, `cpu-thermal`.
 3. A CPU thermal zone by `type`: first `x86_pkg_temp`, `cpu-thermal`, `cpu_thermal`, `CPU-therm`, and only when none of those reads, the ARM SoC types `package-thermal`, `cpu0-thermal`, `soc-thermal`, `soc_thermal`, `BCPU-therm`. Within each group, zones are tried in zone index order. On RK3588 boards without `package-thermal`, `bigcore0-thermal` (the first big-core cluster) is used, but only when no zone of the other types reads. Other cluster zones such as `bigcore2-thermal` or `littlecore-thermal` are never taken.
-4. A motherboard sensor chip input (Super I/O, board EC or WMI drivers) whose `temp*_label` is exactly one of the labels in the table below, in priority order. The best label wins across all chips; ties go to the lower hwmon index, then the lower input number. `asus_wmi_sensors` inputs are used only after this stage and the sensor type stage below find nothing on any other chip (see the warning below). Labels such as `CPU Socket Temperature`, `CPU VRM Temperature`, `PCH_CPU_TEMP` (relayed by the chipset) and `SMBUSMASTER 0` (board dependent) are never taken.
+4. A motherboard sensor chip input (Super I/O, board EC or WMI drivers) whose `temp*_label` is exactly one of the labels in the table below, in priority order. The best label wins across all chips; ties go to the lower hwmon index, then the lower input number. `asus_wmi_sensors` inputs are skipped in this stage and tried in step 6 (see the warning below). Labels such as `CPU Socket Temperature`, `CPU VRM Temperature`, `PCH_CPU_TEMP` (relayed by the chipset) and `SMBUSMASTER 0` (board dependent) are never taken.
 5. An input whose `temp*_type` is `6` (Intel PECI) or `5` (AMD SB-TSI), as unlabelled `it87` chips report them. The input's label, if any, is not checked. These are the CPU's own digital sensor. Ties go to the lower hwmon index, then the lower input number. Doctor shows this rule as `sensor-type`.
-6. The legacy paths `thermal_zone0`, `thermal_zone1`, `hwmon0/temp1_input`, `hwmon1/temp1_input`.
+6. A board label on an `asus_wmi_sensors` input, using the same label table. It comes after the sensor type stage because of its polling hazard.
+7. The legacy paths `thermal_zone0`, `thermal_zone1`, `hwmon0/temp1_input`, `hwmon1/temp1_input`.
 
 Board labels, in priority order:
 
