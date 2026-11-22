@@ -26,5 +26,5 @@ pub mod metrics_render;
 pub mod ready;
 pub mod snapshot;
 
-pub use metrics_render::{SharedState, metrics_handler};
+pub use metrics_render::{SharedState, metrics_handler, refresh_metrics_body};
 pub use ready::ready_handler;
