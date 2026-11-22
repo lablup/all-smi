@@ -299,6 +299,19 @@ impl GpuReader for IntelWindowsGpuReader {
             windows_gpu_perf::augment_gpus(&mut gpus)
         })
     }
+
+    /// Bare GPU rows for the TUI, which merges them into its own process
+    /// pass; no sysinfo refresh per tick (issue #504).
+    fn get_gpu_processes(&self) -> (Vec<ProcessInfo>, std::collections::HashSet<u32>) {
+        use crate::device::readers::windows_gpu_perf;
+        let Ok(adapter_index) = self.adapter_index.lock() else {
+            return Default::default();
+        };
+        windows_gpu_perf::gpu_processes_with(&adapter_index, || {
+            let mut gpus = self.query_intel_gpus();
+            windows_gpu_perf::augment_gpus(&mut gpus)
+        })
+    }
 }
 
 #[cfg(all_smi_level_zero)]

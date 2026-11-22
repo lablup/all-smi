@@ -185,7 +185,7 @@ impl GpuReader for NvidiaJetsonGpuReader {
     }
 
     fn get_process_info(&self) -> Vec<ProcessInfo> {
-        use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, UpdateKind};
+        use sysinfo::ProcessesToUpdate;
 
         // Get GPU processes and PIDs
         let (gpu_processes, gpu_pids) = get_gpu_processes();
@@ -195,7 +195,7 @@ impl GpuReader for NvidiaJetsonGpuReader {
             system.refresh_processes_specifics(
                 ProcessesToUpdate::All,
                 true,
-                ProcessRefreshKind::everything().with_user(UpdateKind::Always),
+                crate::device::process_list::process_row_refresh_kind(),
             );
             system.refresh_memory();
 

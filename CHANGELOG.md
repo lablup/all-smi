@@ -2,6 +2,22 @@
 
 [Home](README.md) · [Release downloads](https://github.com/lablup/all-smi/releases)
 
+## Unreleased
+
+- Cut per-tick Linux CPU collection work: the machine string comes from `uname(2)` once instead of spawning `uname -m` every sample, the static `/proc/cpuinfo` fields are parsed once when the reader is built, the current frequency is read from `scaling_cur_freq` (or only the `cpu MHz` lines when cpufreq is absent), and the CPU reader no longer reads `/proc/stat` itself (#504).
+- Cut per-tick process collection work: GPU readers refresh only CPU, memory, user and command line instead of `ProcessRefreshKind::everything()`, priority/nice and user names are cached per process, the merge with GPU rows no longer clones every baseline row, and the AMD and Intel readers on Windows and the Intel reader on Linux return their GPU rows to the TUI without a second full process pass (#504).
+- Fixed the API and library process lists from the NVIDIA, Jetson, Tenstorrent, Intel and Windows GPU readers containing one row per thread; they now list processes only (#504).
+- Fixed the Linux TUI command column showing `[name]` instead of the full command line for processes it discovered (#504).
+- Hardware detection reads the PCI inventory once from `/sys/bus/pci/devices` and runs `lspci -nn` only when sysfs is unreadable, instead of spawning `lspci` up to eight times at startup; Apple Silicon no longer runs `system_profiler SPPCIDataType` to look for an NVIDIA GPU (#504).
+- On Linux hosts with cpufreq, the reported base CPU frequency is now the average `scaling_cur_freq` over all counted CPUs (previously cpu0 on ARM and the `cpu MHz` average on x86) (#504).
+
+### Library API
+
+- Removed `all_smi::device::is_running_in_container` and `all_smi::device::get_container_pid_namespace` (also under `all_smi::device::platform_detection`), which nothing in all-smi used (#504).
+- Removed the unused `all_smi::device::container_utils` module (`is_running_in_container`, `is_containerized_process`, `get_container_pid_mapping`, `get_self_pid_mapping`, `map_host_to_container_pid`, `find_host_pid_from_container_pid`, `build_pid_mapping_cache`, `format_process_name_with_container_info`) and `all_smi::device::process_utils` module (`get_system_process_info`) (#504).
+- Removed the unused `all_smi::utils::refresh_global_processes` (#504).
+- `all_smi::device::process_list::get_all_processes` no longer returns rows for userland threads (#504).
+
 ## v0.28.1 (2026/10/20)
 
 - Added Rebellions REBEL100 (`RBLN-CR13`) support, verified against captures from a 4-card KMD 3.5.1 node; README, the man page, and API.md list the REBEL line (#466).

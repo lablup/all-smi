@@ -16,7 +16,7 @@ use crate::utils::command::new_command;
 use once_cell::sync::Lazy;
 use std::io::{self, Write};
 use std::sync::Mutex;
-use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+use sysinfo::System;
 
 /// Global System instance for process collection
 /// This avoids creating new System instances on every collection cycle
@@ -39,6 +39,20 @@ pub fn get_hostname() -> String {
     CACHED_HOSTNAME.clone()
 }
 
+#[cfg(test)]
+thread_local! {
+    /// [`with_global_system`] calls made on this thread, so a test can assert
+    /// that a path never touched the shared `System` without racing other
+    /// tests.
+    static GLOBAL_SYSTEM_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How many times this thread has entered [`with_global_system`].
+#[cfg(test)]
+pub(crate) fn global_system_calls_on_this_thread() -> usize {
+    GLOBAL_SYSTEM_CALLS.with(std::cell::Cell::get)
+}
+
 /// Get global system instance for process collection
 /// Returns a reference to the global System wrapped in a MutexGuard
 /// This is more efficient than creating a new System instance every time
@@ -51,25 +65,12 @@ where
     // elsewhere is safe, and it keeps one panicking caller (there are several,
     // across GPU/process readers on multiple platforms) from permanently
     // taking down every later call to this function.
+    #[cfg(test)]
+    GLOBAL_SYSTEM_CALLS.with(|calls| calls.set(calls.get() + 1));
     let mut system = GLOBAL_SYSTEM
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     f(&mut system)
-}
-
-/// Refresh processes using the global System instance
-/// This is the primary use case - collecting process information
-#[allow(dead_code)]
-pub fn refresh_global_processes() {
-    let mut system = GLOBAL_SYSTEM
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    system.refresh_processes_specifics(
-        ProcessesToUpdate::All,
-        true,
-        ProcessRefreshKind::everything().with_user(UpdateKind::Always),
-    );
-    system.refresh_memory();
 }
 
 /// Check if the current process already has sudo privileges

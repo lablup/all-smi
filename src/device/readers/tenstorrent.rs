@@ -225,7 +225,7 @@ impl GpuReader for TenstorrentReader {
     }
 
     fn get_process_info(&self) -> Vec<ProcessInfo> {
-        use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, UpdateKind};
+        use sysinfo::ProcessesToUpdate;
 
         // Get NPU processes (currently empty for Tenstorrent)
         let (npu_processes, npu_pids) = self.get_npu_processes();
@@ -235,7 +235,7 @@ impl GpuReader for TenstorrentReader {
             system.refresh_processes_specifics(
                 ProcessesToUpdate::All,
                 true,
-                ProcessRefreshKind::everything().with_user(UpdateKind::Always),
+                crate::device::process_list::process_row_refresh_kind(),
             );
             system.refresh_memory();
 

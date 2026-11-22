@@ -449,30 +449,23 @@ fn has_intel_client_gpu_rejects_amd() {
     assert!(!super::detection::has_intel_client_gpu_from_root(root));
 }
 
+/// The PCI fallback (issue #504): an Intel display-class function, never an
+/// Intel NIC or another vendor's GPU.
 #[test]
-fn line_matches_intel_gpu_positive_3d() {
-    // Class 0302 (3D controller), Intel vendor.
-    let line = "03:00.0 0302: 8086:56a0 (rev 08)";
-    assert!(super::detection::line_matches_intel_gpu(line));
-}
-
-#[test]
-fn line_matches_intel_gpu_positive_vga() {
-    let line = "00:02.0 0300: 8086:7d40";
-    assert!(super::detection::line_matches_intel_gpu(line));
-}
-
-#[test]
-fn line_matches_intel_gpu_rejects_intel_nic() {
-    // Intel NIC, vendor 8086 but class 0200 (Ethernet).
-    let line = "02:00.0 0200: 8086:15bb";
-    assert!(!super::detection::line_matches_intel_gpu(line));
-}
-
-#[test]
-fn line_matches_intel_gpu_rejects_other_vendor_vga() {
-    let line = "01:00.0 0300: 10de:2204";
-    assert!(!super::detection::line_matches_intel_gpu(line));
+fn pci_fallback_matches_only_intel_display_controllers() {
+    use crate::device::platform_detection::{PciDevice, pci_is_intel_gpu};
+    let device = |vendor, class| PciDevice {
+        vendor,
+        device: 0x56a0,
+        class,
+    };
+    // 3D, VGA, and other display controllers from Intel.
+    assert!(pci_is_intel_gpu(&device(0x8086, 0x0302)));
+    assert!(pci_is_intel_gpu(&device(0x8086, 0x0300)));
+    assert!(pci_is_intel_gpu(&device(0x8086, 0x0380)));
+    // Intel NIC (class 0200), and an NVIDIA VGA controller.
+    assert!(!pci_is_intel_gpu(&device(0x8086, 0x0200)));
+    assert!(!pci_is_intel_gpu(&device(0x10de, 0x0300)));
 }
 
 // ----- get_process_info integration tests (synthetic procfs) -----
@@ -589,6 +582,66 @@ fn get_process_info_default_filter_keeps_uses_gpu_processes() {
     let (filtered, pids) = reader.get_gpu_processes();
     assert_eq!(filtered.len(), 1);
     assert!(pids.contains(&std::process::id()));
+}
+
+/// Issue #504: the TUI path takes the fdinfo rows without refreshing the
+/// shared sysinfo `System`; the collector merges them into its own pass.
+#[test]
+fn get_gpu_processes_reads_fdinfo_without_touching_sysinfo() {
+    use crate::device::traits::GpuReader as _;
+    use crate::utils::system::global_system_calls_on_this_thread;
+
+    let drm = tempdir().unwrap();
+    let proc = tempdir().unwrap();
+    make_card_and_render(drm.path(), 0, 128, "0000:03:00.0");
+    make_proc_fd_for_pid(
+        proc.path(),
+        std::process::id(),
+        3,
+        "renderD128",
+        "drm-driver: i915\n\
+         drm-pdev: 0000:03:00.0\n\
+         drm-client-id: 42\n\
+         drm-resident-local0: 16384 kB\n",
+    );
+
+    let reader = IntelGpuReader::new_with_roots(drm.path(), proc.path());
+    let before = global_system_calls_on_this_thread();
+    let (rows, pids) = reader.get_gpu_processes();
+    assert_eq!(global_system_calls_on_this_thread(), before);
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(pids, std::collections::HashSet::from([std::process::id()]));
+    let row = &rows[0];
+    assert!(row.uses_gpu);
+    assert_eq!(row.pid, std::process::id());
+    assert_eq!(row.device_uuid, "Intel-GPU-0000:03:00.0");
+    assert_eq!(row.used_memory, 16_384 * 1024);
+
+    // The collector's merge supplies the metadata the bare row lacks.
+    let mut base = crate::device::types::ProcessInfo {
+        process_name: "render-job".to_string(),
+        user: "alice".to_string(),
+        cpu_percent: 12.5,
+        memory_rss: 4096,
+        ..row.clone()
+    };
+    base.device_uuid = String::new();
+    base.uses_gpu = false;
+    let merged = crate::device::process_list::merge_gpu_processes(vec![base], rows);
+    assert_eq!(merged.len(), 1);
+    assert_eq!(merged[0].process_name, "render-job");
+    assert_eq!(merged[0].user, "alice");
+    assert_eq!(merged[0].cpu_percent, 12.5);
+    assert_eq!(merged[0].memory_rss, 4096);
+    assert_eq!(merged[0].used_memory, 16_384 * 1024);
+
+    // The API path still enriches through sysinfo, for just the GPU PIDs.
+    let before = global_system_calls_on_this_thread();
+    let enriched = reader.get_process_info();
+    assert_eq!(global_system_calls_on_this_thread(), before + 1);
+    assert_eq!(enriched.len(), 1);
+    assert!(!enriched[0].process_name.is_empty());
 }
 
 // ----- energy cache (xe power derivation) -----

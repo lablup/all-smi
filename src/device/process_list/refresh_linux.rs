@@ -43,7 +43,7 @@
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
-use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 
 use super::sampler_linux::{ProcessSample, ProcessSampler, Sampled};
 use super::{mark_gpu, new_entry_from_sysinfo, refresh_entry_from_sysinfo};
@@ -62,15 +62,12 @@ pub struct ProcessRefreshTimings {
     pub cache: Duration,
 }
 
-/// The refresh kind the collector always used: CPU, memory, and the user
-/// once. sysinfo still recomputes every process's `cpu_usage` from one
-/// global interval on this call (see `sampler_linux`), which is why the
-/// sampler's values override it.
+/// The shared process-row refresh kind (issue #504): CPU, memory, the user
+/// and the command line once, no threads. sysinfo still recomputes every
+/// process's `cpu_usage` from one global interval on this call (see
+/// `sampler_linux`), which is why the sampler's values override it.
 fn refresh_kind() -> ProcessRefreshKind {
-    ProcessRefreshKind::nothing()
-        .with_cpu()
-        .with_memory()
-        .with_user(UpdateKind::OnlyIfNotSet)
+    super::process_row_refresh_kind()
 }
 
 /// Run the process pass of one tick and return the rows for it.
