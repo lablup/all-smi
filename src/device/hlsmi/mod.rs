@@ -16,7 +16,7 @@
 //!
 //! This module provides a modular architecture for:
 //! - Process lifecycle management
-//! - Data storage with circular buffering
+//! - Latest-snapshot storage, parsed once per snapshot
 //! - Background data collection
 //! - Configuration management
 //! - CSV output parsing

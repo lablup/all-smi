@@ -12,148 +12,196 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::parser::{GaudiMetricsData, parse_hlsmi_output};
 
-/// Stores hl-smi data in a circular buffer
+/// The most recent complete hl-smi CSV section and its sequence number.
+///
+/// Only the newest snapshot is ever read, so the store keeps a single slot
+/// instead of a history buffer. `seq` grows by one per push, which lets
+/// readers tell whether the slot changed since they last parsed it.
+#[derive(Debug, Default)]
+struct LatestSnapshot {
+    seq: u64,
+    section: Option<String>,
+}
+
+/// The parse of the snapshot whose sequence number is `seq`.
+#[derive(Debug, Default)]
+struct ParsedSnapshot {
+    seq: u64,
+    data: Option<GaudiMetricsData>,
+}
+
+/// Latest-slot store for hl-smi output.
+///
+/// The reader thread pushes complete sections; `get_latest_data` parses a
+/// section only once, however many collection ticks read it (issue #501).
+#[derive(Debug, Default)]
 pub struct MetricsStore {
-    /// Circular buffer storing complete hl-smi CSV sections
-    data_buffer: Arc<Mutex<VecDeque<String>>>,
-    /// Cache of the last parsed data
-    last_data: Arc<Mutex<Option<GaudiMetricsData>>>,
+    latest: Mutex<LatestSnapshot>,
+    parsed: Mutex<ParsedSnapshot>,
+    /// Number of `parse_hlsmi_output` calls, for the reparse tests.
+    #[cfg(test)]
+    parse_count: AtomicUsize,
 }
 
 impl MetricsStore {
-    /// Create a new MetricsStore with the specified capacity
-    pub fn new(capacity: usize) -> Self {
-        Self {
-            data_buffer: Arc::new(Mutex::new(VecDeque::with_capacity(capacity))),
-            last_data: Arc::new(Mutex::new(None)),
-        }
+    /// Create an empty store.
+    pub fn new() -> Self {
+        Self::default()
     }
 
-    /// Add a new section to the buffer (used in tests)
-    #[cfg(test)]
-    pub fn add_section(&self, section: String, capacity: usize) {
-        let mut buffer = self.data_buffer.lock().unwrap();
-        if buffer.len() >= capacity {
-            buffer.pop_front(); // Remove oldest
-        }
-        buffer.push_back(section);
+    /// Replace the latest snapshot with a newly completed section.
+    pub fn push_section(&self, section: String) {
+        let mut latest = self.latest.lock().unwrap_or_else(|e| e.into_inner());
+        latest.seq = latest.seq.wrapping_add(1);
+        latest.section = Some(section);
     }
 
-    /// Get the buffer for direct access (used by collector)
-    pub fn get_buffer(&self) -> Arc<Mutex<VecDeque<String>>> {
-        self.data_buffer.clone()
-    }
-
-    /// Get the latest hl-smi data from the circular buffer
+    /// Parse of the latest snapshot.
+    ///
+    /// A snapshot that was already parsed returns the cached result without
+    /// cloning or reparsing it. When the newest section does not parse, the
+    /// last good result is returned instead, as before.
     pub fn get_latest_data(&self) -> Result<GaudiMetricsData, Box<dyn std::error::Error>> {
-        // Get the most recent complete section from the buffer
-        let latest_section = {
-            let buffer = self.data_buffer.lock().unwrap();
-            buffer.back().cloned()
+        // Lock order: `parsed` then `latest`. The reader thread only takes
+        // `latest`, so this cannot deadlock.
+        let mut parsed = self.parsed.lock().unwrap_or_else(|e| e.into_inner());
+        let fresh = {
+            let latest = self.latest.lock().unwrap_or_else(|e| e.into_inner());
+            (latest.seq != parsed.seq).then(|| (latest.seq, latest.section.clone()))
         };
 
-        if let Some(section) = latest_section {
-            // Parse the data
-            if let Ok(data) = parse_hlsmi_output(&section) {
-                // Cache the data
-                let mut last_data = self.last_data.lock().unwrap();
-                *last_data = Some(data.clone());
-                return Ok(data);
+        if let Some((seq, section)) = fresh {
+            parsed.seq = seq;
+            match section {
+                Some(section) => {
+                    #[cfg(test)]
+                    self.parse_count.fetch_add(1, Ordering::Relaxed);
+                    if let Ok(data) = parse_hlsmi_output(&section) {
+                        parsed.data = Some(data);
+                    }
+                }
+                // `clear` emptied the slot: forget the old parse too.
+                None => parsed.data = None,
             }
         }
 
-        // If we can't read fresh data, return cached data if available
-        if let Some(cached) = self.last_data.lock().unwrap().clone() {
-            return Ok(cached);
-        }
-
-        Err("No hl-smi data available".into())
+        parsed
+            .data
+            .clone()
+            .ok_or_else(|| "No hl-smi data available".into())
     }
 
     /// Clear all stored data
     pub fn clear(&self) {
-        let mut buffer = self.data_buffer.lock().unwrap();
-        buffer.clear();
+        let mut latest = self.latest.lock().unwrap_or_else(|e| e.into_inner());
+        latest.seq = latest.seq.wrapping_add(1);
+        latest.section = None;
+    }
 
-        let mut last_data = self.last_data.lock().unwrap();
-        *last_data = None;
+    #[cfg(test)]
+    fn parse_count(&self) -> usize {
+        self.parse_count.load(Ordering::Relaxed)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
-    #[test]
-    fn test_buffer_overflow_protection() {
-        let capacity = 5;
-        let store = MetricsStore::new(capacity);
+    const TWO_DEVICES: &str = "0, 01P4-HL3090A0-18-U4V193-22-07-00, HL-325L, 1.22.1-97ec1a4, 131072 MiB, 672 MiB, 130400 MiB, 226 W, 850 W, 36 C, 0 %\n\
+                               1, 01P4-HL3090A0-18-U4V298-03-04-04, HL-325L, 1.22.1-97ec1a4, 131072 MiB, 672 MiB, 130400 MiB, 230 W, 850 W, 39 C, 0 %";
 
-        // Add more sections than capacity
-        for i in 0..10 {
-            let section = format!(
-                "0, UUID-{i}, HL-325L, 131072 MiB, 672 MiB, 130400 MiB, 226 W, 850 W, 36 C, 0 %"
-            );
-            store.add_section(section, capacity);
-        }
-
-        // Verify buffer size is maintained at limit
-        let buffer = store.data_buffer.lock().unwrap();
-        assert_eq!(buffer.len(), capacity);
-        assert!(buffer.back().unwrap().contains("UUID-9"));
-        assert!(buffer.front().unwrap().contains("UUID-5"));
+    fn section(uuid: &str) -> String {
+        format!(
+            "0, {uuid}, HL-325L, 1.22.1, 131072 MiB, 672 MiB, 130400 MiB, 226 W, 850 W, 36 C, 0 %"
+        )
     }
 
     #[test]
-    fn test_concurrent_buffer_access() {
-        use std::thread;
-        use std::time::Duration;
-
-        let capacity = 100;
-        let store = Arc::new(MetricsStore::new(capacity));
-        let mut handles = vec![];
-
-        // Spawn multiple threads accessing the buffer
-        for i in 0..5 {
-            let store_clone = store.clone();
-            let handle = thread::spawn(move || {
-                for j in 0..20 {
-                    let section = format!(
-                        "0, UUID-{i}-{j}, HL-325L, 131072 MiB, 672 MiB, 130400 MiB, 226 W, 850 W, 36 C, 0 %"
-                    );
-                    store_clone.add_section(section, capacity);
-                    thread::sleep(Duration::from_micros(100));
-                }
-            });
-            handles.push(handle);
+    fn unchanged_snapshot_is_parsed_once() {
+        let store = MetricsStore::new();
+        store.push_section(section("UUID-A"));
+        for _ in 0..3 {
+            let data = store.get_latest_data().unwrap();
+            assert_eq!(data.devices[0].uuid, "UUID-A");
         }
+        assert_eq!(store.parse_count(), 1);
 
-        // Wait for all threads
+        store.push_section(section("UUID-B"));
+        assert_eq!(store.get_latest_data().unwrap().devices[0].uuid, "UUID-B");
+        assert_eq!(store.get_latest_data().unwrap().devices[0].uuid, "UUID-B");
+        assert_eq!(store.parse_count(), 2);
+    }
+
+    #[test]
+    fn latest_push_wins() {
+        let store = MetricsStore::new();
+        for i in 0..10 {
+            store.push_section(section(&format!("UUID-{i}")));
+        }
+        assert_eq!(store.get_latest_data().unwrap().devices[0].uuid, "UUID-9");
+        assert_eq!(
+            store.parse_count(),
+            1,
+            "intermediate pushes are never parsed"
+        );
+    }
+
+    #[test]
+    fn unparsable_section_keeps_the_last_good_data() {
+        let store = MetricsStore::new();
+        store.push_section(section("UUID-A"));
+        assert!(store.get_latest_data().is_ok());
+        store.push_section(section("UUID-B").replacen('0', "x", 1));
+        assert_eq!(store.get_latest_data().unwrap().devices[0].uuid, "UUID-A");
+        assert_eq!(store.get_latest_data().unwrap().devices[0].uuid, "UUID-A");
+        assert_eq!(store.parse_count(), 2, "the bad section is parsed once");
+    }
+
+    #[test]
+    fn empty_and_cleared_store_report_no_data() {
+        let store = MetricsStore::new();
+        assert!(store.get_latest_data().is_err());
+        store.push_section(section("UUID-A"));
+        assert!(store.get_latest_data().is_ok());
+        store.clear();
+        assert!(store.get_latest_data().is_err());
+    }
+
+    #[test]
+    fn concurrent_pushes_and_reads() {
+        let store = Arc::new(MetricsStore::new());
+        let handles: Vec<_> = (0..5)
+            .map(|i| {
+                let store = store.clone();
+                std::thread::spawn(move || {
+                    for j in 0..20 {
+                        store.push_section(section(&format!("UUID-{i}-{j}")));
+                        let _ = store.get_latest_data();
+                    }
+                })
+            })
+            .collect();
         for handle in handles {
             handle.join().unwrap();
         }
-
-        // Verify all items were added
-        let buffer = store.data_buffer.lock().unwrap();
-        assert_eq!(buffer.len(), capacity); // 5 threads * 20 items = 100
+        assert_eq!(store.latest.lock().unwrap().seq, 100);
+        assert!(store.get_latest_data().is_ok());
     }
 
     #[test]
     fn test_get_latest_data() {
-        let store = MetricsStore::new(10);
-        let section = "0, 01P4-HL3090A0-18-U4V193-22-07-00, HL-325L, 1.22.1-97ec1a4, 131072 MiB, 672 MiB, 130400 MiB, 226 W, 850 W, 36 C, 0 %\n\
-                       1, 01P4-HL3090A0-18-U4V298-03-04-04, HL-325L, 1.22.1-97ec1a4, 131072 MiB, 672 MiB, 130400 MiB, 230 W, 850 W, 39 C, 0 %";
-        store.add_section(section.to_string(), 10);
+        let store = MetricsStore::new();
+        store.push_section(TWO_DEVICES.to_string());
 
-        let result = store.get_latest_data();
-        assert!(result.is_ok());
-
-        let data = result.unwrap();
+        let data = store.get_latest_data().unwrap();
         assert_eq!(data.devices.len(), 2);
         assert_eq!(data.devices[0].index, 0);
         assert_eq!(data.devices[0].driver_version, "1.22.1");

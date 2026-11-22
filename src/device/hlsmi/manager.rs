@@ -12,8 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::panic;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Once, TryLockError};
 
 use once_cell::sync::Lazy;
 
@@ -25,10 +26,43 @@ use super::store::MetricsStore;
 /// Global singleton for HlsmiManager
 static HLSMI_MANAGER: Lazy<Mutex<Option<Arc<HlsmiManager>>>> = Lazy::new(|| Mutex::new(None));
 
+/// Guards the one-time panic hook installation.
+static PANIC_HOOK: Once = Once::new();
+
+/// Install, once per process, a panic hook that kills the running hl-smi
+/// child so a panic does not leave it orphaned.
+///
+/// The hook finds the child through `HLSMI_MANAGER` at panic time rather
+/// than capturing it, so repeated start/shutdown cycles neither grow the
+/// hook chain nor keep old process handles alive. Every lock is taken with
+/// `try_lock`: the panicking thread may already hold one.
+fn install_panic_hook() {
+    PANIC_HOOK.call_once(|| {
+        let previous = panic::take_hook();
+        panic::set_hook(Box::new(move |info| {
+            kill_running_child();
+            previous(info);
+        }));
+    });
+}
+
+fn kill_running_child() {
+    let manager = match HLSMI_MANAGER.try_lock() {
+        Ok(guard) => guard.clone(),
+        Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner().clone(),
+        Err(TryLockError::WouldBlock) => return,
+    };
+    if let Some(manager) = manager
+        && let Ok(collector) = manager.collector.try_lock()
+    {
+        collector.kill_child_on_panic();
+    }
+}
+
 /// Track if first data has been received
 static FIRST_DATA_RECEIVED: AtomicBool = AtomicBool::new(false);
 
-/// Manages a long-running hl-smi process with in-memory circular buffer
+/// Manages a long-running hl-smi process and its latest-snapshot store
 pub struct HlsmiManager {
     collector: Mutex<DataCollector>,
 }
@@ -37,8 +71,9 @@ impl HlsmiManager {
     /// Create a new HlsmiManager and start the hl-smi process
     fn new(interval_secs: u64) -> Result<Self, Box<dyn std::error::Error>> {
         let config = HlsmiConfig::with_interval_secs(interval_secs);
-        let store = Arc::new(MetricsStore::new(config.buffer_capacity));
+        let store = Arc::new(MetricsStore::new());
         let mut collector = DataCollector::new(config, store);
+        install_panic_hook();
 
         // Start collection
         collector.start()?;
@@ -48,7 +83,7 @@ impl HlsmiManager {
         })
     }
 
-    /// Get the latest hl-smi data from the circular buffer
+    /// Get the latest hl-smi data from the store
     fn get_latest_data_internal(&self) -> Result<GaudiMetricsData, Box<dyn std::error::Error>> {
         let collector = self.collector.lock().unwrap();
         let result = collector.get_latest_data();
@@ -119,5 +154,15 @@ mod tests {
         // Manager should be None when not initialized
         let manager = get_hlsmi_manager();
         assert!(manager.is_none());
+    }
+
+    #[test]
+    fn panic_hook_is_installed_once() {
+        install_panic_hook();
+        install_panic_hook();
+        assert!(PANIC_HOOK.is_completed());
+        // With no manager registered the hook has nothing to kill and must
+        // return without blocking.
+        kill_running_child();
     }
 }
