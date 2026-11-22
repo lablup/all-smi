@@ -31,6 +31,7 @@
 //! reader thread ties the signal to the one thread that lives exactly as long
 //! as the child is wanted, and to the process as a whole when all-smi exits.
 
+use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Stdio};
@@ -177,21 +178,31 @@ pub(super) fn read_monitor_stream<R: Read>(
 }
 
 /// Spawn `neuron-monitor` so that it dies with the calling thread.
-fn spawn_monitor(bin: &Path) -> std::io::Result<Child> {
+fn spawn_monitor(bin: &Path, args: &[OsString]) -> std::io::Result<Child> {
     use std::os::unix::process::CommandExt;
 
+    // Read before the fork: the child compares its parent against this to
+    // catch the parent exiting before `PR_SET_PDEATHSIG` took effect.
+    let parent = std::process::id() as libc::pid_t;
     let mut command = new_command(bin);
     command
+        .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
-    // SAFETY: the closure runs in the forked child before `exec` and only
-    // makes the `prctl` syscall, which is async-signal-safe and touches no
-    // memory shared with the parent. A failure is ignored: the monitor then
-    // merely lacks the kill-on-parent-death guarantee.
+    // SAFETY: the closure runs in the forked child before `exec`. It only
+    // makes the `prctl` and `getppid` syscalls, both async-signal-safe, and
+    // builds an `io::Error` from a raw errno, which does not allocate. It
+    // touches no memory shared with the parent. A `prctl` failure is
+    // ignored: the monitor then merely lacks the kill-on-parent-death
+    // guarantee. If the parent already exited between `fork` and `prctl`,
+    // the signal will never come, so the child refuses to `exec`.
     unsafe {
-        command.pre_exec(|| {
+        command.pre_exec(move || {
             libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
+            if libc::getppid() != parent {
+                return Err(std::io::Error::from_raw_os_error(libc::ESRCH));
+            }
             Ok(())
         });
     }
@@ -199,8 +210,8 @@ fn spawn_monitor(bin: &Path) -> std::io::Result<Child> {
 }
 
 /// Body of the reader thread: spawn the child, read it to the end, reap it.
-fn run_monitor(bin: PathBuf, shared: Arc<MonitorShared>) {
-    let stdout = match spawn_monitor(&bin) {
+fn run_monitor(bin: PathBuf, args: Vec<OsString>, shared: Arc<MonitorShared>) {
+    let stdout = match spawn_monitor(&bin, &args) {
         Ok(mut child) => {
             let stdout = child.stdout.take();
             shared.lock().child = Some(child);
@@ -220,6 +231,11 @@ fn run_monitor(bin: PathBuf, shared: Arc<MonitorShared>) {
 /// Owner of the long-lived `neuron-monitor` child.
 pub(super) struct MonitorStream {
     bin: PathBuf,
+    /// Arguments for `bin`. Empty in production; tests run a fake monitor
+    /// script through `/bin/sh` instead of executing the file they just
+    /// wrote, which another test thread's concurrent fork can make fail
+    /// with `ETXTBSY`.
+    args: Vec<OsString>,
     shared: Arc<MonitorShared>,
 }
 
@@ -227,8 +243,17 @@ impl MonitorStream {
     pub(super) fn new(bin: impl Into<PathBuf>) -> Self {
         Self {
             bin: bin.into(),
+            args: Vec::new(),
             shared: Arc::new(MonitorShared::new()),
         }
+    }
+
+    /// A stream whose child is `bin` run with `args`.
+    #[cfg(test)]
+    fn with_args(bin: impl Into<PathBuf>, args: Vec<OsString>) -> Self {
+        let mut stream = Self::new(bin);
+        stream.args = args;
+        stream
     }
 
     /// The latest monitor record, without blocking.
@@ -252,10 +277,11 @@ impl MonitorStream {
             state.running = true;
             state.last_activity = Some(now);
             let bin = self.bin.clone();
+            let args = self.args.clone();
             let shared = Arc::clone(&self.shared);
             let spawned = std::thread::Builder::new()
                 .name("neuron-monitor-reader".to_string())
-                .spawn(move || run_monitor(bin, shared));
+                .spawn(move || run_monitor(bin, args, shared));
             if spawned.is_err() {
                 state.running = false;
                 self.shared.backoff.fail(now, MONITOR_RETRY_INTERVAL);
@@ -291,7 +317,6 @@ mod tests {
     use super::super::tests::{MONITOR_NO_RUNTIME, MONITOR_WITH_RUNTIME};
     use super::*;
     use std::io::Cursor;
-    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn each_line_replaces_the_latest_snapshot_and_eof_ends_the_stream() {
@@ -389,18 +414,19 @@ mod tests {
         assert!(!pump_monitor_line(&mut reader, &shared));
     }
 
-    /// Write an executable stand-in for `neuron-monitor` that appends a line
-    /// to `runs` each time it starts, prints one record, and then runs
-    /// `tail`.
-    fn fake_monitor(dir: &Path, tail: &str) -> PathBuf {
-        let bin = dir.join("neuron-monitor");
+    /// A stream over a stand-in for `neuron-monitor` that appends a line to
+    /// `runs` each time it starts, prints one record, and then runs `tail`.
+    ///
+    /// The script is run as `/bin/sh <script>` rather than executed: a file
+    /// just written can fail `exec` with `ETXTBSY` while another test
+    /// thread's forked child still holds the write descriptor.
+    fn fake_monitor(dir: &Path, tail: &str) -> MonitorStream {
+        let script_path = dir.join("neuron-monitor");
         let runs = dir.join("runs");
         let runs = runs.display();
-        let script =
-            format!("#!/bin/sh\necho run >> '{runs}'\necho '{MONITOR_WITH_RUNTIME}'\n{tail}\n");
-        std::fs::write(&bin, script).unwrap();
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-        bin
+        let script = format!("echo run >> '{runs}'\necho '{MONITOR_WITH_RUNTIME}'\n{tail}\n");
+        std::fs::write(&script_path, script).unwrap();
+        MonitorStream::with_args("/bin/sh", vec![script_path.into_os_string()])
     }
 
     fn run_count(dir: &Path) -> usize {
@@ -424,7 +450,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         // `exec` so the script becomes the sleeping process: killing the
         // child then closes the pipe instead of orphaning a `sleep`.
-        let stream = MonitorStream::new(fake_monitor(dir.path(), "exec sleep 60"));
+        let stream = fake_monitor(dir.path(), "exec sleep 60");
         let shared = Arc::clone(&stream.shared);
 
         // The first call waits for the first record.
@@ -447,7 +473,7 @@ mod tests {
     fn an_exited_child_is_respawned_only_after_the_back_off() {
         let dir = tempfile::tempdir().unwrap();
         // Prints one record and exits, like a monitor that was killed.
-        let stream = MonitorStream::new(fake_monitor(dir.path(), "exit 0"));
+        let stream = fake_monitor(dir.path(), "exit 0");
 
         assert!(stream.latest(Instant::now()).is_some());
         assert!(wait_until_stopped(&stream.shared));
