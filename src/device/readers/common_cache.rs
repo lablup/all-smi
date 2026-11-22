@@ -15,6 +15,7 @@
 //! - Maintain ~95% reduction in redundant API calls (from PR #69)
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -39,10 +40,16 @@ pub const COALESCE_WINDOW: Duration = Duration::from_millis(500);
 /// measured from when the value was produced, not from when the fetch began.
 ///
 /// The lock is held across `fetch`, so concurrent callers wait for the one
-/// in flight instead of each starting their own.
+/// in flight instead of each starting their own. A caller that waited for a
+/// fetch which then failed returns `None` instead of running `fetch` again:
+/// otherwise a CLI that keeps timing out would make each concurrent caller
+/// wait for one timeout per caller ahead of it.
 #[derive(Debug)]
 pub struct CoalescedSlot<T> {
     slot: Mutex<Option<(Instant, Arc<T>)>>,
+    /// Fetches that have returned, successful or not. Read before taking the
+    /// lock, so a caller can tell whether one finished while it waited.
+    fetches_done: AtomicU64,
     /// A clock a test has frozen; [`Self::get_or_fetch`] reads it instead
     /// of `Instant::now` so reader-level tests cross the window without
     /// depending on how fast they run.
@@ -60,6 +67,7 @@ impl<T> CoalescedSlot<T> {
     pub const fn new() -> Self {
         Self {
             slot: Mutex::new(None),
+            fetches_done: AtomicU64::new(0),
             #[cfg(test)]
             test_now: Mutex::new(None),
         }
@@ -106,6 +114,19 @@ impl<T> CoalescedSlot<T> {
         clock: impl Fn() -> Instant,
         fetch: impl FnOnce() -> Option<T>,
     ) -> Option<Arc<T>> {
+        let seen = self.fetches_done.load(Ordering::Acquire);
+        self.get_or_fetch_after(seen, window, clock, fetch)
+    }
+
+    /// [`Self::get_or_fetch_with`] for a caller that observed `seen`
+    /// completed fetches before it started waiting for the lock.
+    fn get_or_fetch_after(
+        &self,
+        seen: u64,
+        window: Duration,
+        clock: impl Fn() -> Instant,
+        fetch: impl FnOnce() -> Option<T>,
+    ) -> Option<Arc<T>> {
         // A poisoned lock only means an earlier fetch panicked; the stored
         // value is still a complete earlier result or `None`.
         let mut guard = self.slot.lock().unwrap_or_else(|e| e.into_inner());
@@ -114,22 +135,22 @@ impl<T> CoalescedSlot<T> {
         {
             return Some(Arc::clone(value));
         }
+        // A fetch finished while this caller waited and left nothing fresh:
+        // it failed. Share that failure rather than repeating the attempt.
+        if self.fetches_done.load(Ordering::Acquire) != seen {
+            return None;
+        }
         // Drop the stale value before fetching so a failure cannot leave it
         // behind to be served again.
         *guard = None;
-        let value = Arc::new(fetch()?);
+        let fetched = fetch();
+        self.fetches_done.fetch_add(1, Ordering::Release);
+        let value = Arc::new(fetched?);
         *guard = Some((clock(), Arc::clone(&value)));
         Some(value)
     }
 }
 
-/// A negative cache: after a failure, the guarded operation is skipped until
-/// a retry deadline passes.
-///
-/// Used for work that is expensive to repeat while it keeps failing: spawning
-/// a CLI that is not installed, re-running hardware detection, reconnecting
-/// to an endpoint that is down. Every method that reads the clock takes `now`
-/// so callers and tests share one code path and tests never sleep.
 #[derive(Debug)]
 pub struct RetryGate {
     state: Mutex<RetryState>,
@@ -581,6 +602,50 @@ mod tests {
         );
         let again = slot.get_or_fetch_at(later, COALESCE_WINDOW, || Some(9));
         assert_eq!(again.as_deref(), Some(&9));
+    }
+
+    #[test]
+    fn coalesced_slot_waiter_shares_the_failure_of_the_fetch_it_waited_for() {
+        let slot: CoalescedSlot<u32> = CoalescedSlot::new();
+        let t0 = Instant::now();
+        // The waiter reads the counter, then another caller's fetch runs
+        // and fails before the waiter gets the lock.
+        let seen = slot.fetches_done.load(Ordering::Acquire);
+        assert!(slot.get_or_fetch_at(t0, COALESCE_WINDOW, || None).is_none());
+
+        let ran = std::cell::Cell::new(false);
+        let waited = slot.get_or_fetch_after(
+            seen,
+            COALESCE_WINDOW,
+            || t0,
+            || {
+                ran.set(true);
+                Some(1)
+            },
+        );
+        assert!(waited.is_none());
+        assert!(!ran.get(), "a waiter must not repeat a failed fetch");
+
+        // A caller arriving after that failure tries again.
+        assert_eq!(
+            slot.get_or_fetch_at(t0, COALESCE_WINDOW, || Some(2))
+                .as_deref(),
+            Some(&2)
+        );
+    }
+
+    #[test]
+    fn coalesced_slot_waiter_gets_the_value_of_the_fetch_it_waited_for() {
+        let slot: CoalescedSlot<u32> = CoalescedSlot::new();
+        let t0 = Instant::now();
+        let seen = slot.fetches_done.load(Ordering::Acquire);
+        assert!(
+            slot.get_or_fetch_at(t0, COALESCE_WINDOW, || Some(5))
+                .is_some()
+        );
+
+        let waited = slot.get_or_fetch_after(seen, COALESCE_WINDOW, || t0, || Some(6));
+        assert_eq!(waited.as_deref(), Some(&5));
     }
 
     #[test]
