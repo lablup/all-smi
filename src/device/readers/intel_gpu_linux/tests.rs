@@ -697,11 +697,14 @@ fn compute_power_seeds_then_derives() {
         last_cache_write: None,
     });
     // First call seeds (no file cache in play) and reports 0 W.
-    assert_eq!(compute_power_from_energy(&state, device, None), 0.0);
+    assert_eq!(
+        compute_power_from_energy(&state, &list_hwmon_dirs(device), None),
+        0.0
+    );
     // Bump the counter by 1 J and wait so the monotonic delta is > 0.
     std::thread::sleep(std::time::Duration::from_millis(50));
     fs::write(hwmon.join("energy1_input"), "2000000\n").unwrap();
-    let power = compute_power_from_energy(&state, device, None);
+    let power = compute_power_from_energy(&state, &list_hwmon_dirs(device), None);
     assert!(
         power > 0.0,
         "second sample must derive positive power, got {power}"
@@ -731,7 +734,7 @@ fn compute_power_bridges_via_file_cache() {
         energy_uj: 0,
         last_cache_write: None,
     });
-    let power = compute_power_from_energy(&state, device, Some(&cache));
+    let power = compute_power_from_energy(&state, &list_hwmon_dirs(device), Some(&cache));
     assert!(
         (0.9..=1.1).contains(&power),
         "expected roughly 1 W, got {power}"
@@ -761,5 +764,8 @@ fn compute_power_ignores_stale_file_cache() {
         energy_uj: 0,
         last_cache_write: None,
     });
-    assert_eq!(compute_power_from_energy(&state, device, Some(&cache)), 0.0);
+    assert_eq!(
+        compute_power_from_energy(&state, &list_hwmon_dirs(device), Some(&cache)),
+        0.0
+    );
 }

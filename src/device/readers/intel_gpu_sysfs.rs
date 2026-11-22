@@ -18,7 +18,7 @@
 //! the dynamic counter readers can be unit-tested without pulling the
 //! main reader struct into the test harness.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Memory variant of the GPU. Mirrors
 /// `super::intel_gpu_linux::IntelGpuVariant` but kept private to this
@@ -122,6 +122,22 @@ pub fn read_frequency_mhz(device_dir: &Path) -> u32 {
     0
 }
 
+/// List `device/hwmon/hwmon*`, sorted so every reader below sees the same
+/// order. Empty when the card has no hwmon directory.
+///
+/// The four hwmon readers each take this list, so a caller that reads
+/// temperature, power, energy and fan in one tick lists the directory once
+/// (see `IntelGpuReader`, which also keeps the list across ticks).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn list_hwmon_dirs(device_dir: &Path) -> Vec<PathBuf> {
+    let Ok(iter) = std::fs::read_dir(device_dir.join("hwmon")) else {
+        return Vec::new();
+    };
+    let mut hwmon_paths: Vec<PathBuf> = iter.flatten().map(|entry| entry.path()).collect();
+    hwmon_paths.sort_unstable();
+    hwmon_paths
+}
+
 /// Walk `device/hwmon/hwmon*/tempN_input` (milli-Celsius) for N in 1..=21.
 /// Returns the first parseable value divided by 1000. Lower-numbered channels
 /// are preferred across every hwmon directory. Values too large for `u32`
@@ -132,19 +148,18 @@ pub fn read_frequency_mhz(device_dir: &Path) -> u32 {
 /// absent), so we try temp1 first then fall back sequentially through
 /// temp21 to cover both i915 (temp1 = package) and xe (temp2 = package)
 /// without driver-specific branching.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+// Lists the directory itself; the reader uses the `_in` form over a held list.
+#[allow(dead_code)]
 pub fn read_temperature_celsius(device_dir: &Path) -> u32 {
-    let hwmon_root = device_dir.join("hwmon");
-    let iter = match std::fs::read_dir(&hwmon_root) {
-        Ok(i) => i,
-        Err(_) => return 0,
-    };
-    let mut hwmon_paths: Vec<_> = iter.flatten().map(|entry| entry.path()).collect();
-    hwmon_paths.sort_unstable();
+    read_temperature_celsius_in(&list_hwmon_dirs(device_dir))
+}
 
+/// [`read_temperature_celsius`] over an already listed set of hwmon dirs.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn read_temperature_celsius_in(hwmon_dirs: &[PathBuf]) -> u32 {
     for idx in 1..=21 {
         let input_name = format!("temp{idx}_input");
-        for hwmon_path in &hwmon_paths {
+        for hwmon_path in hwmon_dirs {
             if let Some(milli) = read_u64(&hwmon_path.join(&input_name)) {
                 return u32::try_from(milli / 1000).unwrap_or(u32::MAX);
             }
@@ -156,54 +171,55 @@ pub fn read_temperature_celsius(device_dir: &Path) -> u32 {
 /// Walk `device/hwmon/hwmon*/power1_average` (microwatts). Returns the
 /// first parseable value divided by 1_000_000 (W). On absence returns
 /// `0.0`.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+// Lists the directory itself; the reader uses the `_in` form over a held list.
+#[allow(dead_code)]
 pub fn read_power_watts(device_dir: &Path) -> f64 {
-    let hwmon_root = device_dir.join("hwmon");
-    let iter = match std::fs::read_dir(&hwmon_root) {
-        Ok(i) => i,
-        Err(_) => return 0.0,
-    };
-    for entry in iter.flatten() {
-        if let Some(uw) = read_u64(&entry.path().join("power1_average")) {
-            return uw as f64 / 1_000_000.0;
-        }
-    }
-    0.0
+    read_power_watts_in(&list_hwmon_dirs(device_dir))
+}
+
+/// [`read_power_watts`] over an already listed set of hwmon dirs.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn read_power_watts_in(hwmon_dirs: &[PathBuf]) -> f64 {
+    hwmon_dirs
+        .iter()
+        .find_map(|dir| read_u64(&dir.join("power1_average")))
+        .map_or(0.0, |uw| uw as f64 / 1_000_000.0)
 }
 
 /// Walk `device/hwmon/hwmon*/energy1_input` (microjoules). Returns the
 /// first parseable value. The xe driver exposes cumulative energy
 /// counters instead of instantaneous power — the caller delta-tracks
 /// across samples to derive watts.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+// Lists the directory itself; the reader uses the `_in` form over a held list.
+#[allow(dead_code)]
 pub fn read_energy_uj(device_dir: &Path) -> u64 {
-    let hwmon_root = device_dir.join("hwmon");
-    let iter = match std::fs::read_dir(&hwmon_root) {
-        Ok(i) => i,
-        Err(_) => return 0,
-    };
-    for entry in iter.flatten() {
-        if let Some(uj) = read_u64(&entry.path().join("energy1_input")) {
-            return uj;
-        }
-    }
-    0
+    read_energy_uj_in(&list_hwmon_dirs(device_dir))
+}
+
+/// [`read_energy_uj`] over an already listed set of hwmon dirs.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn read_energy_uj_in(hwmon_dirs: &[PathBuf]) -> u64 {
+    hwmon_dirs
+        .iter()
+        .find_map(|dir| read_u64(&dir.join("energy1_input")))
+        .unwrap_or(0)
 }
 
 /// Walk `device/hwmon/hwmon*/fan1_input` (RPM). Returns the first
 /// parseable non-zero value.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+// Lists the directory itself; the reader uses the `_in` form over a held list.
+#[allow(dead_code)]
 pub fn read_fan_rpm(device_dir: &Path) -> Option<u32> {
-    let hwmon_root = device_dir.join("hwmon");
-    let iter = std::fs::read_dir(&hwmon_root).ok()?;
-    for entry in iter.flatten() {
-        if let Some(rpm) = read_u32(&entry.path().join("fan1_input"))
-            && rpm > 0
-        {
-            return Some(rpm);
-        }
-    }
-    None
+    read_fan_rpm_in(&list_hwmon_dirs(device_dir))
+}
+
+/// [`read_fan_rpm`] over an already listed set of hwmon dirs.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn read_fan_rpm_in(hwmon_dirs: &[PathBuf]) -> Option<u32> {
+    hwmon_dirs
+        .iter()
+        .filter_map(|dir| read_u32(&dir.join("fan1_input")))
+        .find(|rpm| *rpm > 0)
 }
 
 /// Read `path` as a decimal u64. Whitespace-trimmed; returns `None` on

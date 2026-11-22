@@ -24,8 +24,8 @@
 
 use once_cell::sync::OnceCell;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use tonic::transport::{Channel, Endpoint};
 use tracing::{debug, warn};
@@ -49,7 +49,11 @@ const CONNECT_TIMEOUT: Duration = Duration::from_millis(500);
 /// Request timeout for gRPC calls
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// Interval for background gRPC reconnection attempts
+/// Minimum time between connection attempts after one failed.
+///
+/// libtpu's metrics server only exists while a workload runs, so on an idle
+/// host every connect fails. Without this gate each collection tick would
+/// attempt (and, behind a filtering firewall, wait out) a connect.
 const GRPC_RETRY_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Track whether gRPC was available on last check
@@ -103,50 +107,107 @@ pub struct HloExecutionTiming {
     pub p999_us: f64,
 }
 
-/// Cached gRPC channel
-static GRPC_CHANNEL: OnceCell<Arc<Mutex<Option<Channel>>>> = OnceCell::new();
-
-/// Get or create a cached gRPC channel
-async fn get_channel() -> Option<Channel> {
-    let channel_holder = GRPC_CHANNEL.get_or_init(|| Arc::new(Mutex::new(None)));
-    let mut guard = channel_holder.lock().await;
-
-    // Return cached channel if available
-    if let Some(ref channel) = *guard {
-        return Some(channel.clone());
-    }
-
-    // Try to create a new channel
-    // Bind the result to a local variable to ensure temporaries from
-    // create_channel().await are dropped before the MutexGuard (Rust 2024 drop order).
-    let channel_result = create_channel().await;
-    match channel_result {
-        Ok(channel) => {
-            *guard = Some(channel.clone());
-            Some(channel)
-        }
-        Err(e) => {
-            debug!("Failed to create gRPC channel: {}", e);
-            None
-        }
-    }
+/// Whether a new connection attempt must wait: the last one failed less
+/// than [`GRPC_RETRY_INTERVAL`] before `now`.
+fn connect_backoff_active(last_failure: Option<Instant>, now: Instant) -> bool {
+    last_failure
+        .is_some_and(|failed_at| now.saturating_duration_since(failed_at) < GRPC_RETRY_INTERVAL)
 }
 
-/// Create a new gRPC channel to the TPU metrics server
-async fn create_channel() -> Result<Channel, tonic::transport::Error> {
-    Endpoint::from_static(DEFAULT_GRPC_ADDR)
-        .connect_timeout(CONNECT_TIMEOUT)
-        .timeout(REQUEST_TIMEOUT)
-        .connect()
-        .await
+/// The connection to one metrics server: the cached channel, the time of the
+/// last failed connect, and a count of connect attempts.
+struct GrpcLink {
+    addr: String,
+    channel: Mutex<Option<Channel>>,
+    last_connect_failure: std::sync::Mutex<Option<Instant>>,
+    /// Connection attempts made through this link. Read by tests.
+    connect_attempts: AtomicUsize,
 }
 
-/// Clear cached channel (call when connection fails)
-async fn clear_channel() {
-    if let Some(channel_holder) = GRPC_CHANNEL.get() {
-        let mut guard = channel_holder.lock().await;
+impl GrpcLink {
+    fn new(addr: impl Into<String>) -> Self {
+        Self {
+            addr: addr.into(),
+            channel: Mutex::new(None),
+            last_connect_failure: std::sync::Mutex::new(None),
+            connect_attempts: AtomicUsize::new(0),
+        }
+    }
+
+    fn last_connect_failure(&self) -> Option<Instant> {
+        self.last_connect_failure
+            .lock()
+            .map(|guard| *guard)
+            .unwrap_or(None)
+    }
+
+    fn set_last_connect_failure(&self, value: Option<Instant>) {
+        if let Ok(mut guard) = self.last_connect_failure.lock() {
+            *guard = value;
+        }
+    }
+
+    /// Get the cached channel or connect.
+    ///
+    /// Returns `None` without connecting while the last failed attempt is
+    /// younger than [`GRPC_RETRY_INTERVAL`].
+    ///
+    /// `cache` must be `false` when the caller runs on a temporary runtime:
+    /// a channel's background task lives on the runtime that created it, so
+    /// a channel cached from a runtime that is about to be dropped would be
+    /// dead on the next call.
+    async fn channel(&self, cache: bool, now: Instant) -> Option<Channel> {
+        let mut guard = self.channel.lock().await;
+
+        // Return cached channel if available
+        if let Some(ref channel) = *guard {
+            return Some(channel.clone());
+        }
+        if connect_backoff_active(self.last_connect_failure(), now) {
+            return None;
+        }
+
+        // Bind the result to a local variable to ensure temporaries from
+        // connect().await are dropped before the MutexGuard (Rust 2024 drop order).
+        let channel_result = self.connect().await;
+        match channel_result {
+            Ok(channel) => {
+                self.set_last_connect_failure(None);
+                if cache {
+                    *guard = Some(channel.clone());
+                }
+                Some(channel)
+            }
+            Err(e) => {
+                debug!("Failed to create gRPC channel: {}", e);
+                self.set_last_connect_failure(Some(now));
+                None
+            }
+        }
+    }
+
+    /// Create a new gRPC channel to the TPU metrics server
+    async fn connect(&self) -> Result<Channel, tonic::transport::Error> {
+        self.connect_attempts.fetch_add(1, Ordering::Relaxed);
+        Endpoint::from_shared(self.addr.clone())?
+            .connect_timeout(CONNECT_TIMEOUT)
+            .timeout(REQUEST_TIMEOUT)
+            .connect()
+            .await
+    }
+
+    /// Clear cached channel (call when connection fails)
+    async fn clear_channel(&self) {
+        let mut guard = self.channel.lock().await;
         *guard = None;
     }
+}
+
+/// The process-wide link to libtpu's metrics server.
+static GRPC_LINK: OnceCell<GrpcLink> = OnceCell::new();
+
+fn default_link() -> &'static GrpcLink {
+    GRPC_LINK.get_or_init(|| GrpcLink::new(DEFAULT_GRPC_ADDR))
 }
 
 /// Fetch a single metric from the gRPC server
@@ -242,7 +303,14 @@ fn update_grpc_status(available: bool) {
 ///
 /// Returns None if the gRPC server is not available (no workload running)
 pub async fn get_tpu_metrics_grpc() -> Option<Vec<TpuUsageMetrics>> {
-    let channel = match get_channel().await {
+    let link = default_link();
+    let channel = link.channel(true, Instant::now()).await;
+    usage_metrics(link, channel).await
+}
+
+/// Usage metrics over an already resolved channel (`None`: no connection).
+async fn usage_metrics(link: &GrpcLink, channel: Option<Channel>) -> Option<Vec<TpuUsageMetrics>> {
+    let channel = match channel {
         Some(ch) => ch,
         None => {
             update_grpc_status(false);
@@ -257,7 +325,7 @@ pub async fn get_tpu_metrics_grpc() -> Option<Vec<TpuUsageMetrics>> {
         Some(t) => t,
         None => {
             update_grpc_status(false);
-            clear_channel().await;
+            link.clear_channel().await;
             return None;
         }
     };
@@ -266,7 +334,7 @@ pub async fn get_tpu_metrics_grpc() -> Option<Vec<TpuUsageMetrics>> {
         Some(u) => u,
         None => {
             update_grpc_status(false);
-            clear_channel().await;
+            link.clear_channel().await;
             return None;
         }
     };
@@ -283,7 +351,7 @@ pub async fn get_tpu_metrics_grpc() -> Option<Vec<TpuUsageMetrics>> {
             usages.len()
         );
         update_grpc_status(false);
-        clear_channel().await;
+        link.clear_channel().await;
         return None;
     }
 
@@ -318,27 +386,81 @@ pub async fn get_tpu_metrics_grpc() -> Option<Vec<TpuUsageMetrics>> {
 
 /// Check if the gRPC metrics server is available
 pub async fn is_grpc_server_available() -> bool {
-    get_channel().await.is_some()
+    default_link().channel(true, Instant::now()).await.is_some()
+}
+
+/// Everything one collection tick reads from the metrics server.
+#[derive(Debug, Clone, Default)]
+pub struct TpuGrpcSnapshot {
+    /// Memory and duty cycle per chip; `None` when the server is not
+    /// reachable (no workload running).
+    pub metrics: Option<Vec<TpuUsageMetrics>>,
+    pub hlo_queue_sizes: Option<Vec<HloQueueSize>>,
+    pub hlo_exec_timings: Option<Vec<HloExecutionTiming>>,
+}
+
+/// Fetch the usage metrics and, when those succeed, both HLO metrics, over
+/// one channel.
+///
+/// The HLO fetches are skipped when the usage metrics failed: the server is
+/// down or mid-restart, and two more requests would only fail the same way.
+async fn collect_snapshot(link: &GrpcLink, cache_channel: bool) -> TpuGrpcSnapshot {
+    let channel = link.channel(cache_channel, Instant::now()).await;
+    let metrics = usage_metrics(link, channel.clone()).await;
+    let (Some(channel), Some(_)) = (channel, metrics.as_ref()) else {
+        return TpuGrpcSnapshot {
+            metrics,
+            ..TpuGrpcSnapshot::default()
+        };
+    };
+    let hlo_queue_sizes = hlo_queue_size(channel.clone()).await;
+    let hlo_exec_timings = hlo_execution_timing(channel).await;
+    TpuGrpcSnapshot {
+        metrics,
+        hlo_queue_sizes,
+        hlo_exec_timings,
+    }
+}
+
+/// Run `task` to completion from synchronous code.
+///
+/// `task` receives whether a channel it creates may be cached: `true` on the
+/// caller's own runtime, `false` on the temporary runtime built when no
+/// runtime is current (library use), which is dropped as soon as the task
+/// returns.
+fn block_on_grpc<T, F>(task: impl FnOnce(bool) -> F) -> Option<T>
+where
+    F: std::future::Future<Output = T>,
+{
+    match tokio::runtime::Handle::try_current() {
+        // We're in an async context, use block_in_place
+        Ok(handle) => Some(tokio::task::block_in_place(|| handle.block_on(task(true)))),
+        _ => {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .ok()?;
+            Some(rt.block_on(task(false)))
+        }
+    }
+}
+
+/// One tick's gRPC metrics from synchronous code: a single `block_on`, and
+/// so at most one temporary runtime and one connection, for all three
+/// fetches.
+pub fn collect_tpu_grpc_sync() -> TpuGrpcSnapshot {
+    block_on_grpc(|cache| collect_snapshot(default_link(), cache)).unwrap_or_default()
 }
 
 /// Synchronous wrapper for get_tpu_metrics_grpc
 /// Uses the tokio runtime to run the async function
 pub fn get_tpu_metrics_grpc_sync() -> Option<Vec<TpuUsageMetrics>> {
-    // Try to get the current tokio runtime handle
-    match tokio::runtime::Handle::try_current() {
-        Ok(handle) => {
-            // We're in an async context, use block_in_place
-            tokio::task::block_in_place(|| handle.block_on(get_tpu_metrics_grpc()))
-        }
-        _ => {
-            // No runtime available, create a temporary one
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .ok()?;
-            rt.block_on(get_tpu_metrics_grpc())
-        }
-    }
+    block_on_grpc(|cache| async move {
+        let link = default_link();
+        let channel = link.channel(cache, Instant::now()).await;
+        usage_metrics(link, channel).await
+    })
+    .flatten()
 }
 
 /// Extract device_ordinal from kvlist_attr attributes
@@ -402,7 +524,12 @@ fn calculate_percentile(
 
 /// Fetch HLO Queue Size metrics via gRPC
 pub async fn get_hlo_queue_size() -> Option<Vec<HloQueueSize>> {
-    let channel = get_channel().await?;
+    let channel = default_link().channel(true, Instant::now()).await?;
+    hlo_queue_size(channel).await
+}
+
+/// HLO queue sizes over an already connected channel.
+async fn hlo_queue_size(channel: Channel) -> Option<Vec<HloQueueSize>> {
     let mut client = RuntimeMetricServiceClient::new(channel);
 
     let request = tonic::Request::new(MetricRequest {
@@ -461,7 +588,12 @@ pub async fn get_hlo_queue_size() -> Option<Vec<HloQueueSize>> {
 
 /// Fetch HLO Execution Timing metrics via gRPC
 pub async fn get_hlo_execution_timing() -> Option<Vec<HloExecutionTiming>> {
-    let channel = get_channel().await?;
+    let channel = default_link().channel(true, Instant::now()).await?;
+    hlo_execution_timing(channel).await
+}
+
+/// HLO execution timings over an already connected channel.
+async fn hlo_execution_timing(channel: Channel) -> Option<Vec<HloExecutionTiming>> {
     let mut client = RuntimeMetricServiceClient::new(channel);
 
     let request = tonic::Request::new(MetricRequest {
@@ -562,30 +694,20 @@ pub async fn get_hlo_execution_timing() -> Option<Vec<HloExecutionTiming>> {
 
 /// Synchronous wrapper for get_hlo_queue_size
 pub fn get_hlo_queue_size_sync() -> Option<Vec<HloQueueSize>> {
-    match tokio::runtime::Handle::try_current() {
-        Ok(handle) => tokio::task::block_in_place(|| handle.block_on(get_hlo_queue_size())),
-        _ => {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .ok()?;
-            rt.block_on(get_hlo_queue_size())
-        }
-    }
+    block_on_grpc(|cache| async move {
+        let channel = default_link().channel(cache, Instant::now()).await?;
+        hlo_queue_size(channel).await
+    })
+    .flatten()
 }
 
 /// Synchronous wrapper for get_hlo_execution_timing
 pub fn get_hlo_execution_timing_sync() -> Option<Vec<HloExecutionTiming>> {
-    match tokio::runtime::Handle::try_current() {
-        Ok(handle) => tokio::task::block_in_place(|| handle.block_on(get_hlo_execution_timing())),
-        _ => {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .ok()?;
-            rt.block_on(get_hlo_execution_timing())
-        }
-    }
+    block_on_grpc(|cache| async move {
+        let channel = default_link().channel(cache, Instant::now()).await?;
+        hlo_execution_timing(channel).await
+    })
+    .flatten()
 }
 
 #[cfg(test)]
@@ -597,5 +719,49 @@ mod tests {
         // This test will pass if no TPU workload is running (expected to fail gracefully)
         let result = get_tpu_metrics_grpc().await;
         println!("gRPC metrics result: {result:?}");
+    }
+
+    #[test]
+    fn connect_backoff_covers_the_retry_interval_only() {
+        let failed_at = Instant::now();
+        assert!(!connect_backoff_active(None, failed_at));
+        assert!(connect_backoff_active(Some(failed_at), failed_at));
+        assert!(connect_backoff_active(
+            Some(failed_at),
+            failed_at + GRPC_RETRY_INTERVAL - Duration::from_millis(1)
+        ));
+        assert!(!connect_backoff_active(
+            Some(failed_at),
+            failed_at + GRPC_RETRY_INTERVAL
+        ));
+    }
+
+    /// A loopback address nothing listens on: bind an ephemeral port, note
+    /// it, and close the listener.
+    fn unused_loopback_addr() -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let port = listener.local_addr().expect("local addr").port();
+        drop(listener);
+        format!("http://127.0.0.1:{port}")
+    }
+
+    #[tokio::test]
+    async fn a_dead_server_is_connected_to_once_per_retry_interval() {
+        let link = GrpcLink::new(unused_loopback_addr());
+
+        // Two ticks back to back: metrics fail, HLO is skipped, and the
+        // second tick does not even try to connect.
+        let first = collect_snapshot(&link, true).await;
+        let second = collect_snapshot(&link, true).await;
+
+        assert!(first.metrics.is_none());
+        assert!(first.hlo_queue_sizes.is_none() && first.hlo_exec_timings.is_none());
+        assert!(second.metrics.is_none());
+        assert_eq!(link.connect_attempts.load(Ordering::Relaxed), 1);
+
+        // Once the interval has passed, the next call connects again.
+        let later = Instant::now() + GRPC_RETRY_INTERVAL;
+        assert!(link.channel(true, later).await.is_none());
+        assert_eq!(link.connect_attempts.load(Ordering::Relaxed), 2);
     }
 }

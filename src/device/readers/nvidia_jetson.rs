@@ -13,19 +13,40 @@
 // limitations under the License.
 
 use crate::device::GpuReader;
+use crate::device::common::command_executor::CommandOutput;
 use crate::device::common::{execute_command_default, parse_csv_line};
 use crate::device::process_list::{get_all_processes, merge_gpu_processes};
-use crate::device::readers::common_cache::{DetailBuilder, DeviceStaticInfo};
+use crate::device::readers::common_cache::{DetailBuilder, DeviceStaticInfo, RetryGate};
+use crate::device::readers::nvidia::read_meminfo_memory;
 use crate::device::types::{GpuInfo, ProcessInfo};
 use crate::utils::{get_hostname, hz_to_mhz, millicelsius_to_celsius, with_global_system};
 use chrono::Local;
 use std::collections::HashSet;
 use std::fs;
 use std::sync::OnceLock;
+use std::time::{Duration, Instant};
+
+/// System memory source. On Jetson the GPU shares system RAM, so the
+/// device's total and used memory are `MemTotal` and
+/// `MemTotal - MemAvailable`.
+const MEMINFO_PATH: &str = "/proc/meminfo";
+
+/// How long `nvidia-smi --query-compute-apps` is skipped after it failed.
+/// JetPack releases without `nvidia-smi`, or with one that rejects the
+/// query, fall back to name matching for this long before trying again.
+const COMPUTE_APPS_RETRY_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Runs the `nvidia-smi` compute-apps query. `None` is a spawn failure or
+/// a timeout.
+type ComputeAppsRunner = Box<dyn Fn() -> Option<CommandOutput> + Send + Sync>;
 
 pub struct NvidiaJetsonGpuReader {
     /// Cached static device information (fetched only once)
     static_info: OnceLock<DeviceStaticInfo>,
+    /// Negative cache for the compute-apps query.
+    compute_apps_gate: RetryGate,
+    /// The compute-apps query; replaced by a counting fake in tests.
+    compute_apps_runner: ComputeAppsRunner,
 }
 
 impl Default for NvidiaJetsonGpuReader {
@@ -36,8 +57,34 @@ impl Default for NvidiaJetsonGpuReader {
 
 impl NvidiaJetsonGpuReader {
     pub fn new() -> Self {
+        Self::with_compute_apps_runner(Box::new(run_compute_apps_query))
+    }
+
+    fn with_compute_apps_runner(compute_apps_runner: ComputeAppsRunner) -> Self {
         Self {
             static_info: OnceLock::new(),
+            compute_apps_gate: RetryGate::new(),
+            compute_apps_runner,
+        }
+    }
+
+    /// Stdout of the compute-apps query, or `None` when it is backed off or
+    /// failed. A spawn error, a timeout or a non-zero status starts the
+    /// back-off; the caller then uses the name-matching fallback.
+    fn compute_apps_stdout(&self, now: Instant) -> Option<String> {
+        if self.compute_apps_gate.is_blocked(now) {
+            return None;
+        }
+        match (self.compute_apps_runner)() {
+            Some(output) if output.status == 0 => {
+                self.compute_apps_gate.clear();
+                Some(output.stdout)
+            }
+            _ => {
+                self.compute_apps_gate
+                    .fail(now, COMPUTE_APPS_RETRY_INTERVAL);
+                None
+            }
         }
     }
 
@@ -142,7 +189,7 @@ impl GpuReader for NvidiaJetsonGpuReader {
             None
         };
 
-        let (total_memory, used_memory) = get_memory_info();
+        let (total_memory, used_memory) = get_memory_info(MEMINFO_PATH);
 
         let info = GpuInfo {
             uuid: "JetsonGPU".to_string(),
@@ -188,7 +235,7 @@ impl GpuReader for NvidiaJetsonGpuReader {
         use sysinfo::ProcessesToUpdate;
 
         // Get GPU processes and PIDs
-        let (gpu_processes, gpu_pids) = get_gpu_processes();
+        let (gpu_processes, gpu_pids) = get_gpu_processes(self.compute_apps_stdout(Instant::now()));
 
         // Use global system instance to avoid file descriptor leak
         let all_processes = with_global_system(|system| {
@@ -208,7 +255,7 @@ impl GpuReader for NvidiaJetsonGpuReader {
     }
 
     fn get_gpu_processes(&self) -> (Vec<ProcessInfo>, HashSet<u32>) {
-        get_gpu_processes()
+        get_gpu_processes(self.compute_apps_stdout(Instant::now()))
     }
 
     fn includes_system_processes(&self) -> bool {
@@ -216,22 +263,31 @@ impl GpuReader for NvidiaJetsonGpuReader {
     }
 }
 
-/// Get GPU processes for Jetson
-fn get_gpu_processes() -> (Vec<ProcessInfo>, HashSet<u32>) {
-    let mut gpu_processes = Vec::new();
-    let mut gpu_pids = HashSet::new();
-
-    // Jetson doesn't have a direct way to query GPU processes
-    // We can try nvidia-smi if available (on newer Jetson models)
-    if let Ok(output) = execute_command_default(
+/// `nvidia-smi --query-compute-apps`, available on newer Jetson models only.
+fn run_compute_apps_query() -> Option<CommandOutput> {
+    execute_command_default(
         "nvidia-smi",
         &[
             "--query-compute-apps=pid,used_memory",
             "--format=csv,noheader,nounits",
         ],
-    ) && output.status == 0
-    {
-        for line in output.stdout.lines() {
+    )
+    .ok()
+}
+
+/// Get GPU processes for Jetson.
+///
+/// `compute_apps_stdout` is the output of the `nvidia-smi` compute-apps
+/// query when it ran and succeeded this tick (see
+/// `NvidiaJetsonGpuReader::compute_apps_stdout`).
+fn get_gpu_processes(compute_apps_stdout: Option<String>) -> (Vec<ProcessInfo>, HashSet<u32>) {
+    let mut gpu_processes = Vec::new();
+    let mut gpu_pids = HashSet::new();
+
+    // Jetson doesn't have a direct way to query GPU processes
+    // We can try nvidia-smi if available (on newer Jetson models)
+    if let Some(stdout) = compute_apps_stdout {
+        for line in stdout.lines() {
             let parts = parse_csv_line(line);
             if parts.len() >= 2
                 && let Ok(pid) = parts[0].parse::<u32>()
@@ -318,46 +374,108 @@ fn get_gpu_processes() -> (Vec<ProcessInfo>, HashSet<u32>) {
     (gpu_processes, gpu_pids)
 }
 
-fn get_memory_info() -> (u64, u64) {
-    // Try to get GPU memory from tegrastats
-    if let Ok(output) = execute_command_default("tegrastats", &["--once"])
-        && output.status == 0
-    {
-        let output_str = &output.stdout;
-        // Parse memory info from tegrastats output
-        // Format: RAM 2298/3964MB (lfb 25x4MB) SWAP 0/1982MB (cached 0MB)
-        if let Some(ram_part) = output_str.split("RAM ").nth(1)
-            && let Some(ram_info) = ram_part.split("MB").next()
-        {
-            let parts: Vec<&str> = ram_info.split('/').collect();
-            if parts.len() == 2 {
-                let used = parts[0].parse::<u64>().unwrap_or(0) * 1024 * 1024;
-                let total = parts[1].parse::<u64>().unwrap_or(0) * 1024 * 1024;
-                return (total, used);
-            }
-        }
+/// Total and used memory of the Jetson GPU, as `(total, used)` in bytes.
+///
+/// The GPU shares system RAM, so this is `MemTotal` and
+/// `MemTotal - MemAvailable` from `meminfo_path`: the same figure
+/// `tegrastats` prints as `RAM used/totalMB`, without spawning it.
+fn get_memory_info(meminfo_path: &str) -> (u64, u64) {
+    read_meminfo_memory(meminfo_path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn memory_is_mem_total_and_total_minus_available() {
+        let mut meminfo = tempfile::NamedTempFile::new().unwrap();
+        writeln!(meminfo, "MemTotal:        7990124 kB").unwrap();
+        writeln!(meminfo, "MemFree:          812340 kB").unwrap();
+        writeln!(meminfo, "MemAvailable:    5120000 kB").unwrap();
+        meminfo.flush().unwrap();
+
+        let (total, used) = get_memory_info(meminfo.path().to_str().unwrap());
+        assert_eq!(total, 7_990_124 * 1024);
+        assert_eq!(used, (7_990_124 - 5_120_000) * 1024);
     }
 
-    // Fallback to system memory
-    if let Ok(meminfo) = fs::read_to_string("/proc/meminfo") {
-        let mut total = 0;
-        let mut available = 0;
+    #[test]
+    fn missing_meminfo_reads_as_zero() {
+        assert_eq!(get_memory_info("/nonexistent/meminfo"), (0, 0));
+    }
 
-        for line in meminfo.lines() {
-            if line.starts_with("MemTotal:") {
-                if let Some(value) = line.split_whitespace().nth(1) {
-                    total = value.parse::<u64>().unwrap_or(0) * 1024; // Convert KB to bytes
-                }
-            } else if line.starts_with("MemAvailable:")
-                && let Some(value) = line.split_whitespace().nth(1)
-            {
-                available = value.parse::<u64>().unwrap_or(0) * 1024; // Convert KB to bytes
-            }
-        }
+    fn counting_reader(
+        result: fn() -> Option<CommandOutput>,
+    ) -> (NvidiaJetsonGpuReader, Arc<AtomicUsize>) {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&calls);
+        let reader = NvidiaJetsonGpuReader::with_compute_apps_runner(Box::new(move || {
+            counter.fetch_add(1, Ordering::SeqCst);
+            result()
+        }));
+        (reader, calls)
+    }
 
-        let used = total.saturating_sub(available);
-        (total, used)
-    } else {
-        (0, 0)
+    #[test]
+    fn a_missing_nvidia_smi_is_attempted_once_per_retry_interval() {
+        let (reader, calls) = counting_reader(|| None);
+        let t0 = Instant::now();
+
+        assert!(reader.compute_apps_stdout(t0).is_none());
+        assert!(
+            reader
+                .compute_apps_stdout(t0 + Duration::from_secs(59))
+                .is_none()
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        assert!(
+            reader
+                .compute_apps_stdout(t0 + COMPUTE_APPS_RETRY_INTERVAL)
+                .is_none()
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn a_non_zero_status_also_starts_the_back_off() {
+        let (reader, calls) = counting_reader(|| {
+            Some(CommandOutput {
+                status: 1,
+                stdout: "unsupported query".to_string(),
+                stderr: String::new(),
+            })
+        });
+        let t0 = Instant::now();
+
+        assert!(reader.compute_apps_stdout(t0).is_none());
+        assert!(reader.compute_apps_stdout(t0).is_none());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn a_working_query_runs_every_call_and_yields_gpu_rows() {
+        let (reader, calls) = counting_reader(|| {
+            Some(CommandOutput {
+                status: 0,
+                stdout: "4242, 512\n".to_string(),
+                stderr: String::new(),
+            })
+        });
+        let t0 = Instant::now();
+
+        let stdout = reader.compute_apps_stdout(t0);
+        assert!(reader.compute_apps_stdout(t0).is_some());
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+        let (rows, pids) = get_gpu_processes(stdout);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].pid, 4242);
+        assert_eq!(rows[0].used_memory, 512 * 1024 * 1024);
+        assert!(pids.contains(&4242));
     }
 }

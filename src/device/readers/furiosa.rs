@@ -18,7 +18,9 @@ use crate::device::common::execute_command_default;
 use crate::device::common::parsers::{
     parse_device_id, parse_frequency_mhz, parse_memory_mb_to_bytes, parse_power, parse_temperature,
 };
-use crate::device::readers::common_cache::{DetailBuilder, DeviceStaticInfo};
+use crate::device::readers::common_cache::{
+    COALESCE_WINDOW, CoalescedSlot, DetailBuilder, DeviceStaticInfo,
+};
 use crate::device::types::{GpuInfo, ProcessInfo};
 use crate::utils::get_hostname;
 use chrono::Local;
@@ -136,13 +138,53 @@ struct FuriosaPsOutputJson {
     memory: String,
 }
 
+/// Runs one `furiosa-smi <subcommand>` with JSON output and returns its
+/// stdout, or `None` when the run failed.
+type SmiRunner = Box<dyn Fn(&str) -> Option<String> + Send + Sync>;
+
+/// How long a failed re-enumeration of the devices is remembered (`furiosa`
+/// feature). Enumerating creates a new device observer, so a device that
+/// keeps erroring triggers it at most once per interval.
+#[cfg(all(target_os = "linux", feature = "furiosa-smi-rs"))]
+const DEVICE_REENUMERATE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// One enumerated device with the identity read from it at enumeration time
+/// (`furiosa` feature).
+#[cfg(all(target_os = "linux", feature = "furiosa-smi-rs"))]
+struct RsDevice {
+    device: furiosa_smi_rs::Device,
+    static_info: DeviceStaticInfo,
+}
+
+/// The cached device list of the `furiosa` feature path.
+#[cfg(all(target_os = "linux", feature = "furiosa-smi-rs"))]
+#[derive(Default)]
+struct RsDeviceCache {
+    devices: Option<std::sync::Arc<Vec<RsDevice>>>,
+    /// Set when a per-device call failed; the list is enumerated again once
+    /// the gate allows it.
+    stale: bool,
+}
+
 pub struct FuriosaNpuReader {
     collection_method: CollectionMethod,
     /// Cached static device information per device index (CLI method)
     device_static_info_cli: OnceLock<HashMap<String, DeviceStaticInfo>>,
-    /// Cached static device information per device UUID (RS method)
+    /// This tick's parsed `furiosa-smi info`, so a repeated `get_gpu_info`
+    /// within the window does not spawn again (CLI method).
+    info_cli: CoalescedSlot<Vec<FuriosaSmiInfoJson>>,
+    /// This tick's parsed `furiosa-smi status` (CLI method).
+    status_cli: CoalescedSlot<Vec<FuriosaSmiStatusJson>>,
+    /// Runs `furiosa-smi`; replaced by a counting fake in tests.
+    smi_runner: SmiRunner,
+    /// Devices and their static identity, enumerated once (RS method).
+    /// `list_devices()` builds a new device observer on every call, so the
+    /// handles are kept instead of being fetched each tick.
     #[cfg(all(target_os = "linux", feature = "furiosa-smi-rs"))]
-    device_static_info_rs: OnceLock<HashMap<String, DeviceStaticInfo>>,
+    devices_rs: std::sync::Mutex<RsDeviceCache>,
+    /// Limits re-enumeration to once per [`DEVICE_REENUMERATE_INTERVAL`].
+    #[cfg(all(target_os = "linux", feature = "furiosa-smi-rs"))]
+    reenumerate_gate: crate::device::readers::common_cache::RetryGate,
 }
 
 impl Default for FuriosaNpuReader {
@@ -153,6 +195,10 @@ impl Default for FuriosaNpuReader {
 
 impl FuriosaNpuReader {
     pub fn new() -> Self {
+        Self::with_smi_runner(Box::new(furiosa_smi_json))
+    }
+
+    fn with_smi_runner(smi_runner: SmiRunner) -> Self {
         // Determine which collection method to use
         #[cfg(all(target_os = "linux", feature = "furiosa-smi-rs"))]
         let collection_method = CollectionMethod::FuriosaSmiRs;
@@ -163,99 +209,65 @@ impl FuriosaNpuReader {
         Self {
             collection_method,
             device_static_info_cli: OnceLock::new(),
+            info_cli: CoalescedSlot::new(),
+            status_cli: CoalescedSlot::new(),
+            smi_runner,
             #[cfg(all(target_os = "linux", feature = "furiosa-smi-rs"))]
-            device_static_info_rs: OnceLock::new(),
+            devices_rs: std::sync::Mutex::new(RsDeviceCache::default()),
+            #[cfg(all(target_os = "linux", feature = "furiosa-smi-rs"))]
+            reenumerate_gate: crate::device::readers::common_cache::RetryGate::new(),
         }
     }
 
-    /// Get cached static device info for CLI method, initializing if needed
-    fn get_device_static_info_cli(&self) -> &HashMap<String, DeviceStaticInfo> {
-        self.device_static_info_cli.get_or_init(|| {
-            let mut device_info_map = HashMap::new();
-
-            // Get device info to extract static fields
-            if let Some(stdout) = furiosa_smi_json("info")
-                && let Ok(devices) = serde_json::from_str::<Vec<FuriosaSmiInfoJson>>(&stdout)
-            {
-                // Use common MAX_DEVICES constant
-                const MAX_DEVICES: usize = crate::device::readers::common_cache::MAX_DEVICES;
-                let devices_to_process: Vec<_> = devices.into_iter().take(MAX_DEVICES).collect();
-
-                for device in devices_to_process {
-                    // Build detail HashMap using DetailBuilder
-                    let mut builder = DetailBuilder::new()
-                        .insert("serial_number", &device.device_sn)
-                        .insert("firmware_version", &device.firmware)
-                        .insert("pci_bdf", &device.pci_bdf)
-                        .insert("pci_dev", &device.pci_dev)
-                        .insert("architecture", device.arch.to_uppercase())
-                        .insert("core_count", "8")
-                        .insert("pe_count", "64K")
-                        .insert("memory_bandwidth", "1.63TB/s")
-                        .insert("on_chip_sram", "256MB");
-
-                    // Only add pert_version if available (Warboy has it, RNGD may not)
-                    if !device.pert.is_empty() {
-                        builder = builder
-                            .insert("pert_version", &device.pert)
-                            .insert_lib_info("PERT", Some(&device.pert));
-                    }
-
-                    let detail = builder.build();
-
-                    let static_info = DeviceStaticInfo::with_details(
-                        format!("Furiosa {}", device.arch.to_uppercase()),
-                        Some(device.device_uuid.clone()),
-                        detail,
-                    );
-
-                    // Use dev_name as key (e.g., "npu0") for both Warboy and RNGD
-                    device_info_map.insert(device.dev_name.clone(), static_info);
-                }
-            }
-
-            device_info_map
-        })
+    /// Cached static device info for the CLI method, built from an already
+    /// parsed `furiosa-smi info` so the first tick does not run it twice.
+    ///
+    /// Returns `None` until an `info` result with at least one device has
+    /// been seen. An empty map is never committed to the cache: caching it
+    /// after one failed or empty first `info` would hide every device for
+    /// the rest of the process.
+    fn get_device_static_info_cli(
+        &self,
+        devices: &[FuriosaSmiInfoJson],
+    ) -> Option<&HashMap<String, DeviceStaticInfo>> {
+        if let Some(cached) = self.device_static_info_cli.get() {
+            return Some(cached);
+        }
+        let device_info_map = build_static_info_cli(devices);
+        if device_info_map.is_empty() {
+            return None;
+        }
+        Some(self.device_static_info_cli.get_or_init(|| device_info_map))
     }
 
-    /// Get cached static device info for RS method, initializing if needed
+    /// The enumerated devices of the RS method.
+    ///
+    /// Enumerates on the first call, and again when a per-device call has
+    /// failed since (see [`Self::mark_devices_rs_stale`]), at most once per
+    /// [`DEVICE_REENUMERATE_INTERVAL`]. A failed enumeration keeps the list
+    /// already held.
     #[cfg(all(target_os = "linux", feature = "furiosa-smi-rs"))]
-    fn get_device_static_info_rs(&self) -> &HashMap<String, DeviceStaticInfo> {
-        self.device_static_info_rs.get_or_init(|| {
-            let mut device_info_map = HashMap::new();
-
-            if let Ok(devices) = list_devices() {
-                // Use common MAX_DEVICES constant
-                const MAX_DEVICES: usize = crate::device::readers::common_cache::MAX_DEVICES;
-                let devices_to_process: Vec<_> = devices.iter().take(MAX_DEVICES).collect();
-
-                for device in devices_to_process {
-                    if let Ok(info) = device.device_info() {
-                        // Build detail HashMap using DetailBuilder
-                        let detail = DetailBuilder::new()
-                            .insert("serial_number", info.serial())
-                            .insert("firmware_version", info.firmware_version().to_string())
-                            .insert("architecture", format!("{:?}", info.arch()))
-                            .insert("core_count", info.core_num().to_string())
-                            .insert("bdf", info.bdf())
-                            .insert("numa_node", info.numa_node().to_string())
-                            // Add unified AI acceleration library labels
-                            .insert_lib_info("PERT", Some(&info.pert_version().to_string()))
-                            .build();
-
-                        let static_info = DeviceStaticInfo::with_details(
-                            format!("Furiosa {:?}", info.arch()),
-                            Some(info.uuid()),
-                            detail,
-                        );
-
-                        device_info_map.insert(info.uuid(), static_info);
-                    }
-                }
+    fn get_devices_rs(&self, now: std::time::Instant) -> Option<std::sync::Arc<Vec<RsDevice>>> {
+        let mut cache = self.devices_rs.lock().unwrap_or_else(|e| e.into_inner());
+        let wanted = cache.devices.is_none() || cache.stale;
+        if wanted && !self.reenumerate_gate.is_blocked(now) {
+            // Whatever the outcome, do not enumerate again within the interval.
+            self.reenumerate_gate.fail(now, DEVICE_REENUMERATE_INTERVAL);
+            if let Some(devices) = enumerate_devices_rs() {
+                cache.devices = Some(std::sync::Arc::new(devices));
+                cache.stale = false;
             }
+        }
+        cache.devices.clone()
+    }
 
-            device_info_map
-        })
+    /// Note that a per-device call failed, so the handles may be outdated.
+    #[cfg(all(target_os = "linux", feature = "furiosa-smi-rs"))]
+    fn mark_devices_rs_stale(&self) {
+        self.devices_rs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .stale = true;
     }
 
     /// Get NPU info based on collection method
@@ -270,92 +282,88 @@ impl FuriosaNpuReader {
     /// Get NPU info using furiosa-smi-rs crate
     #[cfg(all(target_os = "linux", feature = "furiosa-smi-rs"))]
     fn get_npu_info_rs(&self) -> Vec<GpuInfo> {
-        // Initialize library and list devices
-        let devices = match list_devices() {
-            Ok(devices) => devices,
-            Err(_) => return Vec::new(),
+        let Some(devices) = self.get_devices_rs(std::time::Instant::now()) else {
+            return Vec::new();
         };
 
         let time = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
         let hostname = get_hostname();
 
-        // Get cached static info
-        let static_info_map = self.get_device_static_info_rs();
-
-        devices
+        let mut any_failed = false;
+        let rows = devices
             .iter()
-            .filter_map(|device| {
-                // Get device information using 2025.3.0 API
-                let info = device.device_info().ok()?;
-                let uuid = info.uuid();
+            .filter_map(|entry| {
+                // Dynamic performance metrics only; identity is cached.
+                let row = (|| {
+                    let device = &entry.device;
+                    let utilization = device.core_utilization().ok()?;
+                    let temperature = device.device_temperature().ok()?;
+                    let power = device.power_consumption().ok()?;
+                    let governor = device.governor_profile().ok()?;
+                    let core_freq = device.core_frequency().ok()?;
 
-                // Get cached static info for this device
-                let static_info = static_info_map.get(&uuid)?;
-
-                // Get dynamic performance metrics only
-                let utilization = device.core_utilization().ok()?;
-                let temperature = device.device_temperature().ok()?;
-                let power = device.power_consumption().ok()?;
-                let governor = device.governor_profile().ok()?;
-                let core_freq = device.core_frequency().ok()?;
-
-                create_gpu_info_from_device_2025_cached(
-                    static_info,
-                    &utilization,
-                    &temperature,
-                    &power,
-                    &governor,
-                    &core_freq,
-                    &time,
-                    &hostname,
-                )
+                    create_gpu_info_from_device_2025_cached(
+                        &entry.static_info,
+                        &utilization,
+                        &temperature,
+                        &power,
+                        &governor,
+                        &core_freq,
+                        &time,
+                        &hostname,
+                    )
+                })();
+                any_failed |= row.is_none();
+                row
             })
-            .collect()
+            .collect();
+        if any_failed {
+            self.mark_devices_rs_stale();
+        }
+        rows
     }
 
     /// Get NPU info using furiosa-smi command
     fn get_npu_info_cli(&self) -> Vec<GpuInfo> {
-        // Get cached static info first (this will call furiosa-smi info once)
-        let static_info_map = self.get_device_static_info_cli();
-
         // Get status for utilization and memory (dynamic data)
-        let status_stdout = match furiosa_smi_json("status") {
-            Some(stdout) => stdout,
-            None => return Vec::new(),
+        let Some(status_list) = self.status_cli.get_or_fetch(COALESCE_WINDOW, || {
+            let stdout = (self.smi_runner)("status")?;
+            Some(serde_json::from_str::<Vec<FuriosaSmiStatusJson>>(&stdout).unwrap_or_default())
+        }) else {
+            return Vec::new();
         };
 
-        let status_list: Vec<FuriosaSmiStatusJson> =
-            serde_json::from_str(&status_stdout).unwrap_or_default();
-
-        // Also need to get info for dynamic fields (temperature, power, frequency, governor)
-        let info_stdout = match furiosa_smi_json("info") {
-            Some(stdout) => stdout,
-            None => return Vec::new(),
+        // `info` carries the dynamic fields (temperature, power, frequency,
+        // governor) and, on the first tick, the static identity as well.
+        let Some(devices) = self.info_cli.get_or_fetch(COALESCE_WINDOW, || {
+            let stdout = (self.smi_runner)("info")?;
+            serde_json::from_str::<Vec<FuriosaSmiInfoJson>>(&stdout).ok()
+        }) else {
+            return Vec::new();
         };
 
-        let devices: Vec<FuriosaSmiInfoJson> = match serde_json::from_str(&info_stdout) {
-            Ok(devices) => devices,
-            Err(_) => return Vec::new(),
+        let Some(static_info_map) = self.get_device_static_info_cli(&devices) else {
+            return Vec::new();
         };
 
         let time = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
         let hostname = get_hostname();
 
         devices
-            .into_iter()
+            .iter()
             .filter_map(|device| {
                 // Use dev_name (e.g., "npu0") as the lookup key
                 let static_info = static_info_map.get(&device.dev_name)?;
                 // Match status by device field (RNGD) which also uses dev_name format
                 let status = status_list.iter().find(|s| s.device == device.dev_name);
-                create_gpu_info_from_cli_cached(static_info, &device, status, &time, &hostname)
+                create_gpu_info_from_cli_cached(static_info, device, status, &time, &hostname)
             })
             .collect()
     }
 
     /// Get process info using furiosa-smi ps
     fn get_process_info_internal(&self) -> Vec<ProcessInfo> {
-        let stdout = match furiosa_smi_json("ps") {
+        let stdout = match (self.smi_runner)("ps") {
             Some(stdout) => stdout,
             None => return Vec::new(),
         };
@@ -383,6 +391,86 @@ impl GpuReader for FuriosaNpuReader {
 }
 
 // Helper functions
+
+/// Static identity per `dev_name` from one parsed `furiosa-smi info`.
+fn build_static_info_cli(devices: &[FuriosaSmiInfoJson]) -> HashMap<String, DeviceStaticInfo> {
+    // Use common MAX_DEVICES constant
+    const MAX_DEVICES: usize = crate::device::readers::common_cache::MAX_DEVICES;
+    let mut device_info_map = HashMap::new();
+
+    for device in devices.iter().take(MAX_DEVICES) {
+        // Build detail HashMap using DetailBuilder
+        let mut builder = DetailBuilder::new()
+            .insert("serial_number", &device.device_sn)
+            .insert("firmware_version", &device.firmware)
+            .insert("pci_bdf", &device.pci_bdf)
+            .insert("pci_dev", &device.pci_dev)
+            .insert("architecture", device.arch.to_uppercase())
+            .insert("core_count", "8")
+            .insert("pe_count", "64K")
+            .insert("memory_bandwidth", "1.63TB/s")
+            .insert("on_chip_sram", "256MB");
+
+        // Only add pert_version if available (Warboy has it, RNGD may not)
+        if !device.pert.is_empty() {
+            builder = builder
+                .insert("pert_version", &device.pert)
+                .insert_lib_info("PERT", Some(&device.pert));
+        }
+
+        let static_info = DeviceStaticInfo::with_details(
+            format!("Furiosa {}", device.arch.to_uppercase()),
+            Some(device.device_uuid.clone()),
+            builder.build(),
+        );
+
+        // Use dev_name as key (e.g., "npu0") for both Warboy and RNGD
+        device_info_map.insert(device.dev_name.clone(), static_info);
+    }
+
+    device_info_map
+}
+
+/// Enumerate the devices and read each one's static identity (RS method).
+///
+/// `None` when enumeration fails or yields no usable device, so the caller
+/// keeps whatever list it already holds. A device whose `device_info()`
+/// fails is left out, as it was when identity was read on every tick.
+#[cfg(all(target_os = "linux", feature = "furiosa-smi-rs"))]
+fn enumerate_devices_rs() -> Option<Vec<RsDevice>> {
+    // Use common MAX_DEVICES constant
+    const MAX_DEVICES: usize = crate::device::readers::common_cache::MAX_DEVICES;
+
+    let devices: Vec<RsDevice> = list_devices()
+        .ok()?
+        .into_iter()
+        .take(MAX_DEVICES)
+        .filter_map(|device| {
+            let info = device.device_info().ok()?;
+            // Build detail HashMap using DetailBuilder
+            let detail = DetailBuilder::new()
+                .insert("serial_number", info.serial())
+                .insert("firmware_version", info.firmware_version().to_string())
+                .insert("architecture", format!("{:?}", info.arch()))
+                .insert("core_count", info.core_num().to_string())
+                .insert("bdf", info.bdf())
+                .insert("numa_node", info.numa_node().to_string())
+                // Add unified AI acceleration library labels
+                .insert_lib_info("PERT", Some(&info.pert_version().to_string()))
+                .build();
+            let static_info = DeviceStaticInfo::with_details(
+                format!("Furiosa {:?}", info.arch()),
+                Some(info.uuid()),
+                detail,
+            );
+            Some(RsDevice {
+                device,
+                static_info,
+            })
+        })
+        .collect();
+    (!devices.is_empty()).then_some(devices)
+}
 
 /// Cached JSON flag: "--format" for RNGD, "--output" for Warboy.
 /// Detected once on first successful call.
@@ -663,6 +751,125 @@ fn extract_process_name(cmd: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::VecDeque;
+    use std::sync::{Arc, Mutex};
+
+    /// `furiosa-smi info --format json` for one RNGD, trimmed to the fields
+    /// the reader deserializes.
+    const INFO_JSON: &str = r#"[{"arch":"rngd","dev_name":"npu0",
+        "device_uuid":"09512C86-0702-4303-8F43-434445434443",
+        "device_sn":"RNGDXXXXXXXX","firmware":"2025.3.0","temperature":"39.50C",
+        "power":"38.00 W","core_clock":"500 MHz","governor":"OnDemand",
+        "pci_bdf":"0000:17:00.0","pci_dev":"507:0"}]"#;
+
+    const STATUS_JSON: &str = r#"[{"arch":"rngd","device":"npu0","liveness":"alive",
+        "pe_utilizations":[{"pe_core":0,"pe_utilization":12.5}]}]"#;
+
+    type CallLog = Arc<Mutex<Vec<String>>>;
+
+    /// A reader whose `furiosa-smi` is a fake that logs each subcommand and
+    /// answers `info` from `info_answers` in order (the last one repeats).
+    fn fake_reader(info_answers: Vec<Option<&'static str>>) -> (FuriosaNpuReader, CallLog) {
+        let calls: CallLog = Arc::new(Mutex::new(Vec::new()));
+        let log = Arc::clone(&calls);
+        let answers = Mutex::new(VecDeque::from(info_answers));
+        let mut reader = FuriosaNpuReader::with_smi_runner(Box::new(move |subcommand: &str| {
+            log.lock().unwrap().push(subcommand.to_string());
+            match subcommand {
+                "status" => Some(STATUS_JSON.to_string()),
+                "info" => {
+                    let mut answers = answers.lock().unwrap();
+                    let answer = if answers.len() > 1 {
+                        answers.pop_front().flatten()
+                    } else {
+                        answers.front().copied().flatten()
+                    };
+                    answer.map(str::to_string)
+                }
+                _ => None,
+            }
+        }));
+        // These tests drive the CLI path whatever the build's default is.
+        reader.collection_method = CollectionMethod::FuriosaSmi;
+        (reader, calls)
+    }
+
+    /// Freeze both coalescing slots of `reader` at `now`.
+    fn set_now(reader: &FuriosaNpuReader, now: std::time::Instant) {
+        reader.info_cli.set_test_now(now);
+        reader.status_cli.set_test_now(now);
+    }
+
+    fn count(calls: &CallLog, subcommand: &str) -> usize {
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|call| call.as_str() == subcommand)
+            .count()
+    }
+
+    #[test]
+    fn first_tick_runs_info_once_and_status_once() {
+        let (reader, calls) = fake_reader(vec![Some(INFO_JSON)]);
+
+        let rows = reader.get_gpu_info();
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].name, "Furiosa RNGD");
+        assert_eq!(rows[0].uuid, "09512C86-0702-4303-8F43-434445434443");
+        assert_eq!(rows[0].utilization, 12.5);
+        assert_eq!(count(&calls, "info"), 1);
+        assert_eq!(count(&calls, "status"), 1);
+    }
+
+    #[test]
+    fn a_repeat_within_the_window_does_not_spawn_again() {
+        let (reader, calls) = fake_reader(vec![Some(INFO_JSON)]);
+        let t0 = std::time::Instant::now();
+
+        set_now(&reader, t0);
+        assert_eq!(reader.get_gpu_info().len(), 1);
+        set_now(
+            &reader,
+            t0 + COALESCE_WINDOW - std::time::Duration::from_millis(1),
+        );
+        assert_eq!(reader.get_gpu_info().len(), 1);
+
+        assert_eq!(count(&calls, "info"), 1);
+        assert_eq!(count(&calls, "status"), 1);
+
+        // The next tick spawns both again.
+        set_now(&reader, t0 + COALESCE_WINDOW);
+        assert_eq!(reader.get_gpu_info().len(), 1);
+        assert_eq!(count(&calls, "info"), 2);
+        assert_eq!(count(&calls, "status"), 2);
+    }
+
+    #[test]
+    fn a_failed_first_info_does_not_hide_devices_for_good() {
+        let (reader, calls) = fake_reader(vec![None, Some(INFO_JSON)]);
+        // Both calls in one window: only the failed `info` is retried.
+        set_now(&reader, std::time::Instant::now());
+
+        assert!(reader.get_gpu_info().is_empty());
+        // The failed `info` cached neither a result nor an empty static map.
+        assert!(reader.device_static_info_cli.get().is_none());
+
+        let rows = reader.get_gpu_info();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].name, "Furiosa RNGD");
+        assert_eq!(count(&calls, "info"), 2);
+        assert_eq!(count(&calls, "status"), 1);
+    }
+
+    #[test]
+    fn an_empty_first_info_is_not_cached_as_the_static_map() {
+        let (reader, _calls) = fake_reader(vec![Some("[]"), Some(INFO_JSON)]);
+
+        assert!(reader.get_gpu_info().is_empty());
+        assert!(reader.device_static_info_cli.get().is_none());
+    }
 
     #[test]
     fn test_extract_first_device_name_rngd_format() {

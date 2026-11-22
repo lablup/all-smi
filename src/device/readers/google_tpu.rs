@@ -374,12 +374,14 @@ impl GoogleTpuReader {
             return Vec::new();
         }
 
-        // Try gRPC first (native, faster when TPU workload is running)
-        let grpc_metrics = tpu_grpc::get_tpu_metrics_grpc_sync();
-
-        // Fetch HLO metrics via gRPC
-        let hlo_queue_sizes = tpu_grpc::get_hlo_queue_size_sync();
-        let hlo_exec_timings = tpu_grpc::get_hlo_execution_timing_sync();
+        // Try gRPC first (native, faster when TPU workload is running).
+        // One call fetches the usage metrics and, only when those succeed,
+        // the HLO metrics, over a single connection.
+        let tpu_grpc::TpuGrpcSnapshot {
+            metrics: grpc_metrics,
+            hlo_queue_sizes,
+            hlo_exec_timings,
+        } = tpu_grpc::collect_tpu_grpc_sync();
 
         // Construct current device info by combining static metadata with dynamic metrics
         let runner = tpu_info_runner::get_runner();

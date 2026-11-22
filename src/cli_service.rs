@@ -118,7 +118,7 @@ pub struct ServiceInstallArgs {
     ///
     /// Sets the service definition's user and group fields. The default
     /// for subcommand installs is root, because vendor CLIs (hl-smi,
-    /// rbln-stat, furiosa-smi, tegrastats) have varying permission
+    /// rbln-stat, furiosa-smi) have varying permission
     /// requirements and a wrong guess yields a silently empty metrics
     /// page. The Debian package takes the opposite default and ships a
     /// dedicated `all-smi` system account. Prefer a dedicated account

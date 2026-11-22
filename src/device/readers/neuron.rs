@@ -45,10 +45,8 @@
 //! in `detail` instead of being guessed at.
 
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
-use std::sync::{Mutex, mpsc};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use chrono::Local;
@@ -57,10 +55,15 @@ use serde_json::Value;
 
 use crate::device::GpuReader;
 use crate::device::common::execute_command_default;
-use crate::device::readers::common_cache::{DetailBuilder, MAX_DEVICES};
+use crate::device::readers::common_cache::{
+    COALESCE_WINDOW, CoalescedSlot, DetailBuilder, MAX_DEVICES,
+};
 use crate::device::types::{GPU_METRIC_UNAVAILABLE, GpuInfo, ProcessInfo};
-use crate::utils::command::new_command;
 use crate::utils::get_hostname;
+
+#[path = "neuron/monitor_stream.rs"]
+mod monitor_stream;
+use monitor_stream::MonitorStream;
 
 /// `neuron-ls`, always by absolute path (see module docs).
 const NEURON_LS_BIN: &str = "/opt/aws/neuron/bin/neuron-ls";
@@ -71,13 +74,14 @@ const SYSFS_NEURON_ROOT: &str = "/sys/devices/virtual/neuron_device";
 /// Driver version exported by the `neuron` kernel module.
 const SYSFS_DRIVER_VERSION: &str = "/sys/module/neuron/version";
 
-/// How long to wait for `neuron-monitor`'s first NDJSON record.
+/// How long the first call waits for `neuron-monitor`'s first NDJSON record.
 ///
 /// The tool has no `--once` / `--count` / `--period` flag but emits a
 /// complete record immediately at t≈0 and then every 5 s. Matches the
 /// 2 s bare-metal ceiling used by `run_command_fast_fail` so a wedged
 /// monitor cannot stall a collection tick for longer than any other
-/// vendor command would.
+/// vendor command would. Only the first call of the process waits; see
+/// `monitor_stream`.
 const MONITOR_FIRST_RECORD_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Upper bound on one `neuron-monitor` NDJSON record. Real records on a
@@ -92,12 +96,13 @@ const MONITOR_RECORD_CAP_BYTES: u64 = 4 * 1024 * 1024;
 /// driving an effectively unbounded allocation and sysfs walk.
 const MAX_NEURON_CORES_PER_DEVICE: u32 = 256;
 
-/// Delay before retrying `neuron-monitor` after a transient failure.
+/// Delay before respawning `neuron-monitor` after its stream ended. The
+/// suppression is brief, not permanent: the daemon and runtime may become
+/// available after this process starts.
 const MONITOR_RETRY_INTERVAL: Duration = Duration::from_secs(30);
 
-/// A failed monitor probe is suppressed briefly, not permanently: the
-/// daemon and runtime may become available after this process starts.
-static MONITOR_RETRY_AFTER: Mutex<Option<Instant>> = Mutex::new(None);
+/// The one `neuron-monitor` child of this process, started on first use.
+static MONITOR_STREAM: OnceLock<MonitorStream> = OnceLock::new();
 
 /// One element of the `neuron-ls --json-output` top-level array.
 ///
@@ -202,15 +207,15 @@ struct MonitorHardwareInfo {
     logical_neuroncore_config: Option<u32>,
 }
 
-/// Per-device facts read out of sysfs, all of them in one pass.
+/// Per-device facts read out of sysfs, as one poll sees them.
 ///
 /// The first four are static identity: they are the same string on every
-/// poll. `power_utilization_raw` is not. `read_sysfs_device_info` runs once
-/// per device per poll, so that field is re-read every time, and the line it
-/// holds carries both a sampling timestamp and the live utilization floats.
-/// Treating it as identity is what put it on the `all_smi_gpu_info` label set
-/// and gave every NeuronCore a fresh series per scrape, so it is registered
-/// in `detail_keys::VOLATILE_DETAIL_KEYS`.
+/// poll, so they come from [`StaticSysfs`], read once per device.
+/// `power_utilization_raw` is not: it is re-read on every poll, and the line
+/// it holds carries both a sampling timestamp and the live utilization
+/// floats. Treating it as identity is what put it on the `all_smi_gpu_info`
+/// label set and gave every NeuronCore a fresh series per scrape, so it is
+/// registered in `detail_keys::VOLATILE_DETAIL_KEYS`.
 #[derive(Debug, Default, Clone)]
 struct SysfsDeviceInfo {
     serial_number: Option<String>,
@@ -222,7 +227,43 @@ struct SysfsDeviceInfo {
     power_utilization_raw: Option<String>,
 }
 
-pub struct NeuronReader;
+/// The sysfs identity of one device: files that never change while the
+/// driver is loaded, read once and kept for the process lifetime.
+#[derive(Debug, Default)]
+struct StaticSysfs {
+    serial_number: Option<String>,
+    arch_type: Option<String>,
+    device_name: Option<String>,
+    instance_type: Option<String>,
+    /// `neuron_core{N}/info/architecture/arch_type`, by core position.
+    core_arch_types: Vec<Option<String>>,
+}
+
+/// Runs `neuron-ls --json-output` and returns its stdout, or `None` when no
+/// device is visible.
+type LsRunner = Box<dyn Fn() -> Option<String> + Send + Sync>;
+
+pub struct NeuronReader {
+    /// Runs `neuron-ls`; replaced by a counting fake in tests.
+    ls_runner: LsRunner,
+    /// This tick's parsed `neuron-ls` inventory. `get_gpu_info` and
+    /// `get_process_info` read the same output, so whichever runs second
+    /// within the window reuses the first one's.
+    ls_devices: CoalescedSlot<Vec<NeuronLsDevice>>,
+    /// Root of the driver's sysfs tree; a temp dir in tests.
+    sysfs_root: PathBuf,
+    /// File holding the driver version; a temp file in tests.
+    driver_version_path: PathBuf,
+    /// Static sysfs identity per device index. A device is added only once
+    /// its sysfs directory exists, so a value that read as absent because
+    /// the directory was not there yet is not kept.
+    static_sysfs: Mutex<HashMap<u32, Arc<StaticSysfs>>>,
+    /// Driver version, kept once it has been read successfully.
+    driver_version: OnceLock<String>,
+    /// Whether utilization is read from the process-wide `neuron-monitor`
+    /// stream. Off for readers built over fake roots.
+    use_monitor: bool,
+}
 
 impl Default for NeuronReader {
     fn default() -> Self {
@@ -232,50 +273,129 @@ impl Default for NeuronReader {
 
 impl NeuronReader {
     pub fn new() -> Self {
-        Self
+        Self {
+            ls_runner: Box::new(run_neuron_ls),
+            ls_devices: CoalescedSlot::new(),
+            sysfs_root: PathBuf::from(SYSFS_NEURON_ROOT),
+            driver_version_path: PathBuf::from(SYSFS_DRIVER_VERSION),
+            static_sysfs: Mutex::new(HashMap::new()),
+            driver_version: OnceLock::new(),
+            use_monitor: true,
+        }
+    }
+
+    /// A reader over a fake `neuron-ls` and a fake sysfs tree, with the
+    /// monitor stream off.
+    #[cfg(test)]
+    fn new_with_roots(ls_runner: LsRunner, sysfs_root: &Path, driver_version_path: &Path) -> Self {
+        Self {
+            ls_runner,
+            ls_devices: CoalescedSlot::new(),
+            sysfs_root: sysfs_root.to_path_buf(),
+            driver_version_path: driver_version_path.to_path_buf(),
+            static_sysfs: Mutex::new(HashMap::new()),
+            driver_version: OnceLock::new(),
+            use_monitor: false,
+        }
+    }
+
+    /// This tick's `neuron-ls` inventory, shared by both entry points. A
+    /// failed run is not cached.
+    fn devices(&self) -> Option<Arc<Vec<NeuronLsDevice>>> {
+        self.ls_devices.get_or_fetch(COALESCE_WINDOW, || {
+            (self.ls_runner)().map(|stdout| parse_neuron_ls_devices(&stdout))
+        })
+    }
+
+    /// The static sysfs identity of `device`, read on first use.
+    fn static_sysfs(&self, device: &NeuronLsDevice) -> Arc<StaticSysfs> {
+        let mut cache = self.static_sysfs.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(cached) = cache.get(&device.neuron_device) {
+            return Arc::clone(cached);
+        }
+        let dir = sysfs_device_dir(&self.sysfs_root, device.neuron_device);
+        let identity = Arc::new(read_static_sysfs(&dir, effective_core_count(device)));
+        if dir.is_dir() {
+            cache.insert(device.neuron_device, Arc::clone(&identity));
+        }
+        identity
+    }
+
+    /// The driver version, read until it is available and then kept.
+    fn driver_version(&self) -> Option<String> {
+        if let Some(version) = self.driver_version.get() {
+            return Some(version.clone());
+        }
+        let version = read_sysfs_trimmed(&self.driver_version_path)?;
+        Some(self.driver_version.get_or_init(|| version).clone())
+    }
+
+    /// The latest `neuron-monitor` record, from the long-lived stream.
+    fn monitor_snapshot(&self) -> Option<Arc<MonitorSnapshot>> {
+        if !self.use_monitor {
+            return None;
+        }
+        MONITOR_STREAM
+            .get_or_init(|| MonitorStream::new(NEURON_MONITOR_BIN))
+            .latest(Instant::now())
     }
 }
 
 impl GpuReader for NeuronReader {
     fn get_gpu_info(&self) -> Vec<GpuInfo> {
-        let devices = match run_neuron_ls() {
-            Some(stdout) => parse_neuron_ls_devices(&stdout),
-            None => return Vec::new(),
+        let Some(devices) = self.devices() else {
+            return Vec::new();
         };
         if devices.is_empty() {
             return Vec::new();
         }
 
-        let monitor = collect_monitor_snapshot();
+        let monitor = self.monitor_snapshot();
         let time = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
         let hostname = get_hostname();
-        let driver_version = read_sysfs_trimmed(Path::new(SYSFS_DRIVER_VERSION));
+        let driver_version = self.driver_version();
 
         let mut rows = Vec::new();
-        for device in &devices {
+        for device in devices.iter() {
+            let identity = self.static_sysfs(device);
+            let device_dir = sysfs_device_dir(&self.sysfs_root, device.neuron_device);
             let ctx = DeviceContext {
-                sysfs: read_sysfs_device_info(device.neuron_device),
+                sysfs: SysfsDeviceInfo {
+                    serial_number: identity.serial_number.clone(),
+                    arch_type: identity.arch_type.clone(),
+                    device_name: identity.device_name.clone(),
+                    instance_type: identity.instance_type.clone(),
+                    power_utilization_raw: read_power_utilization_raw(&device_dir),
+                },
+                core_arch_types: identity.core_arch_types.clone(),
+                device_dir,
                 driver_version: driver_version.clone(),
                 time: time.clone(),
                 hostname: hostname.clone(),
             };
-            rows.extend(core_rows(device, &ctx, monitor.as_ref()));
+            rows.extend(core_rows(device, &ctx, monitor.as_deref()));
         }
         rows
     }
 
     fn get_process_info(&self) -> Vec<ProcessInfo> {
-        let devices = match run_neuron_ls() {
-            Some(stdout) => parse_neuron_ls_devices(&stdout),
-            None => return Vec::new(),
+        let Some(devices) = self.devices() else {
+            return Vec::new();
         };
-        device_processes(&devices)
+        device_processes(&devices, |device| {
+            self.static_sysfs(device).serial_number.clone()
+        })
     }
 }
 
 /// Per-device data shared by every NeuronCore row of that device.
 struct DeviceContext {
     sysfs: SysfsDeviceInfo,
+    /// Per-core `arch_type` by core position, from the static identity.
+    core_arch_types: Vec<Option<String>>,
+    /// The device's sysfs directory, for the per-core memory counters that
+    /// are read on every poll.
+    device_dir: PathBuf,
     driver_version: Option<String>,
     time: String,
     hostname: String,
@@ -408,8 +528,8 @@ fn parse_numa_node(raw: &str) -> Option<i32> {
     raw.trim().parse::<i32>().ok().filter(|node| *node >= 0)
 }
 
-fn sysfs_device_dir(device_index: u32) -> PathBuf {
-    PathBuf::from(SYSFS_NEURON_ROOT).join(format!("neuron{device_index}"))
+fn sysfs_device_dir(sysfs_root: &Path, device_index: u32) -> PathBuf {
+    sysfs_root.join(format!("neuron{device_index}"))
 }
 
 fn read_sysfs_trimmed(path: &Path) -> Option<String> {
@@ -426,15 +546,28 @@ fn read_sysfs_u64(path: &Path) -> Option<u64> {
     read_sysfs_trimmed(path)?.parse::<u64>().ok()
 }
 
-fn read_sysfs_device_info(device_index: u32) -> SysfsDeviceInfo {
-    let dir = sysfs_device_dir(device_index);
-    SysfsDeviceInfo {
-        serial_number: read_sysfs_trimmed(&dir.join("info/serial_number")),
-        arch_type: read_sysfs_trimmed(&dir.join("info/architecture/arch_type")),
-        device_name: read_sysfs_trimmed(&dir.join("info/architecture/device_name")),
-        instance_type: read_sysfs_trimmed(&dir.join("info/architecture/instance_type")),
-        power_utilization_raw: read_sysfs_trimmed(&dir.join("stats/power/utilization")),
+/// Read the identity files of one device. None of them change while the
+/// driver is loaded; the caller keeps the result (see
+/// [`NeuronReader::static_sysfs`]).
+fn read_static_sysfs(device_dir: &Path, core_count: u32) -> StaticSysfs {
+    StaticSysfs {
+        serial_number: read_sysfs_trimmed(&device_dir.join("info/serial_number")),
+        arch_type: read_sysfs_trimmed(&device_dir.join("info/architecture/arch_type")),
+        device_name: read_sysfs_trimmed(&device_dir.join("info/architecture/device_name")),
+        instance_type: read_sysfs_trimmed(&device_dir.join("info/architecture/instance_type")),
+        core_arch_types: (0..core_count)
+            .map(|core_position| {
+                read_sysfs_trimmed(&device_dir.join(format!(
+                    "neuron_core{core_position}/info/architecture/arch_type"
+                )))
+            })
+            .collect(),
     }
+}
+
+/// The raw `stats/power/utilization` line. Dynamic: read on every poll.
+fn read_power_utilization_raw(device_dir: &Path) -> Option<String> {
+    read_sysfs_trimmed(&device_dir.join("stats/power/utilization"))
 }
 
 /// Bytes currently allocated in device HBM for one NeuronCore.
@@ -442,115 +575,12 @@ fn read_sysfs_device_info(device_index: u32) -> SysfsDeviceInfo {
 /// `present` is the live allocation (`peak` is the high-water mark and
 /// `total` the cumulative sum), and it is populated with no workload
 /// attached, which is why sysfs is preferred over `neuron-monitor` for
-/// memory.
-fn read_core_used_memory(device_index: u32, core_position: u32) -> Option<u64> {
-    let path = sysfs_device_dir(device_index).join(format!(
+/// memory. Dynamic: read on every poll.
+fn read_core_used_memory(device_dir: &Path, core_position: u32) -> Option<u64> {
+    let path = device_dir.join(format!(
         "neuron_core{core_position}/stats/memory_usage/device_mem/present"
     ));
     read_sysfs_u64(&path)
-}
-
-fn read_core_arch_type(device_index: u32, core_position: u32) -> Option<String> {
-    let path = sysfs_device_dir(device_index).join(format!(
-        "neuron_core{core_position}/info/architecture/arch_type"
-    ));
-    read_sysfs_trimmed(&path)
-}
-
-/// Spawn `neuron-monitor`, keep its first NDJSON record, and kill it.
-///
-/// There is no one-shot flag, so the child is terminated as soon as the
-/// record is in hand rather than a background streaming subsystem being
-/// introduced for it. Failures start a short backoff so a wedged tool does
-/// not stall every refresh tick while transient failures can still recover.
-fn neuron_monitor_first_record() -> Option<String> {
-    if !Path::new(NEURON_MONITOR_BIN).exists() || monitor_backoff_active(Instant::now()) {
-        return None;
-    }
-
-    let mut child = match new_command(NEURON_MONITOR_BIN)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-    {
-        Ok(child) => child,
-        Err(_) => {
-            record_monitor_failure(Instant::now());
-            return None;
-        }
-    };
-
-    let line = match child.stdout.take() {
-        Some(stdout) => read_first_line(stdout),
-        None => None,
-    };
-
-    let _ = child.kill();
-    let _ = child.wait();
-
-    match line {
-        Some(line) => {
-            clear_monitor_backoff();
-            Some(line)
-        }
-        None => {
-            record_monitor_failure(Instant::now());
-            None
-        }
-    }
-}
-
-fn retry_deadline_is_active(retry_after: Option<Instant>, now: Instant) -> bool {
-    retry_after.is_some_and(|deadline| now < deadline)
-}
-
-fn monitor_backoff_active(now: Instant) -> bool {
-    MONITOR_RETRY_AFTER
-        .lock()
-        .map(|retry_after| retry_deadline_is_active(*retry_after, now))
-        .unwrap_or(false)
-}
-
-fn record_monitor_failure(now: Instant) {
-    if let Ok(mut retry_after) = MONITOR_RETRY_AFTER.lock() {
-        *retry_after = now.checked_add(MONITOR_RETRY_INTERVAL);
-    }
-}
-
-fn clear_monitor_backoff() {
-    if let Ok(mut retry_after) = MONITOR_RETRY_AFTER.lock() {
-        *retry_after = None;
-    }
-}
-
-/// Read one line off a child's stdout with a deadline.
-///
-/// The read runs on a helper thread so a monitor that never speaks
-/// cannot wedge the collection tick; killing the child closes the pipe,
-/// which ends the helper.
-fn read_first_line<R: Read + Send + 'static>(stdout: R) -> Option<String> {
-    let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        let mut reader = BufReader::new(stdout.take(MONITOR_RECORD_CAP_BYTES));
-        let mut line = String::new();
-        let _ = reader.read_line(&mut line);
-        let _ = tx.send(line);
-    });
-    rx.recv_timeout(MONITOR_FIRST_RECORD_TIMEOUT)
-        .ok()
-        .filter(|line| !line.trim().is_empty())
-}
-
-fn collect_monitor_snapshot() -> Option<MonitorSnapshot> {
-    let line = neuron_monitor_first_record()?;
-    match parse_monitor_record(&line) {
-        Some(snapshot) => Some(snapshot),
-        None => {
-            record_monitor_failure(Instant::now());
-            None
-        }
-    }
 }
 
 /// Turn one `neuron-monitor` record into a utilization map.
@@ -644,7 +674,7 @@ fn build_core_row(
     let utilization = monitor
         .and_then(|snapshot| snapshot.utilization.get(&flat_core).copied())
         .unwrap_or(GPU_METRIC_UNAVAILABLE);
-    let used_memory = read_core_used_memory(device.neuron_device, core_position);
+    let used_memory = read_core_used_memory(&ctx.device_dir, core_position);
 
     let detail = build_detail(
         device,
@@ -742,7 +772,10 @@ fn build_detail(
         .insert_optional("instance_type", ctx.sysfs.instance_type.clone())
         .insert_optional(
             "core_architecture",
-            read_core_arch_type(device.neuron_device, core_position),
+            ctx.core_arch_types
+                .get(core_position as usize)
+                .cloned()
+                .flatten(),
         )
         .insert_optional(
             "power_utilization_raw",
@@ -790,13 +823,19 @@ fn non_empty(value: &str) -> Option<String> {
 /// The element shape of `neuron_processes` could not be verified (no
 /// workload was attached to the reference instance), so an entry without
 /// a PID is dropped rather than emitted as PID 0.
-fn device_processes(devices: &[NeuronLsDevice]) -> Vec<ProcessInfo> {
+///
+/// `serial_of` supplies the device's sysfs serial, which the reader keeps
+/// in its static identity cache.
+fn device_processes(
+    devices: &[NeuronLsDevice],
+    serial_of: impl Fn(&NeuronLsDevice) -> Option<String>,
+) -> Vec<ProcessInfo> {
     let mut processes = Vec::new();
     for device in devices {
         if device.neuron_processes.is_empty() {
             continue;
         }
-        let serial = read_sysfs_device_info(device.neuron_device).serial_number;
+        let serial = serial_of(device);
         let Some((device_id, device_uuid)) = process_device_identity(device, serial.as_deref())
         else {
             continue;
@@ -875,7 +914,7 @@ mod tests {
     /// Verbatim `neuron-ls --json-output` from a `trn1.2xlarge`
     /// (1 Trainium device, 2 NeuronCores). No trailing newline after
     /// `]`, exactly as the tool emits it.
-    const NEURON_LS_TRN1_2XLARGE: &str = r#"[
+    pub(super) const NEURON_LS_TRN1_2XLARGE: &str = r#"[
     {
         "neuron_device": 0,
         "bdf": "0000:00:1e.0",
@@ -895,7 +934,7 @@ mod tests {
     /// Verbatim first NDJSON record from `neuron-monitor` on the same
     /// instance with no runtime attached: `neuron_runtime_data` is empty
     /// and only system / instance / hardware info is populated.
-    const MONITOR_NO_RUNTIME: &str = r#"{"neuron_runtime_data":[],"system_data":{"memory_info":{"period":0.00047258,"memory_total_bytes":33110204416,"memory_used_bytes":1284890624,"swap_total_bytes":0,"swap_used_bytes":0,"error":""}},"instance_info":{"instance_name":"","instance_id":"i-0421ea5496c852415","instance_type":"trn1.2xlarge","instance_availability_zone":"us-west-2d","instance_availability_zone_id":"usw2-az4","instance_region":"us-west-2","ami_id":"ami-01807ad0e6484b5a8","subnet_id":"subnet-079d91c9a71f159fe","error":""},"neuron_hardware_info":{"neuron_device_type":"trainium","neuron_device_version":"v2","neuroncore_version":"v2","neuron_device_count":1,"neuron_device_memory_size":34359738368,"neuroncore_per_device_count":2,"logical_neuroncore_config":1,"error":""}}"#;
+    pub(super) const MONITOR_NO_RUNTIME: &str = r#"{"neuron_runtime_data":[],"system_data":{"memory_info":{"period":0.00047258,"memory_total_bytes":33110204416,"memory_used_bytes":1284890624,"swap_total_bytes":0,"swap_used_bytes":0,"error":""}},"instance_info":{"instance_name":"","instance_id":"i-0421ea5496c852415","instance_type":"trn1.2xlarge","instance_availability_zone":"us-west-2d","instance_availability_zone_id":"usw2-az4","instance_region":"us-west-2","ami_id":"ami-01807ad0e6484b5a8","subnet_id":"subnet-079d91c9a71f159fe","error":""},"neuron_hardware_info":{"neuron_device_type":"trainium","neuron_device_version":"v2","neuroncore_version":"v2","neuron_device_count":1,"neuron_device_memory_size":34359738368,"neuroncore_per_device_count":2,"logical_neuroncore_config":1,"error":""}}"#;
 
     /// NOT captured output. Synthesised from AWS's own shipped
     /// frontends (`neuron-monitor-prometheus.py`,
@@ -903,7 +942,7 @@ mod tests {
     /// these field names: no workload was run on the reference
     /// instance, so a populated `neuron_runtime_data` could not be
     /// captured. Core keys are deliberately the *global flat* indices.
-    const MONITOR_WITH_RUNTIME: &str = r#"{"neuron_runtime_data":[{"neuron_runtime_tag":"12345","error":"","report":{"neuroncore_counters":{"period":1.0,"neuroncores_in_use":{"0":{"neuroncore_utilization":42.5},"1":{"neuroncore_utilization":7.25}},"error":""}}}],"neuron_hardware_info":{"neuron_device_type":"trainium","neuron_device_version":"v2","neuroncore_version":"v2","neuron_device_count":1,"neuron_device_memory_size":34359738368,"neuroncore_per_device_count":2,"logical_neuroncore_config":1,"error":""}}"#;
+    pub(super) const MONITOR_WITH_RUNTIME: &str = r#"{"neuron_runtime_data":[{"neuron_runtime_tag":"12345","error":"","report":{"neuroncore_counters":{"period":1.0,"neuroncores_in_use":{"0":{"neuroncore_utilization":42.5},"1":{"neuroncore_utilization":7.25}},"error":""}}}],"neuron_hardware_info":{"neuron_device_type":"trainium","neuron_device_version":"v2","neuroncore_version":"v2","neuron_device_count":1,"neuron_device_memory_size":34359738368,"neuroncore_per_device_count":2,"logical_neuroncore_config":1,"error":""}}"#;
 
     #[test]
     fn neuron_ls_array_parses() {
@@ -991,6 +1030,8 @@ mod tests {
             driver_version: Some("2.26.5.0".to_string()),
             time: "2026-09-12 02:41:18".to_string(),
             hostname: "ip-10-0-2-237".to_string(),
+            core_arch_types: Vec::new(),
+            device_dir: sysfs_device_dir(Path::new(SYSFS_NEURON_ROOT), 0),
         };
 
         let rows = core_rows(&devices[0], &ctx, None);
@@ -1052,6 +1093,8 @@ mod tests {
                 driver_version: Some("2.26.5.0".to_string()),
                 time: "2026-09-12 02:41:18".to_string(),
                 hostname: "ip-10-0-2-237".to_string(),
+                core_arch_types: Vec::new(),
+                device_dir: sysfs_device_dir(Path::new(SYSFS_NEURON_ROOT), 0),
             };
             let rows = core_rows(&devices[0], &ctx, None);
             let identity = GpuMetricExporter::new(&rows)
@@ -1105,6 +1148,8 @@ mod tests {
             driver_version: None,
             time: String::new(),
             hostname: "host".to_string(),
+            core_arch_types: Vec::new(),
+            device_dir: sysfs_device_dir(Path::new(SYSFS_NEURON_ROOT), 0),
         };
         let rows = core_rows(&devices[0], &ctx, Some(&snapshot));
         assert_eq!(rows[0].utilization_reading(), Some(42.5));
@@ -1122,17 +1167,6 @@ mod tests {
         let invalid = r#"{"neuron_runtime_data":[{"report":{"neuroncore_counters":{"neuroncores_in_use":{"0":{"neuroncore_utilization":101.0},"1":{"neuroncore_utilization":-0.1}}}}}]}"#;
         let snapshot = parse_monitor_record(invalid).expect("record parses");
         assert!(snapshot.utilization.is_empty());
-    }
-
-    #[test]
-    fn monitor_backoff_expires() {
-        let now = Instant::now();
-        assert!(!retry_deadline_is_active(None, now));
-        assert!(retry_deadline_is_active(
-            now.checked_add(Duration::from_secs(1)),
-            now
-        ));
-        assert!(!retry_deadline_is_active(Some(now), now));
     }
 
     #[test]
@@ -1173,6 +1207,8 @@ mod tests {
             driver_version: None,
             time: String::new(),
             hostname: "host".to_string(),
+            core_arch_types: Vec::new(),
+            device_dir: sysfs_device_dir(Path::new(SYSFS_NEURON_ROOT), 0),
         };
         assert!(core_rows(&device, &ctx, None).is_empty());
 
@@ -1189,6 +1225,8 @@ mod tests {
             driver_version: None,
             time: String::new(),
             hostname: "host".to_string(),
+            core_arch_types: Vec::new(),
+            device_dir: sysfs_device_dir(Path::new(SYSFS_NEURON_ROOT), 0),
         };
         let rows = core_rows(&device, &ctx, None);
         assert_eq!(rows.iter().map(|row| row.total_memory).sum::<u64>(), 5);
@@ -1210,12 +1248,12 @@ mod tests {
     #[test]
     fn processes_without_a_pid_are_dropped() {
         let devices = parse_neuron_ls_devices(NEURON_LS_TRN1_2XLARGE);
-        assert!(device_processes(&devices).is_empty());
+        assert!(device_processes(&devices, |_| None).is_empty());
 
         let with_procs = r#"[{"neuron_device":0,"bdf":"0000:00:1e.0","numa_node":"-1","nc_count":2,
              "memory_size":34359738368,"neuroncore_ids":[0,1],
              "neuron_processes":[{"pid":4242,"command":"/usr/bin/python3 train.py"},{"command":"no-pid"}]}]"#;
-        let processes = device_processes(&parse_neuron_ls_devices(with_procs));
+        let processes = device_processes(&parse_neuron_ls_devices(with_procs), |_| None);
         assert_eq!(processes.len(), 1);
         assert_eq!(processes[0].pid, 4242);
         assert_eq!(processes[0].process_name, "python3");
@@ -1234,8 +1272,12 @@ mod tests {
         no_cores.neuroncore_ids.clear();
         assert_eq!(process_device_identity(&no_cores, None), None);
         assert!(
-            device_processes(std::slice::from_ref(&no_cores)).is_empty(),
+            device_processes(std::slice::from_ref(&no_cores), |_| None).is_empty(),
             "a process must not reference a device row that cannot be emitted"
         );
     }
 }
+
+#[cfg(test)]
+#[path = "neuron/caching_tests.rs"]
+mod caching_tests;

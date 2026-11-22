@@ -48,13 +48,15 @@ use crate::common::paths::cache_dir;
 #[cfg(feature = "cli")]
 use crate::common::secure_write::write_atomic_secure;
 use crate::device::GpuReader;
-use crate::device::readers::common_cache::{DeviceStaticInfo, MAX_DEVICES};
+use crate::device::readers::common_cache::{
+    COALESCE_WINDOW, CoalescedSlot, DeviceStaticInfo, MAX_DEVICES,
+};
 use crate::device::readers::intel_gpu_engine::{
     EngineState, apply_engine_readout, refresh_with_lock,
 };
 use crate::device::readers::intel_gpu_fdinfo::{
-    build_intel_drm_basenames, build_intel_gpu_rows, build_intel_process_infos,
-    sum_vram_by_card_from_fdinfo,
+    DrmFdRecord, build_intel_drm_basenames, fold_process_usage, fold_vram_by_card,
+    intel_gpu_rows_from_usages, intel_process_infos_from_usages, scan_intel_drm_fds,
 };
 use crate::device::readers::intel_gpu_gtidle::{
     GtidleState, apply_fallback as apply_gtidle_fallback,
@@ -63,15 +65,16 @@ use crate::device::readers::intel_gpu_names::{
     classify_intel_architecture, resolve_intel_gpu_name,
 };
 use crate::device::readers::intel_gpu_sysfs::{
-    MemoryVariant, has_nonzero_u64, read_energy_uj, read_fan_rpm, read_frequency_mhz,
-    read_memory_bytes, read_power_watts, read_resource2_total_bytes, read_temperature_celsius,
+    MemoryVariant, has_nonzero_u64, list_hwmon_dirs, read_energy_uj_in, read_fan_rpm_in,
+    read_frequency_mhz, read_memory_bytes, read_power_watts_in, read_resource2_total_bytes,
+    read_temperature_celsius_in,
 };
 use crate::device::types::{GpuInfo, MAX_GPU_FAN_RPM, ProcessInfo};
 use crate::utils::get_hostname;
 use chrono::Local;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 // GPU metric validation constants — Intel client GPUs are smaller than
 // datacenter accelerators, so we use tighter caps than the AMD reader.
@@ -121,12 +124,37 @@ struct IntelGpuCard {
     /// than instantaneous power on some kernels; power is derived as
     /// ΔJ / Δs across samples.
     energy_state: Mutex<EnergyState>,
+    /// Where the energy counter is persisted between one-shot runs (see
+    /// [`energy_cache_path`]). Derived from the card's PCI address, which
+    /// does not change, so the device symlink is canonicalized once.
+    energy_cache_path: OnceLock<Option<PathBuf>>,
+    /// The card's `device/hwmon/hwmon*` directories, kept across ticks so
+    /// the four hwmon readers do not each list the directory every tick.
+    /// Listed again when empty or when a held directory has gone (the
+    /// `hwmonN` index changes after a driver rebind).
+    hwmon_dirs: Mutex<Vec<PathBuf>>,
     /// Per-card Level Zero handle state (issue #248). Mirrors
     /// `engine_state` — delta-tracked behind a `Mutex` for power
     /// readings, only present when the Level Zero backend is compiled in,
     /// which is every Linux and Windows target.
     #[cfg(all_smi_level_zero)]
     level_zero_state: Mutex<crate::device::readers::intel_gpu_level_zero::LevelZeroState>,
+}
+
+impl IntelGpuCard {
+    /// The card's hwmon directories for this tick.
+    ///
+    /// Reuses the list held from an earlier tick while every directory in it
+    /// still exists, and lists `device/hwmon` otherwise: at most one listing
+    /// per tick, and none in steady state. A card with no hwmon directory
+    /// holds an empty list and pays one failed `read_dir` per tick.
+    fn hwmon_dirs(&self, device_dir: &Path) -> Vec<PathBuf> {
+        let mut held = self.hwmon_dirs.lock().unwrap_or_else(|e| e.into_inner());
+        if held.is_empty() || !held.iter().all(|dir| dir.is_dir()) {
+            *held = list_hwmon_dirs(device_dir);
+        }
+        held.clone()
+    }
 }
 
 /// Render the discrete/integrated classification as the string we put in
@@ -163,12 +191,15 @@ struct EnergyState {
 /// skew or a corrupted cache could otherwise produce an absurd delta.
 /// Within this function the cache influence is already bounded by the
 /// one-hour staleness window and saturating counter arithmetic.
+///
+/// `hwmon_dirs` is the card's hwmon directory list (see
+/// [`IntelGpuCard::hwmon_dirs`]).
 fn compute_power_from_energy(
     state: &Mutex<EnergyState>,
-    device_dir: &Path,
+    hwmon_dirs: &[PathBuf],
     cache_path: Option<&Path>,
 ) -> f64 {
-    let current_uj = read_energy_uj(device_dir);
+    let current_uj = read_energy_uj_in(hwmon_dirs);
     if current_uj == 0 {
         return 0.0;
     }
@@ -314,6 +345,10 @@ pub struct IntelGpuReader {
     /// Root used for the per-process fdinfo walk. Production is
     /// `/proc`; tests inject a synthetic procfs tree under tempdir.
     proc_root: PathBuf,
+    /// This tick's `/proc` fd walk. The xe VRAM fallback in `get_gpu_info`
+    /// and the process rows read the same walk, so whichever runs second
+    /// within the window reuses the first one's records.
+    drm_fd_scan: CoalescedSlot<Vec<DrmFdRecord>>,
 }
 
 impl Default for IntelGpuReader {
@@ -348,7 +383,21 @@ impl IntelGpuReader {
             cards,
             intel_drm_basenames,
             proc_root: proc_root.to_path_buf(),
+            drm_fd_scan: CoalescedSlot::new(),
         }
+    }
+
+    /// The Intel DRM fds of every process, from one `/proc` walk shared by
+    /// the callers of one tick.
+    fn drm_fd_records(&self) -> Arc<Vec<DrmFdRecord>> {
+        self.drm_fd_scan
+            .get_or_fetch(COALESCE_WINDOW, || {
+                Some(scan_intel_drm_fds(
+                    &self.intel_drm_basenames,
+                    &self.proc_root,
+                ))
+            })
+            .unwrap_or_default()
     }
 
     /// Compute the per-card static identity once and cache it.
@@ -427,9 +476,11 @@ impl GpuReader for IntelGpuReader {
                 && total_memory > 0
                 && !has_nonzero_u64(&device_dir.join("tile0").join("vram0").join("total_bytes"));
             let frequency = read_frequency_mhz(&device_dir);
-            let temperature = read_temperature_celsius(&device_dir);
-            let mut power_consumption = read_power_watts(&device_dir);
-            let fan_rpm = read_fan_rpm(&device_dir);
+            // One listing of the hwmon directory serves all four readers.
+            let hwmon_dirs = card.hwmon_dirs(&device_dir);
+            let temperature = read_temperature_celsius_in(&hwmon_dirs);
+            let mut power_consumption = read_power_watts_in(&hwmon_dirs);
+            let fan_rpm = read_fan_rpm_in(&hwmon_dirs);
 
             // Round-trip values through the validation caps so that a
             // garbled sysfs file can never propagate u32::MAX into the
@@ -471,10 +522,12 @@ impl GpuReader for IntelGpuReader {
             // cap because the file-cache bridge trusts wall-clock
             // timestamps (see `compute_power_from_energy`).
             if power_consumption == 0.0 && card.driver == "xe" {
-                let cache_path = energy_cache_path(&device_dir);
+                let cache_path = card
+                    .energy_cache_path
+                    .get_or_init(|| energy_cache_path(&device_dir));
                 let derived = compute_power_from_energy(
                     &card.energy_state,
-                    &device_dir,
+                    &hwmon_dirs,
                     cache_path.as_deref(),
                 )
                 .clamp(0.0, MAX_GPU_POWER_WATTS);
@@ -488,9 +541,8 @@ impl GpuReader for IntelGpuReader {
             // card-level sysfs counters are unavailable. The per-card
             // sums come from one shared `/proc` walk (see above).
             if used_memory == 0 && total_memory > 0 && card.driver == "xe" {
-                let vram_by_card = fdinfo_vram_by_card.get_or_insert_with(|| {
-                    sum_vram_by_card_from_fdinfo(&self.intel_drm_basenames, &self.proc_root)
-                });
+                let vram_by_card = fdinfo_vram_by_card
+                    .get_or_insert_with(|| fold_vram_by_card(&self.drm_fd_records()));
                 if let Some(&fdinfo_vram) = vram_by_card.get(&card_index)
                     && fdinfo_vram > 0
                 {
@@ -575,10 +627,9 @@ impl GpuReader for IntelGpuReader {
     }
 
     fn get_process_info(&self) -> Vec<ProcessInfo> {
-        build_intel_process_infos(
-            &self.intel_drm_basenames,
+        intel_process_infos_from_usages(
+            fold_process_usage(&self.drm_fd_records()),
             &self.card_uuids(),
-            &self.proc_root,
         )
     }
 
@@ -587,10 +638,9 @@ impl GpuReader for IntelGpuReader {
     /// name, user, CPU and RSS, so the default implementation's full
     /// `get_process_info` would only repeat that pass every tick.
     fn get_gpu_processes(&self) -> (Vec<ProcessInfo>, std::collections::HashSet<u32>) {
-        let rows = build_intel_gpu_rows(
-            &self.intel_drm_basenames,
+        let rows = intel_gpu_rows_from_usages(
+            fold_process_usage(&self.drm_fd_records()),
             &self.card_uuids(),
-            &self.proc_root,
         );
         let pids = rows.iter().map(|row| row.pid).collect();
         (rows, pids)
@@ -670,6 +720,8 @@ fn discover_cards(drm_root: &Path) -> Vec<IntelGpuCard> {
                 energy_uj: 0,
                 last_cache_write: None,
             }),
+            energy_cache_path: OnceLock::new(),
+            hwmon_dirs: Mutex::new(Vec::new()),
             #[cfg(all_smi_level_zero)]
             level_zero_state: Mutex::new(
                 crate::device::readers::intel_gpu_level_zero::LevelZeroState::empty(),
@@ -809,3 +861,7 @@ mod sources;
 #[cfg(test)]
 #[path = "intel_gpu_linux/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "intel_gpu_linux/caching_tests.rs"]
+mod caching_tests;

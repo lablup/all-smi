@@ -15,17 +15,19 @@
 use crate::device::GpuReader;
 use crate::device::common::execute_command_default;
 use crate::device::common::parsers::{parse_power, parse_temperature, parse_utilization};
-use crate::device::readers::common_cache::{DetailBuilder, DeviceStaticInfo};
+use crate::device::readers::common_cache::{
+    COALESCE_WINDOW, CoalescedSlot, DetailBuilder, DeviceStaticInfo,
+};
 use crate::device::readers::detail_keys::CARD_POWER_WATTS_DETAIL_KEY;
 use crate::device::types::{GPU_METRIC_UNAVAILABLE, GpuInfo, ProcessInfo};
 use crate::utils::get_hostname;
 use chrono::Local;
-use once_cell::sync::Lazy;
 use serde::Deserialize;
 use serde::de::{self, Deserializer, Visitor};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 /// Custom deserializer that accepts both string and integer for the `npu` field.
 /// This ensures backward compatibility across different SDK versions:
@@ -76,7 +78,7 @@ where
 }
 
 /// JSON structures for Rebellions device information
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct RblnPciInfo {
     #[allow(dead_code)]
     dev: String,
@@ -86,13 +88,13 @@ struct RblnPciInfo {
     link_width: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct RblnMemoryInfo {
     used: String,
     total: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct RblnDevice {
     #[serde(deserialize_with = "deserialize_string_or_u32")]
     npu: u32,
@@ -120,7 +122,7 @@ struct RblnDevice {
     location: u32,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct RblnResponse {
     #[serde(rename = "KMD_version")]
     kmd_version: String,
@@ -129,7 +131,7 @@ struct RblnResponse {
     contexts: Vec<RblnContext>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct RblnContext {
     #[allow(dead_code)]
     ctx_id: String,
@@ -175,17 +177,63 @@ where
         .collect())
 }
 
-/// Type alias for the cached command information
-type CommandCache = Arc<Mutex<Option<(String, PathBuf)>>>;
+/// How long a failed CLI lookup is remembered. A host can carry the device
+/// without `rbln-stat` installed; the lookup spawns `which` twice, so it is
+/// not repeated on every call, and a CLI installed later is still found
+/// after this interval.
+const RBLN_COMMAND_RETRY_INTERVAL: Duration = Duration::from_secs(60);
 
-/// Cache for rebellions command path
-static RBLN_COMMAND_CACHE: Lazy<CommandCache> = Lazy::new(|| Arc::new(Mutex::new(None)));
+/// The outcome of locating `rbln-stat` / `rbln-smi`.
+#[derive(Debug, Clone)]
+enum CommandLookup {
+    /// Command name and absolute path. Final for the process lifetime.
+    Found((String, PathBuf)),
+    /// Not installed when last looked for; look again at `retry_at`.
+    Missing { retry_at: Instant },
+}
+
+/// Cache for the rebellions command path, shared by every reader.
+static RBLN_COMMAND_CACHE: Mutex<Option<CommandLookup>> = Mutex::new(None);
+
+/// Resolve the CLI through `cache`, calling `resolve` only when nothing is
+/// cached or a `Missing` entry has reached its retry time.
+fn cached_command_lookup(
+    cache: &Mutex<Option<CommandLookup>>,
+    now: Instant,
+    resolve: impl FnOnce() -> Option<(String, PathBuf)>,
+) -> Option<(String, PathBuf)> {
+    let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
+    match guard.as_ref() {
+        Some(CommandLookup::Found(found)) => return Some(found.clone()),
+        Some(CommandLookup::Missing { retry_at }) if now < *retry_at => return None,
+        _ => {}
+    }
+    let resolved = resolve();
+    *guard = Some(match &resolved {
+        Some(found) => CommandLookup::Found(found.clone()),
+        None => CommandLookup::Missing {
+            // An unrepresentable deadline degrades to "look again next call".
+            retry_at: now.checked_add(RBLN_COMMAND_RETRY_INTERVAL).unwrap_or(now),
+        },
+    });
+    resolved
+}
+
+/// Produces the stdout of one `rbln-stat --json` run, or `None` when the CLI
+/// is missing or the run failed.
+type StatRunner = Box<dyn Fn() -> Option<String> + Send + Sync>;
 
 pub struct RebellionsNpuReader {
     /// Cached KMD (driver) version
     kmd_version: OnceLock<String>,
     /// Cached static device information per UUID
     device_static_info: OnceLock<HashMap<String, DeviceStaticInfo>>,
+    /// The parsed response of this tick. `get_gpu_info` and
+    /// `get_process_info` both read the same `rbln-stat --json` output, so
+    /// whichever runs second within the window reuses the first one's.
+    response: CoalescedSlot<RblnResponse>,
+    /// Runs the CLI; replaced by a counting fake in tests.
+    stat_runner: StatRunner,
 }
 
 impl Default for RebellionsNpuReader {
@@ -196,10 +244,25 @@ impl Default for RebellionsNpuReader {
 
 impl RebellionsNpuReader {
     pub fn new() -> Self {
+        Self::with_stat_runner(Box::new(run_rbln_stat))
+    }
+
+    fn with_stat_runner(stat_runner: StatRunner) -> Self {
         Self {
             kmd_version: OnceLock::new(),
             device_static_info: OnceLock::new(),
+            response: CoalescedSlot::new(),
+            stat_runner,
         }
+    }
+
+    /// This tick's parsed `rbln-stat --json` response, shared by both entry
+    /// points. A failed run or an unparseable response is not cached.
+    fn fetch_response(&self) -> Option<Arc<RblnResponse>> {
+        self.response.get_or_fetch(COALESCE_WINDOW, || {
+            let stdout = (self.stat_runner)()?;
+            serde_json::from_str(&stdout).ok()
+        })
     }
 
     /// Initialize static device cache on first access
@@ -254,95 +317,16 @@ impl RebellionsNpuReader {
         self.device_static_info.get().and_then(|map| map.get(uuid))
     }
 
-    /// Determine which command to use (rbln-stat or rbln-smi)
-    fn get_rebellions_command() -> Option<(String, PathBuf)> {
-        // Check cache first
-        if let Ok(cache) = RBLN_COMMAND_CACHE.lock()
-            && let Some(ref cached) = *cache
-        {
-            return Some(cached.clone());
-        }
-
-        // Check specific paths first
-        const PATHS: &[&str] = &[
-            "/usr/local/bin/rbln-stat",
-            "/usr/bin/rbln-stat",
-            "/usr/local/bin/rbln-smi",
-            "/usr/bin/rbln-smi",
-        ];
-
-        for path in PATHS {
-            if Path::new(path).exists() {
-                let cmd_name = Path::new(path)
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("rbln-stat")
-                    .to_string();
-                let result = (cmd_name, PathBuf::from(path));
-
-                // Cache the result
-                if let Ok(mut cache) = RBLN_COMMAND_CACHE.lock() {
-                    *cache = Some(result.clone());
-                }
-
-                return Some(result);
-            }
-        }
-
-        // Check if commands are available in PATH
-        for cmd in &["rbln-stat", "rbln-smi"] {
-            if let Ok(output) = execute_command_default("which", &[cmd])
-                && output.status == 0
-                && let Some(path) = absolute_command_path(&output.stdout)
-            {
-                let result = (cmd.to_string(), path);
-
-                // Cache the result
-                if let Ok(mut cache) = RBLN_COMMAND_CACHE.lock() {
-                    *cache = Some(result.clone());
-                }
-
-                return Some(result);
-            }
-        }
-
-        None
-    }
-
     /// Get NPU info using rbln-stat or rbln-smi
     fn get_npu_info_internal(&self) -> Vec<GpuInfo> {
-        let (_command, path) = match Self::get_rebellions_command() {
-            Some(cmd) => cmd,
-            None => return Vec::new(),
-        };
-
-        // Validate path before execution to prevent path traversal
-        let path_str = match path.to_str() {
-            Some(s) if path.is_absolute() && !s.contains("..") => s,
-            Some(s) => {
-                eprintln!("Suspicious path detected: {s}");
-                return Vec::new();
-            }
-            None => {
-                eprintln!("Invalid path for Rebellions command");
-                return Vec::new();
-            }
-        };
-
-        let output = match execute_command_default(path_str, &["--json"]) {
-            Ok(output) => output,
-            Err(_) => return Vec::new(),
-        };
-
-        let response: RblnResponse = match serde_json::from_str(&output.stdout) {
-            Ok(resp) => resp,
-            Err(_) => return Vec::new(),
+        let Some(response) = self.fetch_response() else {
+            return Vec::new();
         };
 
         let time = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
         let hostname = get_hostname();
 
-        self.gpu_info_from_response(response, &time, &hostname)
+        self.gpu_info_from_response(RblnResponse::clone(&response), &time, &hostname)
     }
 
     /// Convert one parsed `rbln-stat --json` response into one `GpuInfo` per
@@ -384,32 +368,8 @@ impl RebellionsNpuReader {
 
     /// Get process info from rbln-stat/rbln-smi
     fn get_process_info_internal(&self) -> Vec<ProcessInfo> {
-        let (_command, path) = match Self::get_rebellions_command() {
-            Some(cmd) => cmd,
-            None => return Vec::new(),
-        };
-
-        // Validate path before execution to prevent path traversal
-        let path_str = match path.to_str() {
-            Some(s) if path.is_absolute() && !s.contains("..") => s,
-            Some(s) => {
-                eprintln!("Suspicious path detected: {s}");
-                return Vec::new();
-            }
-            None => {
-                eprintln!("Invalid path for Rebellions command");
-                return Vec::new();
-            }
-        };
-
-        let output = match execute_command_default(path_str, &["--json"]) {
-            Ok(output) => output,
-            Err(_) => return Vec::new(),
-        };
-
-        let response: RblnResponse = match serde_json::from_str(&output.stdout) {
-            Ok(resp) => resp,
-            Err(_) => return Vec::new(),
+        let Some(response) = self.fetch_response() else {
+            return Vec::new();
         };
 
         let uuid_by_npu: std::collections::HashMap<u32, String> = response
@@ -420,10 +380,79 @@ impl RebellionsNpuReader {
 
         response
             .contexts
-            .into_iter()
+            .iter()
+            .cloned()
             .map(|ctx| create_process_info_from_context(ctx, &uuid_by_npu))
             .collect()
     }
+}
+
+/// Determine which command to use (rbln-stat or rbln-smi).
+///
+/// A successful lookup is cached for the process lifetime and a failed one
+/// for [`RBLN_COMMAND_RETRY_INTERVAL`], see [`cached_command_lookup`].
+fn get_rebellions_command() -> Option<(String, PathBuf)> {
+    cached_command_lookup(
+        &RBLN_COMMAND_CACHE,
+        Instant::now(),
+        locate_rebellions_command,
+    )
+}
+
+/// Look for the CLI at its usual install paths, then on `PATH`.
+fn locate_rebellions_command() -> Option<(String, PathBuf)> {
+    // Check specific paths first
+    const PATHS: &[&str] = &[
+        "/usr/local/bin/rbln-stat",
+        "/usr/bin/rbln-stat",
+        "/usr/local/bin/rbln-smi",
+        "/usr/bin/rbln-smi",
+    ];
+
+    for path in PATHS {
+        if Path::new(path).exists() {
+            let cmd_name = Path::new(path)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("rbln-stat")
+                .to_string();
+            return Some((cmd_name, PathBuf::from(path)));
+        }
+    }
+
+    // Check if commands are available in PATH
+    for cmd in &["rbln-stat", "rbln-smi"] {
+        if let Ok(output) = execute_command_default("which", &[cmd])
+            && output.status == 0
+            && let Some(path) = absolute_command_path(&output.stdout)
+        {
+            return Some((cmd.to_string(), path));
+        }
+    }
+
+    None
+}
+
+/// Run `rbln-stat --json` (or `rbln-smi`) and return its stdout.
+fn run_rbln_stat() -> Option<String> {
+    let (_command, path) = get_rebellions_command()?;
+
+    // Validate path before execution to prevent path traversal
+    let path_str = match path.to_str() {
+        Some(s) if path.is_absolute() && !s.contains("..") => s,
+        Some(s) => {
+            eprintln!("Suspicious path detected: {s}");
+            return None;
+        }
+        None => {
+            eprintln!("Invalid path for Rebellions command");
+            return None;
+        }
+    };
+
+    execute_command_default(path_str, &["--json"])
+        .ok()
+        .map(|output| output.stdout)
 }
 
 impl GpuReader for RebellionsNpuReader {
@@ -1087,6 +1116,103 @@ mod tests {
 #[cfg(all(test, feature = "cli"))]
 #[path = "rebellions_atom_max_tests.rs"]
 mod atom_max_tests;
+
+#[cfg(test)]
+mod spawn_caching_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Smallest response the reader accepts: one device, one context.
+    const RESPONSE: &str = r#"{
+      "KMD_version": "3.0.0",
+      "devices": [
+        {
+          "npu": 0, "name": "RBLN-CA22", "sid": "0000000022513338",
+          "uuid": "4126c167-c7a6-4d0a-80dd-ffbf3641d1b0", "device": "rbln0",
+          "status": "normal", "fw_ver": "3.0.0",
+          "pci": {"dev": "0x1220", "bus_id": "0000:03:00.0", "numa_node": "0",
+                  "link_speed": "32.0GT/s", "link_width": "16"},
+          "temperature": "31C", "card_power": "17521800uW", "pstate": "P14",
+          "memory": {"used": "0", "total": "16877879296"},
+          "util": "0.0", "board_info": "RBLN-CA22", "location": 0
+        }
+      ],
+      "contexts": [
+        {"ctx_id": "1", "npu": 0, "process": "python3", "pid": "4242",
+         "memalloc": "72.0MiB"}
+      ]
+    }"#;
+
+    fn counting_reader(stdout: Option<&'static str>) -> (RebellionsNpuReader, Arc<AtomicUsize>) {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&calls);
+        let reader = RebellionsNpuReader::with_stat_runner(Box::new(move || {
+            counter.fetch_add(1, Ordering::SeqCst);
+            stdout.map(str::to_string)
+        }));
+        (reader, calls)
+    }
+
+    #[test]
+    fn gpu_info_and_process_info_share_one_cli_run() {
+        let (reader, calls) = counting_reader(Some(RESPONSE));
+        let t0 = Instant::now();
+        reader.response.set_test_now(t0);
+
+        let devices = reader.get_gpu_info();
+        reader
+            .response
+            .set_test_now(t0 + COALESCE_WINDOW - Duration::from_millis(1));
+        let processes = reader.get_process_info();
+
+        assert_eq!(devices.len(), 1);
+        assert_eq!(processes.len(), 1);
+        assert_eq!(processes[0].pid, 4242);
+        assert_eq!(processes[0].device_uuid, devices[0].uuid);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        // The next tick runs the CLI again.
+        reader.response.set_test_now(t0 + COALESCE_WINDOW);
+        assert_eq!(reader.get_gpu_info().len(), 1);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn a_failed_run_is_not_cached() {
+        let (reader, calls) = counting_reader(None);
+
+        assert!(reader.get_gpu_info().is_empty());
+        assert!(reader.get_process_info().is_empty());
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn a_missing_cli_is_looked_up_once_per_retry_interval() {
+        let cache = Mutex::new(None);
+        let lookups = AtomicUsize::new(0);
+        let not_found = || {
+            lookups.fetch_add(1, Ordering::SeqCst);
+            None
+        };
+        let t0 = Instant::now();
+
+        assert!(cached_command_lookup(&cache, t0, not_found).is_none());
+        assert!(cached_command_lookup(&cache, t0 + Duration::from_secs(59), not_found).is_none());
+        assert_eq!(lookups.load(Ordering::SeqCst), 1);
+
+        // After the interval a CLI installed in the meantime is found, and
+        // from then on the lookup is never repeated.
+        let installed = || {
+            lookups.fetch_add(1, Ordering::SeqCst);
+            Some(("rbln-stat".to_string(), PathBuf::from("/usr/bin/rbln-stat")))
+        };
+        let later = t0 + RBLN_COMMAND_RETRY_INTERVAL;
+        let found = cached_command_lookup(&cache, later, installed);
+        assert_eq!(found.map(|(name, _)| name).as_deref(), Some("rbln-stat"));
+        assert!(cached_command_lookup(&cache, later, installed).is_some());
+        assert_eq!(lookups.load(Ordering::SeqCst), 2);
+    }
+}
 
 #[cfg(test)]
 mod loaded_node_tests {

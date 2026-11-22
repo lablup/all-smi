@@ -50,7 +50,7 @@ all-smi service status --user
 sudo all-smi service uninstall
 ```
 
-The subcommand default is root, not a dedicated account, because vendor CLIs (`hl-smi`, `rbln-stat`, `furiosa-smi`, `tegrastats`) differ in what permissions they need, and a wrong guess yields a silently empty metrics page. The Debian package can take the opposite default because its unit is tested against the `all-smi` account.
+The subcommand default is root, not a dedicated account, because vendor CLIs (`hl-smi`, `rbln-stat`, `furiosa-smi`) differ in what permissions they need, and a wrong guess yields a silently empty metrics page. The Debian package can take the opposite default because its unit is tested against the `all-smi` account.
 
 `install` refuses to run when a package manager already owns the binary (`dpkg` at `/usr/bin/all-smi`, or a Homebrew prefix) and points at that package manager's own command instead. Both `install` and `uninstall` also refuse to touch a unit file that lacks the `# Managed by 'all-smi service'` marker. Pass `--force` to override either refusal.
 
