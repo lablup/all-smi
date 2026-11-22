@@ -102,11 +102,19 @@ struct Inner {
 ///
 /// Keyed by `(filter, pretty)`: the filter is six booleans, so at most 128
 /// entries exist, and all of them are dropped when a newer frame arrives.
+///
+/// Each entry is a per-key cell. The map lock is held only to fetch or
+/// insert a cell; serialization runs under the cell's own lock, so callers
+/// with different keys serialize in parallel while callers with the same
+/// key wait for one shared result.
 #[derive(Default)]
 struct FrameBodyCache {
     seq: u64,
-    bodies: HashMap<(SectionFilter, bool), Arc<str>>,
+    bodies: HashMap<(SectionFilter, bool), BodyCell>,
 }
+
+/// One cached body, filled by the first caller for its key.
+type BodyCell = Arc<Mutex<Option<Arc<str>>>>;
 
 /// A published frame together with the wall-clock instant at which it was
 /// captured. The instant drives the `/snapshot` staleness check; the
@@ -191,36 +199,36 @@ impl FrameBus {
     /// subscriber that is still working through an older frame gets a
     /// one-off serialization that does not disturb it.
     ///
-    /// The cache lock is held while serializing, which is what makes
-    /// concurrent callers for the same key wait for one result instead of
-    /// each producing their own.
+    /// The global cache lock is held only to fetch or insert the key's
+    /// cell. Serialization happens under that cell's lock, so concurrent
+    /// callers for the same key wait for one result instead of each
+    /// producing their own, while callers for other keys are not blocked.
     pub fn body_for(
         &self,
         frame: &LatestFrame,
         filter: &SectionFilter,
         pretty: bool,
     ) -> Result<Arc<str>, serde_json::Error> {
-        let mut cache = match self.inner.bodies.lock() {
-            Ok(cache) => cache,
-            // The cache is a plain map; a panic while it was held cannot
-            // leave it in a state worth refusing to read.
-            Err(poisoned) => poisoned.into_inner(),
+        let cell = {
+            let mut cache = lock_ignoring_poison(&self.inner.bodies);
+            if frame.seq < cache.seq {
+                // Not cached and never will be: one-off serialization that
+                // does not touch the cache.
+                drop(cache);
+                return serialize_filtered(&frame.snapshot, filter, pretty).map(Arc::from);
+            }
+            if frame.seq > cache.seq {
+                cache.bodies.clear();
+                cache.seq = frame.seq;
+            }
+            cache.bodies.entry((*filter, pretty)).or_default().clone()
         };
-        if frame.seq < cache.seq {
-            // Not cached and never will be: release the lock first so this
-            // one-off serialization does not hold up current-frame callers.
-            drop(cache);
-            return serialize_filtered(&frame.snapshot, filter, pretty).map(Arc::from);
-        }
-        if frame.seq > cache.seq {
-            cache.bodies.clear();
-            cache.seq = frame.seq;
-        }
-        if let Some(body) = cache.bodies.get(&(*filter, pretty)) {
+        let mut slot = lock_ignoring_poison(&cell);
+        if let Some(body) = slot.as_ref() {
             return Ok(body.clone());
         }
         let body: Arc<str> = serialize_filtered(&frame.snapshot, filter, pretty)?.into();
-        cache.bodies.insert((*filter, pretty), body.clone());
+        *slot = Some(body.clone());
         Ok(body)
     }
 
@@ -272,6 +280,12 @@ impl FrameBus {
     pub fn next_seq(&self) -> u64 {
         self.inner.next_seq.load(Ordering::Relaxed)
     }
+}
+
+/// Lock a plain-data mutex; a panic while it was held cannot leave it in a
+/// state worth refusing to read.
+fn lock_ignoring_poison<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|p| p.into_inner())
 }
 
 #[cfg(test)]

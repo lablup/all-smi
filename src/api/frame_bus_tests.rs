@@ -188,3 +188,43 @@ async fn body_cache_is_keyed_by_filter_and_pretty_and_reset_per_frame() {
         &bus.body_for(&second, &default_filter(), false).unwrap()
     ));
 }
+
+/// A serialization in progress for one key must not block other keys: the
+/// global cache lock is only held to fetch the per-key cell.
+#[tokio::test(flavor = "current_thread")]
+async fn different_keys_do_not_block_each_other() {
+    let bus = FrameBus::new(Duration::from_secs(3));
+    bus.publish(make_snapshot("parallel")).await;
+    let frame = bus.latest().await.expect("frame");
+    let gpu_only = SectionFilter {
+        cpu: false,
+        memory: false,
+        chassis: false,
+        ..default_filter()
+    };
+
+    // Create the cell for the default key and hold its lock, as a slow
+    // serialization would.
+    bus.body_for(&frame, &default_filter(), false).unwrap();
+    let cell = bus
+        .inner
+        .bodies
+        .lock()
+        .unwrap()
+        .bodies
+        .get(&(default_filter(), false))
+        .cloned()
+        .expect("cell");
+    let _held = cell.lock().unwrap();
+
+    let other_bus = bus.clone();
+    let other_frame = frame.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(other_bus.body_for(&other_frame, &gpu_only, false).is_ok());
+    });
+    let finished = rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("another key must not wait for the held cell");
+    assert!(finished);
+}

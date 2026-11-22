@@ -126,6 +126,8 @@ The status bar shows `REPLAY | HH:MM:SS | frame N / M | Xx | playing/paused`.
 Filter-edit mode (`/`) still takes precedence over replay keys, so the
 operator can filter the visible GPUs mid-playback.
 
+Playback follows the recorded frame timestamps divided by the speed setting, so a recording made at `--interval 5` advances one frame every 5 seconds at `1.0x`. At the end of the recording playback pauses on the last frame, or restarts from the first frame when loop is on. The elapsed time in the status bar counts from the first frame and stays correct after seeks.
+
 For the complete option list, run `all-smi record --help` and `all-smi view --help`. Compression follows `--compress`, then `record.compress` (default `zstd`), not just the output suffix. Match the suffix to the selected codec because replay detects compression from the filename. Rotation limits count uncompressed bytes.
 
 The default output is `<cache>/all-smi/records/all-smi-record.ndjson.zst`; override it with `record.output_dir` or `--output`. See [cache paths](configuration.md#cache-paths). Local recording and snapshots use the snapshot collection path; available fields can differ from live local mode. Replay cannot reconstruct fields that were not captured.
