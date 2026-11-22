@@ -12,10 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! CPU temperature sensor selection for Linux (issues #492, #495).
+//! CPU temperature sensor selection for Linux (issues #492, #495, #497).
 //!
-//! The sensor is chosen by override, driver name, thermal zone type, or
-//! motherboard sensor label instead of a fixed sysfs index. It is resolved once
+//! The sensor is chosen by override, driver name, thermal zone type,
+//! motherboard sensor label, or hwmon sensor type instead of a fixed sysfs index. It is resolved once
 //! per process, and afterwards only the single resolved file is read per sample.
 
 use std::fs;
@@ -26,8 +26,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::utils::millicelsius_to_celsius;
 
+#[path = "temp_board.rs"]
+mod temp_board;
 #[path = "temp_override.rs"]
 mod temp_override;
+#[cfg_attr(not(feature = "cli"), allow(unused_imports))]
+pub(crate) use temp_board::ASUS_WMI_SENSORS_DRIVER;
+use temp_board::{pick_from_board_labels, pick_from_sensor_types};
 #[cfg(test)]
 use temp_override::map_override_path;
 use temp_override::{CPU_TEMP_SENSOR_ENV, resolve_override};
@@ -42,21 +47,26 @@ const CPU_HWMON_DRIVERS: &[&str] = &[
 ];
 
 /// thermal zone `type` values that identify a CPU zone (exact, case-sensitive).
-const CPU_THERMAL_ZONE_TYPES: &[&str] =
-    &["x86_pkg_temp", "cpu-thermal", "cpu_thermal", "CPU-therm"];
-
-/// Motherboard sensor labels (Super I/O, board EC/WMI) that name the CPU input,
-/// in priority order. Exact, case-sensitive match. PECI and package readings
-/// are die temperatures; `CPUTIN` is a socket thermistor and ranks last.
-const BOARD_CPU_LABELS: &[&str] = &[
-    "CPU Package",
-    "PECI Agent 0",
-    "PECI Agent 0 Calibration",
-    "PECI 0.0",
-    "CPU Temperature",
-    "CPU",
-    "CPUTIN",
+///
+/// Matching zones are tried in zone index order. The entries from
+/// [`CPU_THERMAL_ZONE_FALLBACK_TYPES`] on are per-cluster zones, tried only when
+/// no zone of an earlier type reads.
+const CPU_THERMAL_ZONE_TYPES: &[&str] = &[
+    "x86_pkg_temp",
+    "cpu-thermal",
+    "cpu_thermal",
+    "CPU-therm",
+    "package-thermal", // Rockchip RK3588 mainline
+    "cpu0-thermal",    // Exynos5422 and others
+    "soc-thermal",     // Rockchip/Amlogic vendor kernels
+    "soc_thermal",     // Rockchip/Amlogic vendor kernels
+    "BCPU-therm",      // NVIDIA DRIVE OS
+    // RK3588 without `package-thermal`: the first big-core cluster stands in.
+    "bigcore0-thermal",
 ];
+
+/// Index in [`CPU_THERMAL_ZONE_TYPES`] where the per-cluster fallback types start.
+const CPU_THERMAL_ZONE_FALLBACK_TYPES: usize = 9;
 
 /// Legacy fixed paths relative to the sysfs root, tried in order as a last resort.
 const FALLBACK_PATHS: &[&str] = &[
@@ -74,6 +84,7 @@ pub(crate) enum TempRule {
     Driver,
     ThermalZone,
     BoardLabel,
+    SensorType,
     Legacy,
     None,
 }
@@ -86,6 +97,7 @@ impl TempRule {
             TempRule::Driver => "driver",
             TempRule::ThermalZone => "thermal-zone",
             TempRule::BoardLabel => "board-label",
+            TempRule::SensorType => "sensor-type",
             TempRule::Legacy => "legacy",
             TempRule::None => "none",
         }
@@ -336,34 +348,20 @@ fn pick_from_hwmon(root: &Path) -> Option<PathBuf> {
 }
 
 fn pick_from_thermal_zones(root: &Path) -> Option<PathBuf> {
-    numbered_entries(&root.join("class/thermal"), "thermal_zone")
-        .into_iter()
-        .filter(|dir| {
-            read_trimmed(&dir.join("type"))
-                .is_some_and(|t| CPU_THERMAL_ZONE_TYPES.contains(&t.as_str()))
-        })
-        .map(|dir| dir.join("temp"))
-        .find(|p| read_millicelsius(p).is_some())
-}
-
-/// Board sensor stage: the best-priority label present on any hwmon instance
-/// that reads wins; ties go to the lower hwmon index, then the lower input N.
-///
-/// Labels are read first and only the candidate under consideration is read as
-/// a sensor, as in the driver stage.
-fn pick_from_board_labels(root: &Path) -> Option<PathBuf> {
-    let mut candidates: Vec<(usize, PathBuf)> = Vec::new();
-    for dir in numbered_entries(&root.join("class/hwmon"), "hwmon") {
-        for (n, path) in hwmon_inputs(&dir) {
-            let priority = hwmon_label(&dir, n)
-                .and_then(|label| BOARD_CPU_LABELS.iter().position(|l| *l == label));
-            if let Some(priority) = priority {
-                candidates.push((priority, path));
-            }
-        }
-    }
-    candidates.sort_by_key(|(priority, _)| *priority); // stable: keeps index order
-    candidates
+    let mut zones: Vec<(bool, PathBuf)> =
+        numbered_entries(&root.join("class/thermal"), "thermal_zone")
+            .into_iter()
+            .filter_map(|dir| {
+                let ty = read_trimmed(&dir.join("type"))?;
+                let position = CPU_THERMAL_ZONE_TYPES.iter().position(|t| *t == ty)?;
+                Some((
+                    position >= CPU_THERMAL_ZONE_FALLBACK_TYPES,
+                    dir.join("temp"),
+                ))
+            })
+            .collect();
+    zones.sort_by_key(|(fallback, _)| *fallback); // stable: keeps zone index order
+    zones
         .into_iter()
         .map(|(_, p)| p)
         .find(|p| read_millicelsius(p).is_some())
@@ -396,7 +394,8 @@ fn describe(path: &Path) -> (Option<String>, Option<String>) {
 /// Resolve the CPU temperature source under `root` (production: `/sys`).
 ///
 /// Order, first readable candidate wins: override, named hwmon driver, named
-/// thermal zone type, motherboard sensor label, legacy fixed paths. An empty or
+/// thermal zone type, motherboard sensor label, hwmon sensor type (PECI or AMD
+/// TSI), legacy fixed paths. An empty or
 /// whitespace-only override counts as unset.
 pub(super) fn resolve_cpu_temp(root: &Path, override_value: Option<&str>) -> CpuTempResolution {
     let mut override_rejection = None;
@@ -414,6 +413,7 @@ pub(super) fn resolve_cpu_temp(root: &Path, override_value: Option<&str>) -> Cpu
         .or_else(|| pick_from_hwmon(root).map(|p| (TempRule::Driver, p)))
         .or_else(|| pick_from_thermal_zones(root).map(|p| (TempRule::ThermalZone, p)))
         .or_else(|| pick_from_board_labels(root).map(|p| (TempRule::BoardLabel, p)))
+        .or_else(|| pick_from_sensor_types(root).map(|p| (TempRule::SensorType, p)))
         .or_else(|| pick_from_legacy(root).map(|p| (TempRule::Legacy, p)));
     match picked {
         Some((rule, path)) => {
@@ -443,3 +443,7 @@ mod tests;
 #[cfg(test)]
 #[path = "temp_selection_tests.rs"]
 mod selection_tests;
+
+#[cfg(test)]
+#[path = "temp_coverage_tests.rs"]
+mod coverage_tests;

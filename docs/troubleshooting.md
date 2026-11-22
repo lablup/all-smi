@@ -102,9 +102,29 @@ all-smi picks the CPU temperature file once per process, at the first sample, an
 
 1. The `ALL_SMI_CPU_TEMP_SENSOR` override, if set (see below).
 2. A CPU driver by hwmon `name`: `coretemp`, `k10temp`, `zenpower`, `cpu_thermal`, `cpu-thermal`.
-3. A CPU thermal zone by `type`: `x86_pkg_temp`, `cpu-thermal`, `cpu_thermal`, `CPU-therm`.
-4. A motherboard sensor chip input (Super I/O, board EC or WMI drivers such as `nct6775`, `nct6683`, `asus_ec_sensors`, `asus_wmi_sensors`, `dell_smm`) whose `temp*_label` is exactly one of, in priority order: `CPU Package`, `PECI Agent 0`, `PECI Agent 0 Calibration`, `PECI 0.0`, `CPU Temperature`, `CPU`, `CPUTIN`. The best label wins across all chips; ties go to the lower hwmon index. Labels such as `CPU Socket Temperature` or `CPU VRM Temperature` are never taken.
-5. The legacy paths `thermal_zone0`, `thermal_zone1`, `hwmon0/temp1_input`, `hwmon1/temp1_input`.
+3. A CPU thermal zone by `type`: `x86_pkg_temp`, `cpu-thermal`, `cpu_thermal`, `CPU-therm`, `package-thermal`, `cpu0-thermal`, `soc-thermal`, `soc_thermal`, `BCPU-therm`. Matching zones are tried in zone index order. On RK3588 boards without `package-thermal`, `bigcore0-thermal` (the first big-core cluster) is used, but only when no zone of the other types reads. Other cluster zones such as `bigcore2-thermal` or `littlecore-thermal` are never taken.
+4. A motherboard sensor chip input (Super I/O, board EC or WMI drivers) whose `temp*_label` is exactly one of the labels in the table below, in priority order. The best label wins across all chips; ties go to the lower hwmon index, then the lower input number. `asus_wmi_sensors` inputs are used only when no other chip offers a readable label (see the warning below). Labels such as `CPU Socket Temperature`, `CPU VRM Temperature`, `PCH_CPU_TEMP` (relayed by the chipset) and `SMBUSMASTER 0` (board dependent) are never taken.
+5. An unlabelled input whose `temp*_type` is `6` (Intel PECI) or `5` (AMD SB-TSI), as `it87` chips report them. These are the CPU's own digital sensor. Ties go to the lower hwmon index, then the lower input number. Doctor shows this rule as `sensor-type`.
+6. The legacy paths `thermal_zone0`, `thermal_zone1`, `hwmon0/temp1_input`, `hwmon1/temp1_input`.
+
+Board labels, in priority order:
+
+| Priority | Label | hwmon `name` |
+|---|---|---|
+| 1 | `CPU Package` | `asusec` |
+| 2 | `PECI Agent 0` | `nct6775` family |
+| 3 | `PECI Agent 0 Calibration` | `nct6792` to `nct6798` |
+| 4 | `PECI/TSI Agent 0 Calibration` | `nct6799` |
+| 5 | `TSI0_TEMP` | `nct6775` family TSI inputs (for example `nct6799` on AMD boards) |
+| 6 | `AMD SB-TSI` | `nct6775` |
+| 7 | `PECI 0.0` | `nct6683` (Intel boards) |
+| 8 | `AMD TSI Addr 98h` | `nct6683`, `nct6686`, `nct6687` (AMD boards) |
+| 9 | `CPU Temperature` | `asus_wmi_sensors`, `hp_wmi_sensors` |
+| 10 | `CPU0 Temperature` | `hp_wmi_sensors` (multi-socket; socket 0 wins) |
+| 11 | `CPU` | `asusec`, `dell_smm`, out-of-tree `nct6687` |
+| 12 | `CPU1` | `lenovo_ec` (ThinkStation; socket 1 is the first) |
+| 13 | `SoC Temperature` | `apm_xgene` (Ampere eMAG/Altra) |
+| 14 | `CPUTIN` | `nct6775` family (socket thermistor, ranks last) |
 
 `all-smi doctor --only platform.cpu_temp` shows which rule matched, the driver and label, the file, and the current reading:
 
@@ -112,11 +132,22 @@ all-smi picks the CPU temperature file once per process, at the first sample, an
 PASS platform.cpu_temp                board-label nct6798 "PECI Agent 0" at /sys/class/hwmon/hwmon2/temp7_input, 48°C
 ```
 
-If the value looks stuck or wrong (often a motherboard `thermal_zone0` reading), or the chip has no labels (`it87`, `gigabyte_wmi`, `f71882fg`, where the CPU input depends on board wiring), name the sensor explicitly with `ALL_SMI_CPU_TEMP_SENSOR`:
+**`asus_wmi_sensors` polling.** The [kernel documentation](https://docs.kernel.org/hwmon/asus_wmi_sensors.html) warns that on some ASUS boards (PRIME X470-PRO is named) the BIOS WMI interface can stop the fans, pin them at full speed, or freeze readouts, and that frequent polling makes this more likely. all-smi reads the CPU temperature every sample, so it uses `asus_wmi_sensors` only when no other chip offers a CPU label. When it does, `all-smi doctor` reports `platform.cpu_temp` as a warning, which makes `all-smi doctor` exit with code 1 when nothing fails. If the board also has an `nct67xx` or `asusec` device, pin it with `ALL_SMI_CPU_TEMP_SENSOR`. An override that names `asus_wmi_sensors` yourself passes, with a note.
+
+**Out-of-tree and unsupported chips.** Some boards need a driver outside the mainline kernel before any CPU sensor appears:
+
+- MSI boards with `nct6687`: the [Fred78290 `nct6687d`](https://github.com/Fred78290/nct6687d) driver exports the CPU input as `CPU`, which is recognised.
+- `it8686` and `it8688` (many Gigabyte boards) have no mainline driver; the [frankcrawford `it87`](https://github.com/frankcrawford/it87) fork supports them. These chips export no labels, so the input is found by `temp*_type` when the board reports it, and otherwise needs an override.
+- `nct6683` binds to `nct6686` and `nct6687` on non-Intel boards only with the `force=1` module parameter.
+
+If the value looks stuck or wrong (often a motherboard `thermal_zone0` reading), or the chip has no labels and no `temp*_type` hint (`it87`, `gigabyte_wmi`, `f71882fg`, where the CPU input depends on board wiring), name the sensor explicitly with `ALL_SMI_CPU_TEMP_SENSOR`:
 
 ```bash
 # Input 2 of the first it87 chip that reads
 ALL_SMI_CPU_TEMP_SENSOR=it87:temp2 all-smi
+# Gigabyte it8688 boards (for example X570 AORUS MASTER): lm-sensors configs map
+# the CPU to temp3, but this varies by board and BIOS, so verify under load
+ALL_SMI_CPU_TEMP_SENSOR=it8688:temp3 all-smi
 # The input labelled exactly CPUTIN on an nct6798 chip
 ALL_SMI_CPU_TEMP_SENSOR=nct6798:CPUTIN all-smi
 # An absolute path to a temp*_input or a thermal zone temp file under /sys
@@ -130,6 +161,8 @@ To find the right input, compare `sensors` (lm-sensors) with the raw sysfs files
 ```bash
 grep . /sys/class/hwmon/hwmon*/name
 grep . /sys/class/hwmon/hwmon*/temp*_label
+grep . /sys/class/hwmon/hwmon*/temp*_type    # 6 = Intel PECI, 5 = AMD SB-TSI
+grep . /sys/class/thermal/thermal_zone*/type
 grep . /sys/class/hwmon/hwmon*/temp*_input   # millidegrees Celsius
 ```
 

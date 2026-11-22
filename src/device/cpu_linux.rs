@@ -34,9 +34,9 @@ use crate::utils::system::get_hostname;
 use crate::utils::{hz_to_mhz, khz_to_mhz};
 
 mod temperature;
-use temperature::{CPU_TEMP_SOURCE, CpuTempSource};
 #[cfg_attr(not(feature = "cli"), allow(unused_imports))]
-pub(crate) use temperature::{CpuTempResolution, TempRule};
+pub(crate) use temperature::{ASUS_WMI_SENSORS_DRIVER, CpuTempResolution, TempRule};
+use temperature::{CPU_TEMP_SOURCE, CpuTempSource};
 
 /// The process-wide CPU temperature resolution plus a current reading, for
 /// `all-smi doctor`. Resolves through the same cached source the readers use,
