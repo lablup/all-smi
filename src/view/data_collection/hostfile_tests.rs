@@ -144,3 +144,35 @@ async fn tilde_prefixed_hostfile_reloads() {
         "reload must use the expanded path, not the raw `~/hosts`"
     );
 }
+
+#[test]
+fn bounded_read_accepts_exactly_the_cap_and_rejects_one_over() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("hosts");
+    std::fs::write(&path, "a".repeat(16)).unwrap();
+    assert_eq!(read_bounded(&path, 16).unwrap().len(), 16);
+    let err = read_bounded(&path, 15).unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+    assert!(err.to_string().contains("too large"), "{err}");
+}
+
+#[tokio::test]
+async fn bounded_async_read_accepts_exactly_the_cap_and_rejects_one_over() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("hosts");
+    std::fs::write(&path, "a".repeat(16)).unwrap();
+    assert_eq!(read_bounded_async(&path, 16).await.unwrap().len(), 16);
+    let err = read_bounded_async(&path, 15).await.unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+}
+
+#[test]
+fn bounded_read_rejects_invalid_utf8() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("hosts");
+    std::fs::write(&path, [0xff, 0xfe]).unwrap();
+    assert_eq!(
+        read_bounded(&path, 16).unwrap_err().kind(),
+        io::ErrorKind::InvalidData
+    );
+}

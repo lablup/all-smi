@@ -75,6 +75,49 @@ fn check_hostfile_metadata(metadata: &std::fs::Metadata) -> io::Result<()> {
     Ok(())
 }
 
+fn too_large_error(max: u64) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidInput,
+        format!("Hostfile too large: over {max} bytes (max: {max} bytes)"),
+    )
+}
+
+fn decode_bounded(bytes: Vec<u8>, max: u64) -> io::Result<String> {
+    if bytes.len() as u64 > max {
+        return Err(too_large_error(max));
+    }
+    String::from_utf8(bytes).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "stream did not contain valid UTF-8",
+        )
+    })
+}
+
+/// Read at most `max` bytes of the file. The metadata check can be stale
+/// (the file may grow or be swapped before the read), so the read itself is
+/// bounded with `take(max + 1)` and rejects when it hits the extra byte.
+fn read_bounded(path: &Path, max: u64) -> io::Result<String> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)?
+        .take(max.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    decode_bounded(bytes, max)
+}
+
+/// Async counterpart of [`read_bounded`].
+async fn read_bounded_async(path: &Path, max: u64) -> io::Result<String> {
+    use tokio::io::AsyncReadExt;
+    let mut bytes = Vec::new();
+    tokio::fs::File::open(path)
+        .await?
+        .take(max.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .await?;
+    decode_bounded(bytes, max)
+}
+
 /// Parse hostfile text: one endpoint per line, blank lines and `#` comments
 /// skipped, every entry validated with the same URL contract as `--hosts`,
 /// and at most [`MAX_HOSTFILE_HOSTS`] entries kept.
@@ -112,7 +155,7 @@ pub(crate) fn parse_hostfile_content(content: &str) -> HostfileContents {
 pub(crate) fn read_hostfile(path: &Path) -> io::Result<HostfileContents> {
     let canonical = resolve_hostfile_path(path)?;
     check_hostfile_metadata(&std::fs::metadata(&canonical)?)?;
-    let content = std::fs::read_to_string(&canonical)?;
+    let content = read_bounded(&canonical, MAX_HOSTFILE_BYTES)?;
     Ok(parse_hostfile_content(&content))
 }
 
@@ -179,7 +222,7 @@ impl HostfileWatcher {
         // Take the signature before reading so a write racing the read is
         // picked up by the next refresh instead of being missed.
         let sig = signature(&metadata);
-        let content = std::fs::read_to_string(&canonical)?;
+        let content = read_bounded(&canonical, MAX_HOSTFILE_BYTES)?;
         let contents = parse_hostfile_content(&content);
         let watcher = Self {
             path: canonical,
@@ -229,7 +272,7 @@ impl HostfileWatcher {
         if self.signature == Some(sig) {
             return &self.hosts;
         }
-        match tokio::fs::read_to_string(&self.path).await {
+        match read_bounded_async(&self.path, MAX_HOSTFILE_BYTES).await {
             Ok(content) => {
                 self.reads += 1;
                 tracing::debug!(reads = self.reads, "hostfile changed, reloaded");

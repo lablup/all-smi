@@ -69,14 +69,40 @@ pub(crate) async fn read_response_text_with_limit(
     Ok(String::from_utf8_lossy(&body).into_owned())
 }
 
-async fn abort_pending_tasks<T>(tasks: &mut FuturesUnordered<tokio::task::JoinHandle<T>>) {
-    for task in tasks.iter() {
-        task.abort();
-    }
+/// Collect task results until every handle has been awaited or `budget`
+/// elapses. When the budget elapses once, every remaining handle is aborted
+/// and collection continues: a task that finished before the abort still
+/// delivers its result, and a cancelled one is skipped. Every handle has been
+/// awaited before this returns, so no aborted task can overlap with a later
+/// collector tick. Returns whether the deadline fired.
+async fn collect_until_deadline<T>(
+    tasks: &mut FuturesUnordered<tokio::task::JoinHandle<T>>,
+    budget: Duration,
+    mut on_result: impl FnMut(T),
+) -> bool {
+    let mut deadline_hit = false;
+    let timeout_future = tokio::time::sleep(budget);
+    tokio::pin!(timeout_future);
 
-    // Await every aborted handle so cancellation has taken effect before the
-    // collector returns and the next polling tick can begin.
-    while tasks.next().await.is_some() {}
+    while !tasks.is_empty() {
+        tokio::select! {
+            biased;
+            _ = &mut timeout_future, if !deadline_hit => {
+                deadline_hit = true;
+                for task in tasks.iter() {
+                    task.abort();
+                }
+            }
+            Some(task_result) = tasks.next() => {
+                // An Err is a task cancelled by the abort above (or a
+                // panic): no result to merge.
+                if let Ok(value) = task_result {
+                    on_result(value);
+                }
+            }
+        }
+    }
+    deadline_hit
 }
 
 pub struct NetworkClient {
@@ -412,40 +438,26 @@ impl NetworkClient {
         }
 
         let mut pending: HashSet<usize> = to_scrape.iter().copied().collect();
-        let mut deadline_hit = false;
-        let timeout_future = tokio::time::sleep(self.timeouts.budget);
-        tokio::pin!(timeout_future);
-
-        while !fetch_futures.is_empty() {
-            tokio::select! {
-                Some(task_result) = fetch_futures.next() => {
-                    // A task that panicked leaves its host in `pending`; it
-                    // is reported after the loop.
-                    let Ok((index, outcome)) = task_result else {
-                        continue;
-                    };
-                    pending.remove(&index);
-                    let mut status = ConnectionStatus::new(host_ids[index].clone(), hosts[index].clone());
-                    match outcome {
-                        ScrapeOutcome::Failed(message) => status.mark_failure(message),
-                        ScrapeOutcome::Empty => status.mark_success(),
-                        ScrapeOutcome::Parsed(parsed) => {
-                            status.mark_success();
-                            status.actual_hostname = instance_name(&parsed);
-                            data.merge(*parsed);
-                        }
+        let deadline_hit = collect_until_deadline(
+            &mut fetch_futures,
+            self.timeouts.budget,
+            |(index, outcome)| {
+                pending.remove(&index);
+                let mut status =
+                    ConnectionStatus::new(host_ids[index].clone(), hosts[index].clone());
+                match outcome {
+                    ScrapeOutcome::Failed(message) => status.mark_failure(message),
+                    ScrapeOutcome::Empty => status.mark_success(),
+                    ScrapeOutcome::Parsed(parsed) => {
+                        status.mark_success();
+                        status.actual_hostname = instance_name(&parsed);
+                        data.merge(*parsed);
                     }
-                    statuses[index] = Some(status);
                 }
-                _ = &mut timeout_future => {
-                    // A dropped JoinHandle detaches its task. Explicitly abort
-                    // and drain every remaining handle so retry/download tasks
-                    // cannot overlap with a later collector tick.
-                    abort_pending_tasks(&mut fetch_futures).await;
-                    deadline_hit = true;
-                }
-            }
-        }
+                statuses[index] = Some(status);
+            },
+        )
+        .await;
 
         for &index in &pending {
             let mut status = ConnectionStatus::new(host_ids[index].clone(), hosts[index].clone());
@@ -580,7 +592,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn abort_pending_tasks_waits_for_cancellation() {
+    async fn collect_until_deadline_waits_for_cancellation() {
         struct DropCounter(Arc<AtomicUsize>);
 
         impl Drop for DropCounter {
@@ -601,9 +613,47 @@ mod tests {
 
         let mut tasks = FuturesUnordered::new();
         tasks.push(task);
-        abort_pending_tasks(&mut tasks).await;
+        let mut results = 0;
+        let hit =
+            collect_until_deadline(&mut tasks, Duration::from_millis(10), |_| results += 1).await;
 
+        assert!(hit);
+        assert_eq!(results, 0);
         assert!(tasks.is_empty());
         assert_eq!(dropped.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn collect_until_deadline_keeps_results_finished_before_abort() {
+        let mut tasks = FuturesUnordered::new();
+        tasks.push(tokio::spawn(async { 1_u32 }));
+        tasks.push(tokio::spawn(async {
+            pending::<()>().await;
+            2_u32
+        }));
+        // Let the first task finish; its handle is complete but not yet
+        // polled by the collector when the zero budget fires.
+        tokio::task::yield_now().await;
+
+        let mut results = Vec::new();
+        let hit = collect_until_deadline(&mut tasks, Duration::ZERO, |v| results.push(v)).await;
+
+        assert!(hit);
+        assert_eq!(results, vec![1]);
+        assert!(tasks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn collect_until_deadline_without_timeout_returns_all_results() {
+        let mut tasks = FuturesUnordered::new();
+        for value in 0..3_u32 {
+            tasks.push(tokio::spawn(async move { value }));
+        }
+        let mut results = Vec::new();
+        let hit =
+            collect_until_deadline(&mut tasks, Duration::from_secs(30), |v| results.push(v)).await;
+        results.sort_unstable();
+        assert!(!hit);
+        assert_eq!(results, vec![0, 1, 2]);
     }
 }
