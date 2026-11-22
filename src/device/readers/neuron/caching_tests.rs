@@ -69,13 +69,23 @@ fn gpu_info_and_process_info_share_one_neuron_ls() {
     let dir = tempfile::tempdir().unwrap();
     make_sysfs_device(dir.path());
     let (reader, calls) = fake_reader(dir.path(), &dir.path().join("version"));
+    let t0 = Instant::now();
+    reader.ls_devices.set_test_now(t0);
 
     let rows = reader.get_gpu_info();
+    reader
+        .ls_devices
+        .set_test_now(t0 + COALESCE_WINDOW - Duration::from_millis(1));
     let processes = reader.get_process_info();
 
     assert_eq!(rows.len(), 2);
     assert!(processes.is_empty());
     assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    // The next tick runs `neuron-ls` again.
+    reader.ls_devices.set_test_now(t0 + COALESCE_WINDOW);
+    assert_eq!(reader.get_gpu_info().len(), 2);
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
 }
 
 #[test]

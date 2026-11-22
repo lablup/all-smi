@@ -71,6 +71,8 @@ fn gpu_info_and_process_rows_share_one_proc_walk() {
         "drm-driver: xe\ndrm-client-id: 5\ndrm-resident-vram0: 2048 kB\ndrm-resident-gtt: 1024 kB\n",
     );
     let reader = IntelGpuReader::new_with_roots(drm.path(), proc.path());
+    // All three calls land in one window, whatever the test's speed.
+    reader.drm_fd_scan.set_test_now(std::time::Instant::now());
     let before = scans_on_this_thread();
 
     let devices = reader.get_gpu_info();

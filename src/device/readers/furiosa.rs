@@ -794,6 +794,12 @@ mod tests {
         (reader, calls)
     }
 
+    /// Freeze both coalescing slots of `reader` at `now`.
+    fn set_now(reader: &FuriosaNpuReader, now: std::time::Instant) {
+        reader.info_cli.set_test_now(now);
+        reader.status_cli.set_test_now(now);
+    }
+
     fn count(calls: &CallLog, subcommand: &str) -> usize {
         calls
             .lock()
@@ -820,17 +826,31 @@ mod tests {
     #[test]
     fn a_repeat_within_the_window_does_not_spawn_again() {
         let (reader, calls) = fake_reader(vec![Some(INFO_JSON)]);
+        let t0 = std::time::Instant::now();
 
+        set_now(&reader, t0);
         assert_eq!(reader.get_gpu_info().len(), 1);
+        set_now(
+            &reader,
+            t0 + COALESCE_WINDOW - std::time::Duration::from_millis(1),
+        );
         assert_eq!(reader.get_gpu_info().len(), 1);
 
         assert_eq!(count(&calls, "info"), 1);
         assert_eq!(count(&calls, "status"), 1);
+
+        // The next tick spawns both again.
+        set_now(&reader, t0 + COALESCE_WINDOW);
+        assert_eq!(reader.get_gpu_info().len(), 1);
+        assert_eq!(count(&calls, "info"), 2);
+        assert_eq!(count(&calls, "status"), 2);
     }
 
     #[test]
     fn a_failed_first_info_does_not_hide_devices_for_good() {
         let (reader, calls) = fake_reader(vec![None, Some(INFO_JSON)]);
+        // Both calls in one window: only the failed `info` is retried.
+        set_now(&reader, std::time::Instant::now());
 
         assert!(reader.get_gpu_info().is_empty());
         // The failed `info` cached neither a result nor an empty static map.
@@ -840,6 +860,7 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].name, "Furiosa RNGD");
         assert_eq!(count(&calls, "info"), 2);
+        assert_eq!(count(&calls, "status"), 1);
     }
 
     #[test]

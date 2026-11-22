@@ -1156,8 +1156,13 @@ mod spawn_caching_tests {
     #[test]
     fn gpu_info_and_process_info_share_one_cli_run() {
         let (reader, calls) = counting_reader(Some(RESPONSE));
+        let t0 = Instant::now();
+        reader.response.set_test_now(t0);
 
         let devices = reader.get_gpu_info();
+        reader
+            .response
+            .set_test_now(t0 + COALESCE_WINDOW - Duration::from_millis(1));
         let processes = reader.get_process_info();
 
         assert_eq!(devices.len(), 1);
@@ -1165,6 +1170,11 @@ mod spawn_caching_tests {
         assert_eq!(processes[0].pid, 4242);
         assert_eq!(processes[0].device_uuid, devices[0].uuid);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        // The next tick runs the CLI again.
+        reader.response.set_test_now(t0 + COALESCE_WINDOW);
+        assert_eq!(reader.get_gpu_info().len(), 1);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 
     #[test]

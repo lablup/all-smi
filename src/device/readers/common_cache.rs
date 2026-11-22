@@ -43,6 +43,11 @@ pub const COALESCE_WINDOW: Duration = Duration::from_millis(500);
 #[derive(Debug)]
 pub struct CoalescedSlot<T> {
     slot: Mutex<Option<(Instant, Arc<T>)>>,
+    /// A clock a test has frozen; [`Self::get_or_fetch`] reads it instead
+    /// of `Instant::now` so reader-level tests cross the window without
+    /// depending on how fast they run.
+    #[cfg(test)]
+    test_now: Mutex<Option<Instant>>,
 }
 
 impl<T> Default for CoalescedSlot<T> {
@@ -55,6 +60,8 @@ impl<T> CoalescedSlot<T> {
     pub const fn new() -> Self {
         Self {
             slot: Mutex::new(None),
+            #[cfg(test)]
+            test_now: Mutex::new(None),
         }
     }
 
@@ -65,7 +72,19 @@ impl<T> CoalescedSlot<T> {
         window: Duration,
         fetch: impl FnOnce() -> Option<T>,
     ) -> Option<Arc<T>> {
+        #[cfg(test)]
+        if let Some(now) = *self.test_now.lock().unwrap_or_else(|e| e.into_inner()) {
+            return self.get_or_fetch_at(now, window, fetch);
+        }
         self.get_or_fetch_with(window, Instant::now, fetch)
+    }
+
+    /// Freeze the clock [`Self::get_or_fetch`] sees at `now`, so a test that
+    /// drives a reader through its public entry points controls whether two
+    /// calls land inside one window.
+    #[cfg(test)]
+    pub(crate) fn set_test_now(&self, now: Instant) {
+        *self.test_now.lock().unwrap_or_else(|e| e.into_inner()) = Some(now);
     }
 
     /// [`Self::get_or_fetch`] with the clock supplied by the caller, so tests
