@@ -40,8 +40,8 @@ use crate::cli::{RecordArgs, RecordCompression, RecordSource, SnapshotIncludes};
 use crate::common::config_file::RecordSettings;
 use crate::snapshot::serializers::write_frame_json;
 use crate::snapshot::{
-    DefaultSnapshotCollector, SNAPSHOT_SCHEMA_VERSION, Snapshot, SnapshotCollector,
-    SnapshotOptions, collect_once,
+    DefaultSnapshotCollector, SNAPSHOT_SCHEMA_VERSION, SectionGate, Snapshot, SnapshotCollector,
+    SnapshotOptions, collect_once_gated,
 };
 
 use writer::{Codec, RotatingWriter};
@@ -217,13 +217,18 @@ async fn run_local(opts: RecorderOptions, stop: Arc<StopSignal>) -> Result<()> {
             .with_context(|| format!("failed to open recording file {}", opts.output.display()))?;
 
     write_header(&mut writer, &opts, &hosts)?;
+    // One gate for the whole run: a reader that hangs keeps one blocking
+    // thread, and later ticks record the section as `busy` instead of
+    // spawning another call into it every interval (issue #503).
+    let gate = SectionGate::new();
     record_loop(&mut writer, &opts, stop, move |includes, timeout| {
-        // Clone both into the async move so the returned future is
-        // `'static` and not tied to the short-lived `&SnapshotIncludes`
-        // reference the closure is invoked with.
+        // Clone into the async move so the returned future is `'static`
+        // and not tied to the short-lived `&SnapshotIncludes` reference
+        // the closure is invoked with.
         let c = collector.clone();
         let inc = *includes;
-        async move { collect_once(c, &inc, timeout).await }
+        let gate = gate.clone();
+        async move { collect_once_gated(c, &inc, timeout, &gate).await }
     })
     .await?;
     writer.finish().context("failed to finalize recording")?;

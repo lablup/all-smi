@@ -45,7 +45,9 @@ pub mod options;
 pub mod query;
 pub mod serializers;
 
-pub use collector::{DefaultSnapshotCollector, SnapshotCollector, collect_once};
+pub use collector::{
+    DefaultSnapshotCollector, SectionGate, SnapshotCollector, collect_once, collect_once_gated,
+};
 // Re-exports that form the public library surface. `#[allow(unused_imports)]`
 // suppresses the "binary doesn't call them directly" warning — they're here
 // for library consumers and integration tests.

@@ -20,9 +20,12 @@
 //!
 //! The runtime guarantee enforced by this module is that *every* reader
 //! call is wrapped in `spawn_blocking` + `tokio::time::timeout`, so a
-//! misbehaving reader cannot stall the whole snapshot.
+//! misbehaving reader cannot stall the whole snapshot. Long-lived callers
+//! additionally pass a [`SectionGate`] so a hung reader holds one blocking
+//! thread instead of one more per collection.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use tokio::time::timeout;
@@ -123,89 +126,189 @@ impl SnapshotCollector for DefaultSnapshotCollector {
     }
 }
 
+/// Section identifiers, in the fixed order results and errors are applied.
+const SECTIONS: [&str; 6] = ["gpu", "cpu", "memory", "chassis", "process", "storage"];
+
+/// In-flight flags, one per section, owned by a long-lived caller of
+/// [`collect_once_gated`].
+///
+/// `spawn_blocking` cannot cancel a reader that hangs: after the timeout
+/// the thread keeps running. Without a gate, a caller that collects every
+/// interval (`record`, the `/snapshot` fallback) spawns another task into
+/// the same hung reader on every tick, each one parking a blocking-pool
+/// thread, until the pool's cap is reached and every `spawn_blocking` user
+/// in the process queues behind them (issue #503). The gate lets a section
+/// have at most one reader call in flight: while its flag is set, later
+/// collections skip the section and report it as `busy`.
+///
+/// Cloning shares the flags, so clones gate the same readers.
+#[derive(Clone, Debug, Default)]
+pub struct SectionGate {
+    in_flight: [Arc<AtomicBool>; 6],
+}
+
+impl SectionGate {
+    /// A gate with no section in flight.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Clears a section's in-flight flag when the reader call ends, including
+/// by panic, or when the blocking task is dropped without ever running.
+struct InFlight(Arc<AtomicBool>);
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
+/// What one section produced.
+enum SectionOutcome {
+    Skipped,
+    Done(SectionResult),
+    Busy,
+    Join(tokio::task::JoinError),
+    Timeout,
+}
+
 /// Run a single collection pass using the provided collector.
 ///
 /// Each requested section is wrapped in [`tokio::task::spawn_blocking`] and
 /// governed by a [`tokio::time::timeout`] so that a single hung reader
 /// cannot block the whole snapshot.
-pub async fn collect_once<C: SnapshotCollector + 'static>(
+///
+/// One-shot form of [`collect_once_gated`]: it uses a fresh
+/// [`SectionGate`], so no section is ever reported `busy`.
+pub async fn collect_once<C: SnapshotCollector + ?Sized + 'static>(
     collector: Arc<C>,
     includes: &SnapshotIncludes,
     per_reader_timeout: Duration,
 ) -> Snapshot {
+    collect_once_gated(collector, includes, per_reader_timeout, &SectionGate::new()).await
+}
+
+/// Run a single collection pass, skipping any section whose previous
+/// reader call (from an earlier pass through the same `gate`) is still
+/// running.
+///
+/// The requested sections run concurrently, each in its own
+/// [`tokio::task::spawn_blocking`] under `per_reader_timeout`, so the pass
+/// takes as long as its slowest section, not the sum. Results and errors
+/// are applied in the fixed section order (`gpu`, `cpu`, `memory`,
+/// `chassis`, `process`, `storage`) so `errors` stays deterministic.
+///
+/// A skipped section is absent from the snapshot and recorded as
+/// `SnapshotError { kind: "busy", message: "previous call still running" }`.
+/// Once the stuck reader returns, the next pass collects the section
+/// normally. `gpu` and `process` share the GPU readers; calling them
+/// concurrently is safe (`SnapshotCollector: Send + Sync`) though they may
+/// serialize on reader-internal locks.
+pub async fn collect_once_gated<C: SnapshotCollector + ?Sized + 'static>(
+    collector: Arc<C>,
+    includes: &SnapshotIncludes,
+    per_reader_timeout: Duration,
+    gate: &SectionGate,
+) -> Snapshot {
     let mut snap = Snapshot::new(collector.hostname());
-    let sections: &[(&str, bool)] = &[
-        ("gpu", includes.gpu),
-        ("cpu", includes.cpu),
-        ("memory", includes.memory),
-        ("chassis", includes.chassis),
-        ("process", includes.process),
-        ("storage", includes.storage),
+    let enabled = [
+        includes.gpu,
+        includes.cpu,
+        includes.memory,
+        includes.chassis,
+        includes.process,
+        includes.storage,
     ];
 
-    for (name, enabled) in sections {
-        if !*enabled {
-            continue;
+    let passes = SECTIONS.iter().enumerate().map(|(idx, name)| {
+        let collector = collector.clone();
+        let flag = gate.in_flight[idx].clone();
+        let enabled = enabled[idx];
+        async move {
+            if !enabled {
+                return SectionOutcome::Skipped;
+            }
+            if flag
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
+            {
+                return SectionOutcome::Busy;
+            }
+            let in_flight = InFlight(flag);
+            let join_handle = tokio::task::spawn_blocking(move || {
+                let _in_flight = in_flight;
+                match idx {
+                    0 => SectionResult::Gpus(collector.collect_gpus()),
+                    1 => SectionResult::Cpus(collector.collect_cpus()),
+                    2 => SectionResult::Memory(collector.collect_memory()),
+                    3 => SectionResult::Chassis(collector.collect_chassis()),
+                    // The process list comes from this one call.
+                    4 => SectionResult::Processes(collector.collect_processes()),
+                    _ => SectionResult::Storage(collector.collect_storage()),
+                }
+            });
+            match timeout(per_reader_timeout, join_handle).await {
+                Ok(Ok(result)) => SectionOutcome::Done(result),
+                Ok(Err(join_err)) => SectionOutcome::Join(join_err),
+                Err(_elapsed) => {
+                    // The `JoinHandle` is dropped when `timeout` returns
+                    // `Elapsed`, but `spawn_blocking` does NOT cancel the
+                    // underlying OS thread — it keeps running until the
+                    // reader returns, and the section's gate flag stays
+                    // set until then. Emit a warning so operators have a
+                    // diagnostic trail. A caller that passes a long-lived
+                    // gate leaks at most this one thread per section; the
+                    // one-shot CLI entrypoint in `src/main.rs` bounds the
+                    // blast radius with a dedicated runtime with
+                    // `max_blocking_threads(32)`.
+                    tracing::warn!(
+                        section = *name,
+                        timeout_ms = per_reader_timeout.as_millis() as u64,
+                        "snapshot reader timed out; the blocking worker cannot be cancelled \
+                         and will continue until the reader returns"
+                    );
+                    SectionOutcome::Timeout
+                }
+            }
         }
-        let c = collector.clone();
-        let section = name.to_string();
-        let join_handle = tokio::task::spawn_blocking(move || match section.as_str() {
-            "gpu" => SectionResult::Gpus(c.collect_gpus()),
-            "cpu" => SectionResult::Cpus(c.collect_cpus()),
-            "memory" => SectionResult::Memory(c.collect_memory()),
-            "chassis" => SectionResult::Chassis(c.collect_chassis()),
-            "process" => SectionResult::Processes(c.collect_processes()),
-            "storage" => SectionResult::Storage(c.collect_storage()),
-            _ => SectionResult::Empty,
-        });
+    });
 
-        match timeout(per_reader_timeout, join_handle).await {
-            Ok(Ok(result)) => match result {
+    let outcomes = futures_util::future::join_all(passes).await;
+    for (name, outcome) in SECTIONS.iter().zip(outcomes) {
+        let error = |kind: &str, message: String| SnapshotError {
+            section: (*name).to_string(),
+            kind: kind.to_string(),
+            message,
+        };
+        match outcome {
+            SectionOutcome::Skipped => {}
+            SectionOutcome::Done(result) => match result {
                 SectionResult::Gpus(v) => snap.gpus = Some(v),
                 SectionResult::Cpus(v) => snap.cpus = Some(v),
                 SectionResult::Memory(v) => snap.memory = Some(v),
                 SectionResult::Chassis(v) => snap.chassis = Some(v),
                 SectionResult::Processes(v) => snap.processes = Some(v),
                 SectionResult::Storage(v) => snap.storage = Some(v),
-                SectionResult::Empty => {}
             },
-            Ok(Err(join_err)) => {
-                snap.errors.push(SnapshotError {
-                    section: (*name).to_string(),
-                    kind: if join_err.is_panic() {
-                        "panic".to_string()
-                    } else {
-                        "error".to_string()
-                    },
-                    message: join_err.to_string(),
-                });
-            }
-            Err(_elapsed) => {
-                // The `JoinHandle` is dropped when `timeout` returns
-                // `Elapsed`, but `spawn_blocking` does NOT cancel the
-                // underlying OS thread — it keeps running until the
-                // reader returns. A hung driver call therefore leaks a
-                // Tokio blocking-pool worker for the rest of the
-                // process's lifetime. Emit a warning so operators have a
-                // diagnostic trail. The CLI entrypoint in `src/main.rs`
-                // bounds the blast radius by using a dedicated runtime
-                // with `max_blocking_threads(32)` for the snapshot
-                // invocation.
-                tracing::warn!(
-                    section = *name,
-                    timeout_ms = per_reader_timeout.as_millis() as u64,
-                    "snapshot reader timed out; the blocking worker cannot be cancelled \
-                     and will continue until the reader returns"
-                );
-                snap.errors.push(SnapshotError {
-                    section: (*name).to_string(),
-                    kind: "timeout".to_string(),
-                    message: format!(
-                        "reader exceeded timeout of {} ms",
-                        per_reader_timeout.as_millis()
-                    ),
-                });
-            }
+            SectionOutcome::Busy => snap
+                .errors
+                .push(error("busy", "previous call still running".to_string())),
+            SectionOutcome::Join(join_err) => snap.errors.push(error(
+                if join_err.is_panic() {
+                    "panic"
+                } else {
+                    "error"
+                },
+                join_err.to_string(),
+            )),
+            SectionOutcome::Timeout => snap.errors.push(error(
+                "timeout",
+                format!(
+                    "reader exceeded timeout of {} ms",
+                    per_reader_timeout.as_millis()
+                ),
+            )),
         }
     }
 
@@ -230,9 +333,8 @@ pub async fn collect_once<C: SnapshotCollector + 'static>(
 }
 
 /// Internal tagged union used to shuttle the result of a single
-/// `spawn_blocking` reader call back to the driver loop without reserving
-/// a separate channel per section. Stays private because the tag it carries
-/// is already encoded by the source-section string.
+/// `spawn_blocking` reader call back to the driver without reserving a
+/// separate channel per section.
 enum SectionResult {
     Gpus(Vec<GpuInfo>),
     Cpus(Vec<CpuInfo>),
@@ -240,5 +342,8 @@ enum SectionResult {
     Chassis(Vec<ChassisInfo>),
     Processes(Vec<ProcessInfo>),
     Storage(Vec<StorageInfo>),
-    Empty,
 }
+
+#[cfg(test)]
+#[path = "collector_tests.rs"]
+mod tests;
