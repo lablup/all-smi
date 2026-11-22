@@ -238,16 +238,10 @@ fn process_pass(
     gpu_pids: &HashSet<u32>,
 ) -> Vec<ProcessInfo> {
     with_global_system(|system| {
-        use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, UpdateKind};
-        // OPTIMIZATION: Only refresh fields we actually need
-        // - CPU usage for cpu_percent
-        // - Memory for memory_percent/memory_rss/memory_vms
-        // - User only if not already set (avoid repeated lookups)
-        // This is much cheaper than everything() which includes disk I/O, etc.
-        let refresh_kind = ProcessRefreshKind::nothing()
-            .with_cpu()
-            .with_memory()
-            .with_user(UpdateKind::OnlyIfNotSet);
+        use sysinfo::ProcessesToUpdate;
+        // Only the fields the rows use: CPU, memory, the user and command
+        // line once, no threads (issue #504).
+        let refresh_kind = crate::device::process_list::process_row_refresh_kind();
 
         // OPTIMIZATION: Selective process refresh
         // Full refresh every N cycles to discover new high-CPU processes;

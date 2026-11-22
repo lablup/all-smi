@@ -445,7 +445,7 @@ impl GpuReader for NvidiaGpuReader {
     }
 
     fn get_process_info(&self) -> Vec<ProcessInfo> {
-        use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, UpdateKind};
+        use sysinfo::ProcessesToUpdate;
 
         // Get GPU processes and PIDs using cached NVML handle
         let (gpu_processes, gpu_pids) = self.get_gpu_processes_cached();
@@ -455,7 +455,7 @@ impl GpuReader for NvidiaGpuReader {
             system.refresh_processes_specifics(
                 ProcessesToUpdate::All,
                 true,
-                ProcessRefreshKind::everything().with_user(UpdateKind::Always),
+                crate::device::process_list::process_row_refresh_kind(),
             );
             system.refresh_memory();
 

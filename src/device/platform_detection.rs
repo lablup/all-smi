@@ -18,6 +18,9 @@ use std::sync::OnceLock;
 use crate::device::common::constants::google_tpu::is_libtpu_available;
 use crate::device::common::execute_command_default;
 
+mod pci;
+pub(crate) use pci::{PciDevice, any_pci_device, vendor};
+
 // Platform detection results are immutable for the lifetime of the process:
 // hardware doesn't appear or disappear at runtime. Cache each detection call
 // in a process-global OnceLock so expensive probes (e.g. `system_profiler
@@ -30,7 +33,14 @@ pub fn has_nvidia() -> bool {
 }
 
 fn detect_nvidia() -> bool {
-    // On macOS, use system_profiler to check for NVIDIA devices
+    // No NVIDIA driver exists for Apple Silicon, so there is nothing to
+    // probe. `system_profiler SPPCIDataType` takes 0.5-2 s, and the TUI's
+    // notification pass calls this while holding its state lock (issue #504).
+    if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        return false;
+    }
+
+    // On Intel Macs, use system_profiler to check for NVIDIA devices
     if std::env::consts::OS == "macos" {
         // First check system_profiler for NVIDIA PCI devices
         if let Ok(output) = execute_command_default("system_profiler", &["SPPCIDataType"])
@@ -76,16 +86,9 @@ fn detect_nvidia() -> bool {
         return false;
     }
 
-    // On Linux, first try lspci to check for NVIDIA VGA/3D controllers
-    if let Ok(output) = execute_command_default("lspci", &[])
-        && output.status == 0
-    {
-        // Look for NVIDIA VGA or 3D controllers
-        for line in output.stdout.lines() {
-            if (line.contains("VGA") || line.contains("3D")) && line.contains("NVIDIA") {
-                return true;
-            }
-        }
+    // On Linux, first look for NVIDIA VGA/3D controllers on the PCI bus
+    if any_pci_device(pci_is_nvidia_gpu) {
+        return true;
     }
 
     // Fallback: Check if nvidia-smi can actually list GPUs
@@ -128,7 +131,8 @@ pub fn has_amd() -> bool {
 /// integrated graphics) is present.
 ///
 /// Linux: delegates to [`crate::device::readers::intel_gpu_linux::has_intel_client_gpu`]
-/// which walks `/sys/class/drm/card*` and falls back to `lspci -n`.
+/// which walks `/sys/class/drm/card*` and falls back to the shared PCI
+/// inventory.
 ///
 /// Windows: delegates to
 /// [`crate::device::readers::intel_gpu_windows::has_intel_gpu_windows`]
@@ -163,15 +167,9 @@ fn detect_intel_gpu() -> bool {
 fn detect_amd() -> bool {
     // On Linux, check for AMD GPUs
     if std::env::consts::OS == "linux" {
-        // Check lspci for AMD devices (Vendor ID 1002)
-        if let Ok(output) = execute_command_default("lspci", &["-n"])
-            && output.status == 0
-        {
-            for line in output.stdout.lines() {
-                if line.contains(":1002:") {
-                    return true;
-                }
-            }
+        // Check the PCI bus for AMD devices (Vendor ID 1002)
+        if any_pci_device(pci_is_amd) {
+            return true;
         }
 
         // Fallback: check /sys/class/drm
@@ -309,24 +307,9 @@ fn detect_tenstorrent() -> bool {
         return true;
     }
 
-    // On macOS, use system_profiler
-    if std::env::consts::OS == "macos" {
-        if let Ok(output) = execute_command_default("system_profiler", &["SPPCIDataType"])
-            && output.status == 0
-            && output.stdout.contains("Tenstorrent")
-        {
-            return true;
-        }
-    } else {
-        // On Linux, try lspci to check for Tenstorrent devices
-        if let Ok(output) = execute_command_default("lspci", &[])
-            && output.status == 0
-        {
-            // Look for Tenstorrent devices
-            if output.stdout.contains("Tenstorrent") {
-                return true;
-            }
-        }
+    // Then the PCI bus (Tenstorrent's vendor ID is 1e52)
+    if any_pci_device(|device| device.vendor == vendor::TENSTORRENT) {
+        return true;
     }
 
     // Last resort: check if tt-smi can actually list devices
@@ -347,15 +330,7 @@ fn detect_tenstorrent() -> bool {
 /// Inferentia1 occupies the 7064-7067 range, with later Inferentia and
 /// Trainium generations using 7164, 7264, and 7364.
 #[cfg(target_os = "linux")]
-const NEURON_PCI_IDS: &[&str] = &[
-    "1d0f:7064",
-    "1d0f:7065",
-    "1d0f:7066",
-    "1d0f:7067",
-    "1d0f:7164",
-    "1d0f:7264",
-    "1d0f:7364",
-];
+const NEURON_PCI_DEVICE_IDS: &[u16] = &[0x7064, 0x7065, 0x7066, 0x7067, 0x7164, 0x7264, 0x7364];
 
 #[cfg(target_os = "linux")]
 pub fn has_neuron() -> bool {
@@ -376,20 +351,12 @@ fn detect_neuron() -> bool {
     // /opt/aws/neuron/bin, which is on PATH only via the DLAMI profile
     // scripts, so probing a CLI here would report a false negative under
     // sudo, systemd, or a container entrypoint.
-    if let Ok(output) = execute_command_default("lspci", &["-nn"])
-        && output.status == 0
-        && lspci_names_neuron(&output.stdout)
-    {
-        return true;
-    }
-
-    false
+    any_pci_device(pci_is_neuron)
 }
 
 #[cfg(target_os = "linux")]
-fn lspci_names_neuron(lspci_output: &str) -> bool {
-    let normalized = lspci_output.to_ascii_lowercase();
-    NEURON_PCI_IDS.iter().any(|id| normalized.contains(id))
+fn pci_is_neuron(device: &PciDevice) -> bool {
+    device.vendor == vendor::AMAZON && NEURON_PCI_DEVICE_IDS.contains(&device.device)
 }
 
 pub fn has_rebellions() -> bool {
@@ -397,20 +364,16 @@ pub fn has_rebellions() -> bool {
     *CACHE.get_or_init(detect_rebellions)
 }
 
-/// Rebellions' PCI vendor ID.
+/// Is this PCI device a Rebellions card?
 ///
-/// Confirmed against a live ATOM Plus node: `lspci -nn` prints
+/// Rebellions' vendor ID is `1eff`, confirmed against a live ATOM Plus node:
+/// `lspci -nn` prints
 /// `Processing accelerators [1200]: Rebellions Inc. RBLN-CA22 (PF) [1eff:1220]`
-/// and every PCI alias in the `rebellions` KMD is `v00001EFF`. The code
-/// previously looked for `1f3f`, which belongs to no Rebellions device.
-const REBELLIONS_PCI_VENDOR_ID: &str = "1eff:";
-
-/// Does this `lspci -nn` output name a Rebellions device?
-///
-/// The vendor-name check is kept as a second signal, for hosts whose `pci.ids`
-/// is too old to resolve `1eff` to "Rebellions Inc.".
-fn lspci_names_rebellions(lspci_output: &str) -> bool {
-    lspci_output.contains(REBELLIONS_PCI_VENDOR_ID) || lspci_output.contains("Rebellions")
+/// and every PCI alias in the `rebellions` KMD is `v00001EFF`. The code once
+/// looked for `1f3f`, which belongs to no Rebellions device. The ID does not
+/// depend on how current the host's `pci.ids` is, so no name check is needed.
+fn pci_is_rebellions(device: &PciDevice) -> bool {
+    device.vendor == vendor::REBELLIONS
 }
 
 fn detect_rebellions() -> bool {
@@ -419,23 +382,9 @@ fn detect_rebellions() -> bool {
         return true;
     }
 
-    // On macOS, use system_profiler
-    if std::env::consts::OS == "macos" {
-        if let Ok(output) = execute_command_default("system_profiler", &["SPPCIDataType"])
-            && output.status == 0
-            && (output.stdout.contains("Rebellions") || output.stdout.contains("RBLN"))
-        {
-            return true;
-        }
-    } else {
-        // On Linux, try lspci to check for Rebellions devices. `-nn` so that
-        // the numeric vendor ID is printed alongside the name.
-        if let Ok(output) = execute_command_default("lspci", &["-nn"])
-            && output.status == 0
-            && lspci_names_rebellions(&output.stdout)
-        {
-            return true;
-        }
+    // Then the PCI bus
+    if any_pci_device(pci_is_rebellions) {
+        return true;
     }
 
     // Last resort: check if rbln-stat or rbln-smi can actually list devices
@@ -594,32 +543,11 @@ fn detect_gaudi() -> bool {
         }
     }
 
-    // On Linux, try lspci to check for Habana devices
-    if std::env::consts::OS == "linux" {
-        // Check with numeric vendor ID format (lspci -n)
-        // Habana Labs vendor ID: 1da3
-        if let Ok(output) = execute_command_default("lspci", &["-n"])
-            && output.status == 0
-        {
-            // Look for Habana Labs vendor ID (1da3)
-            for line in output.stdout.lines() {
-                if line.contains("1da3:") {
-                    return true;
-                }
-            }
-        }
-
-        // Also check regular lspci output for text matches
-        if let Ok(output) = execute_command_default("lspci", &[])
-            && output.status == 0
-        {
-            // Look for Habana Labs / Intel Gaudi devices
-            // May show as "Processing accelerators" with Habana in the name
-            let stdout_lower = output.stdout.to_lowercase();
-            if stdout_lower.contains("habana") || stdout_lower.contains("gaudi") {
-                return true;
-            }
-        }
+    // On Linux, look for Habana Labs' vendor ID (1da3) on the PCI bus. The
+    // ID is what `lspci` resolves to "Habana Labs", so no name check is
+    // needed.
+    if std::env::consts::OS == "linux" && any_pci_device(|device| device.vendor == vendor::HABANA) {
+        return true;
     }
 
     // Last resort: check if hl-smi can actually list devices
@@ -633,83 +561,27 @@ fn detect_gaudi() -> bool {
     false
 }
 
+/// An NVIDIA VGA or 3D controller (the two classes the `lspci` text check
+/// accepted).
+fn pci_is_nvidia_gpu(device: &PciDevice) -> bool {
+    device.vendor == vendor::NVIDIA && device.is_vga_or_3d()
+}
+
+/// Any AMD (ATI) PCI function.
+#[cfg(all(target_os = "linux", not(target_env = "musl")))]
+fn pci_is_amd(device: &PciDevice) -> bool {
+    device.vendor == vendor::AMD
+}
+
+/// An Intel display controller (VGA, XGA, 3D or other display class); an
+/// Intel NIC or chipset function does not count.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) fn pci_is_intel_gpu(device: &PciDevice) -> bool {
+    device.vendor == vendor::INTEL && device.is_display()
+}
+
 pub fn get_os_type() -> &'static str {
     std::env::consts::OS
-}
-
-#[allow(dead_code)]
-pub fn is_running_in_container() -> bool {
-    // Only check on Linux, as containers are Linux-specific
-    if std::env::consts::OS != "linux" {
-        return false;
-    }
-
-    // Check for Docker
-    if std::path::Path::new("/.dockerenv").exists() {
-        return true;
-    }
-
-    // Check for Kubernetes
-    if std::env::var("KUBERNETES_SERVICE_HOST").is_ok() {
-        return true;
-    }
-
-    // Check /proc/self/cgroup for container runtimes
-    if let Ok(cgroup_content) = std::fs::read_to_string("/proc/self/cgroup") {
-        let container_patterns = [
-            "docker",
-            "containerd",
-            "crio",
-            "podman",
-            "garden",
-            "lxc",
-            "systemd-nspawn",
-        ];
-
-        for pattern in &container_patterns {
-            if cgroup_content.contains(pattern) {
-                return true;
-            }
-        }
-    }
-
-    // Check /proc/1/sched for container hints
-    if let Ok(sched_content) = std::fs::read_to_string("/proc/1/sched")
-        && sched_content.lines().next().is_some_and(|line| {
-            line.contains("bash") || line.contains("sh") || line.contains("init")
-        })
-    {
-        // If PID 1 is a shell or init process that's not systemd/upstart, likely in container
-        if !sched_content.contains("systemd") && !sched_content.contains("upstart") {
-            return true;
-        }
-    }
-
-    false
-}
-
-#[allow(dead_code)]
-pub fn get_container_pid_namespace() -> Option<u32> {
-    // Get the PID namespace ID for the current process
-    if let Ok(ns_link) = std::fs::read_link("/proc/self/ns/pid") {
-        // Convert PathBuf to String
-        if let Some(ns_str) = ns_link.to_str() {
-            // Extract namespace ID from the link (format: "pid:[4026531836]")
-            if let Some(start) = ns_str.find('[')
-                && let Some(end) = ns_str.find(']')
-            {
-                let ns_id_str = &ns_str[start + 1..end];
-                // Parse as u64 first, then convert to u32 if within range
-                if let Ok(ns_id_u64) = ns_id_str.parse::<u64>() {
-                    // Namespace IDs can be larger than u32::MAX
-                    // For comparison purposes, we'll use the lower 32 bits
-                    let ns_id = ns_id_u64 as u32;
-                    return Some(ns_id);
-                }
-            }
-        }
-    }
-    None
 }
 
 #[cfg(test)]
@@ -758,28 +630,35 @@ mod tests {
         assert_eq!(habana_accel_node_count(&class.path().join("missing")), 0);
     }
 
+    /// Whether `pred` matches any device in verbatim `lspci -nn` output.
+    fn lspci_matches(pred: impl Fn(&PciDevice) -> bool, output: &str) -> bool {
+        pci::parse_lspci_nn(output).iter().any(pred)
+    }
+
     /// Regression: detection looked for vendor ID `1f3f`, which is not
     /// Rebellions. It only appeared to work because the same line also carries
     /// the vendor *name*, so a host with an old `pci.ids` — where the line
     /// reads `Device [1eff:1220]` — would not have been detected at all.
     #[test]
     fn rebellions_is_detected_by_its_real_pci_vendor_id() {
-        assert!(lspci_names_rebellions(REBELLIONS_LSPCI_LINE));
+        assert!(lspci_matches(pci_is_rebellions, REBELLIONS_LSPCI_LINE));
 
         // Same device on a host whose pci.ids cannot name the vendor.
         let unnamed = REBELLIONS_LSPCI_LINE.replace("Rebellions Inc. RBLN-CA22 (PF)", "Device");
         assert!(
-            lspci_names_rebellions(&unnamed),
+            lspci_matches(pci_is_rebellions, &unnamed),
             "vendor ID alone must be enough: {unnamed}"
         );
 
         // The wrong constant must not be what matches.
-        assert!(!lspci_names_rebellions(
+        assert!(!lspci_matches(
+            pci_is_rebellions,
             "03:00.0 Processing accelerators [1200]: Device [1f3f:1220] (rev 03)"
         ));
 
         // Unrelated accelerators are not Rebellions.
-        assert!(!lspci_names_rebellions(
+        assert!(!lspci_matches(
+            pci_is_rebellions,
             "03:00.0 Processing accelerators [1200]: Habana Labs Ltd. HL-325L [1da3:1060]"
         ));
     }
@@ -787,23 +666,131 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn neuron_detection_accepts_every_supported_pci_generation() {
-        for id in NEURON_PCI_IDS {
+        for id in NEURON_PCI_DEVICE_IDS {
+            let line = format!(
+                "00:1e.0 Processing accelerators [1200]: Amazon.com, Inc. Device [1d0f:{id:04x}]"
+            );
             assert!(
-                lspci_names_neuron(&format!(
-                    "00:1e.0 Processing accelerators [1200]: Amazon.com, Inc. Device [{id}]"
-                )),
-                "missing AWS Neuron PCI ID {id}"
+                lspci_matches(pci_is_neuron, &line),
+                "missing AWS Neuron PCI ID {id:04x}"
             );
         }
-        assert!(lspci_names_neuron(
+        assert!(lspci_matches(
+            pci_is_neuron,
             "00:1e.0 Processing accelerators [1200]: Amazon Device [1D0F:7164]"
         ));
-        assert!(!lspci_names_neuron(
+        assert!(!lspci_matches(
+            pci_is_neuron,
             "00:05.0 Ethernet controller [0200]: Amazon.com, Inc. Elastic Network Adapter [1d0f:ec20]"
         ));
-        assert!(!lspci_names_neuron(
+        assert!(!lspci_matches(
+            pci_is_neuron,
             "00:04.0 Non-Volatile memory controller [0108]: Amazon.com, Inc. NVMe EBS Controller [1d0f:8061]"
         ));
+    }
+
+    /// Issue #504: every detector reads the one shared inventory, so each
+    /// vendor's verbatim `lspci -nn` line must match its own detector and no
+    /// other.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn each_vendor_fixture_matches_only_its_own_detector() {
+        type Detector = (&'static str, fn(&PciDevice) -> bool);
+        fn tenstorrent(device: &PciDevice) -> bool {
+            device.vendor == vendor::TENSTORRENT
+        }
+        fn gaudi(device: &PciDevice) -> bool {
+            device.vendor == vendor::HABANA
+        }
+        let detectors: [Detector; 7] = [
+            ("nvidia", pci_is_nvidia_gpu),
+            ("amd", pci_is_amd_for_tests),
+            ("intel", pci_is_intel_gpu),
+            ("gaudi", gaudi),
+            ("neuron", pci_is_neuron),
+            ("rebellions", pci_is_rebellions),
+            ("tenstorrent", tenstorrent),
+        ];
+        let fixtures = [
+            (
+                "nvidia",
+                "41:00.0 3D controller [0302]: NVIDIA Corporation GH100 [H100 PCIe] [10de:2331] (rev a1)",
+            ),
+            (
+                "nvidia",
+                "01:00.0 VGA compatible controller [0300]: NVIDIA Corporation GA102 [GeForce RTX 3080] [10de:2206] (rev a1)",
+            ),
+            (
+                "amd",
+                "03:00.0 VGA compatible controller [0300]: Advanced Micro Devices, Inc. [AMD/ATI] Navi 21 [Radeon RX 6800/6800 XT / 6900 XT] [1002:73bf] (rev c1)",
+            ),
+            (
+                "amd",
+                "c1:00.0 Processing accelerators [1200]: Advanced Micro Devices, Inc. [AMD/ATI] Aldebaran/MI200 [Instinct MI250X/MI250] [1002:740c] (rev 01)",
+            ),
+            (
+                "intel",
+                "03:00.0 VGA compatible controller [0300]: Intel Corporation DG2 [Arc A770] [8086:56a0] (rev 08)",
+            ),
+            (
+                "intel",
+                "00:02.0 Display controller [0380]: Intel Corporation Meteor Lake-P [Intel Arc Graphics] [8086:7d55] (rev 08)",
+            ),
+            (
+                "gaudi",
+                "19:00.0 Processing accelerators [1200]: Habana Labs Ltd. HL-2000 AI Training Accelerator [Gaudi] [1da3:1000] (rev 01)",
+            ),
+            (
+                "neuron",
+                "00:1e.0 System peripheral [0880]: Amazon.com, Inc. Device [1d0f:7164]",
+            ),
+            ("rebellions", REBELLIONS_LSPCI_LINE),
+            (
+                "tenstorrent",
+                "01:00.0 Processing accelerators [1200]: Tenstorrent Inc. Wormhole [1e52:401e] (rev 01)",
+            ),
+        ];
+        for (owner, line) in fixtures {
+            let devices = pci::parse_lspci_nn(line);
+            assert_eq!(devices.len(), 1, "unparsed fixture: {line}");
+            for (name, detector) in detectors {
+                assert_eq!(
+                    detector(&devices[0]),
+                    name == owner,
+                    "{name} on the {owner} fixture: {line}"
+                );
+            }
+        }
+
+        // Non-accelerator functions of the same vendors match nothing.
+        for line in [
+            "00:1f.6 Ethernet controller [0200]: Intel Corporation Ethernet Connection [8086:15fc] (rev 20)",
+            "41:00.1 Audio device [0403]: NVIDIA Corporation GH100 HD Audio [10de:22ba] (rev a1)",
+            "00:00.0 Host bridge [0600]: Advanced Micro Devices, Inc. [AMD] Starship/Matisse Root Complex [1022:1480]",
+        ] {
+            let devices = pci::parse_lspci_nn(line);
+            for (name, detector) in detectors {
+                assert!(!detector(&devices[0]), "{name} matched {line}");
+            }
+        }
+    }
+
+    #[cfg(all(target_os = "linux", not(target_env = "musl")))]
+    fn pci_is_amd_for_tests(device: &PciDevice) -> bool {
+        pci_is_amd(device)
+    }
+
+    #[cfg(all(target_os = "linux", target_env = "musl"))]
+    fn pci_is_amd_for_tests(device: &PciDevice) -> bool {
+        device.vendor == vendor::AMD
+    }
+
+    /// Issue #504: no NVIDIA driver exists for Apple Silicon, so detection
+    /// answers without spawning `system_profiler` or `nvidia-smi`.
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[test]
+    fn apple_silicon_has_no_nvidia() {
+        assert!(!detect_nvidia());
     }
 
     /// Architecture detection must never abort the process (it used to

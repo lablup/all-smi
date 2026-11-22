@@ -76,14 +76,8 @@ physical id	: 0"#;
 
 #[test]
 fn test_parse_cpu_stat() {
-    let stat_content = r#"cpu  10000 0 20000 70000 0 0 0 0 0 0
-cpu0 2500 0 5000 17500 0 0 0 0 0 0
-cpu1 2500 0 5000 17500 0 0 0 0 0 0
-cpu2 2500 0 5000 17500 0 0 0 0 0 0
-cpu3 2500 0 5000 17500 0 0 0 0 0 0"#;
-
     let reader = LinuxCpuReader::new();
-    let result = reader.parse_cpu_stat(stat_content, 1);
+    let result = reader.parse_cpu_stat(1);
     assert!(result.is_ok());
 
     let (overall_util, socket_info, core_utils) = result.unwrap();

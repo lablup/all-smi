@@ -582,6 +582,64 @@ pub fn process_rows_with<F>(adapter_index: &AdapterIndex, refresh: F) -> Vec<Pro
 where
     F: FnOnce() -> AdapterIndex,
 {
+    let gpu_rows = gpu_rows_with(adapter_index, refresh);
+    if gpu_rows.is_empty() {
+        return Vec::new();
+    }
+
+    let gpu_pids: std::collections::HashSet<u32> = gpu_rows.iter().map(|row| row.pid).collect();
+    let all_processes = crate::utils::system::with_global_system(|system| {
+        system.refresh_processes_specifics(
+            sysinfo::ProcessesToUpdate::All,
+            true,
+            crate::device::process_list::process_row_refresh_kind(),
+        );
+        system.refresh_memory();
+        crate::device::process_list::get_all_processes(system, &gpu_pids)
+    });
+
+    crate::device::process_list::merge_gpu_processes(all_processes, gpu_rows)
+}
+
+/// The bare GPU rows and their PIDs, for a reader's `get_gpu_processes`
+/// (issue #504).
+///
+/// Same adapter-index handling as [`process_rows_with`], but no sysinfo
+/// refresh and no enrichment: the TUI collector merges these rows into its
+/// own process pass, which fills name, CPU, memory and user, exactly as it
+/// does for NVIDIA. The default `get_gpu_processes` called
+/// `get_process_info` instead, refreshing every process on every tick only
+/// to throw all but the GPU rows away.
+pub fn gpu_processes_with<F>(
+    adapter_index: &AdapterIndex,
+    refresh: F,
+) -> (Vec<ProcessInfo>, std::collections::HashSet<u32>)
+where
+    F: FnOnce() -> AdapterIndex,
+{
+    with_pids(gpu_rows_with(adapter_index, refresh))
+}
+
+/// [`gpu_processes_with`] over an explicit snapshot, so the row and PID
+/// shape is testable without Windows.
+pub fn gpu_processes_from(
+    snapshot: &Snapshot,
+    adapter_index: &AdapterIndex,
+) -> (Vec<ProcessInfo>, std::collections::HashSet<u32>) {
+    with_pids(process_rows_from(snapshot, adapter_index))
+}
+
+fn with_pids(rows: Vec<ProcessInfo>) -> (Vec<ProcessInfo>, std::collections::HashSet<u32>) {
+    let pids = rows.iter().map(|row| row.pid).collect();
+    (rows, pids)
+}
+
+/// The GPU rows of the latest snapshot, populating the adapter index through
+/// `refresh` first when nothing has paired adapters yet.
+fn gpu_rows_with<F>(adapter_index: &AdapterIndex, refresh: F) -> Vec<ProcessInfo>
+where
+    F: FnOnce() -> AdapterIndex,
+{
     let owned;
     let adapter_index = if adapter_index.is_empty() {
         owned = refresh();
@@ -592,24 +650,7 @@ where
     if adapter_index.is_empty() {
         return Vec::new();
     }
-
-    let gpu_rows = process_rows_from(&latest(), adapter_index);
-    if gpu_rows.is_empty() {
-        return Vec::new();
-    }
-
-    let gpu_pids: std::collections::HashSet<u32> = gpu_rows.iter().map(|row| row.pid).collect();
-    let all_processes = crate::utils::system::with_global_system(|system| {
-        system.refresh_processes_specifics(
-            sysinfo::ProcessesToUpdate::All,
-            true,
-            sysinfo::ProcessRefreshKind::everything().with_user(sysinfo::UpdateKind::Always),
-        );
-        system.refresh_memory();
-        crate::device::process_list::get_all_processes(system, &gpu_pids)
-    });
-
-    crate::device::process_list::merge_gpu_processes(all_processes, gpu_rows)
+    process_rows_from(&latest(), adapter_index)
 }
 
 /// Attribute each per-process sample to the card its LUID names.
@@ -1015,6 +1056,51 @@ mod tests {
         assert_eq!(rows[0].used_memory, 536_870_912);
         assert_eq!(rows[0].device_uuid, "PCI\\VEN_1002&DEV_744C");
         assert_eq!(rows[0].device_id, 0);
+    }
+
+    /// Issue #504: the TUI override returns the bare GPU rows and their PIDs
+    /// straight from the snapshot, without touching sysinfo.
+    #[test]
+    fn gpu_processes_are_the_bare_rows_and_their_pids() {
+        use crate::utils::system::global_system_calls_on_this_thread;
+
+        let known = AdapterLuid::new(0, 0xD3F5);
+        let mut adapter_index = AdapterIndex::new();
+        adapter_index.insert(known, (1, "PCI\\VEN_8086&DEV_E20B".to_string()));
+        let snapshot = snapshot_with(
+            vec![],
+            vec![
+                ProcessGpuMemory {
+                    pid: 10,
+                    luid: known,
+                    used_bytes: 1024,
+                },
+                ProcessGpuMemory {
+                    pid: 11,
+                    luid: known,
+                    used_bytes: 2048,
+                },
+            ],
+        );
+
+        let before = global_system_calls_on_this_thread();
+        let (rows, pids) = gpu_processes_from(&snapshot, &adapter_index);
+        assert_eq!(global_system_calls_on_this_thread(), before);
+        assert_eq!(pids, std::collections::HashSet::from([10, 11]));
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|row| row.uses_gpu && row.device_id == 1));
+        assert!(rows.iter().all(|row| row.process_name.is_empty()));
+
+        // An unpaired index is populated through `refresh` once; with nothing
+        // to pair the result is empty, and sysinfo is still never touched.
+        let mut refreshes = 0;
+        let (rows, pids) = gpu_processes_with(&AdapterIndex::new(), || {
+            refreshes += 1;
+            AdapterIndex::new()
+        });
+        assert_eq!(refreshes, 1);
+        assert!(rows.is_empty() && pids.is_empty());
+        assert_eq!(global_system_calls_on_this_thread(), before);
     }
 
     #[test]

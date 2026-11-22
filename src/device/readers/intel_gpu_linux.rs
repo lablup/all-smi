@@ -53,7 +53,8 @@ use crate::device::readers::intel_gpu_engine::{
     EngineState, apply_engine_readout, refresh_with_lock,
 };
 use crate::device::readers::intel_gpu_fdinfo::{
-    build_intel_drm_basenames, build_intel_process_infos, sum_vram_by_card_from_fdinfo,
+    build_intel_drm_basenames, build_intel_gpu_rows, build_intel_process_infos,
+    sum_vram_by_card_from_fdinfo,
 };
 use crate::device::readers::intel_gpu_gtidle::{
     GtidleState, apply_fallback as apply_gtidle_fallback,
@@ -574,16 +575,40 @@ impl GpuReader for IntelGpuReader {
     }
 
     fn get_process_info(&self) -> Vec<ProcessInfo> {
-        // Build the {card_index -> uuid} map fresh each call so the
-        // UUID seen by per-process consumers matches whatever
-        // `get_gpu_info()` would emit at the same instant. The PCI
-        // bus is stable across the kernel's lifetime, but recomputing
-        // is microsecond-cheap and keeps the contract explicit.
+        build_intel_process_infos(
+            &self.intel_drm_basenames,
+            &self.card_uuids(),
+            &self.proc_root,
+        )
+    }
+
+    /// The fdinfo rows alone, without a sysinfo refresh (issue #504). The
+    /// TUI collector merges them into its own process pass, which supplies
+    /// name, user, CPU and RSS, so the default implementation's full
+    /// `get_process_info` would only repeat that pass every tick.
+    fn get_gpu_processes(&self) -> (Vec<ProcessInfo>, std::collections::HashSet<u32>) {
+        let rows = build_intel_gpu_rows(
+            &self.intel_drm_basenames,
+            &self.card_uuids(),
+            &self.proc_root,
+        );
+        let pids = rows.iter().map(|row| row.pid).collect();
+        (rows, pids)
+    }
+}
+
+impl IntelGpuReader {
+    /// The {card_index -> uuid} map, built fresh each call so the UUID seen
+    /// by per-process consumers matches whatever `get_gpu_info()` would emit
+    /// at the same instant. The PCI bus is stable across the kernel's
+    /// lifetime, but recomputing is microsecond-cheap and keeps the contract
+    /// explicit.
+    fn card_uuids(&self) -> HashMap<usize, String> {
         let mut card_uuids = HashMap::with_capacity(self.cards.len());
         for (idx, card) in self.cards.iter().enumerate() {
             card_uuids.insert(idx, build_uuid(card, &card.card_path.join("device")));
         }
-        build_intel_process_infos(&self.intel_drm_basenames, &card_uuids, &self.proc_root)
+        card_uuids
     }
 }
 

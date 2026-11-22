@@ -84,10 +84,8 @@ pub mod hlsmi;
 
 /* Refactored modules */
 pub mod common;
-pub mod container_utils;
 pub mod platform_detection;
 pub mod process_list;
-pub mod process_utils;
 pub mod reader_factory;
 pub mod readers;
 pub mod traits;

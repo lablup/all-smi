@@ -21,10 +21,10 @@
 //! delegates here.
 
 use super::{is_card_node, is_intel_vendor, resolve_driver};
-use crate::device::common::execute_command_default;
+use crate::device::platform_detection::{any_pci_device, pci_is_intel_gpu};
 use std::path::Path;
 
-/// Walk `drm_root` and `lspci -n` to decide whether at least one Intel
+/// Walk `drm_root`, then the shared PCI inventory, to decide whether at least one Intel
 /// client GPU is present. See
 /// [`crate::device::readers::intel_gpu_linux::has_intel_client_gpu`] for
 /// the public contract.
@@ -50,37 +50,10 @@ pub(super) fn has_intel_client_gpu_from_root(drm_root: &Path) -> bool {
         }
     }
 
-    // Fallback: `lspci -n` for hosts without `/sys` access (some
-    // unprivileged containers). Class codes 0300/0301/0302/0380 cover
-    // VGA / XGA / 3D / Display controllers respectively.
-    if let Ok(output) = execute_command_default("lspci", &["-n"])
-        && output.status == 0
-    {
-        for line in output.stdout.lines() {
-            if line_matches_intel_gpu(line) {
-                return true;
-            }
-        }
-    }
-    false
-}
-
-/// Match a single `lspci -n` line against the "Intel GPU" criteria
-/// (graphics-class code + Intel vendor ID).
-///
-/// `lspci -n` lines look like `03:00.0 0300: 8086:56a0 (rev 08)`. We
-/// pull out the class (`0300`) and the vendor (`8086`) tokens. Vendor
-/// 8086 alone is not enough — an Intel NIC would falsely match without
-/// the class check.
-pub(super) fn line_matches_intel_gpu(line: &str) -> bool {
-    let mut tokens = line.split_whitespace();
-    let _bdf = tokens.next();
-    let class = tokens.next().unwrap_or("").trim_end_matches(':');
-    let vendor_device = tokens.next().unwrap_or("");
-
-    let class_match = matches!(class, "0300" | "0301" | "0302" | "0380");
-    if !class_match {
-        return false;
-    }
-    vendor_device.split(':').next() == Some("8086")
+    // Fallback: the shared PCI inventory (sysfs, else one `lspci -nn` per
+    // process) for hosts without `/sys/class/drm` (some unprivileged
+    // containers). Class codes 0300/0301/0302/0380 cover VGA / XGA / 3D /
+    // Display controllers; vendor 8086 alone is not enough, since an Intel
+    // NIC would match without the class check (issue #504).
+    any_pci_device(pci_is_intel_gpu)
 }

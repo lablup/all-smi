@@ -14,7 +14,10 @@
 
 use crate::device::types::ProcessInfo;
 use std::collections::{HashMap, HashSet};
-use sysinfo::{ProcessStatus, System};
+use sysinfo::{Pid, ProcessRefreshKind, ProcessStatus, System, ThreadKind, UpdateKind};
+
+#[path = "process_list/row_caches.rs"]
+mod row_caches;
 
 #[cfg(target_os = "macos")]
 #[path = "process_list/pidinfo_macos.rs"]
@@ -57,34 +60,91 @@ fn memory_percent(process_memory: u64, total_memory: u64) -> f64 {
     (process_memory as f64 / total_memory as f64) * 100.0
 }
 
-/// Get all system processes with GPU usage information
-pub fn get_all_processes(system: &System, gpu_pids: &HashSet<u32>) -> Vec<ProcessInfo> {
-    let mut processes = Vec::new();
+/// The sysinfo refresh kind for every refresh whose result becomes process
+/// rows (issue #504): the GPU readers' `get_process_info`, the Linux and
+/// non-Unix TUI process passes, and the Intel enrichment.
+///
+/// It reads exactly what [`get_all_processes`] and the TUI cache use:
+///
+/// * CPU and memory, refreshed every time.
+/// * The user id, read once per process (`OnlyIfNotSet`); it is fixed for
+///   the process's lifetime.
+/// * The command line, read once per process (`OnlyIfNotSet`). sysinfo does
+///   not read `cmdline` at all when `cmd` is `Never`, which left the Linux
+///   TUI showing `[name]` for every process it discovered. Kernel threads
+///   have an empty command line, so they are re-read on each full refresh;
+///   that is one small read per kernel thread.
+/// * No tasks: with tasks on, `ProcessesToUpdate::All` adds every userland
+///   thread to the process map (and API output got one row per thread), and
+///   reads `/proc/<pid>/task` plus a stat/status pair per thread.
+/// * No disk usage, `exe`, `environ`, `cwd` or `root`: nothing displays
+///   them, and with `OnlyIfNotSet` they were re-attempted every refresh for
+///   every process whose value is unreadable (all kernel threads, and every
+///   other user's process when not root).
+pub(crate) fn process_row_refresh_kind() -> ProcessRefreshKind {
+    ProcessRefreshKind::nothing()
+        .with_cpu()
+        .with_memory()
+        .with_user(UpdateKind::OnlyIfNotSet)
+        .with_cmd(UpdateKind::OnlyIfNotSet)
+        .without_tasks()
+}
 
-    for (pid, process) in system.processes() {
-        let pid_u32 = pid.as_u32();
+/// Builds process rows with the process-wide priority and user caches held
+/// for one pass, so a pass takes each lock once instead of once per PID.
+struct RowBuilder<'a> {
+    system: &'a System,
+    total_memory: u64,
+    #[cfg(target_os = "linux")]
+    priorities: std::sync::MutexGuard<'static, row_caches::PriorityCache>,
+    #[cfg(unix)]
+    users: std::sync::MutexGuard<'static, row_caches::UserCache>,
+}
 
-        let uses_gpu = gpu_pids.contains(&pid_u32);
+impl<'a> RowBuilder<'a> {
+    fn new(system: &'a System) -> Self {
+        Self {
+            system,
+            total_memory: system.total_memory(),
+            #[cfg(target_os = "linux")]
+            priorities: row_caches::priority_cache(),
+            #[cfg(unix)]
+            users: row_caches::user_cache(),
+        }
+    }
 
-        // Get process priority and nice values
-        let (priority, nice_value) = get_process_priority_nice(pid_u32);
+    /// The row for one process, or `None` for a userland thread, which is
+    /// not a process of its own.
+    fn row(&mut self, pid: u32, process: &sysinfo::Process, uses_gpu: bool) -> Option<ProcessInfo> {
+        if process.thread_kind() == Some(ThreadKind::Userland) {
+            return None;
+        }
+        #[cfg(target_os = "linux")]
+        let (priority, nice_value) =
+            self.priorities
+                .get_or_read(pid, process.start_time(), &mut get_process_priority_nice);
+        #[cfg(not(target_os = "linux"))]
+        let (priority, nice_value) = get_process_priority_nice(pid);
+        #[cfg(unix)]
+        let user = process_user_with(&mut self.users, process);
+        #[cfg(not(unix))]
+        let user = process_user_with(process);
 
-        // Get process information
-        let process_info = ProcessInfo {
+        Some(ProcessInfo {
             device_id: 0, // Will be set by GPU-specific code if uses_gpu
             device_uuid: if uses_gpu {
                 "GPU".to_string()
             } else {
                 String::new()
             },
-            pid: pid_u32,
+            pid,
             process_name: process.name().to_string_lossy().to_string(),
             used_memory: 0, // GPU memory, will be set by GPU-specific code
             cpu_percent: process.cpu_usage() as f64,
-            memory_percent: memory_percent(process.memory(), system.total_memory()),
+            memory_percent: memory_percent(process.memory(), self.total_memory),
             memory_rss: process.memory(),         // Already in bytes
             memory_vms: process.virtual_memory(), // Already in bytes
-            user: get_process_user(process),
+            user,
             state: convert_process_state(process.status()),
             start_time: format!("{}", process.start_time()),
             cpu_time: process.run_time(),
@@ -95,12 +155,63 @@ pub fn get_all_processes(system: &System, gpu_pids: &HashSet<u32>) -> Vec<Proces
             priority,
             nice_value,
             gpu_utilization: 0.0, // Will be set by GPU-specific code
-        };
-
-        processes.push(process_info);
+        })
     }
 
+    /// Evict cached priorities of PIDs that left the process table.
+    fn finish(self) {
+        #[cfg(target_os = "linux")]
+        {
+            let system = self.system;
+            let mut priorities = self.priorities;
+            priorities.retain_live(|pid| system.process(Pid::from_u32(pid)).is_some());
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = self.system;
+    }
+}
+
+/// Get all system processes with GPU usage information.
+///
+/// One row per process in `system`, sorted by PID; userland threads are
+/// skipped. Priority and nice come from a process-wide cache keyed by PID and
+/// start time, so a repeated call over the same processes reads no
+/// `/proc/<pid>/stat` (issue #504).
+pub fn get_all_processes(system: &System, gpu_pids: &HashSet<u32>) -> Vec<ProcessInfo> {
+    let mut builder = RowBuilder::new(system);
+    let mut processes: Vec<ProcessInfo> = system
+        .processes()
+        .iter()
+        .filter_map(|(pid, process)| {
+            let pid = pid.as_u32();
+            builder.row(pid, process, gpu_pids.contains(&pid))
+        })
+        .collect();
+    builder.finish();
+
     // Sort by PID for consistent ordering
+    processes.sort_by_key(|p| p.pid);
+    processes
+}
+
+/// Rows for just `pids`, the rows [`get_all_processes`] would build for them
+/// with `pids` as the GPU set (each row has `uses_gpu` set), sorted by PID.
+///
+/// For a reader that only needs metadata for its handful of accelerator PIDs:
+/// pair it with `ProcessesToUpdate::Some` and [`process_row_refresh_kind`] so
+/// neither the refresh nor the row building walks the whole process table.
+/// PIDs `system` does not hold are skipped.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) fn rows_for_pids(system: &System, pids: &HashSet<u32>) -> Vec<ProcessInfo> {
+    let mut builder = RowBuilder::new(system);
+    let mut processes: Vec<ProcessInfo> = pids
+        .iter()
+        .filter_map(|&pid| {
+            let process = system.process(Pid::from_u32(pid))?;
+            builder.row(pid, process, true)
+        })
+        .collect();
+    builder.finish();
     processes.sort_by_key(|p| p.pid);
     processes
 }
@@ -229,25 +340,35 @@ fn convert_process_state(status: ProcessStatus) -> String {
     .to_string()
 }
 
-/// Get process user name
+/// Get process user name.
+///
+/// On Unix the uid is resolved through the process-wide uid cache
+/// (issue #504); the name is the passwd name, the numeric uid when there is
+/// no entry, or `"unknown"` when sysinfo has no uid.
 fn get_process_user(process: &sysinfo::Process) -> String {
-    if let Some(user_id) = process.user_id() {
-        // Try to get username from user ID
-        #[cfg(unix)]
-        {
-            use std::ffi::CStr;
-            unsafe {
-                let passwd = libc::getpwuid(**user_id);
-                if !passwd.is_null()
-                    && let Ok(name) = CStr::from_ptr((*passwd).pw_name).to_str()
-                {
-                    return name.to_string();
-                }
-            }
-        }
-        user_id.to_string()
-    } else {
-        "unknown".to_string()
+    #[cfg(unix)]
+    {
+        process_user_with(&mut row_caches::user_cache(), process)
+    }
+    #[cfg(not(unix))]
+    {
+        process_user_with(process)
+    }
+}
+
+#[cfg(unix)]
+fn process_user_with(cache: &mut row_caches::UserCache, process: &sysinfo::Process) -> String {
+    match process.user_id() {
+        Some(user_id) => cache.resolve(**user_id, row_caches::lookup_user_name),
+        None => "unknown".to_string(),
+    }
+}
+
+#[cfg(not(unix))]
+fn process_user_with(process: &sysinfo::Process) -> String {
+    match process.user_id() {
+        Some(user_id) => user_id.to_string(),
+        None => "unknown".to_string(),
     }
 }
 
@@ -347,15 +468,17 @@ pub fn merge_gpu_processes(
         .map(|process| (process.pid, process))
         .collect();
 
-    let mut merged = Vec::new();
-    let mut pids_with_gpu_rows: HashSet<u32> = HashSet::new();
+    let mut merged = Vec::with_capacity(process_by_pid.len() + gpu_map.len());
+    let mut pids_with_gpu_rows: HashSet<u32> = HashSet::with_capacity(gpu_map.len());
 
     for ((_pid, _device_uuid), gpu_process) in gpu_map {
         pids_with_gpu_rows.insert(gpu_process.pid);
+        // A PID with several GPU contexts needs one copy of its base row per
+        // device, so only these rows are cloned.
         if let Some(base) = process_by_pid.get(&gpu_process.pid) {
             let mut merged_row = base.clone();
             merged_row.device_id = gpu_process.device_id;
-            merged_row.device_uuid = gpu_process.device_uuid.clone();
+            merged_row.device_uuid = gpu_process.device_uuid;
             merged_row.used_memory = gpu_process.used_memory;
             merged_row.gpu_utilization = gpu_process.gpu_utilization;
             merged_row.uses_gpu = true;
@@ -365,12 +488,14 @@ pub fn merge_gpu_processes(
         }
     }
 
-    // Keep baseline rows that did not receive any GPU-attributed row.
-    for process in process_by_pid.values() {
-        if !pids_with_gpu_rows.contains(&process.pid) {
-            merged.push(process.clone());
-        }
-    }
+    // Keep baseline rows that did not receive any GPU-attributed row, moved
+    // rather than cloned: this is every non-GPU process on every tick
+    // (issue #504).
+    merged.extend(
+        process_by_pid
+            .into_values()
+            .filter(|process| !pids_with_gpu_rows.contains(&process.pid)),
+    );
 
     // Stable ordering for deterministic API output and tests.
     merged.sort_by(|a, b| {
@@ -382,103 +507,5 @@ pub fn merge_gpu_processes(
 }
 
 #[cfg(test)]
-pub(super) mod tests {
-    use super::*;
-
-    #[test]
-    fn memory_percent_is_zero_when_total_is_unknown() {
-        assert_eq!(memory_percent(1024, 0), 0.0);
-        assert_eq!(memory_percent(512, 2048), 25.0);
-    }
-
-    pub(in crate::device::process_list) fn process(
-        pid: u32,
-        device_uuid: &str,
-        used_memory: u64,
-        uses_gpu: bool,
-    ) -> ProcessInfo {
-        ProcessInfo {
-            device_id: 0,
-            device_uuid: device_uuid.to_string(),
-            pid,
-            process_name: format!("proc-{pid}"),
-            used_memory,
-            cpu_percent: 1.0,
-            memory_percent: 1.0,
-            memory_rss: 1024,
-            memory_vms: 2048,
-            user: "user".to_string(),
-            state: "S".to_string(),
-            start_time: "0".to_string(),
-            cpu_time: 0,
-            command: "cmd".to_string(),
-            ppid: 1,
-            threads: 1,
-            uses_gpu,
-            priority: 0,
-            nice_value: 0,
-            gpu_utilization: 0.0,
-        }
-    }
-
-    #[test]
-    fn multi_gpu_pid_preserved_as_multiple_rows() {
-        let all_processes = vec![process(123, "GPU", 0, true)];
-        let gpu_processes = vec![
-            process(123, "GPU-A", 1024, true),
-            process(123, "GPU-B", 2048, true),
-        ];
-
-        let merged = merge_gpu_processes(all_processes, gpu_processes);
-
-        assert_eq!(merged.len(), 2);
-        assert!(
-            merged
-                .iter()
-                .any(|p| p.pid == 123 && p.device_uuid == "GPU-A" && p.used_memory == 1024)
-        );
-        assert!(
-            merged
-                .iter()
-                .any(|p| p.pid == 123 && p.device_uuid == "GPU-B" && p.used_memory == 2048)
-        );
-    }
-
-    #[test]
-    fn duplicate_same_pid_device_coalesced() {
-        let all_processes = vec![process(123, "GPU", 0, true)];
-        let mut gpu_a_low = process(123, "GPU-A", 1024, true);
-        gpu_a_low.gpu_utilization = 10.0;
-        let mut gpu_a_high = process(123, "GPU-A", 2048, true);
-        gpu_a_high.gpu_utilization = 20.0;
-
-        let merged = merge_gpu_processes(all_processes, vec![gpu_a_low, gpu_a_high]);
-
-        assert_eq!(merged.len(), 1);
-        let row = &merged[0];
-        assert_eq!(row.device_uuid, "GPU-A");
-        assert_eq!(row.used_memory, 2048);
-        assert_eq!(row.gpu_utilization, 20.0);
-    }
-
-    #[test]
-    fn non_gpu_processes_preserved() {
-        let non_gpu = process(999, "", 0, false);
-        let merged = merge_gpu_processes(vec![non_gpu.clone()], Vec::new());
-
-        assert_eq!(merged.len(), 1);
-        assert_eq!(merged[0].pid, 999);
-        assert!(!merged[0].uses_gpu);
-    }
-
-    #[test]
-    fn gpu_row_without_baseline_process_still_emitted() {
-        let orphan_gpu = process(777, "GPU-ORPHAN", 4096, true);
-        let merged = merge_gpu_processes(Vec::new(), vec![orphan_gpu.clone()]);
-
-        assert_eq!(merged.len(), 1);
-        assert_eq!(merged[0].pid, 777);
-        assert_eq!(merged[0].device_uuid, "GPU-ORPHAN");
-        assert_eq!(merged[0].used_memory, 4096);
-    }
-}
+#[path = "process_list/tests.rs"]
+pub(super) mod tests;

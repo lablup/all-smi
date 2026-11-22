@@ -28,7 +28,8 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use super::collect_intel_gpu_processes;
+use super::{GpuProcessUsage, collect_intel_gpu_processes};
+use crate::device::types::ProcessInfo;
 
 /// Walk `/proc` for Intel-GPU-using processes, enrich them with
 /// sysinfo metadata, and assemble the full `Vec<ProcessInfo>` the
@@ -39,36 +40,61 @@ use super::collect_intel_gpu_processes;
 /// `ProcessInfo.device_uuid` against `GpuInfo.uuid` see consistent
 /// identifiers.
 ///
+/// Only the GPU PIDs are refreshed and turned into rows (issue #504):
+/// the rest of the process table is never read.
+///
 /// `proc_root` is normally `/proc`; the parameter exists so callers
 /// can drive a synthetic procfs in integration tests.
 pub fn build_intel_process_infos(
     intel_drm_basenames: &HashMap<String, usize>,
     card_uuids: &HashMap<usize, String>,
     proc_root: &Path,
-) -> Vec<crate::device::types::ProcessInfo> {
+) -> Vec<ProcessInfo> {
     use crate::utils::with_global_system;
-    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, UpdateKind};
+    use sysinfo::{Pid, ProcessesToUpdate};
 
     let usages = collect_intel_gpu_processes(intel_drm_basenames, proc_root);
     if usages.is_empty() {
         return Vec::new();
     }
 
-    // Single sysinfo refresh — same shape as AMD's reader: minimal
-    // ProcessRefreshKind so we do not pay for full-system refresh,
-    // and `get_all_processes` returns rich ProcessInfo rows for every
-    // PID in `gpu_pids`.
     let gpu_pids: HashSet<u32> = usages.iter().map(|u| u.pid).collect();
+    let pid_list: Vec<Pid> = gpu_pids.iter().map(|pid| Pid::from_u32(*pid)).collect();
     let system_processes = with_global_system(|system| {
-        let refresh_kind = ProcessRefreshKind::nothing()
-            .with_cpu()
-            .with_memory()
-            .with_user(UpdateKind::OnlyIfNotSet);
-        system.refresh_processes_specifics(ProcessesToUpdate::All, true, refresh_kind);
-        crate::device::process_list::get_all_processes(system, &gpu_pids)
+        system.refresh_processes_specifics(
+            ProcessesToUpdate::Some(&pid_list),
+            true,
+            crate::device::process_list::process_row_refresh_kind(),
+        );
+        crate::device::process_list::rows_for_pids(system, &gpu_pids)
     });
-    let process_map: HashMap<u32, _> = system_processes.iter().map(|p| (p.pid, p)).collect();
+    let process_map: HashMap<u32, &ProcessInfo> =
+        system_processes.iter().map(|p| (p.pid, p)).collect();
 
+    gpu_rows(usages, card_uuids, |pid| process_map.get(&pid).copied())
+}
+
+/// The Intel GPU rows from fdinfo alone, with no sysinfo refresh, for the
+/// TUI's `get_gpu_processes` (issue #504).
+///
+/// The collector merges these into its own process pass, which fills name,
+/// CPU, memory and user exactly as it does for NVIDIA, so refreshing sysinfo
+/// here would only duplicate that pass under the global `System` lock.
+pub fn build_intel_gpu_rows(
+    intel_drm_basenames: &HashMap<String, usize>,
+    card_uuids: &HashMap<usize, String>,
+    proc_root: &Path,
+) -> Vec<ProcessInfo> {
+    let usages = collect_intel_gpu_processes(intel_drm_basenames, proc_root);
+    gpu_rows(usages, card_uuids, |_| None)
+}
+
+/// One row per fdinfo usage, enriched from `metadata` where it has the PID.
+fn gpu_rows<'a>(
+    usages: Vec<GpuProcessUsage>,
+    card_uuids: &HashMap<usize, String>,
+    metadata: impl Fn(u32) -> Option<&'a ProcessInfo>,
+) -> Vec<ProcessInfo> {
     let mut out = Vec::with_capacity(usages.len());
     for usage in usages {
         // device_uuid for a card we no longer know is a contract bug —
@@ -77,8 +103,8 @@ pub fn build_intel_process_infos(
             .get(&usage.card_index)
             .cloned()
             .unwrap_or_default();
-        let sys_proc = process_map.get(&usage.pid);
-        out.push(crate::device::types::ProcessInfo {
+        let sys_proc = metadata(usage.pid);
+        out.push(ProcessInfo {
             device_id: usage.card_index,
             device_uuid: uuid,
             pid: usage.pid,

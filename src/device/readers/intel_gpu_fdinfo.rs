@@ -588,7 +588,7 @@ pub fn sum_vram_by_card_from_fdinfo(
 
 #[path = "intel_gpu_fdinfo/enrichment.rs"]
 mod enrichment;
-pub use enrichment::build_intel_process_infos;
+pub use enrichment::{build_intel_gpu_rows, build_intel_process_infos};
 
 #[cfg(test)]
 #[path = "intel_gpu_fdinfo/tests.rs"]
