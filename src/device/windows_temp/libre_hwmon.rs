@@ -24,6 +24,7 @@
 //! temperature monitoring on Windows systems without ACPI thermal zones.
 
 use super::{TemperatureResult, is_wmi_not_found_error};
+use crate::device::windows_wmi_worker::{LIBRE_HARDWARE_MONITOR, OPEN_HARDWARE_MONITOR};
 use once_cell::sync::OnceCell;
 use serde::Deserialize;
 use wmi::WMIConnection;
@@ -57,9 +58,8 @@ enum LhmNamespace {
 
 /// LibreHardwareMonitor WMI temperature source.
 ///
-/// Note: WMIConnection is not Send + Sync, so we cannot cache it.
-/// Instead, we cache only which namespace is available (if any),
-/// and create a new connection on each temperature query.
+/// The namespace connection itself is owned and reused by the WMI worker
+/// (`windows_wmi_worker`); this source caches only which namespace exists.
 pub struct LibreHardwareMonitorSource {
     /// Which namespace is available (None if not available, never checked yet, or error)
     available_namespace: OnceCell<Option<LhmNamespace>>,
@@ -82,9 +82,9 @@ impl LibreHardwareMonitorSource {
     /// Get the available namespace, checking both LibreHardwareMonitor and OpenHardwareMonitor.
     fn get_available_namespace(&self) -> Option<LhmNamespace> {
         *self.available_namespace.get_or_init(|| {
-            if WMIConnection::with_namespace_path("root\\LibreHardwareMonitor").is_ok() {
+            if WMIConnection::with_namespace_path(LIBRE_HARDWARE_MONITOR).is_ok() {
                 Some(LhmNamespace::Libre)
-            } else if WMIConnection::with_namespace_path("root\\OpenHardwareMonitor").is_ok() {
+            } else if WMIConnection::with_namespace_path(OPEN_HARDWARE_MONITOR).is_ok() {
                 Some(LhmNamespace::Open)
             } else {
                 None
@@ -92,35 +92,31 @@ impl LibreHardwareMonitorSource {
         })
     }
 
-    /// Create a new WMI connection to the appropriate namespace.
-    fn create_connection(&self) -> Option<WMIConnection> {
+    /// WMI namespace path to query, or `None` when neither is registered.
+    pub fn namespace_path(&self) -> Option<&'static str> {
         match self.get_available_namespace()? {
-            LhmNamespace::Libre => {
-                WMIConnection::with_namespace_path("root\\LibreHardwareMonitor").ok()
-            }
-            LhmNamespace::Open => {
-                WMIConnection::with_namespace_path("root\\OpenHardwareMonitor").ok()
-            }
+            LhmNamespace::Libre => Some(LIBRE_HARDWARE_MONITOR),
+            LhmNamespace::Open => Some(OPEN_HARDWARE_MONITOR),
         }
     }
 
-    /// Get temperature from LibreHardwareMonitor WMI.
+    /// Get temperature from LibreHardwareMonitor WMI over the cached
+    /// connection to [`Self::namespace_path`] (`None` when it could not be
+    /// opened).
     ///
     /// # Returns
     /// * `TemperatureResult::Success(temp)` - Temperature in Celsius
     /// * `TemperatureResult::NotFound` - LibreHardwareMonitor WMI namespace not available
     /// * `TemperatureResult::Error` - Transient error during query
     /// * `TemperatureResult::NoValidReading` - Query succeeded but returned invalid data
-    pub fn get_temperature(&self) -> TemperatureResult {
+    pub fn get_temperature(&self, connection: Option<&WMIConnection>) -> TemperatureResult {
         // Check if any namespace is available (cached)
         if self.get_available_namespace().is_none() {
             return TemperatureResult::NotFound;
         }
 
-        // Create a new connection for this query
-        let connection = match self.create_connection() {
-            Some(conn) => conn,
-            None => return TemperatureResult::Error,
+        let Some(connection) = connection else {
+            return TemperatureResult::Error;
         };
 
         // Query for CPU temperature sensors

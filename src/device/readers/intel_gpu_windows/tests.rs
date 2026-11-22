@@ -198,3 +198,25 @@ fn sycl_capable_label_renders_known_yes_no_unknown() {
     );
     assert_eq!(IntelArchitecture::Unknown.sycl_capable_label(), "Unknown");
 }
+
+#[test]
+fn controller_inventory_is_queried_once_and_vram_warning_fires_once() {
+    use crate::device::readers::windows_video_controller::tests::{controller, counting_cache};
+    use std::sync::atomic::Ordering;
+
+    let (cache, calls) = counting_cache(Some(vec![
+        controller("Intel(R) Arc(TM) A770 Graphics", "PCI\\VEN_8086&DEV_56A0"),
+        controller("Intel(R) Display Audio", "HDAUDIO\\FUNC_01"),
+    ]));
+    let reader = IntelWindowsGpuReader::with_controllers(cache);
+    for _ in 0..10 {
+        let gpus = reader.query_intel_gpus();
+        assert_eq!(gpus.len(), 1);
+        assert_eq!(gpus[0].name, "Intel(R) Arc(TM) A770 Graphics");
+    }
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+    // The fixture's AdapterRAM sits at the 4 GB cap, so the warning was due
+    // once and is now recorded for that device only.
+    assert!(!reader.first_vram_warning("PCI\\VEN_8086&DEV_56A0"));
+    assert!(reader.first_vram_warning("PCI\\VEN_8086&DEV_5690"));
+}

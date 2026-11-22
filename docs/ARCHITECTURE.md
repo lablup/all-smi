@@ -263,7 +263,7 @@ pub trait MetricsExporter: Send + Sync {
 
 #### Windows (`src/device/cpu_windows.rs`, `src/device/windows_temp/`)
 - WMI for processor information (MaxClockSpeed, cache sizes, socket count)
-- Thread-local WMI connections for efficiency
+- One dedicated WMI worker thread (`src/device/windows_wmi_worker.rs`) owns the COM-initialised connections, keyed by namespace; readers submit closures with a 5 s timeout. Static probes (`Win32_Processor`, `Win32_VideoController`) are cached via `CachedProbe`, and the temperature chain applies per-source backoff after repeated failures (`src/device/windows_temp_chain.rs`)
 - Temperature monitoring via fallback chain:
   1. **MSAcpi_ThermalZoneTemperature**: Standard ACPI thermal zones (root\WMI namespace)
   2. **AMD Ryzen Master SDK**: FFI integration with `AMDRyzenMasterMonitoringDLL.dll`

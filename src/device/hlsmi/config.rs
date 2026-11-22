@@ -17,8 +17,6 @@
 pub struct HlsmiConfig {
     /// Interval in seconds for hl-smi collection
     pub interval_secs: u64,
-    /// Buffer capacity (number of samples to store)
-    pub buffer_capacity: usize,
     /// Monitoring thread sleep duration in seconds
     pub monitor_interval_secs: u64,
     /// Query fields for hl-smi command
@@ -28,8 +26,7 @@ pub struct HlsmiConfig {
 impl Default for HlsmiConfig {
     fn default() -> Self {
         Self {
-            interval_secs: 3,     // Default 3 seconds
-            buffer_capacity: 120, // Store up to 2 minutes of data (at 1s interval)
+            interval_secs: 3, // Default 3 seconds
             monitor_interval_secs: 5,
             query_fields: vec![
                 "index".to_string(),
@@ -130,7 +127,6 @@ mod tests {
     fn test_default_config() {
         let config = HlsmiConfig::default();
         assert_eq!(config.interval_secs, 3);
-        assert_eq!(config.buffer_capacity, 120);
         assert_eq!(config.monitor_interval_secs, 5);
         assert_eq!(config.query_fields.len(), 11);
     }

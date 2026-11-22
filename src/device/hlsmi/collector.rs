@@ -52,6 +52,11 @@ impl DataCollector {
         self.store.get_latest_data()
     }
 
+    /// Kill the hl-smi child from the panic hook, without blocking.
+    pub(super) fn kill_child_on_panic(&self) {
+        self.process_manager.kill_child_on_panic();
+    }
+
     /// Check if collection is running (test use only)
     #[cfg(test)]
     pub(super) fn is_running(&self) -> bool {
@@ -90,7 +95,7 @@ mod tests {
     #[test]
     fn test_collector_creation() {
         let config = HlsmiConfig::default();
-        let store = Arc::new(MetricsStore::new(120));
+        let store = Arc::new(MetricsStore::new());
         let collector = DataCollector::new(config, store);
 
         // Verify collector is created but not running
@@ -100,7 +105,7 @@ mod tests {
     #[test]
     fn test_wait_for_initial_data_timeout() {
         let config = HlsmiConfig::default();
-        let store = Arc::new(MetricsStore::new(120));
+        let store = Arc::new(MetricsStore::new());
         let collector = DataCollector::new(config, store);
 
         // Should timeout since we haven't started collection

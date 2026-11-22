@@ -17,9 +17,9 @@ use std::io::BufRead;
 use std::io::BufReader;
 use std::panic::{self, AssertUnwindSafe};
 use std::process::{Child, Stdio};
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
-use std::thread;
+use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use super::config::{HlsmiConfig, ReaderCommand};
@@ -35,6 +35,10 @@ pub struct ProcessManager {
     is_running: Arc<Mutex<bool>>,
     config: HlsmiConfig,
     store: Arc<MetricsStore>,
+    /// Wakes the monitor thread out of its interval wait on shutdown.
+    monitor_shutdown_tx: Option<Sender<()>>,
+    /// Joined by `shutdown`, so the thread is gone before it returns.
+    monitor_handle: Option<JoinHandle<()>>,
 }
 
 impl ProcessManager {
@@ -46,6 +50,8 @@ impl ProcessManager {
             is_running: Arc::new(Mutex::new(false)),
             config,
             store,
+            monitor_shutdown_tx: None,
+            monitor_handle: None,
         }
     }
 
@@ -54,23 +60,9 @@ impl ProcessManager {
         let (command_tx, command_rx) = mpsc::channel();
         self.command_tx = Some(command_tx);
 
-        // Set up panic handler to cleanup on panic
-        let process_clone = self.process.clone();
-        let is_running_clone = self.is_running.clone();
-        let old_hook = panic::take_hook();
-        panic::set_hook(Box::new(move |panic_info| {
-            // Cleanup subprocess on panic
-            if let Ok(mut guard) = process_clone.lock()
-                && let Some(mut child) = guard.take()
-            {
-                let _ = child.kill();
-                let _ = child.wait();
-            }
-            if let Ok(mut running) = is_running_clone.lock() {
-                *running = false;
-            }
-            old_hook(panic_info);
-        }));
+        // The panic hook that kills the child is installed once per process
+        // by the manager (`manager::install_panic_hook`), not here: wrapping
+        // the hook on every start grew the chain by one layer per cycle.
 
         // Start the hl-smi process
         self.start_hlsmi_process(command_rx)?;
@@ -105,11 +97,10 @@ impl ProcessManager {
         let stdout = child.stdout.take().ok_or("Failed to capture stdout")?;
 
         // Start reader thread with panic catching
-        let data_buffer = self.store.get_buffer();
-        let buffer_capacity = self.config.buffer_capacity;
+        let store = self.store.clone();
         thread::spawn(move || {
             let _ = panic::catch_unwind(AssertUnwindSafe(|| {
-                Self::reader_thread(stdout, data_buffer, command_rx, buffer_capacity);
+                Self::reader_thread(stdout, &store, command_rx);
             }));
         });
 
@@ -126,9 +117,8 @@ impl ProcessManager {
     /// hl-smi outputs CSV lines continuously, we accumulate a complete snapshot
     fn reader_thread(
         stdout: std::process::ChildStdout,
-        data_buffer: Arc<Mutex<std::collections::VecDeque<String>>>,
+        store: &MetricsStore,
         command_rx: Receiver<ReaderCommand>,
-        buffer_capacity: usize,
     ) {
         use std::fmt::Write;
 
@@ -164,11 +154,7 @@ impl ProcessManager {
             if device_index == 0 && lines_in_snapshot > 0 {
                 // Store the complete snapshot we just finished
                 if !current_snapshot.is_empty() {
-                    let mut buffer = data_buffer.lock().unwrap();
-                    if buffer.len() >= buffer_capacity {
-                        buffer.pop_front(); // Remove oldest
-                    }
-                    buffer.push_back(std::mem::take(&mut current_snapshot));
+                    store.push_section(std::mem::take(&mut current_snapshot));
                     current_snapshot.reserve(4096);
                 }
 
@@ -188,27 +174,31 @@ impl ProcessManager {
             // If we know device count and have collected all devices, store it immediately
             // This handles cases where output comes in batches
             if device_count > 0 && lines_in_snapshot >= device_count {
-                let mut buffer = data_buffer.lock().unwrap();
-                if buffer.len() >= buffer_capacity {
-                    buffer.pop_front();
-                }
-                buffer.push_back(std::mem::take(&mut current_snapshot));
+                store.push_section(std::mem::take(&mut current_snapshot));
                 current_snapshot.reserve(4096);
                 lines_in_snapshot = 0;
             }
         }
     }
 
-    /// Start a background thread to monitor the process
-    fn start_monitor_thread(&self) {
+    /// Start a background thread to monitor the process.
+    ///
+    /// The thread waits on a shutdown channel between checks instead of
+    /// sleeping, so `shutdown` can wake it and join it (issue #501).
+    fn start_monitor_thread(&mut self) {
         let process_arc = self.process.clone();
         let store_arc = self.store.clone();
         let is_running = self.is_running.clone();
         let config = self.config.clone();
+        let (shutdown_tx, shutdown_rx) = mpsc::channel::<()>();
 
-        thread::spawn(move || {
-            loop {
-                thread::sleep(Duration::from_secs(config.monitor_interval_secs));
+        let handle = thread::spawn(move || {
+            let interval = Duration::from_secs(config.monitor_interval_secs);
+            // Any other outcome is a shutdown signal or a dropped sender.
+            while let Err(RecvTimeoutError::Timeout) = shutdown_rx.recv_timeout(interval) {
+                if !*is_running.lock().unwrap_or_else(|e| e.into_inner()) {
+                    break;
+                }
 
                 let should_restart = {
                     let mut process_guard = process_arc.lock().unwrap();
@@ -251,6 +241,8 @@ impl ProcessManager {
                 }
             }
         });
+        self.monitor_shutdown_tx = Some(shutdown_tx);
+        self.monitor_handle = Some(handle);
     }
 
     /// Restart the hl-smi process
@@ -287,11 +279,10 @@ impl ProcessManager {
         let stdout = child.stdout.take().ok_or("Failed to capture stdout")?;
 
         // Start new reader thread with panic catching
-        let data_buffer = store.get_buffer();
-        let buffer_capacity = config.buffer_capacity;
+        let store = store.clone();
         thread::spawn(move || {
             let _ = panic::catch_unwind(AssertUnwindSafe(|| {
-                Self::reader_thread(stdout, data_buffer, command_rx, buffer_capacity);
+                Self::reader_thread(stdout, &store, command_rx);
             }));
         });
 
@@ -312,6 +303,19 @@ impl ProcessManager {
         // Send shutdown command to reader thread
         if let Some(tx) = &self.command_tx {
             let _ = tx.send(ReaderCommand::Shutdown);
+        }
+
+        // Wake the monitor and wait for it before touching the child, so a
+        // restart it is in the middle of cannot leave a new child behind.
+        if let Some(tx) = self.monitor_shutdown_tx.take() {
+            let _ = tx.send(());
+        }
+        if let Some(handle) = self.monitor_handle.take()
+            && handle.thread().id() != thread::current().id()
+        {
+            // Never self-join: if shutdown ever runs on the monitor thread
+            // itself, the signal above already ends its loop.
+            let _ = handle.join();
         }
 
         // Kill only the process we started
@@ -340,6 +344,22 @@ impl ProcessManager {
         }
     }
 
+    /// Kill the child from the panic hook.
+    ///
+    /// Uses `try_lock` only: the panicking thread may hold either lock, and
+    /// blocking inside a panic hook would deadlock the process.
+    pub(super) fn kill_child_on_panic(&self) {
+        if let Ok(mut guard) = self.process.try_lock()
+            && let Some(mut child) = guard.take()
+        {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        if let Ok(mut running) = self.is_running.try_lock() {
+            *running = false;
+        }
+    }
+
     /// Check if the process is running (test use only)
     #[cfg(test)]
     pub(super) fn is_running(&self) -> bool {
@@ -356,6 +376,44 @@ impl Drop for ProcessManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Issue #501: the monitor used to sleep forever once the child was
+    /// gone, leaking one thread per `AllSmi` lifecycle.
+    #[test]
+    fn shutdown_joins_the_monitor_thread() {
+        let config = HlsmiConfig::default();
+        assert!(config.monitor_interval_secs >= 5);
+        let mut manager = ProcessManager::new(config, Arc::new(MetricsStore::new()));
+        *manager.is_running.lock().unwrap() = true;
+        manager.start_monitor_thread();
+        assert!(manager.monitor_handle.is_some());
+
+        let started = std::time::Instant::now();
+        manager.shutdown();
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "shutdown waited {:?} for the monitor",
+            started.elapsed()
+        );
+        assert!(manager.monitor_handle.is_none(), "monitor was not joined");
+        assert!(!manager.is_running());
+    }
+
+    #[test]
+    fn monitor_exits_when_marked_not_running() {
+        let config = HlsmiConfig {
+            monitor_interval_secs: 0,
+            ..HlsmiConfig::default()
+        };
+        let mut manager = ProcessManager::new(config, Arc::new(MetricsStore::new()));
+        manager.start_monitor_thread();
+        let handle = manager.monitor_handle.take().unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while !handle.is_finished() && std::time::Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(handle.is_finished(), "monitor kept running while stopped");
+    }
 
     #[test]
     fn test_reader_thread_shutdown() {

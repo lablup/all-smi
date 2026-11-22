@@ -187,6 +187,7 @@ struct CFStringRefs {
     gpu_stats: CFStringRef,
     gpu_perf_states: CFStringRef,
     raw_elements: CFStringRef,
+    io_report_channels: CFStringRef,
 }
 
 // SAFETY: CFStringRef is an immutable reference type. Once created and retained,
@@ -237,6 +238,13 @@ impl CFStringRefs {
                 ptr
             };
 
+            let io_report_channels = {
+                let s = CFString::new(IO_REPORT_CHANNELS);
+                let ptr = s.as_concrete_TypeRef();
+                CFRetain(ptr as *const c_void);
+                ptr
+            };
+
             Self {
                 energy_model,
                 cpu_stats,
@@ -244,6 +252,7 @@ impl CFStringRefs {
                 gpu_stats,
                 gpu_perf_states,
                 raw_elements,
+                io_report_channels,
             }
         }
     }
@@ -902,12 +911,13 @@ fn get_io_channels(dict: CFDictionaryRef) -> Vec<CFDictionaryRef> {
     // null-checked and type-checked as a `CFDictionary` before being handed
     // back, so a sample whose structure does not match what IOReport
     // normally returns yields an empty or filtered list instead of driving a
-    // CF accessor with the wrong type.
+    // CF accessor with the wrong type. The key is the process-lifetime static
+    // `IOReportChannels` CFString, so no CFString is allocated per sample.
     unsafe {
         let cf_dict = CFDictionary::<CFType, CFType>::wrap_under_get_rule(dict);
-        let key = CFString::new("IOReportChannels");
+        let key = get_cfstring_refs().io_report_channels as *const c_void;
 
-        if let Some(channels) = cf_dict.find(key.as_CFType().as_CFTypeRef()) {
+        if let Some(channels) = cf_dict.find(key) {
             // The channels value is a CFArray - get its raw pointer
             let arr_ref = channels.as_CFTypeRef() as core_foundation::array::CFArrayRef;
             if arr_ref.is_null()
@@ -1158,6 +1168,9 @@ const GPU_PERF_STATES: &str = "GPU Performance States";
 
 /// Key of the raw element data inside each channel of a sample.
 const RAW_ELEMENTS: &str = "RawElements";
+
+/// Key of the channel array inside a sample dictionary.
+const IO_REPORT_CHANNELS: &str = "IOReportChannels";
 
 /// Shortest interval [`IOReport::get_sample_since_last`] will turn into a
 /// delta. Residency over a window this short is dominated by sampling jitter;

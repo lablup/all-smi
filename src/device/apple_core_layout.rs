@@ -184,6 +184,54 @@ impl CoreLayout {
     }
 }
 
+/// Top-configuration GPU core count for an Apple Silicon brand string.
+///
+/// Used only when `ioreg` publishes no `gpu-core-count`. The brand string
+/// (`machdep.cpu.brand_string`, e.g. `"Apple M2 Pro"`) is split into the
+/// generation token (`M1`..`M5`) and an optional tier word (`Pro`, `Max`,
+/// `Ultra`). Combinations without a published figure return `None` rather
+/// than a guess, and the caller then reports 0 cores.
+pub fn estimate_gpu_cores(cpu_model: &str) -> Option<u32> {
+    let mut words = cpu_model.split_whitespace();
+    let generation = words
+        .by_ref()
+        .find_map(|word| word.strip_prefix('M').and_then(|n| n.parse::<u32>().ok()))?;
+    let tier = words.next().unwrap_or("");
+    let cores = match (generation, tier) {
+        (1, "Pro") => 16,
+        (1, "Max") => 32,
+        (1, "Ultra") => 64,
+        (1, _) => 8,
+        (2, "Pro") => 19,
+        (2, "Max") => 38,
+        (2, "Ultra") => 76,
+        (2, _) => 10,
+        (3, "Pro") => 18,
+        (3, "Max") => 40,
+        (3, "Ultra") => 80,
+        (3, _) => 10,
+        (4, "Pro") => 20,
+        (4, "Max") => 40,
+        (4, "Ultra") => return None,
+        (4, _) => 10,
+        // Only the base M5 figure is published so far.
+        (5, "Pro" | "Max" | "Ultra") => return None,
+        (5, _) => 10,
+        _ => return None,
+    };
+    Some(cores)
+}
+
+/// GPU core count from `ioreg -rc AGXAccelerator -d1` output, falling back
+/// to [`estimate_gpu_cores`] for `cpu_model` when the key is absent.
+pub fn gpu_core_count_from_ioreg(output: &str, cpu_model: &str) -> Option<u32> {
+    output
+        .lines()
+        .filter(|line| line.contains("\"gpu-core-count\""))
+        .find_map(|line| line.split('=').nth(1)?.trim().parse::<u32>().ok())
+        .or_else(|| estimate_gpu_cores(cpu_model))
+}
+
 fn tier_from_name(name: &str) -> Option<CoreType> {
     if name.eq_ignore_ascii_case("super") {
         Some(CoreType::Super)
@@ -336,5 +384,49 @@ mod tests {
         assert_eq!(layout.performance_cores(), 8);
         assert_eq!(layout.efficiency_cores(), 4);
         assert_eq!(layout.super_cores(), 0);
+    }
+
+    #[test]
+    fn gpu_core_estimate_by_generation_and_tier() {
+        let cases = [
+            ("Apple M1", Some(8)),
+            ("Apple M1 Pro", Some(16)),
+            ("Apple M1 Max", Some(32)),
+            ("Apple M1 Ultra", Some(64)),
+            ("Apple M2", Some(10)),
+            ("Apple M2 Pro", Some(19)),
+            ("Apple M2 Max", Some(38)),
+            ("Apple M2 Ultra", Some(76)),
+            ("Apple M3", Some(10)),
+            ("Apple M3 Pro", Some(18)),
+            ("Apple M3 Max", Some(40)),
+            ("Apple M3 Ultra", Some(80)),
+            ("Apple M4", Some(10)),
+            ("Apple M4 Pro", Some(20)),
+            ("Apple M4 Max", Some(40)),
+            ("Apple M4 Ultra", None),
+            ("Apple M5", Some(10)),
+            ("Apple M5 Max", None),
+            ("Apple M9", None),
+            ("Intel(R) Core(TM) i9-9980HK CPU @ 2.40GHz", None),
+            ("", None),
+        ];
+        for (model, expected) in cases {
+            assert_eq!(estimate_gpu_cores(model), expected, "{model:?}");
+        }
+    }
+
+    #[test]
+    fn ioreg_gpu_core_count_wins_over_the_estimate() {
+        let output =
+            "+-o AGXAcceleratorG14X  <class AGXAcceleratorG14X>\n    \"gpu-core-count\" = 30\n";
+        assert_eq!(gpu_core_count_from_ioreg(output, "Apple M2 Pro"), Some(30));
+    }
+
+    #[test]
+    fn missing_ioreg_key_falls_back_to_the_model_estimate() {
+        let output = "+-o AGXAcceleratorG14X  <class AGXAcceleratorG14X>\n    \"IOClass\" = \"AGXAcceleratorG14X\"\n";
+        assert_eq!(gpu_core_count_from_ioreg(output, "Apple M2 Pro"), Some(19));
+        assert_eq!(gpu_core_count_from_ioreg("", "Apple M9"), None);
     }
 }

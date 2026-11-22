@@ -14,18 +14,26 @@
 
 use crate::device::cpu_topology::tier_utilization;
 use crate::device::{CoreType, CoreUtilization, CpuInfo, CpuReader, CpuSocketInfo, CpuTier};
+use crate::utils::cached_probe::CachedProbe;
 use crate::utils::system::get_hostname;
 use chrono::Local;
 use serde::Deserialize;
-use std::sync::RwLock;
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::{Duration, Instant};
 use sysinfo::{CpuRefreshKind, System};
-use wmi::WMIConnection;
 
 // Import the temperature fallback chain
 use super::cpu_windows_arm::{
     classify_platform, core_types_from_identifiers, tier_topology_from_identifiers,
 };
 use super::windows_temp::TemperatureManager;
+use super::windows_wmi_worker::{CIMV2, with_wmi};
+
+/// `(max clock MHz, L2+L3 cache MB, socket count)` from `Win32_Processor`.
+type ProcessorInfo = (u32, u32, u32);
+
+/// How long a failed `Win32_Processor` query waits before it is retried.
+const PROCESSOR_INFO_RETRY: Duration = Duration::from_secs(60);
 
 /// Read `HKLM\HARDWARE\DESCRIPTION\System\CentralProcessor\<index>\Identifier`.
 fn read_processor_identifier(index: usize) -> Option<String> {
@@ -77,52 +85,15 @@ struct Win32Processor {
     l3_cache_size: Option<u32>,
 }
 
-// Thread-local WMI connections for reuse within the same thread
-thread_local! {
-    static WMI_CIMV2_CONNECTION: std::cell::RefCell<Option<WMIConnection>> =
-        const { std::cell::RefCell::new(None) };
-    static WMI_ROOT_WMI_CONNECTION: std::cell::RefCell<Option<WMIConnection>> =
-        const { std::cell::RefCell::new(None) };
-}
-
-/// Helper to get or create CIMV2 connection
-fn with_cimv2_connection<T, F: FnOnce(&WMIConnection) -> T>(f: F) -> Option<T> {
-    WMI_CIMV2_CONNECTION.with(|cell| {
-        let mut conn_ref = cell.borrow_mut();
-        // A failed connection is left as `None` on purpose: the caller
-        // gets `None` back and degrades, and the next call retries.
-        if conn_ref.is_none()
-            && let Ok(wmi_con) = WMIConnection::new()
-        {
-            *conn_ref = Some(wmi_con);
-        }
-        conn_ref.as_ref().map(f)
-    })
-}
-
-/// Helper to get or create root\WMI connection
-fn with_root_wmi_connection<T, F: FnOnce(&WMIConnection) -> T>(f: F) -> Option<T> {
-    WMI_ROOT_WMI_CONNECTION.with(|cell| {
-        let mut conn_ref = cell.borrow_mut();
-        // Same as above: a failed connection stays `None` and is retried.
-        if conn_ref.is_none()
-            && let Ok(wmi_con) = WMIConnection::with_namespace_path("root\\WMI")
-        {
-            *conn_ref = Some(wmi_con);
-        }
-        conn_ref.as_ref().map(f)
-    })
-}
-
 pub struct WindowsCpuReader {
     system: RwLock<System>,
     first_refresh_done: RwLock<bool>,
-    // Cached WMI data (static info)
-    cached_max_frequency: RwLock<Option<u32>>,
-    cached_cache_size: RwLock<Option<u32>>,
-    cached_socket_count: RwLock<Option<u32>>,
-    // Temperature manager with fallback chain
-    temperature_manager: TemperatureManager,
+    // Static `Win32_Processor` info: kept forever once read, a failed
+    // query retried at most once per PROCESSOR_INFO_RETRY (issue #501).
+    processor_info: Mutex<CachedProbe<ProcessorInfo>>,
+    // Temperature manager with fallback chain. Shared with the WMI worker
+    // thread, which runs the chain against its cached connections.
+    temperature_manager: Arc<TemperatureManager>,
     // Per-logical-processor registry `Identifier` strings, read once:
     // they name the ARM core design and so the P/E cluster (issue #459).
     processor_identifiers: Vec<Option<String>>,
@@ -162,10 +133,8 @@ impl WindowsCpuReader {
         Self {
             system: RwLock::new(system),
             first_refresh_done: RwLock::new(true), // Already initialized
-            cached_max_frequency: RwLock::new(None),
-            cached_cache_size: RwLock::new(None),
-            cached_socket_count: RwLock::new(None),
-            temperature_manager: TemperatureManager::new(),
+            processor_info: Mutex::new(CachedProbe::new()),
+            temperature_manager: Arc::new(TemperatureManager::new()),
             processor_identifiers,
             cpu_tiers,
             tier_index_by_core,
@@ -182,86 +151,17 @@ impl WindowsCpuReader {
     /// 4. LibreHardwareMonitor WMI (any CPU)
     /// 5. ThermalZoneInformation performance counters (any CPU, no elevation)
     /// 6. None (graceful fallback)
+    ///
+    /// The chain runs exactly once per call, on the WMI worker thread, and
+    /// each source takes its own namespace connection there.
     fn get_cpu_temperature(&self) -> Option<u32> {
-        // Get the root\WMI connection for ACPI thermal zones
-        // The cimv2 connection serves the last fallback
-        // (Win32_PerfFormattedData_Counters_ThermalZoneInformation).
-        with_cimv2_connection(|cimv2| {
-            with_root_wmi_connection(|wmi_conn| {
-                self.temperature_manager
-                    .get_temperature(Some(wmi_conn), Some(cimv2))
-            })
-            .flatten()
-            // If root\WMI connection failed, still try other sources
-            .or_else(|| self.temperature_manager.get_temperature(None, Some(cimv2)))
-        })
-        .flatten()
-        .or_else(|| self.temperature_manager.get_temperature(None, None))
+        let manager = Arc::clone(&self.temperature_manager);
+        with_wmi(move |connections| manager.get_temperature(connections)).flatten()
     }
 
     /// Get static CPU info from WMI (max frequency, cache size, socket count)
-    /// Uses thread-local connection for efficiency
     fn get_wmi_processor_info(&self) -> (Option<u32>, Option<u32>, u32) {
-        // Check cache first
-        let cached_freq = *self
-            .cached_max_frequency
-            .read()
-            .expect("cached_max_frequency lock poisoned");
-        let cached_cache = *self
-            .cached_cache_size
-            .read()
-            .expect("cached_cache_size lock poisoned");
-        let cached_sockets = *self
-            .cached_socket_count
-            .read()
-            .expect("cached_socket_count lock poisoned");
-
-        if cached_freq.is_some() && cached_cache.is_some() && cached_sockets.is_some() {
-            return (cached_freq, cached_cache, cached_sockets.unwrap_or(1));
-        }
-
-        // Query WMI for processor info using thread-local connection
-        // Win32_Processor returns one instance per physical processor (socket)
-        let result = with_cimv2_connection(|wmi_con| {
-            let results: Result<Vec<Win32Processor>, _> = wmi_con
-                .raw_query("SELECT MaxClockSpeed, L2CacheSize, L3CacheSize FROM Win32_Processor");
-
-            if let Ok(procs) = results {
-                // Number of Win32_Processor instances = number of physical processors (sockets)
-                let socket_count = procs.len().max(1) as u32;
-
-                if let Some(proc) = procs.first() {
-                    let max_freq = proc.max_clock_speed.unwrap_or(0);
-                    // Cache size in KB, convert to MB
-                    let l2 = proc.l2_cache_size.unwrap_or(0);
-                    let l3 = proc.l3_cache_size.unwrap_or(0);
-                    let cache_mb = (l2 + l3) / 1024;
-
-                    return Some((max_freq, cache_mb, socket_count));
-                }
-            }
-            None
-        })
-        .flatten();
-
-        if let Some((freq, cache, sockets)) = result {
-            *self
-                .cached_max_frequency
-                .write()
-                .expect("cached_max_frequency lock poisoned") = Some(freq);
-            *self
-                .cached_cache_size
-                .write()
-                .expect("cached_cache_size lock poisoned") = Some(cache);
-            *self
-                .cached_socket_count
-                .write()
-                .expect("cached_socket_count lock poisoned") = Some(sockets);
-            (Some(freq), Some(cache), sockets)
-        } else {
-            // Default to 1 socket if WMI query fails
-            (None, None, 1)
-        }
+        processor_info_from_probe(&self.processor_info, Instant::now(), query_processor_info)
     }
 
     fn get_cpu_info_from_system(&self) -> Result<CpuInfo, Box<dyn std::error::Error>> {
@@ -416,6 +316,48 @@ impl WindowsCpuReader {
     }
 }
 
+/// Static processor info through `probe`, querying with `query` when the
+/// probe's policy allows. Defaults to one socket when nothing is known.
+fn processor_info_from_probe(
+    probe: &Mutex<CachedProbe<ProcessorInfo>>,
+    now: Instant,
+    query: impl FnOnce() -> Option<ProcessorInfo>,
+) -> (Option<u32>, Option<u32>, u32) {
+    let info = probe.lock().unwrap_or_else(|e| e.into_inner()).get_or_try(
+        now,
+        None,
+        PROCESSOR_INFO_RETRY,
+        query,
+    );
+    match info {
+        Some((max_freq, cache_mb, sockets)) => (Some(max_freq), Some(cache_mb), sockets),
+        None => (None, None, 1),
+    }
+}
+
+/// Query `Win32_Processor` on the WMI worker.
+fn query_processor_info() -> Option<ProcessorInfo> {
+    with_wmi(|connections| {
+        let queried: Result<Vec<Win32Processor>, _> = connections
+            .get(CIMV2)?
+            .raw_query("SELECT MaxClockSpeed, L2CacheSize, L3CacheSize FROM Win32_Processor");
+        let Ok(procs) = queried else {
+            // The connection may be stale (winmgmt restarted): reconnect
+            // on the next attempt instead of failing against it forever.
+            connections.invalidate(CIMV2);
+            return None;
+        };
+        // One Win32_Processor instance per physical processor (socket).
+        let socket_count = procs.len().max(1) as u32;
+        let proc = procs.first()?;
+        let max_freq = proc.max_clock_speed.unwrap_or(0);
+        // Cache size in KB, convert to MB
+        let cache_mb = (proc.l2_cache_size.unwrap_or(0) + proc.l3_cache_size.unwrap_or(0)) / 1024;
+        Some((max_freq, cache_mb, socket_count))
+    })
+    .flatten()
+}
+
 impl CpuReader for WindowsCpuReader {
     fn get_cpu_info(&self) -> Vec<CpuInfo> {
         match self.get_cpu_info_from_system() {
@@ -425,5 +367,39 @@ impl CpuReader for WindowsCpuReader {
                 vec![]
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn failed_processor_query_is_not_retried_inside_a_minute() {
+        let probe = Mutex::new(CachedProbe::new());
+        let calls = Cell::new(0);
+        let t0 = Instant::now();
+        let failing = || {
+            calls.set(calls.get() + 1);
+            None
+        };
+        for tick in 0..30 {
+            let at = t0 + Duration::from_secs(tick * 2);
+            assert_eq!(
+                processor_info_from_probe(&probe, at, failing),
+                (None, None, 1)
+            );
+        }
+        assert_eq!(calls.get(), 1);
+        let answer = processor_info_from_probe(&probe, t0 + Duration::from_secs(60), || {
+            calls.set(calls.get() + 1);
+            Some((3000, 32, 2))
+        });
+        assert_eq!(answer, (Some(3000), Some(32), 2));
+        assert_eq!(calls.get(), 2);
+        let later = processor_info_from_probe(&probe, t0 + Duration::from_secs(86_400), failing);
+        assert_eq!(later, (Some(3000), Some(32), 2), "success kept for good");
+        assert_eq!(calls.get(), 2);
     }
 }

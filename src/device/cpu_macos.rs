@@ -18,21 +18,59 @@ use crate::device::macos_native::get_native_metrics_manager;
 // native metrics manager is IOReport-backed and therefore Apple Silicon only.
 use crate::device::macos_native::smc::SmcConnection;
 
-use crate::device::apple_core_layout::CoreLayout;
+use crate::device::apple_core_layout::{CoreLayout, gpu_core_count_from_ioreg};
 use crate::device::cpu_macos_intel::IntelCpuHardware;
 use crate::device::{
     AppleSiliconCpuInfo, CoreType, CoreUtilization, CpuInfo, CpuPlatformType, CpuReader,
     CpuSocketInfo,
 };
+use crate::utils::cached_probe::CachedProbe;
 use crate::utils::command::new_command;
 use crate::utils::system::get_hostname;
 use chrono::Local;
-use std::sync::{Mutex, RwLock};
+use std::ffi::CString;
+use std::sync::{Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 use sysinfo::System;
 
 /// (cpu_model, core_layout, gpu_core_count)
 type AppleSiliconHwInfo = (String, CoreLayout, u32);
+
+/// How long a failed Apple Silicon hardware probe waits before it spawns
+/// `sysctl`/`ioreg` again (issue #501).
+const HARDWARE_PROBE_RETRY: Duration = Duration::from_secs(60);
+
+/// Read an integer sysctl by name without spawning `sysctl`.
+///
+/// Accepts both 32-bit and 64-bit values: the kernel writes the value's own
+/// width and reports it in `size`. Returns `None` for a missing key.
+fn sysctl_u64(name: &str) -> Option<u64> {
+    let name = CString::new(name).ok()?;
+    let mut value: u64 = 0;
+    let mut size = std::mem::size_of::<u64>();
+    // SAFETY: `name` is NUL-terminated; `value` is a writable 8-byte buffer
+    // whose length is passed in `size`, which the kernel updates to the
+    // bytes written; no new value is set (null pointer, zero length).
+    let rc = unsafe {
+        libc::sysctlbyname(
+            name.as_ptr(),
+            (&raw mut value).cast(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if rc != 0 {
+        return None;
+    }
+    match size {
+        8 => Some(value),
+        // A 32-bit value lands in the low four bytes; Apple platforms are
+        // little-endian, and `value` started at zero.
+        4 => Some(value & u64::from(u32::MAX)),
+        _ => None,
+    }
+}
 
 pub struct MacOsCpuReader {
     is_apple_silicon: bool,
@@ -45,15 +83,15 @@ pub struct MacOsCpuReader {
     /// interval after this instant, so the wait overlaps whatever else runs
     /// between construction and the first tick (issue #414).
     first_sample_at: Instant,
-    // Cached hardware info for Apple Silicon
-    cached_cpu_model: Mutex<Option<String>>,
-    /// Whole perflevel topology: tier counts and the perflevel index behind
-    /// each tier, so the L2 cache readers address the right sysctl key.
-    cached_core_layout: Mutex<Option<CoreLayout>>,
-    cached_gpu_core_count: Mutex<Option<u32>>,
-    cached_s_core_l2_cache_mb: Mutex<Option<u32>>,
-    cached_p_core_l2_cache_mb: Mutex<Option<u32>>,
-    cached_e_core_l2_cache_mb: Mutex<Option<u32>>,
+    /// Apple Silicon CPU model, perflevel topology and GPU core count.
+    /// Kept for the process lifetime once read; a failed probe is retried
+    /// at most once per `HARDWARE_PROBE_RETRY`.
+    hardware_probe: Mutex<CachedProbe<AppleSiliconHwInfo>>,
+    /// Per-tier L2 cache size in MB. Fixed hardware, so the outcome is
+    /// cached whether or not the sysctl answered.
+    s_core_l2_cache_mb: OnceLock<Option<u32>>,
+    p_core_l2_cache_mb: OnceLock<Option<u32>>,
+    e_core_l2_cache_mb: OnceLock<Option<u32>>,
     // Cached hardware info for Intel
     cached_intel_info: Mutex<Option<IntelCpuHardware>>,
     // Cached SMC connection, used by the Intel path only
@@ -81,12 +119,10 @@ impl MacOsCpuReader {
             system: RwLock::new(system),
             first_refresh_done: RwLock::new(false),
             first_sample_at,
-            cached_cpu_model: Mutex::new(None),
-            cached_core_layout: Mutex::new(None),
-            cached_gpu_core_count: Mutex::new(None),
-            cached_s_core_l2_cache_mb: Mutex::new(None),
-            cached_p_core_l2_cache_mb: Mutex::new(None),
-            cached_e_core_l2_cache_mb: Mutex::new(None),
+            hardware_probe: Mutex::new(CachedProbe::new()),
+            s_core_l2_cache_mb: OnceLock::new(),
+            p_core_l2_cache_mb: OnceLock::new(),
+            e_core_l2_cache_mb: OnceLock::new(),
             cached_intel_info: Mutex::new(None),
             smc: Mutex::new(SmcConnection::default()),
         }
@@ -119,24 +155,18 @@ impl MacOsCpuReader {
         instance: String,
         time: String,
     ) -> Result<CpuInfo, Box<dyn std::error::Error>> {
-        // Check cache BEFORE calling sysctl commands
-        // IMPORTANT: Read cache values first and drop the locks before any else branch
-        let cached_values = {
-            let cpu_model = self.cached_cpu_model.lock().unwrap().clone();
-            let core_layout = self.cached_core_layout.lock().unwrap().clone();
-            let gpu_core_count = *self.cached_gpu_core_count.lock().unwrap();
-            (cpu_model, core_layout, gpu_core_count)
-        };
-        // Now all locks are released
-
-        let (cpu_model, core_layout, gpu_core_count) =
-            if let (Some(cpu_model), Some(core_layout), Some(gpu_core_count)) = cached_values {
-                // Use cached values - avoids sysctl/ioreg calls
-                (cpu_model, core_layout, gpu_core_count)
-            } else {
-                // Get CPU model and core counts using fast sysctl commands (first time only)
-                self.parse_apple_silicon_hardware_info_fast()?
-            };
+        // sysctl/ioreg run once on success, and at most once per
+        // HARDWARE_PROBE_RETRY while the probe keeps failing (issue #501).
+        let (cpu_model, core_layout, gpu_core_count) = self
+            .hardware_probe
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get_or_try(Instant::now(), None, HARDWARE_PROBE_RETRY, || {
+                self.probe_apple_silicon_hardware()
+                    .map_err(|e| eprintln!("Apple Silicon hardware probe failed: {e}"))
+                    .ok()
+            })
+            .ok_or("Apple Silicon hardware info is unavailable")?;
 
         let s_core_count = core_layout.super_cores();
         let p_core_count = core_layout.performance_cores();
@@ -222,9 +252,15 @@ impl MacOsCpuReader {
         let total_threads = total_cores; // Apple Silicon doesn't use hyperthreading
 
         // Get cache sizes for S, P and E cores
-        let s_core_l2_cache_mb = self.get_s_core_l2_cache_size().ok();
-        let p_core_l2_cache_mb = self.get_p_core_l2_cache_size().ok();
-        let e_core_l2_cache_mb = self.get_e_core_l2_cache_size().ok();
+        let s_core_l2_cache_mb =
+            Self::core_l2_cache_mb(CoreType::Super, &core_layout, &self.s_core_l2_cache_mb);
+        let p_core_l2_cache_mb = Self::core_l2_cache_mb(
+            CoreType::Performance,
+            &core_layout,
+            &self.p_core_l2_cache_mb,
+        );
+        let e_core_l2_cache_mb =
+            Self::core_l2_cache_mb(CoreType::Efficiency, &core_layout, &self.e_core_l2_cache_mb);
 
         // Calculate S-core, P-core and E-core utilization from per-core data if available
         let (s_core_utilization, p_core_utilization, e_core_utilization) =
@@ -459,19 +495,11 @@ impl MacOsCpuReader {
 
     /// Fast method to get Apple Silicon hardware info using sysctl and ioreg
     /// This is ~50x faster than system_profiler (~10ms vs ~500ms)
-    /// Returns (cpu_model, core_layout, gpu_core_count)
-    fn parse_apple_silicon_hardware_info_fast(
+    /// Returns (cpu_model, core_layout, gpu_core_count). Caching is the
+    /// caller's job (`hardware_probe`).
+    fn probe_apple_silicon_hardware(
         &self,
     ) -> Result<AppleSiliconHwInfo, Box<dyn std::error::Error>> {
-        // Check if we have cached values
-        if let (Some(cpu_model), Some(core_layout), Some(gpu_core_count)) = (
-            self.cached_cpu_model.lock().unwrap().clone(),
-            self.cached_core_layout.lock().unwrap().clone(),
-            *self.cached_gpu_core_count.lock().unwrap(),
-        ) {
-            return Ok((cpu_model, core_layout, gpu_core_count));
-        }
-
         // Get CPU model using sysctl (fast: ~10ms vs system_profiler ~500ms)
         let cpu_model = self.get_cpu_model_sysctl()?;
 
@@ -489,18 +517,15 @@ impl MacOsCpuReader {
 
         let core_layout = CoreLayout::from_sysctl_output(&String::from_utf8_lossy(&output.stdout));
 
-        // Get GPU core count using ioreg (fast: ~50ms vs system_profiler ~500ms)
-        let gpu_core_count = self.get_gpu_core_count_ioreg().unwrap_or(0);
-
         // Any layout that names no cores at all is unusable.
         if core_layout.total_cores() == 0 {
             return Err("Failed to get core counts".into());
         }
 
-        // Cache the values
-        *self.cached_cpu_model.lock().unwrap() = Some(cpu_model.clone());
-        *self.cached_core_layout.lock().unwrap() = Some(core_layout.clone());
-        *self.cached_gpu_core_count.lock().unwrap() = Some(gpu_core_count);
+        // Get GPU core count using ioreg (fast: ~50ms vs system_profiler
+        // ~500ms). The model is passed in: the estimate fallback used to read
+        // a cache that was only written after this call (issue #501).
+        let gpu_core_count = self.get_gpu_core_count_ioreg(&cpu_model);
 
         Ok((cpu_model, core_layout, gpu_core_count))
     }
@@ -526,67 +551,16 @@ impl MacOsCpuReader {
         }
     }
 
-    /// Get GPU core count using ioreg (faster than system_profiler)
-    fn get_gpu_core_count_ioreg(&self) -> Result<u32, Box<dyn std::error::Error>> {
+    /// GPU core count from ioreg (faster than system_profiler), estimated
+    /// from `cpu_model` when ioreg publishes no `gpu-core-count`; 0 when
+    /// neither knows.
+    fn get_gpu_core_count_ioreg(&self, cpu_model: &str) -> u32 {
         let output = new_command("ioreg")
             .args(["-rc", "AGXAccelerator", "-d1"])
-            .output()?;
-
-        let output_str = String::from_utf8_lossy(&output.stdout);
-
-        // Look for "gpu-core-count" in ioreg output
-        for line in output_str.lines() {
-            if line.contains("\"gpu-core-count\"") {
-                // Format: "gpu-core-count" = 10
-                let parts: Vec<&str> = line.split('=').collect();
-                if parts.len() >= 2
-                    && let Ok(count) = parts[1].trim().parse::<u32>()
-                {
-                    return Ok(count);
-                }
-            }
-        }
-
-        // Fallback: estimate from CPU model
-        self.estimate_gpu_cores_from_model()
-    }
-
-    /// Estimate GPU core count from CPU model name
-    fn estimate_gpu_cores_from_model(&self) -> Result<u32, Box<dyn std::error::Error>> {
-        if let Some(cpu_model) = self.cached_cpu_model.lock().unwrap().clone() {
-            let model = cpu_model.as_str();
-            let core_count = match model {
-                s if s.contains("M1 ")
-                    && !s.contains("Pro")
-                    && !s.contains("Max")
-                    && !s.contains("Ultra") =>
-                {
-                    8
-                }
-                s if s.contains("M1 Pro") => 16,
-                s if s.contains("M1 Max") => 32,
-                s if s.contains("M1 Ultra") => 64,
-                s if s.contains("M2 ")
-                    && !s.contains("Pro")
-                    && !s.contains("Max")
-                    && !s.contains("Ultra") =>
-                {
-                    10
-                }
-                s if s.contains("M2 Pro") => 19,
-                s if s.contains("M2 Max") => 38,
-                s if s.contains("M2 Ultra") => 76,
-                s if s.contains("M3 ") && !s.contains("Pro") && !s.contains("Max") => 10,
-                s if s.contains("M3 Pro") => 18,
-                s if s.contains("M3 Max") => 40,
-                s if s.contains("M4 ") && !s.contains("Pro") && !s.contains("Max") => 10,
-                s if s.contains("M4 Pro") => 20,
-                s if s.contains("M4 Max") => 40,
-                _ => 8, // Default fallback
-            };
-            return Ok(core_count);
-        }
-        Err("Cannot estimate GPU cores without CPU model".into())
+            .output()
+            .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
+            .unwrap_or_default();
+        gpu_core_count_from_ioreg(&output, cpu_model).unwrap_or(0)
     }
 
     // These methods are no longer used since we fetch both values in a single sysctl call
@@ -649,55 +623,21 @@ impl MacOsCpuReader {
         Err("Failed to parse GPU core count".into())
     }
 
-    /// Cached perflevel topology. Populated by
-    /// `parse_apple_silicon_hardware_info_fast` before any L2 reader runs.
-    fn cached_core_layout(&self) -> Option<CoreLayout> {
-        self.cached_core_layout.lock().unwrap().clone()
-    }
-
-    /// Read `hw.perflevelN.l2cachesize` for the perflevel behind `tier`.
+    /// L2 cache size in MB for the perflevel behind `tier`, read once.
     ///
     /// The key comes from the layout, so base M5 reads its E-cluster cache
-    /// from perflevel1 even though its Super cluster occupies perflevel0.
-    fn get_core_l2_cache_size(
-        &self,
+    /// from perflevel1 even though its Super cluster occupies perflevel0. A
+    /// tier the chip lacks, or a key the kernel does not publish, caches
+    /// `None`.
+    fn core_l2_cache_mb(
         tier: CoreType,
-        cache: &Mutex<Option<u32>>,
-    ) -> Result<u32, Box<dyn std::error::Error>> {
-        if let Some(cached) = *cache.lock().unwrap() {
-            return Ok(cached);
-        }
-
-        let layout = self
-            .cached_core_layout()
-            .ok_or("Apple Silicon core layout is not cached yet")?;
-        let key = layout
-            .l2_cache_key(tier)
-            .ok_or_else(|| format!("No {} cores on this chip", tier.short_label()))?;
-
-        let output = new_command("sysctl").arg(&key).output()?;
-
-        let output_str = String::from_utf8_lossy(&output.stdout);
-        let Some(value_str) = output_str.split(':').nth(1) else {
-            return Err(format!("Failed to parse {} L2 cache size", tier.short_label()).into());
-        };
-        let cache_bytes = value_str.trim().parse::<u64>()?;
-        let cache_mb = (cache_bytes / 1024 / 1024) as u32; // Convert bytes to MB
-
-        *cache.lock().unwrap() = Some(cache_mb);
-        Ok(cache_mb)
-    }
-
-    fn get_s_core_l2_cache_size(&self) -> Result<u32, Box<dyn std::error::Error>> {
-        self.get_core_l2_cache_size(CoreType::Super, &self.cached_s_core_l2_cache_mb)
-    }
-
-    fn get_p_core_l2_cache_size(&self) -> Result<u32, Box<dyn std::error::Error>> {
-        self.get_core_l2_cache_size(CoreType::Performance, &self.cached_p_core_l2_cache_mb)
-    }
-
-    fn get_e_core_l2_cache_size(&self) -> Result<u32, Box<dyn std::error::Error>> {
-        self.get_core_l2_cache_size(CoreType::Efficiency, &self.cached_e_core_l2_cache_mb)
+        layout: &CoreLayout,
+        cache: &OnceLock<Option<u32>>,
+    ) -> Option<u32> {
+        *cache.get_or_init(|| {
+            let key = layout.l2_cache_key(tier)?;
+            sysctl_u64(&key).map(|bytes| (bytes / 1024 / 1024) as u32)
+        })
     }
 
     /// The least time between the first two `refresh_cpu_usage` samples for
@@ -943,5 +883,31 @@ impl CpuReader for MacOsCpuReader {
                 vec![]
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sysctl_u64_reads_64_and_32_bit_values() {
+        assert!(sysctl_u64("hw.memsize").is_some_and(|bytes| bytes > 0));
+        assert!(sysctl_u64("hw.ncpu").is_some_and(|n| n > 0));
+    }
+
+    #[test]
+    fn sysctl_u64_reads_perflevel_l2_cache_when_published() {
+        // Apple Silicon publishes hw.perflevel0; a virtualised runner may
+        // not, and then the key must read as missing rather than as zero.
+        if let Some(bytes) = sysctl_u64("hw.perflevel0.l2cachesize") {
+            assert!(bytes > 0);
+        }
+    }
+
+    #[test]
+    fn sysctl_u64_missing_key_is_none() {
+        assert_eq!(sysctl_u64("hw.perflevel9.no_such_key"), None);
+        assert_eq!(sysctl_u64("bad\0name"), None);
     }
 }

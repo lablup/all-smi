@@ -40,34 +40,18 @@ pub use intel_wmi::IntelWmiSource;
 pub use libre_hwmon::LibreHardwareMonitorSource;
 pub use thermal_zone_info::ThermalZoneInfoSource;
 
+pub use crate::device::windows_temp_chain::{CpuVendor, TemperatureResult};
+
+use crate::device::windows_temp_chain::{ChainState, TempSource, source_order};
+use crate::device::windows_wmi_worker::{CIMV2, INTEL, ROOT_WMI, WmiConnections};
 use once_cell::sync::OnceCell;
-use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
-use wmi::WMIConnection;
-
-/// Helper to get read lock, recovering from poisoned state.
-/// This prevents the application from panicking if another thread panicked while holding the lock.
-fn read_lock<T>(lock: &RwLock<T>) -> RwLockReadGuard<'_, T> {
-    lock.read().unwrap_or_else(|poisoned| poisoned.into_inner())
-}
-
-/// Helper to get write lock, recovering from poisoned state.
-fn write_lock<T>(lock: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
-    lock.write()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-}
+use std::sync::Mutex;
+use std::time::Instant;
 
 /// HRESULT error code for WBEM_E_NOT_FOUND (0x8004100C)
 /// This error indicates the WMI class doesn't exist in the namespace.
 #[allow(dead_code)]
 const WBEM_E_NOT_FOUND: i32 = -0x7FFBEFEC_i32; // 0x8004100C as signed
-
-/// Represents the detected CPU vendor for selecting appropriate temperature sources.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CpuVendor {
-    Intel,
-    Amd,
-    Unknown,
-}
 
 /// Cached CPU vendor, determined once at startup.
 static CPU_VENDOR: OnceCell<CpuVendor> = OnceCell::new();
@@ -99,30 +83,13 @@ fn detect_cpu_vendor() -> CpuVendor {
     }
 }
 
-/// Availability status of a temperature source.
-/// Once we determine a source is unavailable, we cache that to avoid repeated checks.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SourceAvailability {
-    /// Not yet checked
-    Unknown,
-    /// Available and working
-    Available,
-    /// Permanently unavailable (e.g., WMI class not found)
-    Unavailable,
-}
-
-/// Manages the temperature fallback chain and caches availability status.
+/// Runs the temperature fallback chain over the WMI worker's connections.
+///
+/// Availability and backoff live in one [`ChainState`]: `NotFound` drops a
+/// source for good, repeated `Error`/`NoValidReading` backs it off
+/// (`windows_temp_chain`).
 pub struct TemperatureManager {
-    /// ACPI thermal zone availability
-    acpi_available: RwLock<SourceAvailability>,
-    /// AMD Ryzen Master SDK availability
-    amd_available: RwLock<SourceAvailability>,
-    /// Intel WMI availability
-    intel_available: RwLock<SourceAvailability>,
-    /// LibreHardwareMonitor WMI availability
-    libre_available: RwLock<SourceAvailability>,
-    /// ThermalZoneInformation performance-counter availability
-    thermal_zone_info_available: RwLock<SourceAvailability>,
+    chain: Mutex<ChainState>,
     /// ACPI thermal zone source
     acpi_source: AcpiThermalSource,
     /// AMD Ryzen Master SDK source
@@ -135,34 +102,6 @@ pub struct TemperatureManager {
     thermal_zone_info_source: ThermalZoneInfoSource,
 }
 
-/// One entry in the temperature fallback chain.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TempSource {
-    Acpi,
-    AmdRyzen,
-    IntelWmi,
-    LibreHardwareMonitor,
-    ThermalZoneInfo,
-}
-
-/// The sources to try, in priority order, for a CPU vendor.
-///
-/// The CPU package sensors (vendor SDKs, LibreHardwareMonitor) come before
-/// the ThermalZoneInformation counters, which report ACPI zones and answer
-/// on almost every machine; trying them earlier would hide the package
-/// temperature on Intel and AMD hosts.
-fn source_order(vendor: CpuVendor) -> Vec<TempSource> {
-    let mut order = vec![TempSource::Acpi];
-    match vendor {
-        CpuVendor::Amd => order.push(TempSource::AmdRyzen),
-        CpuVendor::Intel => order.push(TempSource::IntelWmi),
-        CpuVendor::Unknown => {}
-    }
-    order.push(TempSource::LibreHardwareMonitor);
-    order.push(TempSource::ThermalZoneInfo);
-    order
-}
-
 impl Default for TemperatureManager {
     fn default() -> Self {
         Self::new()
@@ -173,108 +112,66 @@ impl TemperatureManager {
     /// Create a new temperature manager.
     pub fn new() -> Self {
         Self {
-            acpi_available: RwLock::new(SourceAvailability::Unknown),
-            amd_available: RwLock::new(SourceAvailability::Unknown),
-            intel_available: RwLock::new(SourceAvailability::Unknown),
-            libre_available: RwLock::new(SourceAvailability::Unknown),
+            chain: Mutex::new(ChainState::new()),
             acpi_source: AcpiThermalSource::new(),
             amd_source: AmdRyzenSource::new(),
             intel_source: IntelWmiSource::new(),
             libre_source: LibreHardwareMonitorSource::new(),
-            thermal_zone_info_available: RwLock::new(SourceAvailability::Unknown),
             thermal_zone_info_source: ThermalZoneInfoSource::new(),
         }
     }
 
-    /// Get the CPU temperature using the fallback chain.
+    /// Get the CPU temperature using the fallback chain, once.
     ///
-    /// Tries each temperature source in order until one succeeds.
-    /// Caches the availability status to avoid repeated failed queries.
-    pub fn get_temperature(
-        &self,
-        root_wmi_conn: Option<&WMIConnection>,
-        cimv2_conn: Option<&WMIConnection>,
-    ) -> Option<u32> {
-        for source in source_order(get_cpu_vendor()) {
-            let status = self.availability(source);
-            if !self.is_source_potentially_available(status) {
-                continue;
-            }
-            match self.query(source, root_wmi_conn, cimv2_conn) {
-                TemperatureResult::Success(temp) => {
-                    self.mark_available(status);
-                    return Some(temp);
-                }
-                TemperatureResult::NotFound => self.mark_unavailable(status),
-                // Transient error, or the source exists without a valid
-                // reading: keep it for the next poll.
-                TemperatureResult::Error | TemperatureResult::NoValidReading => {}
-            }
-        }
-
-        // All sources failed - return None gracefully (no error spam)
-        None
+    /// Must run on the WMI worker (`with_wmi`), which owns `connections`.
+    /// Each source takes its own namespace connection, so one namespace that
+    /// cannot be connected no longer hides the sources behind it.
+    pub fn get_temperature(&self, connections: &mut WmiConnections) -> Option<u32> {
+        self.run(Instant::now(), |source| self.query(source, connections))
     }
 
-    /// Availability cell for a source.
-    fn availability(&self, source: TempSource) -> &RwLock<SourceAvailability> {
-        match source {
-            TempSource::Acpi => &self.acpi_available,
-            TempSource::AmdRyzen => &self.amd_available,
-            TempSource::IntelWmi => &self.intel_available,
-            TempSource::LibreHardwareMonitor => &self.libre_available,
-            TempSource::ThermalZoneInfo => &self.thermal_zone_info_available,
-        }
+    /// One pass of the chain in priority order, with `query` reading a source.
+    fn run(&self, now: Instant, query: impl FnMut(TempSource) -> TemperatureResult) -> Option<u32> {
+        let mut chain = self.chain.lock().unwrap_or_else(|e| e.into_inner());
+        chain.run_chain(&source_order(get_cpu_vendor()), now, query)
     }
 
-    /// Query one source.
-    fn query(
-        &self,
-        source: TempSource,
-        root_wmi_conn: Option<&WMIConnection>,
-        cimv2_conn: Option<&WMIConnection>,
-    ) -> TemperatureResult {
+    /// Query one source over its cached connection.
+    fn query(&self, source: TempSource, connections: &mut WmiConnections) -> TemperatureResult {
         match source {
-            TempSource::Acpi => self.acpi_source.get_temperature(root_wmi_conn),
+            TempSource::Acpi => query_over(connections, ROOT_WMI, |conn| {
+                self.acpi_source.get_temperature(conn)
+            }),
             TempSource::AmdRyzen => self.amd_source.get_temperature(),
-            TempSource::IntelWmi => self.intel_source.get_temperature(),
-            TempSource::LibreHardwareMonitor => self.libre_source.get_temperature(),
-            TempSource::ThermalZoneInfo => {
-                self.thermal_zone_info_source.get_temperature(cimv2_conn)
-            }
+            TempSource::IntelWmi => query_over(connections, INTEL, |conn| {
+                self.intel_source.get_temperature(conn)
+            }),
+            TempSource::LibreHardwareMonitor => match self.libre_source.namespace_path() {
+                Some(namespace) => query_over(connections, namespace, |conn| {
+                    self.libre_source.get_temperature(conn)
+                }),
+                None => TemperatureResult::NotFound,
+            },
+            TempSource::ThermalZoneInfo => query_over(connections, CIMV2, |conn| {
+                self.thermal_zone_info_source.get_temperature(conn)
+            }),
         }
-    }
-
-    /// Check if a source is potentially available (not marked as permanently unavailable).
-    fn is_source_potentially_available(&self, status: &RwLock<SourceAvailability>) -> bool {
-        !matches!(*read_lock(status), SourceAvailability::Unavailable)
-    }
-
-    /// Mark a source as available.
-    fn mark_available(&self, status: &RwLock<SourceAvailability>) {
-        let mut guard = write_lock(status);
-        if *guard == SourceAvailability::Unknown {
-            *guard = SourceAvailability::Available;
-        }
-    }
-
-    /// Mark a source as permanently unavailable.
-    fn mark_unavailable(&self, status: &RwLock<SourceAvailability>) {
-        *write_lock(status) = SourceAvailability::Unavailable;
     }
 }
 
-/// Result of attempting to read temperature from a source.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TemperatureResult {
-    /// Successfully read temperature (in Celsius)
-    Success(u32),
-    /// Source permanently not found (e.g., WMI class doesn't exist)
-    NotFound,
-    /// Transient error (connection issue, etc.)
-    Error,
-    /// Source exists but returned no valid reading
-    NoValidReading,
+/// Run a WMI-backed source over the cached `namespace` connection, dropping
+/// that connection when the query fails with a transient error so the next
+/// attempt reconnects (the provider may have restarted).
+fn query_over(
+    connections: &mut WmiConnections,
+    namespace: &'static str,
+    read: impl FnOnce(Option<&wmi::WMIConnection>) -> TemperatureResult,
+) -> TemperatureResult {
+    let result = read(connections.get(namespace));
+    if result == TemperatureResult::Error {
+        connections.invalidate(namespace);
+    }
+    result
 }
 
 /// Check if a WMI error is WBEM_E_NOT_FOUND.
@@ -321,25 +218,6 @@ mod tests {
     }
 
     #[test]
-    fn thermal_zone_info_is_tried_after_every_cpu_sensor() {
-        use TempSource::*;
-        assert_eq!(
-            source_order(CpuVendor::Intel),
-            [Acpi, IntelWmi, LibreHardwareMonitor, ThermalZoneInfo]
-        );
-        assert_eq!(
-            source_order(CpuVendor::Amd),
-            [Acpi, AmdRyzen, LibreHardwareMonitor, ThermalZoneInfo]
-        );
-        // RTX Spark N1X (Arm brand string): no vendor SDK, and the
-        // unelevated thermal-zone counters are the source that answers.
-        assert_eq!(
-            source_order(CpuVendor::Unknown),
-            [Acpi, LibreHardwareMonitor, ThermalZoneInfo]
-        );
-    }
-
-    #[test]
     fn access_denied_errors_are_recognised() {
         for hres in [WBEM_E_ACCESS_DENIED, E_ACCESSDENIED] {
             assert!(is_wmi_access_denied_error(&wmi::WMIError::HResultError {
@@ -352,9 +230,18 @@ mod tests {
         assert!(!is_wmi_access_denied_error(&wmi::WMIError::ResultEmpty));
     }
 
+    /// The chain runs once per call: every source in the vendor order is
+    /// queried exactly once when none answers (the old nested fallback ran
+    /// most of them three times).
     #[test]
-    fn test_temperature_manager_creation() {
+    fn manager_queries_each_source_once_per_call() {
         let manager = TemperatureManager::new();
-        assert!(manager.is_source_potentially_available(&manager.acpi_available));
+        let mut queried = Vec::new();
+        let reading = manager.run(Instant::now(), |source| {
+            queried.push(source);
+            TemperatureResult::NoValidReading
+        });
+        assert_eq!(reading, None);
+        assert_eq!(queried, source_order(get_cpu_vendor()));
     }
 }
