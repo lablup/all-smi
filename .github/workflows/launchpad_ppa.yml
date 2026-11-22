@@ -36,7 +36,7 @@ jobs:
 
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v7
       with:
         fetch-depth: 0
 
@@ -73,7 +73,7 @@ jobs:
 
     - name: Check out release tag
       if: steps.check_distro.outputs.should_run == 'true'
-      uses: actions/checkout@v4
+      uses: actions/checkout@v7
       with:
         ref: ${{ steps.get_tag.outputs.tag }}
         fetch-depth: 0

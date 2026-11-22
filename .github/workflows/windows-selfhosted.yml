@@ -100,7 +100,7 @@ jobs:
           }
 
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       # A checkout that reports success is not evidence of a tree; the failure
       # above looked exactly like one until cargo ran. Fail here, with the git
@@ -223,7 +223,7 @@ jobs:
         shell: pwsh
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       # Same persistent paths the release job pins, so registry and
       # toolchain survive workspace cleanup between jobs.

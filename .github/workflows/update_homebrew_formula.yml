@@ -65,7 +65,7 @@ jobs:
       # every later step and by anything those steps run. No step here performs
       # a git operation in this checkout, so nothing needs it.
       - name: Checkout this repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           persist-credentials: false
 
