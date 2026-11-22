@@ -19,6 +19,8 @@ use std::collections::HashMap;
 use chrono::Local;
 
 use crate::device::{ChassisInfo, FanInfo};
+
+use super::prometheus_labels::Labels;
 use crate::metrics::energy::MAX_POWER_WATTS;
 
 const MAX_CHASSIS_PER_SCRAPE: usize = 256;
@@ -43,7 +45,7 @@ impl ChassisParseState {
     pub(super) fn process(
         &mut self,
         metric_name: &str,
-        labels: &HashMap<String, String>,
+        labels: &Labels<'_>,
         value: f64,
         host: &str,
     ) {
@@ -55,11 +57,11 @@ impl ChassisParseState {
             .get("hostname")
             .or_else(|| labels.get("host"))
             .or_else(|| labels.get("instance"))
-            .cloned()
+            .map(str::to_string)
             .unwrap_or_else(|| host.to_string());
         let instance = labels
             .get("instance")
-            .cloned()
+            .map(str::to_string)
             .unwrap_or_else(|| hostname.clone());
         let key = (hostname.clone(), instance.clone());
 
@@ -82,7 +84,7 @@ impl ChassisParseState {
             }
             "chassis_thermal_pressure_info" => {
                 if let Some(level) = labels.get("level").filter(|level| !level.is_empty()) {
-                    chassis.thermal_pressure = Some(level.clone());
+                    chassis.thermal_pressure = Some(level.to_string());
                 }
             }
             "chassis_cpu_power_watts" if value.is_finite() && value >= 0.0 => {
@@ -150,7 +152,7 @@ fn is_chassis_metric(metric_name: &str) -> bool {
     )
 }
 
-fn copy_identity_details(chassis: &mut ChassisInfo, labels: &HashMap<String, String>) {
+fn copy_identity_details(chassis: &mut ChassisInfo, labels: &Labels<'_>) {
     for (label, detail_key) in [
         ("product_name", "Product Name"),
         ("vendor", "Vendor"),
@@ -160,18 +162,20 @@ fn copy_identity_details(chassis: &mut ChassisInfo, labels: &HashMap<String, Str
         ("platform", "platform"),
     ] {
         if let Some(value) = labels.get(label).filter(|value| !value.is_empty()) {
-            chassis.detail.insert(detail_key.to_string(), value.clone());
+            chassis
+                .detail
+                .insert(detail_key.to_string(), value.to_string());
         }
     }
 }
 
-fn update_fan(chassis: &mut ChassisInfo, labels: &HashMap<String, String>, speed_rpm: u32) {
+fn update_fan(chassis: &mut ChassisInfo, labels: &Labels<'_>, speed_rpm: u32) {
     let Some(id) = labels.get("fan_id").and_then(|id| id.parse::<u32>().ok()) else {
         return;
     };
     let name = labels
         .get("fan_name")
-        .cloned()
+        .map(str::to_string)
         .unwrap_or_else(|| format!("Fan {id}"));
 
     if let Some(fan) = chassis.fan_speeds.iter_mut().find(|fan| fan.id == id) {
@@ -200,6 +204,10 @@ mod tests {
         ])
     }
 
+    fn borrowed(map: &HashMap<String, String>) -> Labels<'static> {
+        Labels::from_pairs(map.clone())
+    }
+
     #[test]
     fn invalid_readings_are_ignored_and_power_is_bounded() {
         let mut state = ChassisParseState::new();
@@ -207,20 +215,20 @@ mod tests {
 
         state.process(
             "chassis_power_watts",
-            &metric_labels,
+            &borrowed(&metric_labels),
             MAX_POWER_WATTS * 2.0,
             "endpoint:9090",
         );
         state.process(
             "chassis_inlet_temperature_celsius",
-            &metric_labels,
+            &borrowed(&metric_labels),
             f64::INFINITY,
             "endpoint:9090",
         );
         metric_labels.insert("fan_id".to_string(), "1".to_string());
         state.process(
             "chassis_fan_speed_rpm",
-            &metric_labels,
+            &borrowed(&metric_labels),
             1_234.5,
             "endpoint:9090",
         );
@@ -239,7 +247,10 @@ mod tests {
         for index in 0..=MAX_CHASSIS_PER_SCRAPE {
             state.process(
                 "chassis_info",
-                &labels(&format!("host-{index}"), &format!("instance-{index}")),
+                &borrowed(&labels(
+                    &format!("host-{index}"),
+                    &format!("instance-{index}"),
+                )),
                 1.0,
                 "endpoint:9090",
             );
@@ -254,7 +265,7 @@ mod tests {
             metric_labels.insert("fan_id".to_string(), id.to_string());
             fan_state.process(
                 "chassis_fan_speed_rpm",
-                &metric_labels,
+                &borrowed(&metric_labels),
                 1_000.0,
                 "endpoint:9090",
             );

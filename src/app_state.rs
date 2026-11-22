@@ -135,7 +135,7 @@ pub struct ConnectionStatus {
     /// "not applicable" (local mode, replay mode).
     pub transport_chip: Option<String>,
     /// Short connection-state tag (`connecting`, `connected`,
-    /// `auth-failed`, `timeout`, `disconnected`). Used by the TUI to
+    /// `auth-failed`, `timeout`, `backing-off`, `disconnected`). Used by the TUI to
     /// render a per-host status chip. `None` when the status has not
     /// yet been set.
     pub connection_state: Option<String>,
@@ -173,28 +173,18 @@ impl ConnectionStatus {
         self.last_update = Instant::now();
         // Classify the error into a compact state chip. The error
         // messages the SSH client produces carry the chip label as
-        // the prefix — parse it out rather than re-deriving.
-        let chip = if self
-            .last_error
-            .as_deref()
-            .unwrap_or("")
-            .starts_with("auth-failed")
-        {
+        // the prefix — parse it out rather than re-deriving. The HTTP
+        // scraper uses the same convention for `timeout` and for
+        // `backing-off` (a host skipped after repeated failures, #500).
+        let error = self.last_error.as_deref().unwrap_or("");
+        let chip = if error.starts_with("auth-failed") {
             "auth-failed"
-        } else if self
-            .last_error
-            .as_deref()
-            .unwrap_or("")
-            .starts_with("timeout")
-        {
+        } else if error.starts_with("timeout") {
             "timeout"
-        } else if self
-            .last_error
-            .as_deref()
-            .unwrap_or("")
-            .starts_with("host-key-rejected")
-        {
+        } else if error.starts_with("host-key-rejected") {
             "host-key-rejected"
+        } else if error.starts_with("backing-off") {
+            "backing-off"
         } else {
             "disconnected"
         };
@@ -959,6 +949,8 @@ mod tests {
         assert_eq!(cs.connection_state.as_deref(), Some("timeout"));
         cs.mark_failure("host-key-rejected: host key not trusted".into());
         assert_eq!(cs.connection_state.as_deref(), Some("host-key-rejected"));
+        cs.mark_failure("backing-off: next retry in 4s (3 consecutive failures)".into());
+        assert_eq!(cs.connection_state.as_deref(), Some("backing-off"));
         cs.mark_failure("other: stuff".into());
         assert_eq!(cs.connection_state.as_deref(), Some("disconnected"));
         cs.mark_success();

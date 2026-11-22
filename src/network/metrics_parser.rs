@@ -14,7 +14,6 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::parsing::common::sanitize_label_value;
 use chrono::Local;
 use regex::Regex;
 
@@ -26,7 +25,12 @@ use crate::device::{
 };
 use crate::storage::info::StorageInfo;
 
-use super::chassis_metrics_parser::ChassisParseState;
+use super::prometheus_labels::Labels;
+use crate::parsing::prometheus::split_prometheus_line;
+
+#[path = "metrics_parse_accumulator.rs"]
+mod accumulator;
+use accumulator::{MAX_LABEL_STRING_BYTES, MAX_METRIC_NAME_BYTES, OverlongLines, ParseAccumulator};
 
 /// Maximum number of response-body bytes accepted from a remote metrics endpoint.
 ///
@@ -145,180 +149,64 @@ impl MetricsParser {
         Self
     }
 
+    /// Parse one host's exposition text.
+    ///
+    /// `re` is unused since issue #500: lines are split by
+    /// [`crate::parsing::prometheus::split_prometheus_line`], which accepts
+    /// exactly what the former regex did. The parameter stays for source
+    /// compatibility.
     #[allow(dead_code)] // Public library API; the binary uses the chassis-aware internal variant.
     pub fn parse_metrics(&self, text: &str, host: &str, re: &Regex) -> ParsedMetrics {
-        self.parse_metrics_with_chassis(text, host, re).metrics
+        let _ = re;
+        self.parse_metrics_with_chassis(text, host).metrics
     }
 
-    pub(crate) fn parse_metrics_with_chassis(
-        &self,
-        text: &str,
-        host: &str,
-        re: &Regex,
-    ) -> ParsedRemoteMetrics {
-        // Limit the maximum size of HashMaps to prevent memory exhaustion
-        const MAX_DEVICES_PER_TYPE: usize = 256;
-
+    pub(crate) fn parse_metrics_with_chassis(&self, text: &str, host: &str) -> ParsedRemoteMetrics {
         // Validate input size. Move the byte cutoff to the preceding UTF-8
         // boundary so a multi-byte code point straddling the limit cannot
         // make the defensive truncation itself panic.
         let text = if text.len() > MAX_METRICS_TEXT_BYTES {
-            eprintln!(
-                "Warning: Metrics text too large ({}), truncating to 10MB",
-                text.len()
+            tracing::warn!(
+                bytes = text.len(),
+                "metrics text too large, truncating to 10MB"
             );
             truncate_utf8_at_byte_limit(text, MAX_METRICS_TEXT_BYTES)
         } else {
             text
         };
 
-        let mut gpu_info_map: HashMap<String, GpuInfo> = HashMap::with_capacity(16);
-        let mut cpu_info_map: HashMap<String, CpuInfo> = HashMap::with_capacity(8);
-        let mut memory_info_map: HashMap<String, MemoryInfo> = HashMap::with_capacity(8);
-        let mut storage_info_map: HashMap<String, StorageInfo> = HashMap::with_capacity(32);
-        let mut chassis_state = ChassisParseState::new();
-        // Keyed by (gpu_uuid, vgpu_id) for instance rows, and by (gpu_uuid, "__host__")
-        // for host-scoped metrics.
-        let mut vgpu_state = VgpuParseState::new();
-        // MIG accumulator — keyed by gpu_uuid for parent host rows, and by
-        // (gpu_uuid, mig_instance) for per-instance rows.
-        let mut mig_state = MigParseState::new();
-        // Per-process row accumulator (issue #189). Keyed by
-        // `(pid, gpu_index)` so the three metric families (memory,
-        // start-time, cpu-percent) collapse into a single row even though
-        // they arrive on separate lines.
-        let mut process_info_map: HashMap<(u32, u32), ParsedProcessRow> =
-            HashMap::with_capacity(32);
-        let mut host_instance_name: Option<String> = None;
-        // Tier series + per-core `cpu_tier` labels, resolved after the loop
-        // because Prometheus line order is not guaranteed (issue #473).
-        let mut cpu_tier_state = CpuTierParseState::new();
+        let mut dropped = OverlongLines::default();
+        let parsed = self.parse_lines(text, host, &mut dropped);
+        dropped.report(host);
+        parsed
+    }
 
+    /// Tokenize and route every line, recording lines dropped by the length
+    /// caps in `dropped`.
+    fn parse_lines(
+        &self,
+        text: &str,
+        host: &str,
+        dropped: &mut OverlongLines,
+    ) -> ParsedRemoteMetrics {
+        let mut acc = ParseAccumulator::new();
+        // One label vector reused for every line; its entries borrow from
+        // `text`, so a line without escapes allocates nothing here.
+        let mut labels = Labels::new();
         for line in text.lines() {
-            if let Some((metric_name, labels_str, value)) = parse_prometheus!(line, re) {
-                let labels = self.parse_labels(&labels_str);
-
-                // Extract instance name from the first metric that has it
-                if host_instance_name.is_none()
-                    && let Some(instance) = labels.get("instance")
-                {
-                    host_instance_name = Some(instance.clone());
-                }
-
-                // Process different metric types with size limits.
-                // Route vGPU and MIG lines first so they aren't swallowed by
-                // the broader `gpu_` prefix below. `nvlink_*` metrics from
-                // issue #132 are also hardware-detail lines that must join
-                // the per-GPU accumulator — they carry the same GPU base
-                // label set as the rest of the GPU rows. NPU families share
-                // the same accumulator but may identify themselves with
-                // either the GPU (`gpu_uuid`/`gpu_index`) or NPU
-                // (`npu_uuid`/`npu_index`) label aliases; see
-                // `process_gpu_metrics` for the fallback chain.
-                if metric_name.starts_with("chassis_") {
-                    chassis_state.process(&metric_name, &labels, value, host);
-                } else if metric_name.starts_with("vgpu_") {
-                    vgpu_state.process(&metric_name, &labels, value, host);
-                } else if metric_name == "gpu_mig_mode" || metric_name.starts_with("mig_instance_")
-                {
-                    mig_state.process(&metric_name, &labels, value, host);
-                } else if metric_name.starts_with("gpu_")
-                    || metric_name.starts_with("npu_")
-                    || metric_name.starts_with("nvlink_")
-                    || metric_name == "ane_utilization"
-                    || metric_name.starts_with("dla_")
-                {
-                    if gpu_info_map.len() < MAX_DEVICES_PER_TYPE {
-                        self.process_gpu_metrics(
-                            &mut gpu_info_map,
-                            &metric_name,
-                            &labels,
-                            value,
-                            host,
-                        );
-                    }
-                } else if metric_name.starts_with("cpu_") {
-                    if cpu_info_map.len() < MAX_DEVICES_PER_TYPE {
-                        self.process_cpu_metrics(
-                            &mut cpu_info_map,
-                            &metric_name,
-                            &labels,
-                            value,
-                            host,
-                            &mut cpu_tier_state,
-                        );
-                    }
-                } else if metric_name.starts_with("memory_") || metric_name.starts_with("swap_") {
-                    // Swap metrics share the same per-host accumulator as
-                    // memory — they carry identical `instance`/`hostname`/`index`
-                    // labels and are conceptually a property of the host's
-                    // memory subsystem (issue #220). Routing them together
-                    // keeps the `MemoryInfo` row populated consistently.
-                    if memory_info_map.len() < MAX_DEVICES_PER_TYPE {
-                        self.process_memory_metrics(
-                            &mut memory_info_map,
-                            &metric_name,
-                            &labels,
-                            value,
-                            host,
-                        );
-                    }
-                } else if (metric_name.starts_with("storage_") || metric_name.starts_with("disk_"))
-                    && storage_info_map.len() < MAX_DEVICES_PER_TYPE
-                {
-                    self.process_storage_metrics(
-                        &mut storage_info_map,
-                        &metric_name,
-                        &labels,
-                        value,
-                        host,
-                    );
-                } else if metric_name.starts_with("process_") {
-                    // Cap process rows to keep a pathological scrape from
-                    // turning into an OOM — 50 k rows is two orders of
-                    // magnitude beyond any realistic node (the issue
-                    // target is 100 nodes × 50 procs = 5 k).
-                    const MAX_PROCESS_ROWS: usize = 50_000;
-                    if process_info_map.len() < MAX_PROCESS_ROWS {
-                        self.process_process_metrics(
-                            &mut process_info_map,
-                            &metric_name,
-                            &labels,
-                            value,
-                            host,
-                        );
-                    }
-                }
+            let Some((metric_name, labels_str, value)) = split_prometheus_line(line) else {
+                continue;
+            };
+            if metric_name.len() > MAX_METRIC_NAME_BYTES
+                || labels_str.len() > MAX_LABEL_STRING_BYTES
+            {
+                dropped.note(metric_name);
+                continue;
             }
+            labels.parse_into(labels_str);
+            acc.process_line(self, metric_name, &labels, value, host);
         }
-
-        // Store instance name in detail field if available, but keep host as the key
-        if let Some(instance_name) = host_instance_name {
-            self.update_instance_names(
-                &mut gpu_info_map,
-                &mut cpu_info_map,
-                &mut memory_info_map,
-                &mut storage_info_map,
-                &instance_name,
-            );
-        }
-
-        // Resolve tier labels now that every line has been read. This must
-        // run before the maps are flattened into vectors.
-        cpu_tier_state.finish(&mut cpu_info_map);
-
-        ParsedRemoteMetrics {
-            chassis_info: chassis_state.finish(),
-            metrics: ParsedMetrics {
-                gpu_info: gpu_info_map.into_values().collect(),
-                cpu_info: cpu_info_map.into_values().collect(),
-                memory_info: memory_info_map.into_values().collect(),
-                storage_info: storage_info_map.into_values().collect(),
-                vgpu_info: vgpu_state.finish(),
-                mig_info: mig_state.finish(),
-                process_info: process_info_map.into_values().collect(),
-            },
-        }
+        acc.finish(self)
     }
 
     /// Absorb a single `all_smi_process_*` metric line into the per-PID
@@ -335,7 +223,7 @@ impl MetricsParser {
         &self,
         process_info_map: &mut HashMap<(u32, u32), ParsedProcessRow>,
         metric_name: &str,
-        labels: &HashMap<String, String>,
+        labels: &Labels<'_>,
         value: f64,
         host: &str,
     ) {
@@ -393,7 +281,7 @@ impl MetricsParser {
         // string is non-empty — this keeps a future exporter that
         // truncates labels on a per-metric basis from wiping a real
         // value with an empty string.
-        let overwrite_capped = |dst: &mut String, src: Option<&String>, cap: usize| {
+        let overwrite_capped = |dst: &mut String, src: Option<&str>, cap: usize| {
             if let Some(v) = src
                 && !v.is_empty()
             {
@@ -428,57 +316,19 @@ impl MetricsParser {
         }
     }
 
+    /// Parse a label string into an owned map, for tests.
+    #[cfg(test)]
     fn parse_labels(&self, labels_str: &str) -> HashMap<String, String> {
-        const MAX_LABELS: usize = 100; // Prevent unbounded growth
-        const MAX_LABEL_LENGTH: usize = 1024; // Prevent large string allocations
-        const MAX_INPUT_LENGTH: usize = 32768; // Maximum label string length to process
-
-        // Limit input size to prevent DoS
-        if labels_str.len() > MAX_INPUT_LENGTH {
-            eprintln!("Warning: Label string too long, truncating to {MAX_INPUT_LENGTH} bytes");
-            return HashMap::new();
-        }
-
-        let mut labels: HashMap<String, String> = HashMap::with_capacity(16);
-        let mut label_count = 0;
-
-        // Quote-aware splitting: only split on commas that appear outside of
-        // a double-quoted value, so that a VM-owner-controlled label value
-        // containing `",` cannot break out and inject fake labels.
-        for label in split_labels_respecting_quotes(labels_str) {
-            if label_count >= MAX_LABELS {
-                break;
-            }
-
-            // Find the '=' separator without allocating a vector
-            if let Some(eq_pos) = label.find('=') {
-                let key = &label[..eq_pos];
-                let value = &label[eq_pos + 1..];
-
-                // Sanitize the key (trim whitespace + any stray quotes).
-                let key_clean = sanitize_label_value(key);
-                // For the value we strip the surrounding quotes ourselves
-                // and un-escape the Prometheus exposition escape sequences
-                // produced by `MetricBuilder::metric`. We never fall back to
-                // the naive sanitizer for quoted values — doing so would
-                // leave `\"` / `\\` / `\n` / `\r` escapes in place.
-                let value_clean = unescape_label_value(value);
-
-                // Check lengths and insert
-                if key_clean.len() <= MAX_LABEL_LENGTH && value_clean.len() <= MAX_LABEL_LENGTH {
-                    labels.insert(key_clean, value_clean);
-                    label_count += 1;
-                }
-            }
-        }
-        labels
+        let mut labels = Labels::new();
+        labels.parse_into(labels_str);
+        labels.to_map()
     }
 
     fn process_gpu_metrics(
         &self,
         gpu_info_map: &mut HashMap<String, GpuInfo>,
         metric_name: &str,
-        labels: &HashMap<String, String>,
+        labels: &Labels<'_>,
         value: f64,
         host: &str,
     ) {
@@ -489,7 +339,6 @@ impl MetricsParser {
         let gpu_name = labels
             .get("gpu")
             .or_else(|| labels.get("npu"))
-            .cloned()
             .unwrap_or_default();
         // Accept GPU (`gpu_uuid`/`uuid`) and NPU (`npu_uuid`) label names for
         // backward compatibility. The legacy `uuid`/`index` labels were used
@@ -500,26 +349,26 @@ impl MetricsParser {
             .get("gpu_uuid")
             .or_else(|| labels.get("npu_uuid"))
             .or_else(|| labels.get("uuid"))
-            .cloned()
             .unwrap_or_default();
         let gpu_index = labels
             .get("gpu_index")
             .or_else(|| labels.get("npu_index"))
             .or_else(|| labels.get("index"))
-            .cloned()
             .unwrap_or_default();
 
         if gpu_name.is_empty() || gpu_uuid.is_empty() {
             return;
         }
 
-        let gpu_info = gpu_info_map.entry(gpu_uuid.clone()).or_insert_with(|| {
+        // Look up by borrowed uuid first so a line for a device already in
+        // the map allocates nothing; owned strings are built only on insert.
+        if !gpu_info_map.contains_key(gpu_uuid) {
             let mut detail = HashMap::new();
-            detail.insert("index".to_string(), gpu_index.clone());
-            GpuInfo {
-                uuid: gpu_uuid.clone(),
+            detail.insert("index".to_string(), gpu_index.to_string());
+            let new_gpu = GpuInfo {
+                uuid: gpu_uuid.to_string(),
                 time: Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
-                name: gpu_name,
+                name: gpu_name.to_string(),
                 device_type: "GPU".to_string(), // Default to GPU, can be overridden by gpu_info metric
                 host_id: host.to_string(),      // Host identifier (e.g., "10.82.128.41:9090")
                 hostname: crate::get_label_or_default!(labels, "instance", host), // DNS hostname from instance label
@@ -565,8 +414,12 @@ impl MetricsParser {
                 nvlink_remote_devices: Vec::new(),
                 gpm_metrics: None,
                 detail,
-            }
-        });
+            };
+            gpu_info_map.insert(gpu_uuid.to_string(), new_gpu);
+        }
+        let Some(gpu_info) = gpu_info_map.get_mut(gpu_uuid) else {
+            return;
+        };
 
         crate::update_metric_field!(metric_name, value, gpu_info, {
             "gpu_utilization" => utilization as f64,
@@ -599,7 +452,7 @@ impl MetricsParser {
             "gpu_info" => {
                 // Extract device type
                 if let Some(device_type) = labels.get("type") {
-                    gpu_info.device_type = device_type.clone();
+                    gpu_info.device_type = device_type.to_string();
                 }
 
                 // Extract all GPU metadata labels in batch
@@ -746,7 +599,7 @@ impl MetricsParser {
                 }
                 let remote_type = labels
                     .get("remote_type")
-                    .map(|s| NvLinkRemoteType::from_label(s))
+                    .map(NvLinkRemoteType::from_label)
                     .unwrap_or_default();
                 // Optional bandwidth hint (issue #190). Absent from older
                 // exporters — `None` preserves backward compatibility with
@@ -834,7 +687,7 @@ impl MetricsParser {
         &self,
         cpu_info_map: &mut HashMap<String, CpuInfo>,
         metric_name: &str,
-        labels: &HashMap<String, String>,
+        labels: &Labels<'_>,
         value: f64,
         host: &str,
         tier_state: &mut CpuTierParseState,
@@ -897,7 +750,7 @@ impl MetricsParser {
             "cpu_model" => {
                 // Handle all_smi_cpu_model info metric
                 if let Some(model) = labels.get("model") {
-                    cpu_info.cpu_model = model.clone();
+                    cpu_info.cpu_model = model.to_string();
 
                     // Update platform type based on new model info
                     cpu_info.platform_type = if model.contains("Apple") {
@@ -986,7 +839,7 @@ impl MetricsParser {
                         return;
                     }
 
-                    let core_type = match core_type_str.as_str() {
+                    let core_type = match core_type_str {
                         "S" => crate::device::CoreType::Super,
                         "P" => crate::device::CoreType::Performance,
                         "E" => crate::device::CoreType::Efficiency,
@@ -1018,7 +871,7 @@ impl MetricsParser {
             "cpu_info" => {
                 // Extract architecture and platform type from cpu_info metric
                 if let Some(architecture) = labels.get("architecture") {
-                    cpu_info.architecture = architecture.clone();
+                    cpu_info.architecture = architecture.to_string();
                 }
                 if let Some(platform_type_str) = labels.get("platform_type") {
                     // Parse the platform type from the Debug format
@@ -1029,7 +882,7 @@ impl MetricsParser {
                     } else if platform_type_str.contains("Amd") {
                         CpuPlatformType::Amd
                     } else {
-                        CpuPlatformType::Other(platform_type_str.clone())
+                        CpuPlatformType::Other(platform_type_str.to_string())
                     };
                 }
             }
@@ -1041,7 +894,7 @@ impl MetricsParser {
         &self,
         memory_info_map: &mut HashMap<String, MemoryInfo>,
         metric_name: &str,
-        labels: &HashMap<String, String>,
+        labels: &Labels<'_>,
         value: f64,
         host: &str,
     ) {
@@ -1091,7 +944,7 @@ impl MetricsParser {
         &self,
         storage_info_map: &mut HashMap<String, StorageInfo>,
         metric_name: &str,
-        labels: &HashMap<String, String>,
+        labels: &Labels<'_>,
         value: f64,
         host: &str,
     ) {
@@ -1110,7 +963,7 @@ impl MetricsParser {
                 host_id: host.to_string(), // Host identifier (e.g., "10.82.128.41:9090")
                 hostname: labels
                     .get("instance")
-                    .cloned()
+                    .map(str::to_string)
                     .unwrap_or_else(|| host.to_string()), // DNS hostname from instance label
                 mount_point: mount_point.clone(),
                 total_bytes: 0,
@@ -1260,13 +1113,7 @@ impl CpuTierParseState {
         }
     }
 
-    fn process(
-        &mut self,
-        cpu_key: &str,
-        metric_name: &str,
-        labels: &HashMap<String, String>,
-        value: f64,
-    ) {
+    fn process(&mut self, cpu_key: &str, metric_name: &str, labels: &Labels<'_>, value: f64) {
         match metric_name {
             "cpu_tier_core_count"
             | "cpu_tier_utilization"
@@ -1275,7 +1122,6 @@ impl CpuTierParseState {
                 let Some(label) = labels.get("cpu_tier").filter(|label| !label.is_empty()) else {
                     return;
                 };
-                let label = label.clone();
 
                 // Reject values the exporter could not have produced before
                 // an entry is created, so a garbage line cannot allocate a
@@ -1294,7 +1140,7 @@ impl CpuTierParseState {
                     return;
                 }
 
-                let key = (cpu_key.to_string(), label.clone());
+                let key = (cpu_key.to_string(), label.to_string());
                 if !self.tiers.contains_key(&key) {
                     let count = self.tier_counts.get(cpu_key).copied().unwrap_or(0);
                     if count >= MAX_CPU_TIERS {
@@ -1304,7 +1150,7 @@ impl CpuTierParseState {
                     self.tiers.insert(
                         key.clone(),
                         CpuTier {
-                            label,
+                            label: label.to_string(),
                             core_type: crate::device::CoreType::Standard,
                             core_count: 0,
                             utilization: 0.0,
@@ -1336,7 +1182,7 @@ impl CpuTierParseState {
                     return;
                 };
                 self.core_labels
-                    .insert((cpu_key.to_string(), core_id), label.clone());
+                    .insert((cpu_key.to_string(), core_id), label.to_string());
             }
             _ => {}
         }
@@ -1433,100 +1279,6 @@ fn ensure_gpm_metrics(gpu_info: &mut GpuInfo) -> &mut GpmMetrics {
     gpu_info.gpm_metrics.as_mut().expect("just populated above")
 }
 
-fn split_labels_respecting_quotes(labels_str: &str) -> Vec<&str> {
-    let bytes = labels_str.as_bytes();
-    let mut out: Vec<&str> = Vec::with_capacity(16);
-    let mut start = 0usize;
-    let mut i = 0usize;
-    let mut in_quotes = false;
-    while i < bytes.len() {
-        let b = bytes[i];
-        if in_quotes {
-            if b == b'\\' && i + 1 < bytes.len() {
-                // Skip the escaped byte so `\"` doesn't terminate the quote.
-                i += 2;
-                continue;
-            }
-            if b == b'"' {
-                in_quotes = false;
-            }
-            i += 1;
-        } else {
-            match b {
-                b'"' => {
-                    in_quotes = true;
-                    i += 1;
-                }
-                b',' => {
-                    out.push(&labels_str[start..i]);
-                    i += 1;
-                    start = i;
-                }
-                _ => {
-                    i += 1;
-                }
-            }
-        }
-    }
-    out.push(&labels_str[start..]);
-    out
-}
-
-/// Strip the surrounding double quotes from a Prometheus label value and
-/// un-escape the escape sequences emitted by `MetricBuilder::metric`
-/// (`\\`, `\"`, `\n`, `\r`). If the value is not quoted, fall back to the
-/// shared sanitizer so callers see consistent trimming behaviour for legacy
-/// unquoted inputs.
-fn unescape_label_value(raw: &str) -> String {
-    let trimmed = raw.trim();
-    let inner = match (trimmed.strip_prefix('"'), trimmed.ends_with('"')) {
-        (Some(s), true) if trimmed.len() >= 2 => &s[..s.len() - 1],
-        _ => return sanitize_label_value(raw),
-    };
-
-    let mut out = String::with_capacity(inner.len());
-    let mut chars = inner.chars();
-    while let Some(c) = chars.next() {
-        if c != '\\' {
-            out.push(c);
-            continue;
-        }
-        match chars.next() {
-            Some('\\') => out.push('\\'),
-            Some('"') => out.push('"'),
-            Some('n') => out.push('\n'),
-            Some('r') => out.push('\r'),
-            Some(other) => {
-                // Unknown escape: keep the backslash and the following char
-                // verbatim so we do not silently lose data.
-                out.push('\\');
-                out.push(other);
-            }
-            None => out.push('\\'),
-        }
-    }
-
-    // Strip control characters (including ANSI escape sequences) to defend
-    // against TUI escape injection from compromised remote endpoints. This
-    // mirrors the stripping done in `sanitize_label_value` for unquoted
-    // values, ensuring ALL label values are safe regardless of quoting.
-    let out = crate::parsing::common::strip_control_chars(&out);
-
-    // Run through length truncation (the shared sanitizer also does this,
-    // but `inner` has already had its quotes removed and any stray
-    // leading/trailing whitespace inside the quotes is intentional).
-    const MAX_LABEL_VALUE_LENGTH: usize = 1024;
-    if out.len() > MAX_LABEL_VALUE_LENGTH {
-        let mut end = MAX_LABEL_VALUE_LENGTH;
-        while !out.is_char_boundary(end) {
-            end -= 1;
-        }
-        out[..end].to_string()
-    } else {
-        out
-    }
-}
-
 /// Accumulator used while parsing vGPU Prometheus lines.
 ///
 /// Per-instance metrics are keyed by `(gpu_uuid, vgpu_id)` so they merge into
@@ -1558,14 +1310,11 @@ impl VgpuParseState {
         }
     }
 
-    fn process(
-        &mut self,
-        metric_name: &str,
-        labels: &HashMap<String, String>,
-        value: f64,
-        host: &str,
-    ) {
-        let gpu_uuid = labels.get("gpu_uuid").cloned().unwrap_or_default();
+    fn process(&mut self, metric_name: &str, labels: &Labels<'_>, value: f64, host: &str) {
+        let gpu_uuid = labels
+            .get("gpu_uuid")
+            .map(str::to_string)
+            .unwrap_or_default();
         if gpu_uuid.is_empty() {
             return;
         }
@@ -1585,7 +1334,7 @@ impl VgpuParseState {
             let hostname = labels
                 .get("host")
                 .or_else(|| labels.get("instance"))
-                .cloned()
+                .map(str::to_string)
                 .unwrap_or_else(|| host.to_string());
             VgpuHostInfo {
                 host_id: host.to_string(),
@@ -1593,7 +1342,7 @@ impl VgpuParseState {
                 instance: hostname,
                 gpu_index,
                 gpu_uuid: gpu_uuid.clone(),
-                gpu_name: labels.get("gpu").cloned().unwrap_or_default(),
+                gpu_name: labels.get("gpu").map(str::to_string).unwrap_or_default(),
                 host_mode: "Disabled".to_string(),
                 scheduler_policy: 0,
                 scheduler_arr_mode: 0,
@@ -1606,7 +1355,7 @@ impl VgpuParseState {
         match metric_name {
             "vgpu_host_mode" => {
                 if let Some(mode) = labels.get("host_mode") {
-                    host_entry.host_mode = mode.clone();
+                    host_entry.host_mode = mode.to_string();
                 }
             }
             "vgpu_scheduler_state" => {
@@ -1637,12 +1386,21 @@ impl VgpuParseState {
                     .entry(instance_key)
                     .or_insert_with(|| VgpuInfo {
                         instance_id: vgpu_id,
-                        uuid: labels.get("vgpu_uuid").cloned().unwrap_or_default(),
+                        uuid: labels
+                            .get("vgpu_uuid")
+                            .map(str::to_string)
+                            .unwrap_or_default(),
                         // Keep vm_id round-tripping through the Prometheus
                         // exporter so remote mode can display the same `vm=`
                         // column as local mode.
-                        vm_id: labels.get("vgpu_vm_id").cloned().unwrap_or_default(),
-                        vgpu_type_name: labels.get("vgpu_type").cloned().unwrap_or_default(),
+                        vm_id: labels
+                            .get("vgpu_vm_id")
+                            .map(str::to_string)
+                            .unwrap_or_default(),
+                        vgpu_type_name: labels
+                            .get("vgpu_type")
+                            .map(str::to_string)
+                            .unwrap_or_default(),
                         fb_used_bytes: 0,
                         fb_total_bytes: 0,
                         gpu_utilization: None,
@@ -1721,14 +1479,11 @@ impl MigParseState {
         }
     }
 
-    fn process(
-        &mut self,
-        metric_name: &str,
-        labels: &HashMap<String, String>,
-        value: f64,
-        host: &str,
-    ) {
-        let gpu_uuid = labels.get("gpu_uuid").cloned().unwrap_or_default();
+    fn process(&mut self, metric_name: &str, labels: &Labels<'_>, value: f64, host: &str) {
+        let gpu_uuid = labels
+            .get("gpu_uuid")
+            .map(str::to_string)
+            .unwrap_or_default();
         if gpu_uuid.is_empty() {
             return;
         }
@@ -1748,7 +1503,7 @@ impl MigParseState {
             let hostname = labels
                 .get("host")
                 .or_else(|| labels.get("instance"))
-                .cloned()
+                .map(str::to_string)
                 .unwrap_or_else(|| host.to_string());
             MigGpuInfo {
                 host_id: host.to_string(),
@@ -1756,7 +1511,7 @@ impl MigParseState {
                 instance: hostname,
                 gpu_index,
                 gpu_uuid: gpu_uuid.clone(),
-                gpu_name: labels.get("gpu").cloned().unwrap_or_default(),
+                gpu_name: labels.get("gpu").map(str::to_string).unwrap_or_default(),
                 mig_mode: false,
                 instances: Vec::new(),
             }
@@ -1808,8 +1563,14 @@ impl MigParseState {
                         compute_instance_id: labels
                             .get("compute_instance_id")
                             .and_then(|s| s.parse::<u32>().ok()),
-                        uuid: labels.get("mig_uuid").cloned().unwrap_or_default(),
-                        profile_name: labels.get("mig_profile").cloned().unwrap_or_default(),
+                        uuid: labels
+                            .get("mig_uuid")
+                            .map(str::to_string)
+                            .unwrap_or_default(),
+                        profile_name: labels
+                            .get("mig_profile")
+                            .map(str::to_string)
+                            .unwrap_or_default(),
                         utilization_gpu: None,
                         utilization_memory: None,
                         memory_used_bytes: 0,
@@ -1871,6 +1632,10 @@ impl MigParseState {
         out
     }
 }
+
+#[cfg(test)]
+#[path = "metrics_parser_equivalence_tests.rs"]
+mod equivalence_tests;
 
 #[cfg(test)]
 mod tests {

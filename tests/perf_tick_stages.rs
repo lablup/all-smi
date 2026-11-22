@@ -428,3 +428,73 @@ fn print_enumeration_costs() {
     list_refresh.row("DiskCache list refresh (background, every 30 s)");
     old_per_tick.row("Disks::new_with_refreshed_list (old per-tick path)");
 }
+
+/// Remote parse stage for a 100-host scrape (issue #500).
+///
+/// Builds 100 host bodies from the captured NVIDIA mock exposition (each
+/// with its own instance name), then times the line splitter alone (the
+/// former regex against the current tokenizer) and the whole
+/// `MetricsParser::parse_metrics` pass over every body. Run on the commit
+/// before and after a parser change to compare.
+///
+/// ```text
+/// cargo test --release --test perf_tick_stages perf_remote_parse_stage -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore = "benchmark; run with --release --ignored --nocapture"]
+fn perf_remote_parse_stage() {
+    use all_smi::network::metrics_parser::MetricsParser;
+    use all_smi::parsing::prometheus::split_prometheus_line;
+
+    const HOSTS: usize = 100;
+    const ROUNDS: usize = 5;
+    let template = include_str!("fixtures/prometheus/mock-nvidia.prom");
+    let bodies: Vec<String> = (0..HOSTS)
+        .map(|i| template.replace("node-0001", &format!("node-{i:04}")))
+        .collect();
+    let lines: usize = bodies.iter().map(|b| b.lines().count()).sum();
+    let re = regex::Regex::new(r"^all_smi_([^\{]+)\{([^}]+)\} ([\d\.]+)$").unwrap();
+    let parser = MetricsParser::new();
+
+    let mut regex_split = Stage::default();
+    let mut tokenizer_split = Stage::default();
+    let mut full_parse = Stage::default();
+    for _ in 0..ROUNDS {
+        let started = Instant::now();
+        let mut accepted = 0usize;
+        for body in &bodies {
+            for line in body.lines() {
+                accepted += usize::from(re.captures(line.trim()).is_some());
+            }
+        }
+        regex_split.push(started.elapsed());
+        std::hint::black_box(accepted);
+
+        let started = Instant::now();
+        let mut accepted = 0usize;
+        for body in &bodies {
+            for line in body.lines() {
+                accepted += usize::from(split_prometheus_line(line).is_some());
+            }
+        }
+        tokenizer_split.push(started.elapsed());
+        std::hint::black_box(accepted);
+
+        let started = Instant::now();
+        let mut devices = 0usize;
+        for (i, body) in bodies.iter().enumerate() {
+            devices += parser
+                .parse_metrics(body, &format!("10.0.0.{i}:9090"), &re)
+                .gpu_info
+                .len();
+        }
+        full_parse.push(started.elapsed());
+        std::hint::black_box(devices);
+    }
+
+    println!("\n| remote parse, {HOSTS} hosts, {lines} lines | avg | min | max | runs |");
+    println!("|---|---|---|---|---|");
+    regex_split.row("line split: former regex");
+    tokenizer_split.row("line split: split_prometheus_line");
+    full_parse.row("MetricsParser::parse_metrics, all hosts");
+}

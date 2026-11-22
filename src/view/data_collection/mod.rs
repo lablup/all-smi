@@ -13,6 +13,7 @@
 // limitations under the License.
 
 pub mod aggregator;
+pub mod hostfile;
 pub mod local_collector;
 pub mod remote_collector;
 pub mod replay_collector;

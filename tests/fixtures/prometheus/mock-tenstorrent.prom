@@ -1,0 +1,183 @@
+# HELP all_smi_gpu_utilization GPU utilization percentage
+# TYPE all_smi_gpu_utilization gauge
+all_smi_gpu_utilization{gpu="Tenstorrent Grayskull e75 120W", instance="node-0001", gpu_uuid="1687A8B4-5260-23EC-DDF9-29A542A3B043", gpu_index="0"} 62.83
+all_smi_gpu_utilization{gpu="Tenstorrent Grayskull e75 120W", instance="node-0001", gpu_uuid="0621D504-48D2-DB07-9DC4-803C545D691F", gpu_index="1"} 28.36
+all_smi_gpu_utilization{gpu="Tenstorrent Grayskull e75 120W", instance="node-0001", gpu_uuid="EACDC169-2EE2-CF9A-2F48-E75C565CEE1F", gpu_index="2"} 62.54
+all_smi_gpu_utilization{gpu="Tenstorrent Grayskull e75 120W", instance="node-0001", gpu_uuid="F53980CA-E831-509E-73D4-3606BC871D2A", gpu_index="3"} 67.63
+all_smi_gpu_utilization{gpu="Tenstorrent Grayskull e75 120W", instance="node-0001", gpu_uuid="34623C04-CA4E-8D39-DCFB-B59395EF3683", gpu_index="4"} 34.46
+all_smi_gpu_utilization{gpu="Tenstorrent Grayskull e75 120W", instance="node-0001", gpu_uuid="01F1D7FE-47E3-F361-A0A5-43F1569A097F", gpu_index="5"} 58.33
+all_smi_gpu_utilization{gpu="Tenstorrent Grayskull e75 120W", instance="node-0001", gpu_uuid="9B3D5839-1625-8640-1D1D-8D6D7559AD6F", gpu_index="6"} 36.16
+all_smi_gpu_utilization{gpu="Tenstorrent Grayskull e75 120W", instance="node-0001", gpu_uuid="32491024-20CC-56A5-3C70-71E471425327", gpu_index="7"} 39.51
+# HELP all_smi_gpu_memory_used_bytes GPU memory used in bytes
+# TYPE all_smi_gpu_memory_used_bytes gauge
+all_smi_gpu_memory_used_bytes{gpu="Tenstorrent Grayskull e75 120W", instance="node-0001", gpu_uuid="1687A8B4-5260-23EC-DDF9-29A542A3B043", gpu_index="0"} 7839405831
+all_smi_gpu_memory_used_bytes{gpu="Tenstorrent Grayskull e75 120W", instance="node-0001", gpu_uuid="0621D504-48D2-DB07-9DC4-803C545D691F", gpu_index="1"} 2460630653
+all_smi_gpu_memory_used_bytes{gpu="Tenstorrent Grayskull e75 120W", instance="node-0001", gpu_uuid="EACDC169-2EE2-CF9A-2F48-E75C565CEE1F", gpu_index="2"} 22709537536
+all_smi_gpu_memory_used_bytes{gpu="Tenstorrent Grayskull e75 120W", instance="node-0001", gpu_uuid="F53980CA-E831-509E-73D4-3606BC871D2A", gpu_index="3"} 4244024433
+all_smi_gpu_memory_used_bytes{gpu="Tenstorrent Grayskull e75 120W", instance="node-0001", gpu_uuid="34623C04-CA4E-8D39-DCFB-B59395EF3683", gpu_index="4"} 6215357601
+all_smi_gpu_memory_used_bytes{gpu="Tenstorrent Grayskull e75 120W", instance="node-0001", gpu_uuid="01F1D7FE-47E3-F361-A0A5-43F1569A097F", gpu_index="5"} 8967472484
+all_smi_gpu_memory_used_bytes{gpu="Tenstorrent Grayskull e75 120W", instance="node-0001", gpu_uuid="9B3D5839-1625-8640-1D1D-8D6D7559AD6F", gpu_index="6"} 1252935815
+all_smi_gpu_memory_used_bytes{gpu="Tenstorrent Grayskull e75 120W", instance="node-0001", gpu_uuid="32491024-20CC-56A5-3C70-71E471425327", gpu_index="7"} 7350460206
+# HELP all_smi_gpu_memory_total_bytes GPU memory total in bytes
+# TYPE all_smi_gpu_memory_total_bytes gauge
+all_smi_gpu_memory_total_bytes{gpu="Tenstorrent Grayskull e75 120W", instance="node-0001", gpu_uuid="1687A8B4-5260-23EC-DDF9-29A542A3B043", gpu_index="0"} 25769803776
+all_smi_gpu_memory_total_bytes{gpu="Tenstorrent Grayskull e75 120W", instance="node-0001", gpu_uuid="0621D504-48D2-DB07-9DC4-803C545D691F", gpu_index="1"} 25769803776
+all_smi_gpu_memory_total_bytes{gpu="Tenstorrent Grayskull e75 120W", instance="node-0001", gpu_uuid="EACDC169-2EE2-CF9A-2F48-E75C565CEE1F", gpu_index="2"} 25769803776
+all_smi_gpu_memory_total_bytes{gpu="Tenstorrent Grayskull e75 120W", instance="node-0001", gpu_uuid="F53980CA-E831-509E-73D4-3606BC871D2A", gpu_index="3"} 25769803776
+all_smi_gpu_memory_total_bytes{gpu="Tenstorrent Grayskull e75 120W", instance="node-0001", gpu_uuid="34623C04-CA4E-8D39-DCFB-B59395EF3683", gpu_index="4"} 25769803776
+all_smi_gpu_memory_total_bytes{gpu="Tenstorrent Grayskull e75 120W", instance="node-0001", gpu_uuid="01F1D7FE-47E3-F361-A0A5-43F1569A097F", gpu_index="5"} 25769803776
+all_smi_gpu_memory_total_bytes{gpu="Tenstorrent Grayskull e75 120W", instance="node-0001", gpu_uuid="9B3D5839-1625-8640-1D1D-8D6D7559AD6F", gpu_index="6"} 25769803776
+all_smi_gpu_memory_total_bytes{gpu="Tenstorrent Grayskull e75 120W", instance="node-0001", gpu_uuid="32491024-20CC-56A5-3C70-71E471425327", gpu_index="7"} 25769803776
+# HELP all_smi_gpu_temperature_celsius GPU temperature in celsius
+# TYPE all_smi_gpu_temperature_celsius gauge
+all_smi_gpu_temperature_celsius{gpu="Tenstorrent Grayskull e75 120W", instance="node-0001", gpu_uuid="1687A8B4-5260-23EC-DDF9-29A542A3B043", gpu_index="0"} 70
+all_smi_gpu_temperature_celsius{gpu="Tenstorrent Grayskull e75 120W", instance="node-0001", gpu_uuid="0621D504-48D2-DB07-9DC4-803C545D691F", gpu_index="1"} 58
+all_smi_gpu_temperature_celsius{gpu="Tenstorrent Grayskull e75 120W", instance="node-0001", gpu_uuid="EACDC169-2EE2-CF9A-2F48-E75C565CEE1F", gpu_index="2"} 81
+all_smi_gpu_temperature_celsius{gpu="Tenstorrent Grayskull e75 120W", instance="node-0001", gpu_uuid="F53980CA-E831-509E-73D4-3606BC871D2A", gpu_index="3"} 76
+all_smi_gpu_temperature_celsius{gpu="Tenstorrent Grayskull e75 120W", instance="node-0001", gpu_uuid="34623C04-CA4E-8D39-DCFB-B59395EF3683", gpu_index="4"} 61
+all_smi_gpu_temperature_celsius{gpu="Tenstorrent Grayskull e75 120W", instance="node-0001", gpu_uuid="01F1D7FE-47E3-F361-A0A5-43F1569A097F", gpu_index="5"} 76
+all_smi_gpu_temperature_celsius{gpu="Tenstorrent Grayskull e75 120W", instance="node-0001", gpu_uuid="9B3D5839-1625-8640-1D1D-8D6D7559AD6F", gpu_index="6"} 60
+all_smi_gpu_temperature_celsius{gpu="Tenstorrent Grayskull e75 120W", instance="node-0001", gpu_uuid="32491024-20CC-56A5-3C70-71E471425327", gpu_index="7"} 63
+# HELP all_smi_gpu_power_consumption_watts GPU power consumption in watts
+# TYPE all_smi_gpu_power_consumption_watts gauge
+all_smi_gpu_power_consumption_watts{gpu="Tenstorrent Grayskull e75 120W", instance="node-0001", gpu_uuid="1687A8B4-5260-23EC-DDF9-29A542A3B043", gpu_index="0"} 414.554
+all_smi_gpu_power_consumption_watts{gpu="Tenstorrent Grayskull e75 120W", instance="node-0001", gpu_uuid="0621D504-48D2-DB07-9DC4-803C545D691F", gpu_index="1"} 296.969
+all_smi_gpu_power_consumption_watts{gpu="Tenstorrent Grayskull e75 120W", instance="node-0001", gpu_uuid="EACDC169-2EE2-CF9A-2F48-E75C565CEE1F", gpu_index="2"} 609.037
+all_smi_gpu_power_consumption_watts{gpu="Tenstorrent Grayskull e75 120W", instance="node-0001", gpu_uuid="F53980CA-E831-509E-73D4-3606BC871D2A", gpu_index="3"} 528.815
+all_smi_gpu_power_consumption_watts{gpu="Tenstorrent Grayskull e75 120W", instance="node-0001", gpu_uuid="34623C04-CA4E-8D39-DCFB-B59395EF3683", gpu_index="4"} 304.787
+all_smi_gpu_power_consumption_watts{gpu="Tenstorrent Grayskull e75 120W", instance="node-0001", gpu_uuid="01F1D7FE-47E3-F361-A0A5-43F1569A097F", gpu_index="5"} 492.701
+all_smi_gpu_power_consumption_watts{gpu="Tenstorrent Grayskull e75 120W", instance="node-0001", gpu_uuid="9B3D5839-1625-8640-1D1D-8D6D7559AD6F", gpu_index="6"} 316.917
+all_smi_gpu_power_consumption_watts{gpu="Tenstorrent Grayskull e75 120W", instance="node-0001", gpu_uuid="32491024-20CC-56A5-3C70-71E471425327", gpu_index="7"} 324.138
+# HELP all_smi_gpu_frequency_mhz GPU frequency in MHz
+# TYPE all_smi_gpu_frequency_mhz gauge
+all_smi_gpu_frequency_mhz{gpu="Tenstorrent Grayskull e75 120W", instance="node-0001", gpu_uuid="1687A8B4-5260-23EC-DDF9-29A542A3B043", gpu_index="0"} 1656
+all_smi_gpu_frequency_mhz{gpu="Tenstorrent Grayskull e75 120W", instance="node-0001", gpu_uuid="0621D504-48D2-DB07-9DC4-803C545D691F", gpu_index="1"} 1398
+all_smi_gpu_frequency_mhz{gpu="Tenstorrent Grayskull e75 120W", instance="node-0001", gpu_uuid="EACDC169-2EE2-CF9A-2F48-E75C565CEE1F", gpu_index="2"} 1584
+all_smi_gpu_frequency_mhz{gpu="Tenstorrent Grayskull e75 120W", instance="node-0001", gpu_uuid="F53980CA-E831-509E-73D4-3606BC871D2A", gpu_index="3"} 1649
+all_smi_gpu_frequency_mhz{gpu="Tenstorrent Grayskull e75 120W", instance="node-0001", gpu_uuid="34623C04-CA4E-8D39-DCFB-B59395EF3683", gpu_index="4"} 1460
+all_smi_gpu_frequency_mhz{gpu="Tenstorrent Grayskull e75 120W", instance="node-0001", gpu_uuid="01F1D7FE-47E3-F361-A0A5-43F1569A097F", gpu_index="5"} 1625
+all_smi_gpu_frequency_mhz{gpu="Tenstorrent Grayskull e75 120W", instance="node-0001", gpu_uuid="9B3D5839-1625-8640-1D1D-8D6D7559AD6F", gpu_index="6"} 1473
+all_smi_gpu_frequency_mhz{gpu="Tenstorrent Grayskull e75 120W", instance="node-0001", gpu_uuid="32491024-20CC-56A5-3C70-71E471425327", gpu_index="7"} 1503
+# HELP all_smi_npu_soc_utilization NPU SoC utilization percentage
+# TYPE all_smi_npu_soc_utilization gauge
+all_smi_npu_soc_utilization{npu="Tenstorrent Grayskull e75 120W", instance="node-0001", npu_uuid="1687A8B4-5260-23EC-DDF9-29A542A3B043", npu_index="0"} 71.49
+all_smi_npu_soc_utilization{npu="Tenstorrent Grayskull e75 120W", instance="node-0001", npu_uuid="0621D504-48D2-DB07-9DC4-803C545D691F", npu_index="1"} 25.40
+all_smi_npu_soc_utilization{npu="Tenstorrent Grayskull e75 120W", instance="node-0001", npu_uuid="EACDC169-2EE2-CF9A-2F48-E75C565CEE1F", npu_index="2"} 66.42
+all_smi_npu_soc_utilization{npu="Tenstorrent Grayskull e75 120W", instance="node-0001", npu_uuid="F53980CA-E831-509E-73D4-3606BC871D2A", npu_index="3"} 70.25
+all_smi_npu_soc_utilization{npu="Tenstorrent Grayskull e75 120W", instance="node-0001", npu_uuid="34623C04-CA4E-8D39-DCFB-B59395EF3683", npu_index="4"} 39.83
+all_smi_npu_soc_utilization{npu="Tenstorrent Grayskull e75 120W", instance="node-0001", npu_uuid="01F1D7FE-47E3-F361-A0A5-43F1569A097F", npu_index="5"} 51.73
+all_smi_npu_soc_utilization{npu="Tenstorrent Grayskull e75 120W", instance="node-0001", npu_uuid="9B3D5839-1625-8640-1D1D-8D6D7559AD6F", npu_index="6"} 44.66
+all_smi_npu_soc_utilization{npu="Tenstorrent Grayskull e75 120W", instance="node-0001", npu_uuid="32491024-20CC-56A5-3C70-71E471425327", npu_index="7"} 34.13
+# HELP all_smi_temperature_asic_celsius ASIC temperature in celsius
+# TYPE all_smi_temperature_asic_celsius gauge
+all_smi_temperature_asic_celsius{npu="Tenstorrent Grayskull e75 120W", instance="node-0001", npu_uuid="1687A8B4-5260-23EC-DDF9-29A542A3B043", npu_index="0"} 70
+all_smi_temperature_asic_celsius{npu="Tenstorrent Grayskull e75 120W", instance="node-0001", npu_uuid="0621D504-48D2-DB07-9DC4-803C545D691F", npu_index="1"} 58
+all_smi_temperature_asic_celsius{npu="Tenstorrent Grayskull e75 120W", instance="node-0001", npu_uuid="EACDC169-2EE2-CF9A-2F48-E75C565CEE1F", npu_index="2"} 81
+all_smi_temperature_asic_celsius{npu="Tenstorrent Grayskull e75 120W", instance="node-0001", npu_uuid="F53980CA-E831-509E-73D4-3606BC871D2A", npu_index="3"} 76
+all_smi_temperature_asic_celsius{npu="Tenstorrent Grayskull e75 120W", instance="node-0001", npu_uuid="34623C04-CA4E-8D39-DCFB-B59395EF3683", npu_index="4"} 61
+all_smi_temperature_asic_celsius{npu="Tenstorrent Grayskull e75 120W", instance="node-0001", npu_uuid="01F1D7FE-47E3-F361-A0A5-43F1569A097F", npu_index="5"} 76
+all_smi_temperature_asic_celsius{npu="Tenstorrent Grayskull e75 120W", instance="node-0001", npu_uuid="9B3D5839-1625-8640-1D1D-8D6D7559AD6F", npu_index="6"} 60
+all_smi_temperature_asic_celsius{npu="Tenstorrent Grayskull e75 120W", instance="node-0001", npu_uuid="32491024-20CC-56A5-3C70-71E471425327", npu_index="7"} 63
+# HELP all_smi_temperature_vreg_celsius Voltage regulator temperature in celsius
+# TYPE all_smi_temperature_vreg_celsius gauge
+all_smi_temperature_vreg_celsius{npu="Tenstorrent Grayskull e75 120W", instance="node-0001", npu_uuid="1687A8B4-5260-23EC-DDF9-29A542A3B043", npu_index="0"} 73
+all_smi_temperature_vreg_celsius{npu="Tenstorrent Grayskull e75 120W", instance="node-0001", npu_uuid="0621D504-48D2-DB07-9DC4-803C545D691F", npu_index="1"} 53
+all_smi_temperature_vreg_celsius{npu="Tenstorrent Grayskull e75 120W", instance="node-0001", npu_uuid="EACDC169-2EE2-CF9A-2F48-E75C565CEE1F", npu_index="2"} 81
+all_smi_temperature_vreg_celsius{npu="Tenstorrent Grayskull e75 120W", instance="node-0001", npu_uuid="F53980CA-E831-509E-73D4-3606BC871D2A", npu_index="3"} 80
+all_smi_temperature_vreg_celsius{npu="Tenstorrent Grayskull e75 120W", instance="node-0001", npu_uuid="34623C04-CA4E-8D39-DCFB-B59395EF3683", npu_index="4"} 64
+all_smi_temperature_vreg_celsius{npu="Tenstorrent Grayskull e75 120W", instance="node-0001", npu_uuid="01F1D7FE-47E3-F361-A0A5-43F1569A097F", npu_index="5"} 74
+all_smi_temperature_vreg_celsius{npu="Tenstorrent Grayskull e75 120W", instance="node-0001", npu_uuid="9B3D5839-1625-8640-1D1D-8D6D7559AD6F", npu_index="6"} 58
+all_smi_temperature_vreg_celsius{npu="Tenstorrent Grayskull e75 120W", instance="node-0001", npu_uuid="32491024-20CC-56A5-3C70-71E471425327", npu_index="7"} 58
+# HELP all_smi_temperature_inlet_celsius Inlet temperature in celsius
+# TYPE all_smi_temperature_inlet_celsius gauge
+all_smi_temperature_inlet_celsius{npu="Tenstorrent Grayskull e75 120W", instance="node-0001", npu_uuid="1687A8B4-5260-23EC-DDF9-29A542A3B043", npu_index="0"} 58
+all_smi_temperature_inlet_celsius{npu="Tenstorrent Grayskull e75 120W", instance="node-0001", npu_uuid="0621D504-48D2-DB07-9DC4-803C545D691F", npu_index="1"} 47
+all_smi_temperature_inlet_celsius{npu="Tenstorrent Grayskull e75 120W", instance="node-0001", npu_uuid="EACDC169-2EE2-CF9A-2F48-E75C565CEE1F", npu_index="2"} 60
+all_smi_temperature_inlet_celsius{npu="Tenstorrent Grayskull e75 120W", instance="node-0001", npu_uuid="F53980CA-E831-509E-73D4-3606BC871D2A", npu_index="3"} 59
+all_smi_temperature_inlet_celsius{npu="Tenstorrent Grayskull e75 120W", instance="node-0001", npu_uuid="34623C04-CA4E-8D39-DCFB-B59395EF3683", npu_index="4"} 41
+all_smi_temperature_inlet_celsius{npu="Tenstorrent Grayskull e75 120W", instance="node-0001", npu_uuid="01F1D7FE-47E3-F361-A0A5-43F1569A097F", npu_index="5"} 60
+all_smi_temperature_inlet_celsius{npu="Tenstorrent Grayskull e75 120W", instance="node-0001", npu_uuid="9B3D5839-1625-8640-1D1D-8D6D7559AD6F", npu_index="6"} 46
+all_smi_temperature_inlet_celsius{npu="Tenstorrent Grayskull e75 120W", instance="node-0001", npu_uuid="32491024-20CC-56A5-3C70-71E471425327", npu_index="7"} 51
+# HELP all_smi_aiclk_mhz AI clock frequency in MHz
+# TYPE all_smi_aiclk_mhz gauge
+all_smi_aiclk_mhz{npu="Tenstorrent Grayskull e75 120W", instance="node-0001", npu_uuid="1687A8B4-5260-23EC-DDF9-29A542A3B043", npu_index="0"} 1656
+all_smi_aiclk_mhz{npu="Tenstorrent Grayskull e75 120W", instance="node-0001", npu_uuid="0621D504-48D2-DB07-9DC4-803C545D691F", npu_index="1"} 1398
+all_smi_aiclk_mhz{npu="Tenstorrent Grayskull e75 120W", instance="node-0001", npu_uuid="EACDC169-2EE2-CF9A-2F48-E75C565CEE1F", npu_index="2"} 1584
+all_smi_aiclk_mhz{npu="Tenstorrent Grayskull e75 120W", instance="node-0001", npu_uuid="F53980CA-E831-509E-73D4-3606BC871D2A", npu_index="3"} 1649
+all_smi_aiclk_mhz{npu="Tenstorrent Grayskull e75 120W", instance="node-0001", npu_uuid="34623C04-CA4E-8D39-DCFB-B59395EF3683", npu_index="4"} 1460
+all_smi_aiclk_mhz{npu="Tenstorrent Grayskull e75 120W", instance="node-0001", npu_uuid="01F1D7FE-47E3-F361-A0A5-43F1569A097F", npu_index="5"} 1625
+all_smi_aiclk_mhz{npu="Tenstorrent Grayskull e75 120W", instance="node-0001", npu_uuid="9B3D5839-1625-8640-1D1D-8D6D7559AD6F", npu_index="6"} 1473
+all_smi_aiclk_mhz{npu="Tenstorrent Grayskull e75 120W", instance="node-0001", npu_uuid="32491024-20CC-56A5-3C70-71E471425327", npu_index="7"} 1503
+# HELP all_smi_axiclk_mhz AXI clock frequency in MHz
+# TYPE all_smi_axiclk_mhz gauge
+all_smi_axiclk_mhz{npu="Tenstorrent Grayskull e75 120W", instance="node-0001", npu_uuid="1687A8B4-5260-23EC-DDF9-29A542A3B043", npu_index="0"} 1069
+all_smi_axiclk_mhz{npu="Tenstorrent Grayskull e75 120W", instance="node-0001", npu_uuid="0621D504-48D2-DB07-9DC4-803C545D691F", npu_index="1"} 815
+all_smi_axiclk_mhz{npu="Tenstorrent Grayskull e75 120W", instance="node-0001", npu_uuid="EACDC169-2EE2-CF9A-2F48-E75C565CEE1F", npu_index="2"} 955
+all_smi_axiclk_mhz{npu="Tenstorrent Grayskull e75 120W", instance="node-0001", npu_uuid="F53980CA-E831-509E-73D4-3606BC871D2A", npu_index="3"} 900
+all_smi_axiclk_mhz{npu="Tenstorrent Grayskull e75 120W", instance="node-0001", npu_uuid="34623C04-CA4E-8D39-DCFB-B59395EF3683", npu_index="4"} 834
+all_smi_axiclk_mhz{npu="Tenstorrent Grayskull e75 120W", instance="node-0001", npu_uuid="01F1D7FE-47E3-F361-A0A5-43F1569A097F", npu_index="5"} 898
+all_smi_axiclk_mhz{npu="Tenstorrent Grayskull e75 120W", instance="node-0001", npu_uuid="9B3D5839-1625-8640-1D1D-8D6D7559AD6F", npu_index="6"} 1110
+all_smi_axiclk_mhz{npu="Tenstorrent Grayskull e75 120W", instance="node-0001", npu_uuid="32491024-20CC-56A5-3C70-71E471425327", npu_index="7"} 1108
+# HELP all_smi_arcclk_mhz ARC clock frequency in MHz
+# TYPE all_smi_arcclk_mhz gauge
+all_smi_arcclk_mhz{npu="Tenstorrent Grayskull e75 120W", instance="node-0001", npu_uuid="1687A8B4-5260-23EC-DDF9-29A542A3B043", npu_index="0"} 710
+all_smi_arcclk_mhz{npu="Tenstorrent Grayskull e75 120W", instance="node-0001", npu_uuid="0621D504-48D2-DB07-9DC4-803C545D691F", npu_index="1"} 788
+all_smi_arcclk_mhz{npu="Tenstorrent Grayskull e75 120W", instance="node-0001", npu_uuid="EACDC169-2EE2-CF9A-2F48-E75C565CEE1F", npu_index="2"} 739
+all_smi_arcclk_mhz{npu="Tenstorrent Grayskull e75 120W", instance="node-0001", npu_uuid="F53980CA-E831-509E-73D4-3606BC871D2A", npu_index="3"} 726
+all_smi_arcclk_mhz{npu="Tenstorrent Grayskull e75 120W", instance="node-0001", npu_uuid="34623C04-CA4E-8D39-DCFB-B59395EF3683", npu_index="4"} 577
+all_smi_arcclk_mhz{npu="Tenstorrent Grayskull e75 120W", instance="node-0001", npu_uuid="01F1D7FE-47E3-F361-A0A5-43F1569A097F", npu_index="5"} 627
+all_smi_arcclk_mhz{npu="Tenstorrent Grayskull e75 120W", instance="node-0001", npu_uuid="9B3D5839-1625-8640-1D1D-8D6D7559AD6F", npu_index="6"} 615
+all_smi_arcclk_mhz{npu="Tenstorrent Grayskull e75 120W", instance="node-0001", npu_uuid="32491024-20CC-56A5-3C70-71E471425327", npu_index="7"} 786
+# HELP all_smi_voltage_volts Core voltage in volts
+# TYPE all_smi_voltage_volts gauge
+all_smi_voltage_volts{npu="Tenstorrent Grayskull e75 120W", instance="node-0001", npu_uuid="1687A8B4-5260-23EC-DDF9-29A542A3B043", npu_index="0"} 0.927
+all_smi_voltage_volts{npu="Tenstorrent Grayskull e75 120W", instance="node-0001", npu_uuid="0621D504-48D2-DB07-9DC4-803C545D691F", npu_index="1"} 0.862
+all_smi_voltage_volts{npu="Tenstorrent Grayskull e75 120W", instance="node-0001", npu_uuid="EACDC169-2EE2-CF9A-2F48-E75C565CEE1F", npu_index="2"} 0.861
+all_smi_voltage_volts{npu="Tenstorrent Grayskull e75 120W", instance="node-0001", npu_uuid="F53980CA-E831-509E-73D4-3606BC871D2A", npu_index="3"} 0.878
+all_smi_voltage_volts{npu="Tenstorrent Grayskull e75 120W", instance="node-0001", npu_uuid="34623C04-CA4E-8D39-DCFB-B59395EF3683", npu_index="4"} 0.915
+all_smi_voltage_volts{npu="Tenstorrent Grayskull e75 120W", instance="node-0001", npu_uuid="01F1D7FE-47E3-F361-A0A5-43F1569A097F", npu_index="5"} 0.920
+all_smi_voltage_volts{npu="Tenstorrent Grayskull e75 120W", instance="node-0001", npu_uuid="9B3D5839-1625-8640-1D1D-8D6D7559AD6F", npu_index="6"} 0.941
+all_smi_voltage_volts{npu="Tenstorrent Grayskull e75 120W", instance="node-0001", npu_uuid="32491024-20CC-56A5-3C70-71E471425327", npu_index="7"} 0.856
+# HELP all_smi_current_amperes Core current in amperes
+# TYPE all_smi_current_amperes gauge
+all_smi_current_amperes{npu="Tenstorrent Grayskull e75 120W", instance="node-0001", npu_uuid="1687A8B4-5260-23EC-DDF9-29A542A3B043", npu_index="0"} 447.3
+all_smi_current_amperes{npu="Tenstorrent Grayskull e75 120W", instance="node-0001", npu_uuid="0621D504-48D2-DB07-9DC4-803C545D691F", npu_index="1"} 344.5
+all_smi_current_amperes{npu="Tenstorrent Grayskull e75 120W", instance="node-0001", npu_uuid="EACDC169-2EE2-CF9A-2F48-E75C565CEE1F", npu_index="2"} 707.4
+all_smi_current_amperes{npu="Tenstorrent Grayskull e75 120W", instance="node-0001", npu_uuid="F53980CA-E831-509E-73D4-3606BC871D2A", npu_index="3"} 602.4
+all_smi_current_amperes{npu="Tenstorrent Grayskull e75 120W", instance="node-0001", npu_uuid="34623C04-CA4E-8D39-DCFB-B59395EF3683", npu_index="4"} 333.2
+all_smi_current_amperes{npu="Tenstorrent Grayskull e75 120W", instance="node-0001", npu_uuid="01F1D7FE-47E3-F361-A0A5-43F1569A097F", npu_index="5"} 535.4
+all_smi_current_amperes{npu="Tenstorrent Grayskull e75 120W", instance="node-0001", npu_uuid="9B3D5839-1625-8640-1D1D-8D6D7559AD6F", npu_index="6"} 336.7
+all_smi_current_amperes{npu="Tenstorrent Grayskull e75 120W", instance="node-0001", npu_uuid="32491024-20CC-56A5-3C70-71E471425327", npu_index="7"} 378.8
+# HELP all_smi_cpu_utilization CPU utilization percentage
+# TYPE all_smi_cpu_utilization gauge
+all_smi_cpu_utilization{instance="node-0001"} 57.48
+# HELP all_smi_cpu_core_count Total number of CPU cores
+# TYPE all_smi_cpu_core_count gauge
+all_smi_cpu_core_count{instance="node-0001"} 128
+# HELP all_smi_cpu_temperature_celsius CPU temperature in celsius
+# TYPE all_smi_cpu_temperature_celsius gauge
+all_smi_cpu_temperature_celsius{instance="node-0001"} 57
+# HELP all_smi_memory_used_bytes System memory used in bytes
+# TYPE all_smi_memory_used_bytes gauge
+all_smi_memory_used_bytes{instance="node-0001"} 80127244909
+# HELP all_smi_memory_total_bytes System memory total in bytes
+# TYPE all_smi_memory_total_bytes gauge
+all_smi_memory_total_bytes{instance="node-0001"} 1099511627776
+# HELP all_smi_tenstorrent_driver_version Tenstorrent driver version
+# TYPE all_smi_tenstorrent_driver_version gauge
+all_smi_tenstorrent_driver_version{instance="node-0001"} 1
+# HELP all_smi_disk_total_bytes Total disk space in bytes
+# TYPE all_smi_disk_total_bytes gauge
+all_smi_disk_total_bytes{instance="node-0001", mount_point="/", index="0"} 4398046511104
+# HELP all_smi_disk_available_bytes Available disk space in bytes
+# TYPE all_smi_disk_available_bytes gauge
+all_smi_disk_available_bytes{instance="node-0001", mount_point="/", index="0"} 1731361598559
+# HELP all_smi_disk_utilization_percent Disk utilization percentage
+# TYPE all_smi_disk_utilization_percent gauge
+all_smi_disk_utilization_percent{instance="node-0001", mount_point="/", index="0"} 60.63
+# HELP all_smi_disk_read_bytes_per_sec Disk read bytes per second
+# TYPE all_smi_disk_read_bytes_per_sec gauge
+all_smi_disk_read_bytes_per_sec{instance="node-0001", mount_point="/", index="0"} 82286143
+# HELP all_smi_disk_write_bytes_per_sec Disk write bytes per second
+# TYPE all_smi_disk_write_bytes_per_sec gauge
+all_smi_disk_write_bytes_per_sec{instance="node-0001", mount_point="/", index="0"} 28553652

@@ -294,22 +294,34 @@ mod nvidia_jetson;
 #### Connection Pool Configuration
 - **Pool Size**: 200 idle connections per host
 - **Keep-Alive**: TCP keepalive for persistent connections
-- **Timeout**: 5-second request timeout
-- **Concurrency**: Limited to 64 simultaneous connections
+- **Timeouts**: 1-second connect timeout and 3-second request timeout per attempt, inside a 4-second budget for the whole scrape tick, so one attempt always ends before the tick deadline
+- **Concurrency**: Limited to 128 simultaneous connections; each tick spawns one task per configured host, so concurrency follows hostfile reloads
 
 #### Resilience Features
 
 1. **Retry Logic**
-   - 3 attempts with exponential backoff
-   - Delays: 50ms → 100ms → 150ms
-   - Automatic failure recovery
+   - Fast failures (connection refused, HTTP 5xx) retry up to 3 attempts with 50ms and 100ms pauses; a timeout is not retried
+   - Hosts still pending at the tick deadline are reported `timeout` (not left at their previous status) and count as failures
 
-2. **Connection Staggering**
+2. **Per-host Backoff** (`network/host_backoff.rs`)
+   - After the second consecutive failure a host is skipped for `min(2 s * 2^(failures - 2), 60 s)` and reported `backing-off`; one success clears it
+   - The state lives in `NetworkClient`, so `record --source=remote` backs off the same way; hosts removed from the configuration drop their entry
+   - A tick with a dead host in backoff ends when the live hosts answer instead of waiting out the budget
+
+3. **Off-loop Parsing**
+   - Each host task parses its own body (bodies over 64 KiB on the blocking pool), so the collector loop only merges results
+   - Lines are split by `parsing::prometheus::split_prometheus_line` and labels borrow from the body (`network/prometheus_labels.rs`), so a typical line allocates nothing; label strings up to 32 KiB are accepted and dropped over-long lines are reported once per scrape through `tracing`
+
+4. **Hostfile Reload** (`view/data_collection/hostfile.rs`)
+   - The view re-checks the hostfile each tick with one async `metadata` call and re-reads it only when its modification time or length changed; a read failure keeps the previous host list and logs through `tracing`
+   - Tabs, statuses, and the Users coverage count follow the reloaded host list; `--hosts` and hostfile hosts are merged and de-duplicated by `host:port`
+
+5. **Connection Staggering**
    - 500ms delays for 100+ nodes
    - Prevents overwhelming system listen queues
    - Respects `kern.ipc.somaxconn` limits
 
-3. **Adaptive Behavior**
+6. **Adaptive Behavior**
    - Update intervals: 2-6 seconds based on cluster size
    - Dynamic timeout adjustments
    - Graceful degradation on failures
@@ -519,8 +531,10 @@ impl Drop for TerminalState {
 
 ```rust
 pub const DEFAULT_UPDATE_INTERVAL: u64 = 3;
-pub const MAX_CONCURRENT_CONNECTIONS: usize = 64;
-pub const CONNECTION_TIMEOUT: Duration = Duration::from_secs(5);
+pub const MAX_CONCURRENT_CONNECTIONS: usize = 128;
+pub const CONNECTION_TIMEOUT_SECS: u64 = 3;     // per request attempt
+pub const CONNECT_TIMEOUT_MS: u64 = 1000;       // per TCP connect
+pub const REMOTE_SCRAPE_BUDGET_MS: u64 = 4000;  // per scrape tick
 pub const MAX_HISTORY_SIZE: usize = 60;
 ```
 
@@ -795,7 +809,7 @@ collector.update_state(app_state, data, &config).await;
 - **Staggered Connections**: 500ms spread for 100+ nodes
 - **Connection Pool**: 200 idle connections per host
 - **TCP Keepalive**: Maintains persistent connections
-- **Retry Logic**: 3 attempts with exponential backoff
+- **Retry Logic**: 3 attempts for fast failures, no retry after a timeout, per-host backoff after repeated failures
 
 ### 5. Input Validation
 - **Hostfile Limits**:

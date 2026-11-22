@@ -235,13 +235,28 @@ async fn run_remote(opts: RecorderOptions, stop: Arc<AtomicBool>) -> Result<()> 
         CollectionConfig, DataCollectionStrategy, RemoteCollectorBuilder,
     };
 
-    let mut builder = RemoteCollectorBuilder::new().with_hosts(opts.hosts.clone());
-    if let Some(file) = opts.hostfile.as_deref() {
-        builder = builder
-            .load_hosts_from_file(file)
-            .with_context(|| format!("failed to load hostfile {file}"))?;
+    // `--hosts` merged with the hostfile's hosts, resolved once: the
+    // recorder does not reload the hostfile.
+    let resolved = crate::view::data_collection::hostfile::resolve_hosts(
+        &opts.hosts,
+        opts.hostfile.as_deref(),
+    )
+    .with_context(|| {
+        format!(
+            "failed to load hostfile {}",
+            opts.hostfile.as_deref().unwrap_or_default()
+        )
+    })?;
+    for warning in &resolved.warnings {
+        eprintln!("Warning: {warning}");
     }
-    let collector = builder.build();
+    let hosts = resolved.hosts;
+    if hosts.is_empty() {
+        bail!("--source=remote found no valid hosts in --hosts or --hostfile");
+    }
+    let collector = RemoteCollectorBuilder::new()
+        .with_hosts(hosts.clone())
+        .build();
 
     let mut writer =
         RotatingWriter::new(&opts.output, opts.codec, opts.max_size, opts.max_files)
@@ -250,7 +265,7 @@ async fn run_remote(opts: RecorderOptions, stop: Arc<AtomicBool>) -> Result<()> 
     // In remote mode the header `hosts` field carries the scrape targets
     // so the replay side can reconstruct the tab list even when no data
     // frames arrive.
-    write_header(&mut writer, &opts, &opts.hosts)?;
+    write_header(&mut writer, &opts, &hosts)?;
 
     let start = std::time::Instant::now();
     let mut seq: u64 = 0;
@@ -263,7 +278,7 @@ async fn run_remote(opts: RecorderOptions, stop: Arc<AtomicBool>) -> Result<()> 
         let config = CollectionConfig {
             interval: opts.interval.as_secs(),
             first_iteration: false,
-            hosts: opts.hosts.clone(),
+            hosts: hosts.clone(),
         };
         match collector.collect(&config).await {
             Ok(data) => {
@@ -520,6 +535,9 @@ fn codec_extension_mismatch(path: &Path, compress: Option<RecordCompression>) ->
 /// discovery, without making it a required re-export.
 #[allow(dead_code)]
 fn _type_check_snapshot_reexport(_: SnapshotOptions) {}
+
+#[cfg(test)]
+mod remote_hostfile_tests;
 
 #[cfg(test)]
 mod tests {

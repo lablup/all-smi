@@ -48,6 +48,13 @@ macro_rules! parse_metric {
 /// Example regex: r"^all_smi_([^\{]+)\{([^}]+)\} ([\d\.]+)$"
 /// Returns Option<(String, String, f64)>
 ///
+/// Lines whose metric name exceeds 256 bytes or whose label string exceeds
+/// 32 KiB are rejected (None).
+///
+/// The remote parser no longer uses this macro (issue #500 replaced it with
+/// [`crate::parsing::prometheus::split_prometheus_line`]); it stays exported
+/// for downstream callers.
+///
 /// A line whose value fails to parse as `f64` is dropped (None), never
 /// turned into a fabricated `0.0`: zero is a real reading in this domain,
 /// so a fabricated one would be indistinguishable from a measurement
@@ -67,8 +74,12 @@ macro_rules! parse_prometheus {
             // both match) must drop the line, not become a reading.
             let value = cap.get(3).and_then(|m| m.as_str().parse::<f64>().ok());
             if let (Some(name), Some(labels), Some(value)) = (name, labels, value) {
-                // Add length validation that was previously enforced by bounded quantifiers
-                if name.len() > 256 || labels.len() > 1024 {
+                // Length bounds formerly enforced by bounded quantifiers. The
+                // label-string bound matches the remote parser's single
+                // 32 KiB limit (issue #500 measured a fully detailed NVIDIA
+                // `all_smi_gpu_info` label string at 769 bytes, too close to
+                // the old 1024-byte cap).
+                if name.len() > 256 || labels.len() > 32_768 {
                     None
                 } else {
                     Some((name, labels, value))
@@ -82,8 +93,10 @@ macro_rules! parse_prometheus {
     }};
 }
 
-/// Extract a label value from a HashMap and insert it into a detail HashMap with a given key.
-/// Useful for processing Prometheus label data.
+/// Extract a label value from a label map and insert it into a detail HashMap with a given key.
+/// Useful for processing Prometheus label data. Works with any map whose
+/// `get` returns a `Display` value reference (`HashMap<String, String>` or
+/// the remote parser's borrowed label set).
 ///
 /// Example usage:
 /// ```ignore
@@ -96,7 +109,7 @@ macro_rules! parse_prometheus {
 macro_rules! extract_label_to_detail {
     ($labels:expr_2021, $label_key:expr_2021, $detail_map:expr_2021, $detail_key:expr_2021) => {
         if let Some(value) = $labels.get($label_key) {
-            $detail_map.insert($detail_key.to_string(), value.clone());
+            $detail_map.insert($detail_key.to_string(), value.to_string());
         }
     };
     // Variant that uses the same key for both label and detail
@@ -121,7 +134,7 @@ macro_rules! extract_labels_batch {
     ($labels:expr_2021, $detail_map:expr_2021, [$($key:expr_2021),* $(,)?]) => {
         $(
             if let Some(value) = $labels.get($key) {
-                $detail_map.insert($key.to_string(), value.clone());
+                $detail_map.insert($key.to_string(), value.to_string());
             }
         )*
     };
@@ -164,8 +177,9 @@ macro_rules! update_metric_field {
     };
 }
 
-/// Extract a label value from a HashMap with a default if not present.
-/// Returns the value or a default. Uses efficient borrowing when possible.
+/// Extract a label value from a label map with a default if not present.
+/// Returns the value or a default. Works with `HashMap<String, String>` and
+/// with the remote parser's borrowed label set.
 ///
 /// Example usage:
 /// ```ignore
@@ -175,11 +189,7 @@ macro_rules! update_metric_field {
 #[macro_export]
 macro_rules! get_label_or_default {
     ($labels:expr_2021, $key:expr_2021) => {
-        $labels
-            .get($key)
-            .map(|s| s.as_str())
-            .unwrap_or("")
-            .to_string()
+        $labels.get($key).map(|s| s.to_string()).unwrap_or_default()
     };
     ($labels:expr_2021, $key:expr_2021, $default:expr_2021) => {
         $labels
