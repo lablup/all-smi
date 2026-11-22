@@ -199,7 +199,7 @@ impl RecorderOptions {
 
 /// Entry point for the `record` subcommand.
 pub async fn run(opts: RecorderOptions) -> Result<()> {
-    let stop = Arc::new(AtomicBool::new(false));
+    let stop = Arc::new(StopSignal::default());
     install_signal_handlers(stop.clone());
 
     match opts.source {
@@ -208,7 +208,7 @@ pub async fn run(opts: RecorderOptions) -> Result<()> {
     }
 }
 
-async fn run_local(opts: RecorderOptions, stop: Arc<AtomicBool>) -> Result<()> {
+async fn run_local(opts: RecorderOptions, stop: Arc<StopSignal>) -> Result<()> {
     let collector = Arc::new(DefaultSnapshotCollector::new());
     let hosts = vec![collector.hostname()];
 
@@ -230,7 +230,7 @@ async fn run_local(opts: RecorderOptions, stop: Arc<AtomicBool>) -> Result<()> {
     Ok(())
 }
 
-async fn run_remote(opts: RecorderOptions, stop: Arc<AtomicBool>) -> Result<()> {
+async fn run_remote(opts: RecorderOptions, stop: Arc<StopSignal>) -> Result<()> {
     use crate::view::data_collection::{
         CollectionConfig, DataCollectionStrategy, RemoteCollectorBuilder,
     };
@@ -269,7 +269,7 @@ async fn run_remote(opts: RecorderOptions, stop: Arc<AtomicBool>) -> Result<()> 
 
     let start = std::time::Instant::now();
     let mut seq: u64 = 0;
-    while !stop.load(Ordering::Relaxed) {
+    while !stop.is_stopped() {
         if let Some(limit) = opts.duration
             && start.elapsed() >= limit
         {
@@ -299,7 +299,7 @@ async fn run_remote(opts: RecorderOptions, stop: Arc<AtomicBool>) -> Result<()> 
 async fn record_loop<F, Fut>(
     writer: &mut RotatingWriter,
     opts: &RecorderOptions,
-    stop: Arc<AtomicBool>,
+    stop: Arc<StopSignal>,
     mut collect: F,
 ) -> Result<()>
 where
@@ -314,7 +314,7 @@ where
     // safely; the timeout is per-reader, not per-cycle.
     let reader_timeout = Duration::from_millis(5_000);
 
-    while !stop.load(Ordering::Relaxed) {
+    while !stop.is_stopped() {
         if let Some(limit) = opts.duration
             && start.elapsed() >= limit
         {
@@ -328,28 +328,55 @@ where
     Ok(())
 }
 
+/// Stop request shared between the signal handlers and the record loop.
+///
+/// The flag is what the loop checks between frames. The [`Notify`] wakes
+/// the loop out of its inter-frame sleep at once, so the recorder needs no
+/// periodic wakeups to notice a signal (it used to poll the flag every
+/// 100 ms, issue #503).
+///
+/// [`Notify`]: tokio::sync::Notify
+#[derive(Default)]
+struct StopSignal {
+    stopped: AtomicBool,
+    notify: tokio::sync::Notify,
+}
+
+impl StopSignal {
+    fn is_stopped(&self) -> bool {
+        self.stopped.load(Ordering::Relaxed)
+    }
+
+    /// Request a stop. `notify_one` stores a permit when the loop is not
+    /// sleeping at this moment (it is collecting or writing), so the next
+    /// sleep returns immediately instead of missing the wakeup.
+    fn stop(&self) {
+        self.stopped.store(true, Ordering::Relaxed);
+        self.notify.notify_one();
+    }
+}
+
 /// Sleep until the next tick boundary (fixed-interval recording) or
-/// break early if SIGTERM landed.
+/// return early if SIGINT / SIGTERM landed.
 async fn sleep_until_next(
     opts: &RecorderOptions,
     start: std::time::Instant,
     seq: u64,
-    stop: &Arc<AtomicBool>,
+    stop: &Arc<StopSignal>,
 ) {
     let target = start + opts.interval.saturating_mul(seq as u32);
-    let now = std::time::Instant::now();
-    if target > now {
-        let remaining = target.duration_since(now);
-        // Wake early on stop so SIGTERM responsiveness is `interval / 10`
-        // rather than a full cycle. We poll the atomic at 100ms
-        // granularity — plenty fast for human-observable shutdown.
-        let mut slept = Duration::ZERO;
-        let step = Duration::from_millis(100);
-        while slept < remaining && !stop.load(Ordering::Relaxed) {
-            let chunk = step.min(remaining - slept);
-            tokio::time::sleep(chunk).await;
-            slept += chunk;
-        }
+    sleep_until_or_stopped(tokio::time::Instant::from_std(target), stop).await;
+}
+
+/// Sleep until `target`, waking as soon as a stop is requested. One timer
+/// and one notification, no polling.
+async fn sleep_until_or_stopped(target: tokio::time::Instant, stop: &StopSignal) {
+    if stop.is_stopped() {
+        return;
+    }
+    tokio::select! {
+        _ = tokio::time::sleep_until(target) => {}
+        _ = stop.notify.notified() => {}
     }
 }
 
@@ -432,15 +459,16 @@ fn snapshot_from_collection_data(
 }
 
 /// Register signal handlers to cleanly terminate the recorder on
-/// SIGTERM / SIGINT (Ctrl-C). The flag is polled in the record loop so
-/// we can finish the in-flight frame, flush the encoder, and close the
-/// file before exiting.
-fn install_signal_handlers(stop: Arc<AtomicBool>) {
+/// SIGTERM / SIGINT (Ctrl-C). The record loop checks the flag between
+/// frames and is woken out of its sleep by the notification, so we can
+/// finish the in-flight frame, flush the encoder, and close the file
+/// before exiting.
+fn install_signal_handlers(stop: Arc<StopSignal>) {
     {
         let stop = stop.clone();
         tokio::spawn(async move {
             let _ = tokio::signal::ctrl_c().await;
-            stop.store(true, Ordering::Relaxed);
+            stop.stop();
         });
     }
     #[cfg(unix)]
@@ -451,7 +479,7 @@ fn install_signal_handlers(stop: Arc<AtomicBool>) {
                 tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
             {
                 sig.recv().await;
-                stop.store(true, Ordering::Relaxed);
+                stop.stop();
             }
         });
     }
@@ -542,6 +570,42 @@ mod remote_hostfile_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A stop request ends the inter-frame sleep at once: notified 1.5 s
+    /// into a 10 s interval, the sleep returns at 1.5 s. The old loop
+    /// polled the flag every 100 ms instead.
+    #[tokio::test(start_paused = true)]
+    async fn sleep_returns_as_soon_as_a_stop_is_requested() {
+        let stop = Arc::new(StopSignal::default());
+        let started = tokio::time::Instant::now();
+        let target = started + Duration::from_secs(10);
+
+        let signal = stop.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(1_500)).await;
+            signal.stop();
+        });
+
+        sleep_until_or_stopped(target, &stop).await;
+        assert_eq!(started.elapsed(), Duration::from_millis(1_500));
+        assert!(stop.is_stopped());
+    }
+
+    /// Without a stop the sleep lasts exactly until the tick boundary,
+    /// and a stop requested while the loop was busy (no sleeper to wake)
+    /// still makes the next sleep return immediately.
+    #[tokio::test(start_paused = true)]
+    async fn sleep_runs_to_the_boundary_and_honours_an_earlier_stop() {
+        let stop = StopSignal::default();
+        let started = tokio::time::Instant::now();
+        sleep_until_or_stopped(started + Duration::from_secs(10), &stop).await;
+        assert_eq!(started.elapsed(), Duration::from_secs(10));
+
+        stop.stop();
+        let before = tokio::time::Instant::now();
+        sleep_until_or_stopped(before + Duration::from_secs(10), &stop).await;
+        assert_eq!(before.elapsed(), Duration::ZERO);
+    }
 
     #[test]
     fn parse_duration_accepts_suffixes() {
