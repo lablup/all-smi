@@ -25,6 +25,7 @@ use luwen_pci::detect_chips_silent;
 use once_cell::sync::Lazy;
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 /// Collection method for Tenstorrent NPU metrics
 #[derive(Debug, Clone, Copy)]
@@ -67,6 +68,37 @@ struct CachedChipInfo {
 // Cache for initialized chips and their static info to avoid re-initialization on every measurement
 static INITIALIZED_CHIPS: Lazy<Mutex<Option<Vec<CachedChipInfo>>>> = Lazy::new(|| Mutex::new(None));
 
+/// Delay before chip detection is attempted again after it failed.
+const DETECT_RETRY_INTERVAL: Duration = Duration::from_secs(60);
+
+/// When a failed detection may run again. `None` means the cached chip list
+/// is final: a successful detection and the Grayskull skip never retry.
+static DETECT_RETRY_AT: Mutex<Option<Instant>> = Mutex::new(None);
+
+/// Decide whether chip detection should run on this call.
+///
+/// Detection opens every `/dev/tenstorrent/*` node, so a failure is cached as
+/// an empty list with a retry deadline rather than repeated on every tick.
+/// An empty list without a deadline (no chips, Grayskull skip) and a
+/// populated list are final.
+fn should_detect<T>(cached: Option<&[T]>, retry_at: Option<Instant>, now: Instant) -> bool {
+    match cached {
+        None => true,
+        Some([]) => retry_at.is_some_and(|deadline| now >= deadline),
+        Some(_) => false,
+    }
+}
+
+fn detect_retry_at() -> Option<Instant> {
+    DETECT_RETRY_AT.lock().ok().and_then(|guard| *guard)
+}
+
+fn set_detect_retry_at(value: Option<Instant>) {
+    if let Ok(mut guard) = DETECT_RETRY_AT.lock() {
+        *guard = value;
+    }
+}
+
 pub struct TenstorrentReader {
     _config: TenstorrentConfig,
 }
@@ -99,9 +131,12 @@ impl TenstorrentReader {
             }
         };
 
-        if chips_guard.is_some() {
+        let now = Instant::now();
+        if !should_detect(chips_guard.as_deref(), detect_retry_at(), now) {
             return;
         }
+        // Whatever this attempt concludes replaces the previous deadline.
+        set_detect_retry_at(None);
 
         // luwen 0.8.x has sunset Grayskull and panics (`unimplemented!()` in luwen-kmd)
         // when it opens one. Detection opens every node under /dev/tenstorrent, so a
@@ -133,12 +168,16 @@ impl TenstorrentReader {
             Ok(Ok(chips)) => chips,
             Ok(Err(e)) => {
                 set_tenstorrent_status(format!("Failed to detect Tenstorrent chips: {e}"));
+                *chips_guard = Some(Vec::new());
+                set_detect_retry_at(now.checked_add(DETECT_RETRY_INTERVAL));
                 return;
             }
             Err(_) => {
                 set_tenstorrent_status(
                     "Skipped Tenstorrent detection: a connected device is unsupported by luwen 0.8.x (e.g. Grayskull, which upstream has sunset)".to_string(),
                 );
+                *chips_guard = Some(Vec::new());
+                set_detect_retry_at(now.checked_add(DETECT_RETRY_INTERVAL));
                 return;
             }
         };
@@ -176,6 +215,7 @@ impl TenstorrentReader {
         match INITIALIZED_CHIPS.lock() {
             Ok(mut chips_guard) => {
                 *chips_guard = None;
+                set_detect_retry_at(None);
             }
             _ => {
                 eprintln!("Failed to acquire lock to invalidate Tenstorrent cache");
@@ -609,3 +649,57 @@ fn estimate_utilization(telem: &Telemetry, tdp_limit: f64) -> f64 {
 #[cfg(all(test, feature = "cli"))]
 #[path = "tenstorrent_telemetry_tests.rs"]
 mod telemetry_tests;
+
+#[cfg(test)]
+mod detect_retry_tests {
+    use super::*;
+
+    #[test]
+    fn detection_runs_when_nothing_is_cached() {
+        let now = Instant::now();
+        assert!(should_detect::<u8>(None, None, now));
+        // A stale deadline cannot suppress the very first detection.
+        assert!(should_detect::<u8>(
+            None,
+            now.checked_add(DETECT_RETRY_INTERVAL),
+            now
+        ));
+    }
+
+    #[test]
+    fn failed_detection_is_not_repeated_inside_the_window() {
+        let failed_at = Instant::now();
+        let retry_at = failed_at.checked_add(DETECT_RETRY_INTERVAL);
+        let empty: &[u8] = &[];
+        assert!(!should_detect(Some(empty), retry_at, failed_at));
+        assert!(!should_detect(
+            Some(empty),
+            retry_at,
+            failed_at + DETECT_RETRY_INTERVAL - Duration::from_millis(1)
+        ));
+    }
+
+    #[test]
+    fn failed_detection_is_retried_after_the_window() {
+        let failed_at = Instant::now();
+        let retry_at = failed_at.checked_add(DETECT_RETRY_INTERVAL);
+        let empty: &[u8] = &[];
+        assert!(should_detect(
+            Some(empty),
+            retry_at,
+            failed_at + DETECT_RETRY_INTERVAL
+        ));
+    }
+
+    #[test]
+    fn final_results_never_detect_again() {
+        let now = Instant::now();
+        let far = now + Duration::from_secs(3600);
+        // Detected chips, with or without a leftover deadline.
+        assert!(!should_detect(Some(&[1u8][..]), None, far));
+        assert!(!should_detect(Some(&[1u8][..]), Some(now), far));
+        // "No chips" and the Grayskull skip: empty with no deadline.
+        let empty: &[u8] = &[];
+        assert!(!should_detect(Some(empty), None, far));
+    }
+}

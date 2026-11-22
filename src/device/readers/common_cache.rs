@@ -15,10 +15,160 @@
 //! - Maintain ~95% reduction in redundant API calls (from PR #69)
 
 use std::collections::HashMap;
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 /// Maximum number of devices supported per platform
 pub const MAX_DEVICES: usize = 256;
+
+/// How long one reader result is shared between the entry points of a
+/// single collection tick.
+///
+/// Every reader is called once per tick for device rows and once for process
+/// rows, and several of them answer both from the same vendor CLI output.
+/// 500 ms is below the fastest poll interval (1 s), so a cached result never
+/// leaks into the next tick, and above the time it takes to walk a handful of
+/// readers. Matches `SNAPSHOT_COALESCE_WINDOW` in `windows_gpu_perf`.
+pub const COALESCE_WINDOW: Duration = Duration::from_millis(500);
+
+/// A result shared by the callers that ask for it within one window.
+///
+/// The first caller runs `fetch`; callers arriving while the stored value is
+/// younger than the window get the same `Arc` without running it. A failed
+/// fetch (`None`) is never stored, so the next caller tries again. The age is
+/// measured from when the value was produced, not from when the fetch began.
+///
+/// The lock is held across `fetch`, so concurrent callers wait for the one
+/// in flight instead of each starting their own.
+#[derive(Debug)]
+pub struct CoalescedSlot<T> {
+    slot: Mutex<Option<(Instant, Arc<T>)>>,
+}
+
+impl<T> Default for CoalescedSlot<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<T> CoalescedSlot<T> {
+    pub const fn new() -> Self {
+        Self {
+            slot: Mutex::new(None),
+        }
+    }
+
+    /// Return the stored value when it is younger than `window`, otherwise
+    /// run `fetch` and store what it returns.
+    pub fn get_or_fetch(
+        &self,
+        window: Duration,
+        fetch: impl FnOnce() -> Option<T>,
+    ) -> Option<Arc<T>> {
+        self.get_or_fetch_with(window, Instant::now, fetch)
+    }
+
+    /// [`Self::get_or_fetch`] with the clock supplied by the caller, so tests
+    /// cross the window without sleeping. `now` is the time of this call and
+    /// also stamps a value fetched by it.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn get_or_fetch_at(
+        &self,
+        now: Instant,
+        window: Duration,
+        fetch: impl FnOnce() -> Option<T>,
+    ) -> Option<Arc<T>> {
+        self.get_or_fetch_with(window, || now, fetch)
+    }
+
+    fn get_or_fetch_with(
+        &self,
+        window: Duration,
+        clock: impl Fn() -> Instant,
+        fetch: impl FnOnce() -> Option<T>,
+    ) -> Option<Arc<T>> {
+        // A poisoned lock only means an earlier fetch panicked; the stored
+        // value is still a complete earlier result or `None`.
+        let mut guard = self.slot.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((produced_at, value)) = guard.as_ref()
+            && clock().saturating_duration_since(*produced_at) < window
+        {
+            return Some(Arc::clone(value));
+        }
+        // Drop the stale value before fetching so a failure cannot leave it
+        // behind to be served again.
+        *guard = None;
+        let value = Arc::new(fetch()?);
+        *guard = Some((clock(), Arc::clone(&value)));
+        Some(value)
+    }
+}
+
+/// A negative cache: after a failure, the guarded operation is skipped until
+/// a retry deadline passes.
+///
+/// Used for work that is expensive to repeat while it keeps failing: spawning
+/// a CLI that is not installed, re-running hardware detection, reconnecting
+/// to an endpoint that is down. Every method that reads the clock takes `now`
+/// so callers and tests share one code path and tests never sleep.
+#[derive(Debug)]
+pub struct RetryGate {
+    state: Mutex<RetryState>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RetryState {
+    retry_at: Option<Instant>,
+    /// Delay the next [`RetryGate::fail_with_backoff`] will apply.
+    next_backoff: Option<Duration>,
+}
+
+impl Default for RetryGate {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl RetryGate {
+    pub const fn new() -> Self {
+        Self {
+            state: Mutex::new(RetryState {
+                retry_at: None,
+                next_backoff: None,
+            }),
+        }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, RetryState> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Whether the operation should be skipped at `now`.
+    pub fn is_blocked(&self, now: Instant) -> bool {
+        self.lock().retry_at.is_some_and(|deadline| now < deadline)
+    }
+
+    /// Record a failure: block until `now + interval`.
+    pub fn fail(&self, now: Instant, interval: Duration) {
+        self.lock().retry_at = now.checked_add(interval);
+    }
+
+    /// Record a failure with a delay that starts at `initial` and doubles on
+    /// each consecutive failure up to `max`. [`Self::clear`] resets it.
+    pub fn fail_with_backoff(&self, now: Instant, initial: Duration, max: Duration) {
+        let mut state = self.lock();
+        let delay = state.next_backoff.unwrap_or(initial).min(max);
+        state.retry_at = now.checked_add(delay);
+        state.next_backoff = Some(delay.saturating_mul(2).min(max));
+    }
+
+    /// Record a success: unblock and forget the accumulated back-off.
+    pub fn clear(&self) {
+        let mut state = self.lock();
+        state.retry_at = None;
+        state.next_backoff = None;
+    }
+}
 
 /// Common structure for static device information that doesn't change during runtime.
 ///
@@ -372,6 +522,81 @@ mod tests {
 
         // Test invalid format
         assert!(PciInfo::parse("invalid").is_err());
+    }
+
+    #[test]
+    fn coalesced_slot_reuses_a_value_inside_the_window() {
+        let slot = CoalescedSlot::new();
+        let calls = std::cell::Cell::new(0);
+        let fetch = || {
+            calls.set(calls.get() + 1);
+            Some(calls.get())
+        };
+        let t0 = Instant::now();
+
+        let first = slot.get_or_fetch_at(t0, COALESCE_WINDOW, fetch);
+        let second = slot.get_or_fetch_at(t0 + Duration::from_millis(499), COALESCE_WINDOW, fetch);
+        assert_eq!(first.as_deref(), Some(&1));
+        assert_eq!(second.as_deref(), Some(&1));
+        assert_eq!(calls.get(), 1);
+
+        let third = slot.get_or_fetch_at(t0 + Duration::from_millis(500), COALESCE_WINDOW, fetch);
+        assert_eq!(third.as_deref(), Some(&2));
+        assert_eq!(calls.get(), 2);
+    }
+
+    #[test]
+    fn coalesced_slot_does_not_cache_a_failure() {
+        let slot: CoalescedSlot<u32> = CoalescedSlot::new();
+        let t0 = Instant::now();
+
+        assert!(slot.get_or_fetch_at(t0, COALESCE_WINDOW, || None).is_none());
+        let value = slot.get_or_fetch_at(t0, COALESCE_WINDOW, || Some(7));
+        assert_eq!(value.as_deref(), Some(&7));
+
+        // A failure after the window also drops the stale value.
+        let later = t0 + Duration::from_secs(1);
+        assert!(
+            slot.get_or_fetch_at(later, COALESCE_WINDOW, || None)
+                .is_none()
+        );
+        let again = slot.get_or_fetch_at(later, COALESCE_WINDOW, || Some(9));
+        assert_eq!(again.as_deref(), Some(&9));
+    }
+
+    #[test]
+    fn retry_gate_blocks_until_the_deadline() {
+        let gate = RetryGate::new();
+        let t0 = Instant::now();
+        assert!(!gate.is_blocked(t0));
+
+        gate.fail(t0, Duration::from_secs(60));
+        assert!(gate.is_blocked(t0));
+        assert!(gate.is_blocked(t0 + Duration::from_secs(59)));
+        assert!(!gate.is_blocked(t0 + Duration::from_secs(60)));
+
+        gate.fail(t0, Duration::from_secs(60));
+        gate.clear();
+        assert!(!gate.is_blocked(t0));
+    }
+
+    #[test]
+    fn retry_gate_backoff_doubles_to_the_cap_and_resets_on_clear() {
+        let gate = RetryGate::new();
+        let t0 = Instant::now();
+        let initial = Duration::from_secs(30);
+        let max = Duration::from_secs(300);
+
+        // 30, 60, 120, 240, then capped at 300.
+        for expected in [30, 60, 120, 240, 300, 300] {
+            gate.fail_with_backoff(t0, initial, max);
+            assert!(gate.is_blocked(t0 + Duration::from_secs(expected - 1)));
+            assert!(!gate.is_blocked(t0 + Duration::from_secs(expected)));
+        }
+
+        gate.clear();
+        gate.fail_with_backoff(t0, initial, max);
+        assert!(!gate.is_blocked(t0 + Duration::from_secs(30)));
     }
 
     #[test]
