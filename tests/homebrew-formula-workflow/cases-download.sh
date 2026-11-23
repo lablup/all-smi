@@ -3,11 +3,9 @@
 # stubbed `gh` and `curl`. Offline, so it can run anywhere and cannot be made
 # green or red by the state of a real release.
 #
-# The stubs are assertions in their own right. The `gh` stub refuses to answer
-# an assets listing that arrives without --paginate, and refuses to hand back
-# the `assets` array embedded in the release object at all, so reverting either
-# of those fails here rather than years later on the release that first grows
-# past a page.
+# The step needs nothing from the GitHub API since Intel macOS archives stopped
+# being published: every artifact it reads has a fixed name. The `gh` stub stays
+# so that any call that creeps back in is logged and asserted against.
 #
 # Sourced by run-workflow-steps.sh.
 
@@ -132,33 +130,26 @@ all-smi-linux-x86_64.tar.gz'
 
 case_download_keeps_tap_clean() {
     begin_case "download step: artifacts land outside the tap clone"
-    local box status dirty artifacts assets
+    local box status dirty artifacts
     box=$(new_download_sandbox)
 
-    # The Intel zip is deliberately the last name in a long list, so a listing
-    # that stopped early would report it absent.
-    assets="$THREE_ASSETS"
-    local i=0
-    while [ "$i" -lt 200 ]; do
-        assets="${assets}
-filler-asset-${i}.txt"
-        i=$((i + 1))
-    done
-    assets="${assets}
-all-smi-macos-x86_64.zip"
-
-    run_download_step "$box" "$assets" "$box/download.log"
+    run_download_step "$box" "$THREE_ASSETS" "$box/download.log"
     status=$?
     assert_status "download step succeeds" 0 "$status" "$box/download.log"
 
     artifacts="${box}/runner_temp/all-smi-artifacts"
-    for name in mac.zip linux-arm.tar.gz linux-x86.tar.gz mac-x86.zip; do
+    for name in mac.zip linux-arm.tar.gz linux-x86.tar.gz; do
         if [ -s "${artifacts}/${name}" ]; then
             ok "downloaded ${name} into RUNNER_TEMP"
         else
             bad "downloaded ${name} into RUNNER_TEMP" "missing: ${artifacts}/${name}"
         fi
     done
+    if [ -e "${artifacts}/mac-x86.zip" ]; then
+        bad "no Intel macOS zip is downloaded" "mac-x86.zip should not exist"
+    else
+        ok "no Intel macOS zip is downloaded"
+    fi
 
     dirty=$(git -C "${box}/homebrew-tap" status --porcelain)
     assert_eq "tap working tree is untouched" "" "$dirty"
@@ -168,30 +159,9 @@ all-smi-macos-x86_64.zip"
         ok "no tmp directory inside the tap clone"
     fi
 
-    assert_file_has "the Intel zip at the end of the list is still seen" \
-        "$box/github_env" "mac_x86_present=true"
-    assert_file_has "asset list came from the paginated assets collection" \
-        "$box/stub.log" "/assets?per_page=100"
-    assert_file_has "asset list was requested with --paginate" \
-        "$box/stub.log" "--paginate"
+    assert_file_lacks "no GitHub API call is made" "$box/stub.log" "gh api"
+    assert_file_lacks "no Intel macOS asset is requested" "$box/stub.log" "all-smi-macos-x86_64.zip"
     assert_file_has "checksum was recorded for the macOS zip" "$box/github_env" "mac_sha="
-}
-
-case_download_absent_intel_asset() {
-    begin_case "download step: release without the Intel zip"
-    local box status
-    box=$(new_download_sandbox)
-
-    run_download_step "$box" "$THREE_ASSETS" "$box/download.log"
-    status=$?
-    assert_status "download step succeeds" 0 "$status" "$box/download.log"
-    assert_file_has "records mac_x86_present=false" "$box/github_env" "mac_x86_present=false"
-    assert_file_has "emits a notice" "$box/download.log" "::notice::"
-    if [ -e "${box}/runner_temp/all-smi-artifacts/mac-x86.zip" ]; then
-        bad "no Intel zip is downloaded" "mac-x86.zip should not exist"
-    else
-        ok "no Intel zip is downloaded"
-    fi
 }
 
 case_download_rejects_bad_version() {
@@ -223,6 +193,5 @@ case_download_rejects_bad_version() {
 
 run_download_cases() {
     case_download_keeps_tap_clean
-    case_download_absent_intel_asset
     case_download_rejects_bad_version
 }

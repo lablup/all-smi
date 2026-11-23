@@ -10,13 +10,13 @@
 # copy that drifts away from it.
 #
 # What is covered:
-#   - the four release-asset / formula-stanza states, plus a malformed tap
-#     (cases-formula.sh)
+#   - a normal formula update, and the refusal of a tap formula that still
+#     carries an Intel macOS stanza (cases-formula.sh)
 #   - the url/sha256 pairing guard, including a control showing that checking
 #     them independently accepts a formula with the pairs exchanged
 #     (cases-formula.sh)
-#   - artifacts landing outside the tap clone, and the release asset list being
-#     read from the paginated assets collection (cases-download.sh)
+#   - artifacts landing outside the tap clone, with no GitHub API call and no
+#     Intel macOS download (cases-download.sh)
 #   - the push credential reaching git without touching disk, argv or the trace
 #     (cases-token.sh)
 #

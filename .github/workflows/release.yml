@@ -1,7 +1,7 @@
 name: Release
 
 # SECURITY: this repository is public and this workflow schedules jobs on
-# self-hosted runners (the Windows signing box and the Intel Mac builder).
+# a self-hosted runner (the Windows box that builds x86_64 and signs ARM64).
 # Both triggers below are maintainer-only: `release: published` requires push
 # access to publish a release, and `workflow_dispatch` requires write access.
 # Neither can be fired by a pull request, so a fork PR can never run code on a
@@ -23,7 +23,7 @@ on:
         description: 'Tag to build from AND upload artifacts to (e.g. v1.2.3). Empty = build the dispatched ref.'
         required: false
       targets:
-        description: 'Platform families to build (comma-separated: windows, linux, macos, or all). Empty = all. "macos" covers both aarch64 and x86_64.'
+        description: 'Platform families to build (comma-separated: windows, linux, macos, or all). Empty = all.'
         required: false
         default: ''
         type: string
@@ -55,19 +55,18 @@ jobs:
           # JSON uses only double quotes, so a single-quoted bash literal is safe
           # and avoids heredoc indentation pitfalls inside this YAML block.
           #
-          # `os` becomes the job's runs-on value. It is a label string for every
-          # GitHub-hosted runner and for the label-targeted Windows box, and a
-          # {group, labels} object for the self-hosted Intel Mac, which has to be
-          # selected out of a specific runner group. runs-on is evaluated per
-          # matrix job instance, so the two shapes coexist without affecting each
-          # other.
+          # `os` becomes the job's runs-on value: a label string for every
+          # GitHub-hosted runner and for the label-targeted Windows box.
+          #
+          # x86_64-apple-darwin is not built. Intel macOS archives were dropped
+          # after v0.29.0, when the self-hosted Intel Mac runner became the
+          # release's critical path; Intel Macs can still build from source.
           ALL='[
             {"os_family":"linux",   "target":"x86_64-unknown-linux-gnu",    "os":"ubuntu-22.04",             "artifact_name":"all-smi",     "asset_name":"all-smi-linux-x86_64",       "archive_ext":".tar.gz", "protoc_platform":"linux-x86_64"},
             {"os_family":"linux",   "target":"x86_64-unknown-linux-musl",   "os":"ubuntu-latest",           "artifact_name":"all-smi",     "asset_name":"all-smi-linux-x86_64-musl",  "archive_ext":".tar.gz", "protoc_platform":"linux-x86_64"},
             {"os_family":"linux",   "target":"aarch64-unknown-linux-gnu",   "os":"ubuntu-22.04-arm",        "artifact_name":"all-smi",     "asset_name":"all-smi-linux-aarch64",      "archive_ext":".tar.gz", "protoc_platform":"linux-aarch_64"},
             {"os_family":"linux",   "target":"aarch64-unknown-linux-musl",  "os":"ubuntu-24.04-arm",        "artifact_name":"all-smi",     "asset_name":"all-smi-linux-aarch64-musl", "archive_ext":".tar.gz", "protoc_platform":"linux-aarch_64"},
             {"os_family":"macos",   "target":"aarch64-apple-darwin",        "os":"macos-15",                "artifact_name":"all-smi",     "asset_name":"all-smi-macos-aarch64",      "archive_ext":".zip",    "protoc_platform":"osx-aarch_64"},
-            {"os_family":"macos",   "target":"x86_64-apple-darwin",         "os":{"group":"macOS x64","labels":"self-hosted-macos-15-x64"}, "artifact_name":"all-smi", "asset_name":"all-smi-macos-x86_64", "archive_ext":".zip", "protoc_platform":"osx-x86_64"},
             {"os_family":"windows", "target":"x86_64-pc-windows-msvc",      "os":"windows-on-macmini02-x64","artifact_name":"all-smi.exe", "asset_name":"all-smi-windows-x86_64",     "archive_ext":".zip",    "protoc_platform":""},
             {"os_family":"windows", "target":"aarch64-pc-windows-msvc",     "os":"windows-11-arm",          "artifact_name":"all-smi.exe", "asset_name":"all-smi-windows-aarch64",    "archive_ext":".zip",    "protoc_platform":""}
           ]'
@@ -176,18 +175,11 @@ jobs:
           echo "RUSTUP_HOME=C:\.rustup" >> $env:GITHUB_ENV
 
       # 2) Cache Cargo build artifacts
-      # Skipped on the self-hosted runners, for different reasons on each.
-      # The Windows box has a persistent CARGO_HOME and RUSTUP_HOME (configured
-      # above), so the Actions cache would only mirror state already on disk.
-      # On the Intel Mac only ~/.cargo survives between jobs: actions/checkout
-      # defaults to clean: true, whose `git clean -ffdx` removes the ignored
-      # target/ directory, so each release compiles the dependency tree cold.
-      # That is accepted here because releases are infrequent and a release
-      # target/ is large enough that caching it would crowd the repository's
-      # 10 GB cache budget shared with the other five targets. Revisit with
-      # real build times if the Intel job becomes the critical path.
+      # Skipped on the self-hosted Windows box, which has a persistent
+      # CARGO_HOME and RUSTUP_HOME (configured above), so the Actions cache
+      # would only mirror state already on disk.
       - name: Cache cargo
-        if: matrix.target != 'x86_64-pc-windows-msvc' && matrix.target != 'x86_64-apple-darwin'
+        if: matrix.target != 'x86_64-pc-windows-msvc'
         uses: actions/cache@v6
         with:
           path: |
@@ -269,8 +261,8 @@ jobs:
       # rcodesign, not Apple's codesign, and therefore no keychain at all.
       #
       # The keychain route this replaces worked on GitHub-hosted macOS and
-      # failed on the self-hosted Intel Mac, with the same certificate and the
-      # same command:
+      # failed on the self-hosted Intel Mac that used to build x86_64, with the
+      # same certificate and the same command:
       #
       #   Warning: unable to build chain to self-signed root for signer
       #            "Developer ID Application: Lablup Inc. (NVWJ7XZ6BY)"

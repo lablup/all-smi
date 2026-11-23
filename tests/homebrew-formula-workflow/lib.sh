@@ -28,7 +28,6 @@ SERVER_PIDFILE=$(mktemp "${TMPDIR:-/tmp}/all-smi-hbw-servers.XXXXXX")
 NEW_VERSION="0.26.0"
 NEW_BASE="https://github.com/lablup/all-smi/releases/download/v${NEW_VERSION}"
 SHA_MAC="aaaaaaaa11111111aaaaaaaa11111111aaaaaaaa11111111aaaaaaaa11111111"
-SHA_MAC_X86="bbbbbbbb22222222bbbbbbbb22222222bbbbbbbb22222222bbbbbbbb22222222"
 SHA_LINUX_ARM="cccccccc33333333cccccccc33333333cccccccc33333333cccccccc33333333"
 SHA_LINUX_X86="dddddddd44444444dddddddd44444444dddddddd44444444dddddddd44444444"
 
@@ -131,9 +130,8 @@ make_tap() {  # dir fixture
 }
 
 # The environment the download step would have left behind for the update and
-# validate steps. mac_x86_present is the caller's choice, because it is exactly
-# the axis the four asset/stanza states turn on.
-export_artifact_env() {  # mac_x86_present
+# validate steps.
+export_artifact_env() {
     export VERSION_NO_V="$NEW_VERSION"
     export amd_plugin_present=true
     export mac_url="${NEW_BASE}/all-smi-macos-aarch64.zip"
@@ -142,11 +140,4 @@ export_artifact_env() {  # mac_x86_present
     export linux_arm_sha="$SHA_LINUX_ARM"
     export linux_x86_url="${NEW_BASE}/all-smi-linux-x86_64.tar.gz"
     export linux_x86_sha="$SHA_LINUX_X86"
-    export mac_x86_present="$1"
-    if [ "$1" = "true" ]; then
-        export mac_x86_url="${NEW_BASE}/all-smi-macos-x86_64.zip"
-        export mac_x86_sha="$SHA_MAC_X86"
-    else
-        unset mac_x86_url mac_x86_sha
-    fi
 }

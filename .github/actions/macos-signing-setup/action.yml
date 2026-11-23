@@ -188,11 +188,11 @@ runs:
 
         # rcodesign is a keychain-free Apple code signing tool. That is the
         # property this repository needs. The keychain-based pipeline this
-        # replaces failed on the self-hosted Intel Mac with "unable to build
-        # chain to self-signed root" and errSecInternalComponent, while the
-        # same certificate signed cleanly on a GitHub-hosted runner: codesign
-        # depends on host keychain and SecurityAgent state that a headless
-        # runner does not reliably have.
+        # replaces failed on the self-hosted Intel Mac (which built x86_64
+        # until v0.29.0) with "unable to build chain to self-signed root" and
+        # errSecInternalComponent, while the same certificate signed cleanly
+        # on a GitHub-hosted runner: codesign depends on host keychain and
+        # SecurityAgent state that a headless runner does not reliably have.
         RCODESIGN_VERSION="0.29.0"
         RCODESIGN_DIR="$HOME/.rcodesign"
         RCODESIGN_BIN="$RCODESIGN_DIR/rcodesign"

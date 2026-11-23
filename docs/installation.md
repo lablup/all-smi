@@ -102,7 +102,7 @@ all-smi does not ship a container image, and container deployment is not a suppo
   - Chassis block reports fan RPMs, thermal pressure, and approximate total system power (SMC `PSTR`)
   - GPU monitoring is not available: the integrated Intel and discrete AMD GPUs in Intel Macs are not read, so the GPU list stays empty
   - Total power is the SMC's own estimate rather than a metered value, and its accuracy varies by model. `powermetrics` would be metered but needs sudo, which all-smi does not ask for on macOS
-  - Download `all-smi-macos-x86_64.zip` from the releases page. It is signed and notarized like the Apple Silicon archive
+  - No prebuilt binary: releases after v0.29.0 do not publish `all-smi-macos-x86_64.zip`, and Homebrew serves Apple Silicon only. Install with `cargo install all-smi` (Option 5) or build from source (Option 6). v0.29.0 and earlier releases still carry the Intel archive
   - Run with: `all-smi local`
 
 ### Linux with AMD GPUs
