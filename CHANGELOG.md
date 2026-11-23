@@ -2,6 +2,11 @@
 
 [Home](README.md) · [Release downloads](https://github.com/lablup/all-smi/releases)
 
+## Unreleased
+
+- Removed the Intel macOS (`x86_64-apple-darwin`) release archive. `all-smi-macos-x86_64.zip` is no longer built or published, and the Homebrew updater refuses to bump a tap formula that still has an Intel macOS stanza. Intel Macs remain supported at runtime; install with `cargo install all-smi` or build from source. v0.29.0 and earlier keep their Intel archives.
+- Moved the GitHub Actions in every workflow to their latest Node 24 majors: `actions/checkout` v7, `actions/cache` v6, `actions/setup-python` v7, and `softprops/action-gh-release` v3 (#516).
+
 ## v0.29.0 (2026/11/23)
 
 - Added N-tier CPU topology on Linux and Windows ARM. Linux detects tiers once per reader from Intel hybrid PMU cpumasks, arm64 MIDR part numbers, or the firmware `cpu_capacity` table (honoring the container cpuset), Windows ARM reports P/M/E clusters, and the local TUI renders every tier (#474).

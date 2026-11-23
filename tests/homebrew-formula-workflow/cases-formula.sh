@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # The `Update formula` and `Validate updated formula` steps, executed against
-# fixture formulas. Covers the four asset/stanza states that PR #313 established
-# and the url/sha256 pairing guard added for issue #316.
+# fixture formulas. Covers a normal update, the refusal of a formula that still
+# carries an Intel macOS stanza, and the url/sha256 pairing guard added for
+# issue #316.
 #
 # Sourced by run-workflow-steps.sh.
 
@@ -64,16 +65,15 @@ run_formula_step() {  # step-name sandbox logfile -> status
     ) > "$3" 2>&1
 }
 
-case_state1_asset_and_stanza() {
-    begin_case "state 1: release publishes the Intel zip, formula has the stanza"
+case_update() {
+    begin_case "update: the formula serves Apple Silicon, Linux arm64 and Linux x86_64"
     local box status formula
-    box=$(new_sandbox "${FIXTURES}/two-stanza.rb")
-    export_artifact_env true
+    box=$(new_sandbox "${FIXTURES}/one-stanza.rb")
+    export_artifact_env
 
     run_formula_step 'Update formula' "$box" "$box/update.log"
     status=$?
     assert_status "update step succeeds" 0 "$status" "$box/update.log"
-    assert_file_has "records mac_x86_state=updated" "$box/github_env" "mac_x86_state=updated"
 
     apply_github_env "$box/github_env"
     run_formula_step 'Validate updated formula' "$box" "$box/validate.log"
@@ -86,99 +86,33 @@ case_state1_asset_and_stanza() {
     # `brew audit` rejects it (lablup/homebrew-tap#5).
     assert_file_lacks "redundant version stanza removed" "$formula" '  version "'
     assert_file_has "Linux installs the AMD companion" "$formula" '(lib/"all-smi").install "liball_smi_amd.so" if OS.linux?'
-    assert_eq "four sha256 stanzas" 4 "$(count_sha_stanzas "$formula")"
+    assert_eq "three sha256 stanzas" 3 "$(count_sha_stanzas "$formula")"
     assert_eq "aarch64 macOS url rewritten" "$mac_url" "$(url_of "$formula" all-smi-macos-aarch64.zip)"
     assert_eq "aarch64 macOS checksum is its own" "$SHA_MAC" "$(sha_after "$formula" all-smi-macos-aarch64.zip)"
-    assert_eq "x86_64 macOS url rewritten" "$mac_x86_url" "$(url_of "$formula" all-smi-macos-x86_64.zip)"
-    assert_eq "x86_64 macOS checksum is its own" "$SHA_MAC_X86" "$(sha_after "$formula" all-smi-macos-x86_64.zip)"
     assert_eq "linux aarch64 checksum is its own" "$SHA_LINUX_ARM" "$(sha_after "$formula" all-smi-linux-aarch64.tar.gz)"
     assert_eq "linux x86_64 checksum is its own" "$SHA_LINUX_X86" "$(sha_after "$formula" all-smi-linux-x86_64.tar.gz)"
+    assert_file_lacks "no Intel macOS stanza appears" "$formula" "all-smi-macos-x86_64.zip"
 
-    SANDBOX_STATE1="$box"
+    SANDBOX_UPDATED="$box"
 }
 
-case_state2_neither() {
-    begin_case "state 2: no Intel zip in the release, no stanza in the formula"
-    local box status formula before after
-    box=$(new_sandbox "${FIXTURES}/one-stanza.rb")
-    export_artifact_env false
-
-    before=$(sed -n '/on_macos do/,/^  end$/p' "$box/homebrew-tap/Formula/all-smi.rb" | grep -c 'sha256' || true)
-
-    run_formula_step 'Update formula' "$box" "$box/update.log"
-    status=$?
-    assert_status "update step succeeds" 0 "$status" "$box/update.log"
-    assert_file_has "records mac_x86_state=skipped" "$box/github_env" "mac_x86_state=skipped"
-    assert_file_has "emits a notice, not a warning" "$box/update.log" "::notice::"
-
-    apply_github_env "$box/github_env"
-    run_formula_step 'Validate updated formula' "$box" "$box/validate.log"
-    status=$?
-    assert_status "validate step succeeds" 0 "$status" "$box/validate.log"
-
-    formula="$box/homebrew-tap/Formula/all-smi.rb"
-    assert_eq "three sha256 stanzas" 3 "$(count_sha_stanzas "$formula")"
-    after=$(sed -n '/on_macos do/,/^  end$/p' "$formula" | grep -c 'sha256' || true)
-    assert_eq "macOS section gains no stanza" "$before" "$after"
-
-    SANDBOX_STATE2="$box"
-}
-
-case_state3_asset_without_stanza() {
-    begin_case "state 3: release publishes the Intel zip, formula has no stanza"
-    local box status formula
-    box=$(new_sandbox "${FIXTURES}/one-stanza.rb")
-    export_artifact_env true
-
-    run_formula_step 'Update formula' "$box" "$box/update.log"
-    status=$?
-    assert_status "update step succeeds so the other three still ship" 0 "$status" "$box/update.log"
-    assert_file_has "records mac_x86_state=stanza-missing" "$box/github_env" "mac_x86_state=stanza-missing"
-    assert_file_has "emits a warning" "$box/update.log" "::warning::"
-
-    apply_github_env "$box/github_env"
-    run_formula_step 'Validate updated formula' "$box" "$box/validate.log"
-    status=$?
-    assert_status "validate step succeeds at three artifacts" 0 "$status" "$box/validate.log"
-
-    formula="$box/homebrew-tap/Formula/all-smi.rb"
-    assert_eq "three sha256 stanzas" 3 "$(count_sha_stanzas "$formula")"
-
-    # The push happens, and only then does the job go red, which is the whole
-    # point of this state. That final gate lives in a step-level `if`, not in a
-    # step body, so it is asserted against the YAML.
-    if grep -q "if: env.mac_x86_state == 'stanza-missing'" "$WORKFLOW"; then
-        ok "a later step is gated on stanza-missing so the job ends red"
-    else
-        bad "a later step is gated on stanza-missing so the job ends red"
-    fi
-}
-
-case_state4_stanza_without_asset() {
-    begin_case "state 4: no Intel zip in the release, but the formula has a stanza"
+case_leftover_intel_stanza() {
+    begin_case "leftover Intel macOS stanza: refused before anything is pushed"
     local box status
     box=$(new_sandbox "${FIXTURES}/two-stanza.rb")
-    export_artifact_env false
+    export_artifact_env
 
     run_formula_step 'Update formula' "$box" "$box/update.log"
     status=$?
     assert_status "update step refuses" 1 "$status" "$box/update.log"
-    assert_file_has "refuses over version skew" "$box/update.log" \
-        "Refusing to bump the version while the Intel url still points at another release"
-    assert_file_lacks "no state is recorded for a refused run" "$box/github_env" "mac_x86_state="
-}
+    assert_file_has "names the stanza to remove" "$box/update.log" \
+        "still has a url stanza for all-smi-macos-x86_64.zip"
 
-case_malformed_duplicate_stanza() {
-    begin_case "malformed tap: two Intel stanzas"
-    local box status
-    box=$(new_sandbox "${FIXTURES}/two-intel-stanzas.rb")
-    export_artifact_env true
-
-    run_formula_step 'Update formula' "$box" "$box/update.log"
-    status=$?
-    assert_status "update step refuses" 1 "$status" "$box/update.log"
-    assert_file_has "names the ambiguous artifact" "$box/update.log" \
-        "expected exactly one url stanza for all-smi-macos-x86_64.zip, found 2"
+    if grep -q "mac_x86_state" "$WORKFLOW"; then
+        bad "no step is gated on the old Intel macOS state" "mac_x86_state is still referenced"
+    else
+        ok "no step is gated on the old Intel macOS state"
+    fi
 }
 
 # The regression this issue's pairing guard exists for. Every checksum in the
@@ -188,14 +122,13 @@ case_malformed_duplicate_stanza() {
 case_swapped_checksums() {
     begin_case "swapped checksums: url and sha256 correct apart, wrong together"
     local box status formula independent_checks_pass sha
-    box="$SANDBOX_STATE1"
+    box="$SANDBOX_UPDATED"
     if [ -z "${box:-}" ]; then
-        bad "state 1 sandbox available" "state 1 must run first"
+        bad "update sandbox available" "the update case must run first"
         return
     fi
     formula="$box/homebrew-tap/Formula/all-smi.rb"
-    export_artifact_env true
-    export mac_x86_state=updated
+    export_artifact_env
 
     # Exchange the macOS aarch64 checksum with the Linux x86_64 one.
     gsed -i "s|sha256 \"${SHA_MAC}\"|sha256 \"__SWAP__\"|" "$formula"
@@ -206,8 +139,8 @@ case_swapped_checksums() {
 
     # Control: the pre-#316 checks, reimplemented here, all accept this file.
     independent_checks_pass=yes
-    [ "$(count_sha_stanzas "$formula")" = 4 ] || independent_checks_pass=no
-    for sha in "$SHA_MAC" "$SHA_MAC_X86" "$SHA_LINUX_ARM" "$SHA_LINUX_X86"; do
+    [ "$(count_sha_stanzas "$formula")" = 3 ] || independent_checks_pass=no
+    for sha in "$SHA_MAC" "$SHA_LINUX_ARM" "$SHA_LINUX_X86"; do
         grep -q "^[[:space:]]*sha256 \"${sha}\"$" "$formula" || independent_checks_pass=no
     done
     if [ "$(grep -c '^[[:space:]]*url ".*/releases/download/' "$formula")" \
@@ -228,14 +161,14 @@ case_swapped_checksums() {
 case_stale_url() {
     begin_case "stale url: one stanza left behind at the previous release"
     local box status formula
-    box="$SANDBOX_STATE2"
-    if [ -z "${box:-}" ]; then
-        bad "state 2 sandbox available" "state 2 must run first"
+    box=$(new_sandbox "${FIXTURES}/one-stanza.rb")
+    export_artifact_env
+    run_formula_step 'Update formula' "$box" "$box/update.log" || {
+        bad "update step succeeds before the stale url is planted" "$(cat "$box/update.log")"
         return
-    fi
+    }
+    apply_github_env "$box/github_env"
     formula="$box/homebrew-tap/Formula/all-smi.rb"
-    export_artifact_env false
-    export mac_x86_state=skipped
 
     gsed -i "s|download/v${NEW_VERSION}/all-smi-linux-x86_64.tar.gz|download/v0.25.0/all-smi-linux-x86_64.tar.gz|" "$formula"
 
@@ -253,8 +186,8 @@ case_misread_tag_pins_version() {
     local box status formula saved_version="$NEW_VERSION" saved_base="$NEW_BASE"
     NEW_VERSION="0.26.0-rc.1"
     NEW_BASE="https://github.com/lablup/all-smi/releases/download/v${NEW_VERSION}"
-    box=$(new_sandbox "${FIXTURES}/two-stanza.rb")
-    export_artifact_env true
+    box=$(new_sandbox "${FIXTURES}/one-stanza.rb")
+    export_artifact_env
 
     run_formula_step 'Update formula' "$box" "$box/update.log"
     status=$?
@@ -275,11 +208,8 @@ case_misread_tag_pins_version() {
 }
 
 run_formula_cases() {
-    case_state1_asset_and_stanza
-    case_state2_neither
-    case_state3_asset_without_stanza
-    case_state4_stanza_without_asset
-    case_malformed_duplicate_stanza
+    case_update
+    case_leftover_intel_stanza
     case_swapped_checksums
     case_stale_url
     case_misread_tag_pins_version
