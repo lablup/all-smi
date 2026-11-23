@@ -1,3 +1,10 @@
+all-smi (0.29.1-0) jammy; urgency=medium
+
+  * Stopped building and publishing the Intel macOS archive (#518).
+  * Moved GitHub Actions to their Node 24 majors (#516).
+
+ -- Jeongkyu Shin <inureyes@gmail.com>  Tue, 24 Nov 2026 00:00:00 +0900
+
 all-smi (0.29.0-0) jammy; urgency=medium
 
   * Added N-tier CPU topology on Linux and Windows ARM with cpu_tier metrics (#474).

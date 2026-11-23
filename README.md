@@ -114,7 +114,7 @@ Configuration is optional. To keep an exporter running across reboots, follow th
 
 ## Recent Updates
 
-- **v0.29.0 (2026/11/23):** Added N-tier CPU topology and wider Linux CPU temperature sensor coverage, fixed AMD MI300X metrics and ROCm 7.x detection, and cut per-tick collection, API and TUI overhead across platforms.
+- **v0.29.1 (2026/11/24):** Stopped publishing the Intel macOS archive so releases no longer wait on the self-hosted Intel Mac, and moved CI to the Node 24 releases of GitHub Actions; v0.29.0 stayed a pre-release, so this release carries its changes.
 
 ## Documentation
 
