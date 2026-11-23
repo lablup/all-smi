@@ -4,7 +4,7 @@
 
 ## v0.29.1 (2026/11/24)
 
-v0.29.0 was published as a pre-release only and never promoted, so this release is the first in the 0.29 line on Homebrew and as the latest download, and it carries every change listed under v0.29.0 below.
+v0.29.0 became the latest release without its Windows ARM64 and Intel macOS archives, and its Homebrew and Debian package updates never ran because its Release run ended cancelled. This release is the first 0.29 release on Homebrew and carries every change listed under v0.29.0 below.
 
 - Removed the Intel macOS (`x86_64-apple-darwin`) release archive. `all-smi-macos-x86_64.zip` is no longer built or published, and the Homebrew updater refuses to bump a tap formula that still has an Intel macOS stanza. Intel Macs remain supported at runtime; install with `cargo install all-smi` or build from source. v0.29.0 and earlier keep their Intel archives (#518).
 - Moved the GitHub Actions in every workflow to their latest Node 24 majors: `actions/checkout` v7, `actions/cache` v6, `actions/setup-python` v7, and `softprops/action-gh-release` v3 (#516).
@@ -117,7 +117,7 @@ v0.29.0 was published as a pre-release only and never promoted, so this release 
 [Full changelog](https://github.com/lablup/all-smi/compare/v0.27.0...v0.27.1)
 
 ## Release history
-- **v0.29.1 (2026/11/24):** Stopped publishing the Intel macOS archive so releases no longer wait on the self-hosted Intel Mac, and moved CI to the Node 24 releases of GitHub Actions; v0.29.0 stayed a pre-release, so this release carries its changes.
+- **v0.29.1 (2026/11/24):** Stopped publishing the Intel macOS archive so releases no longer wait on the self-hosted Intel Mac, moved CI to the Node 24 releases of GitHub Actions, and brings the 0.29 changes to Homebrew.
 - **v0.29.0 (2026/11/23):** Added N-tier CPU topology and wider Linux CPU temperature sensor coverage, fixed AMD MI300X metrics and ROCm 7.x detection, and cut per-tick collection, API and TUI overhead across platforms.
 - **v0.28.1 (2026/10/20):** Added Rebellions REBEL100 support with per-process NPU utilization and SKU-based model labels, stopped reporting non-Habana accel nodes as Intel Gaudi, and updated russh and luwen.
 - **v0.28.0 (2026/10/17):** Added NVIDIA RTX Spark N1X and native Windows ARM64 support with DLA metrics on the GPU row, read the N1X DLA engine clock, and fixed false 100% Intel Xe utilization from frozen GT idle counters.
