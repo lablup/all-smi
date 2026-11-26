@@ -23,7 +23,6 @@ pub mod config_env;
 pub mod config_file;
 #[cfg(feature = "cli")]
 pub mod config_schema;
-pub mod error_handling;
 #[cfg(feature = "cli")]
 pub mod http_hosts;
 #[cfg(feature = "cli")]
