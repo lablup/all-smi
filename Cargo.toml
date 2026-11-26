@@ -28,9 +28,9 @@ axum = { version = "0.8.9", optional = true }
 tower-http = { version = "0.7", features = ["cors", "trace"], optional = true }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-reqwest = { version = "0.13", features = ["json"] }
+reqwest = { version = "0.13", features = ["json"], optional = true }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3.20", features = ["env-filter"], optional = true }
 regex = "1.12.2"
 # The `gpu` default added in 0.40 is left out on purpose: it makes
 # `ProcessRefreshKind::everything()` scan per-process GPU state on every
@@ -40,32 +40,31 @@ anyhow = { version = "1.0.100", optional = true }
 hyper = { version = "1.9.0", features = ["full"], optional = true }
 hyper-util = { version = "0.1.18", features = ["full"], optional = true }
 rand = { version = "0.10", optional = true }
-futures-util = "0.3.31"
+futures-util = { version = "0.3.31", optional = true }
 nvml-wrapper = "0.13.0"
 once_cell = "1.21.3"
 libc = "0.2"
-whoami = "2"
+whoami = { version = "2", optional = true }
 num_cpus = "1.17"
-async-trait = "0.1"
+async-trait = { version = "0.1", optional = true }
 thiserror = "2.0"
-url = "2.5"
+url = { version = "2.5", optional = true }
 # gRPC for TPU metrics
 tonic = "0.14"
 tonic-prost = "0.14"
 prost = "0.14"
 prost-types = "0.14"
 # Compression for the `record`/`view --replay` subcommands (issue #187).
-# Both are required at the crate level because the writer auto-selects
-# by file extension — dynamically gating on a feature would force the
-# operator to rebuild to record into a `.gz` stream.
-zstd = "0.14"
-flate2 = "1"
+# Both come in together with `cli`: the writer picks the codec from the
+# file extension, so neither is gated on its own feature.
+zstd = { version = "0.14", optional = true }
+flate2 = { version = "1", optional = true }
 # Support bundle packaging for the `doctor --bundle` subcommand (issue #188).
-tar = "0.4.46"
+tar = { version = "0.4.46", optional = true }
 # Pure-Rust SSH client for the agentless view transport (issue #194).
 # Chosen over ssh2/libssh2 so musl static builds do not need a C
 # dependency. russh 0.65 targets edition 2024 with tokio 1.x.
-russh = "0.65.0"
+russh = { version = "0.65.0", optional = true }
 [target.'cfg(target_os = "linux")'.dependencies]
 # Tenstorrent NPU support via the upstream luwen crates (published on crates.io,
 # tracking luwen main). Replaces the former all-smi-luwen-* republished forks.
@@ -105,11 +104,11 @@ windows = { version = "0.62", features = [
 # as Win32 error codes we can translate instead of localized text we
 # would have to scrape, and over a WinSW/NSSM wrapper so the signed
 # release archive still ships a single binary.
-windows-service = "0.8.1"
+windows-service = { version = "0.8.1", optional = true }
 # Rolling file logging for the service context. Under the SCM there is
 # no console, so `all-smi service run` writes to
 # %PROGRAMDATA%\all-smi\logs instead of stdout.
-tracing-appender = "0.2.5"
+tracing-appender = { version = "0.2.5", optional = true }
 
 # macOS-specific dependencies
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -124,7 +123,7 @@ tonic-prost-build = "0.14"
 
 [features]
 default = ["cli", "amd"]
-cli = ["dep:clap", "dep:crossterm", "dep:axum", "dep:tower-http", "dep:anyhow", "dep:toml", "dep:dirs"]
+cli = ["dep:clap", "dep:crossterm", "dep:axum", "dep:tower-http", "dep:anyhow", "dep:toml", "dep:dirs", "dep:reqwest", "dep:tracing-subscriber", "dep:futures-util", "dep:whoami", "dep:async-trait", "dep:url", "dep:zstd", "dep:flate2", "dep:tar", "dep:russh", "dep:windows-service", "dep:tracing-appender"]
 # Accepted no-op kept for downstream manifest compatibility. Linux AMD support
 # is now compiled into every glibc build as a runtime loader; the separately
 # built `all-smi-amd-plugin` owns `libamdgpu_top` and its libdrm linkage.

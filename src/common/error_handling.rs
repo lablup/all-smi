@@ -72,6 +72,9 @@ impl ErrorHandler {
         AppError::IOError(format!("{context}: {err}"))
     }
 
+    // reqwest is a `cli`-feature dependency; the lib-only build carries
+    // no HTTP client.
+    #[cfg(feature = "cli")]
     pub fn from_network_error(err: reqwest::Error, context: &str) -> AppError {
         AppError::NetworkError(format!("{context}: {err}"))
     }

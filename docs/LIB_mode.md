@@ -62,7 +62,7 @@ cargo add all-smi
 
 | Feature | Default | Effect on a library consumer |
 |---------|---------|------------------------------|
-| `cli` | on | CLI parsing, TUI, and the `axum` API server. A library-only consumer usually does not need it. |
+| `cli` | on | CLI parsing, TUI, the `axum` API server, and the dependencies only the binary uses: the remote-view HTTP client (`reqwest`), the SSH transport (`russh`), `record`/`view --replay` compression (`zstd`, `flate2`), the `doctor --bundle` archive (`tar`), log setup (`tracing-subscriber`), and the Windows service and its rolling log (`windows-service`, `tracing-appender`). A library-only consumer usually does not need it, and turning it off roughly halves the dependency graph. |
 | `amd` | on, accepted no-op | Retained for manifest compatibility. Every glibc Linux build contains the runtime AMD loader; this feature adds no dependency or link requirement. |
 | `mock` | off | Builds the mock server binary. |
 | `furiosa` | off | Furiosa NPU backend. |

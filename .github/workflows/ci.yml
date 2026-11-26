@@ -1188,6 +1188,26 @@ jobs:
       - name: Build library-only (no default features)
         run: cargo build --no-default-features --lib
 
+      # Guards PR #519: the binary-only dependencies stay behind `cli`, so a
+      # `default-features = false` consumer does not compile them. The default
+      # tree must still contain them, or the check would pass vacuously.
+      - name: Verify library-only dependency graph
+        run: |
+          set -euo pipefail
+          gated='^(reqwest|tracing-subscriber|whoami|url|zstd|flate2|tar|russh|windows-service|tracing-appender) v'
+          lib_tree="$(cargo tree -p all-smi --locked --no-default-features -e normal --target all --prefix none)"
+          full_tree="$(cargo tree -p all-smi --locked -e normal --target all --prefix none)"
+          if grep -Eq "$gated" <<<"$lib_tree"; then
+            echo "::error::a cli-only dependency leaked into the library-only build:"
+            grep -E "$gated" <<<"$lib_tree" | sort -u
+            exit 1
+          fi
+          present="$(grep -Eo "$gated" <<<"$full_tree" | sort -u | wc -l)"
+          if [ "$present" -ne 10 ]; then
+            echo "::error::expected all 10 gated crates in the default tree, found $present"
+            exit 1
+          fi
+
       # Guards issues #345 and #359: both feature configurations keep libdrm
       # out of the main binary, while the companion owns that linkage and can
       # be loaded through the versioned ABI. `--no-default-features` drops the
