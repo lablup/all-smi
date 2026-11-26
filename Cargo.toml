@@ -55,6 +55,8 @@ tonic-prost = "0.14"
 prost = "0.14"
 prost-types = "0.14"
 # Compression for the `record`/`view --replay` subcommands (issue #187).
+# Both come in together with `cli`: the writer picks the codec from the
+# file extension, so neither is gated on its own feature.
 zstd = { version = "0.14", optional = true }
 flate2 = { version = "1", optional = true }
 # Support bundle packaging for the `doctor --bundle` subcommand (issue #188).
