@@ -124,8 +124,7 @@ pub(crate) struct RemoteScrapeData {
     pub(crate) cpu_info: Vec<CpuInfo>,
     pub(crate) memory_info: Vec<MemoryInfo>,
     pub(crate) storage_info: Vec<StorageInfo>,
-    #[allow(dead_code)]
-    // Read by the binary's RemoteCollector; the lib target has no `view` module.
+    #[allow(dead_code)] // Read by the binary's RemoteCollector; the lib has no `view`.
     pub(crate) chassis_info: Vec<ChassisInfo>,
     pub(crate) vgpu_info: Vec<crate::device::VgpuHostInfo>,
     pub(crate) mig_info: Vec<crate::device::MigGpuInfo>,

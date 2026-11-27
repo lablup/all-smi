@@ -763,6 +763,7 @@ pub fn initialize_native_metrics_manager(
 ///
 /// Unused by the binary, which owns the manager for the whole process and
 /// tears it down with [`shutdown_native_metrics_manager`] instead.
+#[allow(dead_code)] // Called by the library's `AllSmi` (src/client.rs); the binary never calls it.
 pub fn acquire_native_metrics_manager(interval_ms: u64) -> Result<(), Box<dyn std::error::Error>> {
     let mut slot = NATIVE_METRICS_MANAGER.lock().map_err(|_| "Lock poisoned")?;
     ensure_manager(&mut slot, interval_ms)?;
@@ -772,6 +773,7 @@ pub fn acquire_native_metrics_manager(interval_ms: u64) -> Result<(), Box<dyn st
 
 /// Release an owning handle taken by [`acquire_native_metrics_manager`],
 /// tearing the manager down once the last one is gone.
+#[allow(dead_code)] // Called by the library's `AllSmi` (src/client.rs); the binary never calls it.
 pub fn release_native_metrics_manager() {
     let Ok(mut slot) = NATIVE_METRICS_MANAGER.lock() else {
         return;
