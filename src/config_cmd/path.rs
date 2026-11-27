@@ -24,8 +24,7 @@
 //! body that is acceptable (it is the operator's own machine, and
 //! every other path-printing CLI tool — `cargo`, `rustup`, `npm` —
 //! does the same). We never print secrets such as `webhook_url`; that
-//! redaction lives in [`config_cmd::redact_secrets`] and is enforced
-//! by the renderers used by `config print`.
+//! redaction is enforced inline by the renderers used by `config print`.
 
 use std::io::{self, Write};
 use std::path::Path;

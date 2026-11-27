@@ -15,7 +15,7 @@
 //! `tenstorrent.*` checks — luwen availability (compile-time), /dev node
 //! presence, tt-kmd module load.
 
-use crate::doctor::types::{Check, CheckCtx, CheckResult, Severity};
+use crate::doctor::types::{Check, CheckCtx, CheckResult};
 
 static CHECKS: &[&Check] = &[&LUWEN, &DEV_NODE, &KMD_MODULE];
 
@@ -26,21 +26,18 @@ pub fn checks() -> &'static [&'static Check] {
 static LUWEN: Check = Check {
     id: "tenstorrent.luwen",
     title: "luwen library linked",
-    severity_on_fail: Severity::Info,
     run: check_luwen,
 };
 
 static DEV_NODE: Check = Check {
     id: "tenstorrent.kmd",
     title: "/dev/tenstorrent presence",
-    severity_on_fail: Severity::Warn,
     run: check_dev_node,
 };
 
 static KMD_MODULE: Check = Check {
     id: "tenstorrent.module",
     title: "tt-kmd kernel module",
-    severity_on_fail: Severity::Info,
     run: check_kmd,
 };
 

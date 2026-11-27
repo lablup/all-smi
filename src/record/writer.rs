@@ -308,19 +308,6 @@ impl RotatingWriter {
         Ok(())
     }
 
-    /// Flush the active segment buffers. Does not close the encoder.
-    /// Called on SIGTERM / SIGINT paths so an operator who killed the
-    /// recorder can still decompress the partial file — zstd/gzip
-    /// streams only become valid once the trailing frame has landed on
-    /// disk.
-    #[allow(dead_code)]
-    pub fn flush(&mut self) -> io::Result<()> {
-        if let Some(active) = self.active.as_mut() {
-            active.flush()?;
-        }
-        Ok(())
-    }
-
     /// Close the active segment cleanly. The writer must not be used
     /// afterwards.
     pub fn finish(mut self) -> io::Result<()> {

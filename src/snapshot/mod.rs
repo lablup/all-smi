@@ -48,10 +48,8 @@ pub mod serializers;
 pub use collector::{
     DefaultSnapshotCollector, SectionGate, SnapshotCollector, collect_once, collect_once_gated,
 };
-// Re-exports that form the public library surface. `#[allow(unused_imports)]`
-// suppresses the "binary doesn't call them directly" warning — they're here
-// for library consumers and integration tests.
-#[allow(unused_imports)]
+// Re-exports that form the public library surface (src/lib.rs re-exports them).
+#[allow(unused_imports)] // `SnapshotError` is library API; the binary does not name it.
 pub use options::{
     SNAPSHOT_SCHEMA_VERSION, Snapshot, SnapshotError, SnapshotHardFailure, SnapshotOptions,
 };

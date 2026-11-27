@@ -16,7 +16,7 @@
 
 #[cfg(target_os = "linux")]
 use crate::doctor::exec::which;
-use crate::doctor::types::{Check, CheckCtx, CheckResult, Severity};
+use crate::doctor::types::{Check, CheckCtx, CheckResult};
 
 static CHECKS: &[&Check] = &[&FEATURE, &SMI];
 
@@ -27,14 +27,12 @@ pub fn checks() -> &'static [&'static Check] {
 static FEATURE: Check = Check {
     id: "furiosa.feature",
     title: "Furiosa feature compiled in",
-    severity_on_fail: Severity::Info,
     run: check_feature,
 };
 
 static SMI: Check = Check {
     id: "furiosa.smi",
     title: "furiosa-smi binary",
-    severity_on_fail: Severity::Warn,
     run: check_smi,
 };
 

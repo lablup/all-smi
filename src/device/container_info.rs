@@ -27,41 +27,18 @@ use once_cell::sync::Lazy;
 use std::fs;
 use std::path::Path;
 
-#[derive(Default, Debug, Clone)]
-#[allow(dead_code)]
-pub struct MemoryStats {
-    pub anon_bytes: u64,
-    pub file_bytes: u64,
-    pub kernel_stack_bytes: u64,
-    pub slab_bytes: u64,
-    pub sock_bytes: u64,
-    pub file_mapped_bytes: u64,
-    pub file_dirty_bytes: u64,
-    pub file_writeback_bytes: u64,
-}
-
 pub struct ContainerInfo {
     pub is_container: bool,
     // CPU limits
-    #[allow(dead_code)]
     pub cpu_quota: Option<i64>,
-    #[allow(dead_code)]
     pub cpu_period: Option<u64>,
-    #[allow(dead_code)]
     pub cpu_shares: Option<u64>,
     pub cpuset_cpus: Option<Vec<u32>>,
     pub effective_cpu_count: f64,
     // Memory limits
     pub memory_limit_bytes: Option<u64>,
-    #[allow(dead_code)]
     pub memory_soft_limit_bytes: Option<u64>,
-    #[allow(dead_code)]
     pub memory_swap_limit_bytes: Option<u64>,
-    #[allow(dead_code)]
-    pub memory_usage_bytes: Option<u64>,
-    // Cgroup handle
-    #[cfg(target_os = "linux")]
-    cgroup: Option<Cgroup>,
 }
 
 // Cache container detection data (excluding Cgroup handle)
@@ -109,15 +86,8 @@ impl ContainerInfo {
                 memory_limit_bytes: None,
                 memory_soft_limit_bytes: None,
                 memory_swap_limit_bytes: None,
-                memory_usage_bytes: None,
-                #[cfg(target_os = "linux")]
-                cgroup: None,
             };
         }
-
-        // For containers, reinitialize cgroup handle for fresh memory usage
-        #[cfg(target_os = "linux")]
-        let cgroup = Self::init_cgroup();
 
         ContainerInfo {
             is_container: cached.is_container,
@@ -129,9 +99,6 @@ impl ContainerInfo {
             memory_limit_bytes: cached.memory_limit_bytes,
             memory_soft_limit_bytes: cached.memory_soft_limit_bytes,
             memory_swap_limit_bytes: cached.memory_swap_limit_bytes,
-            memory_usage_bytes: None, // Will be fetched fresh
-            #[cfg(target_os = "linux")]
-            cgroup,
         }
     }
 
@@ -149,9 +116,6 @@ impl ContainerInfo {
                 memory_limit_bytes: None,
                 memory_soft_limit_bytes: None,
                 memory_swap_limit_bytes: None,
-                memory_usage_bytes: None,
-                #[cfg(target_os = "linux")]
-                cgroup: None,
             };
         }
 
@@ -171,19 +135,11 @@ impl ContainerInfo {
         let cpuset_cpus = None;
 
         #[cfg(target_os = "linux")]
-        let (
-            memory_limit_bytes,
-            memory_soft_limit_bytes,
-            memory_swap_limit_bytes,
-            memory_usage_bytes,
-        ) = Self::get_memory_limits(&cgroup);
+        let (memory_limit_bytes, memory_soft_limit_bytes, memory_swap_limit_bytes) =
+            Self::get_memory_limits(&cgroup);
         #[cfg(not(target_os = "linux"))]
-        let (
-            memory_limit_bytes,
-            memory_soft_limit_bytes,
-            memory_swap_limit_bytes,
-            memory_usage_bytes,
-        ) = (None, None, None, None);
+        let (memory_limit_bytes, memory_soft_limit_bytes, memory_swap_limit_bytes) =
+            (None, None, None);
 
         // Calculate effective CPU count based on quota and period
         let effective_cpu_count =
@@ -199,9 +155,6 @@ impl ContainerInfo {
             memory_limit_bytes,
             memory_soft_limit_bytes,
             memory_swap_limit_bytes,
-            memory_usage_bytes,
-            #[cfg(target_os = "linux")]
-            cgroup,
         }
     }
 
@@ -450,49 +403,11 @@ impl ContainerInfo {
         quota_limit.min(shares_limit).min(cpuset_limit)
     }
 
-    #[allow(dead_code)]
-    pub fn get_cpu_usage_from_cgroup(&self) -> Option<f64> {
-        #[cfg(target_os = "linux")]
-        if let Some(ref _cg) = self.cgroup {
-            // CPU usage tracking is done via /proc/stat, not directly from cgroups
-            // cgroups provides limits, not usage metrics
-        }
-
-        // Try filesystem approach
-        // cgroups v2
-        if let Ok(content) = fs::read_to_string("/sys/fs/cgroup/cpu.stat") {
-            let mut _usage_usec = 0u64;
-            for line in content.lines() {
-                if line.starts_with("usage_usec")
-                    && let Some(value) = line.split_whitespace().nth(1)
-                {
-                    _usage_usec = value.parse().unwrap_or(0);
-                    break;
-                }
-            }
-
-            // This would need to be calculated as a delta over time
-            // For now, return None to fall back to /proc/stat
-            return None;
-        }
-
-        // cgroups v1
-        if let Ok(_content) = fs::read_to_string("/sys/fs/cgroup/cpuacct/cpuacct.usage") {
-            // This is cumulative nanoseconds, would need delta calculation
-            return None;
-        }
-
-        None
-    }
-
     #[cfg(target_os = "linux")]
-    fn get_memory_limits(
-        cgroup: &Option<Cgroup>,
-    ) -> (Option<u64>, Option<u64>, Option<u64>, Option<u64>) {
+    fn get_memory_limits(cgroup: &Option<Cgroup>) -> (Option<u64>, Option<u64>, Option<u64>) {
         let mut memory_limit = None;
         let mut memory_soft_limit = None;
         let mut memory_swap_limit = None;
-        let mut memory_usage = None;
 
         if let Some(cg) = cgroup
             && let Some(mem_controller) = cg.controller_of::<MemController>()
@@ -502,8 +417,6 @@ impl ContainerInfo {
             if mem_stat.limit_in_bytes > 0 && mem_stat.limit_in_bytes < i64::MAX {
                 memory_limit = Some(mem_stat.limit_in_bytes as u64);
             }
-
-            memory_usage = Some(mem_stat.usage_in_bytes);
 
             if mem_stat.soft_limit_in_bytes > 0 && mem_stat.soft_limit_in_bytes < i64::MAX {
                 memory_soft_limit = Some(mem_stat.soft_limit_in_bytes as u64);
@@ -516,28 +429,20 @@ impl ContainerInfo {
         }
 
         // Fallback to filesystem if cgroups-rs doesn't work
-        if memory_limit.is_none() || memory_usage.is_none() {
-            let (fs_limit, fs_soft_limit, fs_swap_limit, fs_usage) =
-                Self::get_memory_limits_from_fs();
+        if memory_limit.is_none() {
+            let (fs_limit, fs_soft_limit, fs_swap_limit) = Self::get_memory_limits_from_fs();
             memory_limit = memory_limit.or(fs_limit);
             memory_soft_limit = memory_soft_limit.or(fs_soft_limit);
             memory_swap_limit = memory_swap_limit.or(fs_swap_limit);
-            memory_usage = memory_usage.or(fs_usage);
         }
 
-        (
-            memory_limit,
-            memory_soft_limit,
-            memory_swap_limit,
-            memory_usage,
-        )
+        (memory_limit, memory_soft_limit, memory_swap_limit)
     }
 
-    fn get_memory_limits_from_fs() -> (Option<u64>, Option<u64>, Option<u64>, Option<u64>) {
+    fn get_memory_limits_from_fs() -> (Option<u64>, Option<u64>, Option<u64>) {
         let mut memory_limit = None;
         let mut memory_soft_limit = None;
         let mut memory_swap_limit = None;
-        let mut memory_usage = None;
 
         // Try cgroups v2 first
         if let Ok(content) = fs::read_to_string("/sys/fs/cgroup/memory.max") {
@@ -559,10 +464,6 @@ impl ContainerInfo {
             if trimmed != "max" {
                 memory_swap_limit = trimmed.parse::<u64>().ok();
             }
-        }
-
-        if let Ok(content) = fs::read_to_string("/sys/fs/cgroup/memory.current") {
-            memory_usage = content.trim().parse::<u64>().ok();
         }
 
         // Try cgroups v1 if v2 didn't work
@@ -597,18 +498,7 @@ impl ContainerInfo {
             }
         }
 
-        if memory_usage.is_none()
-            && let Ok(content) = fs::read_to_string("/sys/fs/cgroup/memory/memory.usage_in_bytes")
-        {
-            memory_usage = content.trim().parse::<u64>().ok();
-        }
-
-        (
-            memory_limit,
-            memory_soft_limit,
-            memory_swap_limit,
-            memory_usage,
-        )
+        (memory_limit, memory_soft_limit, memory_swap_limit)
     }
 
     pub fn get_memory_stats(&self) -> Option<(u64, u64, f64)> {
@@ -648,76 +538,6 @@ impl ContainerInfo {
             {
                 return Some(usage);
             }
-        }
-
-        None
-    }
-
-    #[allow(dead_code)]
-    pub fn get_detailed_memory_stats(&self) -> Option<MemoryStats> {
-        if !self.is_container {
-            return None;
-        }
-
-        let mut stats = MemoryStats::default();
-
-        #[cfg(target_os = "linux")]
-        if let Some(ref cg) = self.cgroup
-            && let Some(mem_controller) = cg.controller_of::<MemController>()
-        {
-            let mem_stat = mem_controller.memory_stat();
-            // Map the MemoryStat fields to our MemoryStats
-            stats.anon_bytes = mem_stat.stat.rss; // RSS is roughly anonymous memory
-            stats.file_bytes = mem_stat.stat.cache; // Cache is file-backed memory
-            stats.file_mapped_bytes = mem_stat.stat.mapped_file;
-            stats.file_dirty_bytes = mem_stat.stat.dirty;
-            stats.file_writeback_bytes = mem_stat.stat.writeback;
-            // Note: kernel_stack, slab, and sock are not directly available in MemoryStat
-            return Some(stats);
-        }
-
-        // Fallback to filesystem
-        // Try cgroups v2 memory.stat
-        if let Ok(content) = fs::read_to_string("/sys/fs/cgroup/memory.stat") {
-            for line in content.lines() {
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.len() == 2
-                    && let Ok(value) = parts[1].parse::<u64>()
-                {
-                    match parts[0] {
-                        "anon" => stats.anon_bytes = value,
-                        "file" => stats.file_bytes = value,
-                        "kernel_stack" => stats.kernel_stack_bytes = value,
-                        "slab" => stats.slab_bytes = value,
-                        "sock" => stats.sock_bytes = value,
-                        "file_mapped" => stats.file_mapped_bytes = value,
-                        "file_dirty" => stats.file_dirty_bytes = value,
-                        "file_writeback" => stats.file_writeback_bytes = value,
-                        _ => {}
-                    }
-                }
-            }
-            return Some(stats);
-        }
-
-        // Try cgroups v1
-        if let Ok(content) = fs::read_to_string("/sys/fs/cgroup/memory/memory.stat") {
-            for line in content.lines() {
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.len() == 2
-                    && let Ok(value) = parts[1].parse::<u64>()
-                {
-                    match parts[0] {
-                        "rss" => stats.anon_bytes = value,
-                        "cache" => stats.file_bytes = value,
-                        "mapped_file" => stats.file_mapped_bytes = value,
-                        "dirty" => stats.file_dirty_bytes = value,
-                        "writeback" => stats.file_writeback_bytes = value,
-                        _ => {}
-                    }
-                }
-            }
-            return Some(stats);
         }
 
         None

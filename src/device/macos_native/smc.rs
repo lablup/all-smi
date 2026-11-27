@@ -295,16 +295,15 @@ pub struct TempKeyScan {
     pub gpu_keys: Vec<String>,
     /// Key-table indices actually read, including binary-search probes.
     ///
-    /// Diagnostic only, like the other two counters here: the binary
-    /// target never reads it, so it needs the same `dead_code` waiver.
-    #[allow(dead_code)]
+    /// Diagnostic only, like the other two counters here.
+    #[cfg_attr(not(test), allow(dead_code))] // Read only by the test temperature report.
     pub scanned_keys: u32,
     /// Total number of keys the SMC reports.
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), allow(dead_code))] // Read only by the test temperature report.
     pub total_keys: u32,
     /// Whether the sorted-table fast path produced this result. False means
     /// the exhaustive fallback ran. Diagnostic only; no metric depends on it.
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), allow(dead_code))] // Read only by the test temperature report.
     pub used_sorted_range: bool,
 }
 
@@ -472,7 +471,7 @@ impl SMC {
     ///
     /// Part of this module's public surface; discovery itself compares the
     /// undecoded codes from [`get_key_code_from_index`](Self::get_key_code_from_index).
-    #[allow(dead_code)]
+    #[allow(dead_code)] // macOS-only SMC API with no caller; not verifiable on a Linux build.
     pub fn get_key_from_index(&self, index: u32) -> Result<String, &'static str> {
         Ok(fourcc_to_string(self.get_key_code_from_index(index)?))
     }

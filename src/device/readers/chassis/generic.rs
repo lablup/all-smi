@@ -26,7 +26,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 /// Generic chassis reader that collects DMI info, thermal zones, and GPU power
-#[allow(dead_code)]
+// macOS uses the native chassis readers instead.
+#[cfg_attr(all(target_os = "macos", not(test)), allow(dead_code))]
 pub struct GenericChassisReader {
     hostname: String,
     /// Cached total GPU power (updated externally)
@@ -41,7 +42,7 @@ impl Default for GenericChassisReader {
     }
 }
 
-#[allow(dead_code)]
+#[cfg_attr(all(target_os = "macos", not(test)), allow(dead_code))]
 impl GenericChassisReader {
     pub fn new() -> Self {
         #[allow(unused_mut)]
@@ -55,8 +56,9 @@ impl GenericChassisReader {
         }
     }
 
-    /// Update the cached GPU power value
-    /// This should be called from the data collection loop with aggregated GPU power
+    /// Update the cached GPU power value. The collectors attach GPU power to
+    /// the chassis record themselves, so only the tests feed this cache.
+    #[cfg(test)]
     pub fn update_gpu_power(&self, total_gpu_power_watts: f64) {
         if let Ok(mut power) = self.cached_gpu_power.write() {
             *power = Some(total_gpu_power_watts);

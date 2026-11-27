@@ -21,7 +21,7 @@ use std::time::Duration;
 
 #[cfg(target_os = "linux")]
 use crate::doctor::exec::try_exec;
-use crate::doctor::types::{Check, CheckCtx, CheckResult, Severity};
+use crate::doctor::types::{Check, CheckCtx, CheckResult};
 
 static CHECKS: &[&Check] = &[&USER, &ROOT, &VIDEO_RENDER, &DEV_DRI, &DEV_TENSTORRENT];
 
@@ -32,35 +32,30 @@ pub fn checks() -> &'static [&'static Check] {
 static USER: Check = Check {
     id: "privileges.user",
     title: "Calling user identity",
-    severity_on_fail: Severity::Info,
     run: check_user,
 };
 
 static ROOT: Check = Check {
     id: "privileges.root",
     title: "Root / sudo availability",
-    severity_on_fail: Severity::Warn,
     run: check_root,
 };
 
 static VIDEO_RENDER: Check = Check {
     id: "privileges.video_render_group",
     title: "video/render group membership",
-    severity_on_fail: Severity::Warn,
     run: check_video_render_group,
 };
 
 static DEV_DRI: Check = Check {
     id: "privileges.dev_dri",
     title: "/dev/dri access",
-    severity_on_fail: Severity::Warn,
     run: check_dev_dri,
 };
 
 static DEV_TENSTORRENT: Check = Check {
     id: "privileges.dev_tenstorrent",
     title: "/dev/tenstorrent access",
-    severity_on_fail: Severity::Info,
     run: check_dev_tenstorrent,
 };
 

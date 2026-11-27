@@ -22,7 +22,7 @@ use crate::mock::template_engine::{build_response_template, render_response};
 use rand::{RngExt, rng};
 
 /// High-performance template-based mock node
-#[allow(dead_code)]
+#[allow(dead_code)] // Not read by the mock server; left for a mock-specific cleanup.
 pub struct MockNode {
     pub instance_name: String,
     pub gpu_name: String,

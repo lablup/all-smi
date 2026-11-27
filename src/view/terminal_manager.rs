@@ -83,11 +83,6 @@ impl TerminalManager {
         self.initialized = true;
         Ok(())
     }
-
-    #[allow(dead_code)] // Future terminal management architecture
-    pub fn is_initialized(&self) -> bool {
-        self.initialized
-    }
 }
 
 impl Drop for TerminalManager {

@@ -255,14 +255,6 @@ impl DataCollectionStrategy for SshStrategy {
         state.loading = false;
         state.mark_collector_data_changed();
     }
-
-    fn strategy_type(&self) -> &str {
-        "ssh"
-    }
-
-    async fn is_ready(&self) -> bool {
-        true
-    }
 }
 
 /// Per-host collection driver. Returns `Ok((gpus, status))` on success
@@ -320,10 +312,8 @@ async fn collect_one_host(
             let params = ConnectParams {
                 target: target.clone(),
                 explicit_key: config.explicit_key.clone(),
-                strict_host_key: config.strict_host_key,
                 connect_timeout: config.connect_timeout,
                 inactivity: crate::network::ssh_client::DEFAULT_INACTIVITY,
-                known_hosts: config.known_hosts.clone(),
             };
 
             match SshSession::connect(params, Arc::clone(&verifier)).await {

@@ -109,21 +109,12 @@ pub enum ReplayError {
 }
 
 /// Header frame metadata (first line of a well-formed recording).
-///
-/// `interval_ms` and `all_smi_version` are deserialized for completeness
-/// and read by consumers outside this crate (SSE endpoint, issue #193);
-/// allow `dead_code` so an internal rebuild that only consumes `hosts`
-/// does not force us to strip the shape.
 #[derive(Clone, Debug, Deserialize)]
 pub struct ReplayHeader {
     #[serde(default)]
-    #[allow(dead_code)]
     pub interval_ms: Option<u64>,
     #[serde(default)]
     pub hosts: Vec<String>,
-    #[serde(default)]
-    #[allow(dead_code)]
-    pub all_smi_version: Option<String>,
 }
 
 /// Raw JSON frame — discriminates between header, index, and data. We
@@ -140,8 +131,6 @@ struct RawFrame {
     interval_ms: Option<u64>,
     #[serde(default)]
     hosts: Vec<String>,
-    #[serde(default)]
-    all_smi_version: Option<String>,
 }
 
 /// A decoded data frame plus its position in the file (line number).
@@ -437,7 +426,6 @@ impl Replayer {
             return Ok(ClassifiedLine::Header(ReplayHeader {
                 interval_ms: raw.interval_ms,
                 hosts,
-                all_smi_version: raw.all_smi_version,
             }));
         }
         if raw.index {

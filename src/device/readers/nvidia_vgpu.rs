@@ -59,20 +59,6 @@ fn host_mode_label(mode: HostVgpuMode) -> &'static str {
     }
 }
 
-/// Numeric encoding of the host vGPU mode for Prometheus. Matches the C enum
-/// values in NVML headers so that downstream dashboards can correlate the
-/// gauge with the `host_mode` label.
-///
-/// Used by the exporter in `api/metrics/vgpu.rs` via its string-based
-/// mirror — this function is the canonical source in Rust-land.
-#[allow(dead_code)] // Consumed only by tests; exporter mirrors the mapping on strings.
-fn host_mode_code(mode: HostVgpuMode) -> u32 {
-    match mode {
-        HostVgpuMode::NonSriov => 0,
-        HostVgpuMode::Sriov => 1,
-    }
-}
-
 /// Collect vGPU information for every physical NVIDIA GPU on the host.
 ///
 /// Returns an empty vector when:
@@ -351,11 +337,5 @@ mod tests {
     fn host_mode_label_maps_known_variants() {
         assert_eq!(host_mode_label(HostVgpuMode::NonSriov), "NonSriov");
         assert_eq!(host_mode_label(HostVgpuMode::Sriov), "Sriov");
-    }
-
-    #[test]
-    fn host_mode_code_is_stable() {
-        assert_eq!(host_mode_code(HostVgpuMode::NonSriov), 0);
-        assert_eq!(host_mode_code(HostVgpuMode::Sriov), 1);
     }
 }

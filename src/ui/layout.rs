@@ -92,10 +92,8 @@ impl LayoutCalculator {
             .saturating_sub(function_keys_lines);
 
         ContentArea {
-            x: 0,
+            #[cfg(test)]
             y: header_lines + activity_panel_lines,
-            width: cols,
-            height: available_rows,
             available_rows: available_rows as usize,
         }
     }
@@ -164,62 +162,14 @@ impl LayoutCalculator {
         let max_gpu_items = gpu_display_rows / lines_per_gpu;
 
         GpuDisplayParams {
+            #[cfg(test)]
             display_rows: gpu_display_rows,
+            #[cfg(test)]
             lines_per_gpu,
             max_items: max_gpu_items,
-            start_index: state.gpu_scroll_offset(),
+            #[cfg(test)]
             storage_rows: storage_display_rows,
         }
-    }
-
-    /// Calculate progress bar layout
-    #[allow(dead_code)] // Future progress bar layout
-    pub fn calculate_progress_bar_layout(
-        width: usize,
-        num_bars: usize,
-        padding: usize,
-    ) -> ProgressBarLayout {
-        let total_padding = padding * 2; // Left and right padding
-        let separators = if num_bars > 1 { (num_bars - 1) * 2 } else { 0 }; // 2 spaces between bars
-
-        let available_width = width.saturating_sub(total_padding + separators);
-        let bar_width = available_width
-            .checked_div(num_bars)
-            .unwrap_or(available_width);
-
-        ProgressBarLayout {
-            bar_width,
-            left_padding: padding,
-            right_padding: padding,
-            separator_width: if num_bars > 1 { 2 } else { 0 },
-            total_bars: num_bars,
-        }
-    }
-
-    /// Calculate dynamic column widths for tables
-    #[allow(dead_code)] // Future table layout
-    pub fn calculate_table_columns(
-        available_width: usize,
-        column_specs: &[ColumnSpec],
-    ) -> Vec<usize> {
-        let min_total: usize = column_specs.iter().map(|c| c.min_width).sum();
-        let separator_width = column_specs.len() - 1; // 1 space between columns
-
-        if available_width <= min_total + separator_width {
-            // Use minimum widths if not enough space
-            return column_specs.iter().map(|c| c.min_width).collect();
-        }
-
-        let extra_space = available_width - min_total - separator_width;
-        let total_weight: f32 = column_specs.iter().map(|c| c.weight).sum();
-
-        let mut widths = Vec::new();
-        for spec in column_specs {
-            let extra = (extra_space as f32 * spec.weight / total_weight) as usize;
-            widths.push(spec.min_width + extra);
-        }
-
-        widths
     }
 
     /// Public entry point used by `view::event_handler` so PgUp / PgDn page
@@ -261,91 +211,23 @@ impl LayoutCalculator {
 /// Content area dimensions
 #[derive(Debug, Clone)]
 pub struct ContentArea {
-    #[allow(dead_code)] // Future layout calculations
-    pub x: u16,
-    #[allow(dead_code)] // Future layout calculations
+    /// First row of the content area; only the layout tests read it.
+    #[cfg(test)]
     pub y: u16,
-    #[allow(dead_code)] // Future layout calculations
-    pub width: u16,
-    #[allow(dead_code)] // Future layout calculations
-    pub height: u16,
     pub available_rows: usize,
 }
 
 /// GPU display parameters
 #[derive(Debug, Clone)]
 pub struct GpuDisplayParams {
-    #[allow(dead_code)] // Future layout calculations
+    // The row counts behind `max_items`, kept for the layout tests.
+    #[cfg(test)]
     pub display_rows: usize,
-    #[allow(dead_code)] // Future layout calculations
+    #[cfg(test)]
     pub lines_per_gpu: usize,
     pub max_items: usize, // Used in ui_loop.rs
-    #[allow(dead_code)] // Future layout calculations
-    pub start_index: usize,
-    #[allow(dead_code)] // Future layout calculations
+    #[cfg(test)]
     pub storage_rows: usize,
-}
-
-/// Progress bar layout configuration
-#[derive(Debug, Clone)]
-#[allow(dead_code)] // Future progress bar layout architecture
-pub struct ProgressBarLayout {
-    pub bar_width: usize,
-    pub left_padding: usize,
-    pub right_padding: usize,
-    pub separator_width: usize,
-    pub total_bars: usize,
-}
-
-/// Table column specification
-#[derive(Debug, Clone)]
-#[allow(dead_code)] // Future table layout architecture
-pub struct ColumnSpec {
-    pub name: &'static str,
-    pub min_width: usize,
-    pub weight: f32, // Relative weight for extra space distribution
-}
-
-#[allow(dead_code)] // Future table layout architecture
-impl ColumnSpec {
-    pub fn new(name: &'static str, min_width: usize, weight: f32) -> Self {
-        Self {
-            name,
-            min_width,
-            weight,
-        }
-    }
-}
-
-/// Predefined column specifications for common tables
-#[allow(dead_code)] // Future table layout architecture
-pub struct StandardColumns;
-
-#[allow(dead_code)] // Future table layout architecture
-impl StandardColumns {
-    pub fn process_table() -> Vec<ColumnSpec> {
-        vec![
-            ColumnSpec::new("PID", 6, 0.5),
-            ColumnSpec::new("User", 12, 1.0),
-            ColumnSpec::new("Name", 8, 2.0),
-            ColumnSpec::new("CPU%", 6, 0.5),
-            ColumnSpec::new("Mem%", 8, 0.5),
-            ColumnSpec::new("GPU Mem", 8, 1.0),
-            ColumnSpec::new("State", 8, 0.5),
-            ColumnSpec::new("Command", 10, 3.0),
-        ]
-    }
-
-    pub fn device_table() -> Vec<ColumnSpec> {
-        vec![
-            ColumnSpec::new("Device", 15, 2.0),
-            ColumnSpec::new("Host", 12, 1.0),
-            ColumnSpec::new("Utilization", 12, 1.0),
-            ColumnSpec::new("Memory", 15, 1.5),
-            ColumnSpec::new("Temperature", 12, 1.0),
-            ColumnSpec::new("Power", 10, 1.0),
-        ]
-    }
 }
 
 /// Filter `gpu_info` to the subset visible under the current tab. "All"
@@ -419,10 +301,7 @@ mod tests {
     #[test]
     fn hidden_storage_reserves_no_layout_rows_for_zero_or_many_disks() {
         let content_area = ContentArea {
-            x: 0,
             y: 0,
-            width: 120,
-            height: 30,
             available_rows: 30,
         };
         let mut args = ViewArgs::empty();
@@ -457,10 +336,7 @@ mod tests {
         let mut args = ViewArgs::empty();
         args.hosts = Some(vec!["host-a".into()]);
         let content_area = ContentArea {
-            x: 0,
             y: 0,
-            width: 120,
-            height: 30,
             available_rows: 30,
         };
 
@@ -471,34 +347,6 @@ mod tests {
         assert_eq!(visible.storage_rows, 4);
         assert_eq!(hidden.storage_rows, 0);
         assert_eq!(hidden.display_rows, content_area.available_rows);
-    }
-
-    #[test]
-    fn test_calculate_progress_bar_layout() {
-        let layout = LayoutCalculator::calculate_progress_bar_layout(40, 3, 5);
-
-        assert_eq!(layout.bar_width, 8); // (40 - 10 padding - 4 separators) / 3 = 26 / 3 = 8
-        assert_eq!(layout.left_padding, 5);
-        assert_eq!(layout.right_padding, 5);
-        assert_eq!(layout.separator_width, 2);
-        assert_eq!(layout.total_bars, 3);
-    }
-
-    #[test]
-    fn test_calculate_table_columns() {
-        let specs = vec![
-            ColumnSpec::new("A", 10, 1.0),
-            ColumnSpec::new("B", 15, 2.0),
-            ColumnSpec::new("C", 5, 0.5),
-        ];
-
-        let widths = LayoutCalculator::calculate_table_columns(50, &specs);
-
-        // Min total: 30, separators: 2, extra: 18
-        // Weight distribution: A=18*1/3.5=5, B=18*2/3.5=10, C=18*0.5/3.5=2
-        assert_eq!(widths[0], 15); // 10 + 5
-        assert_eq!(widths[1], 25); // 15 + 10
-        assert_eq!(widths[2], 7); // 5 + 2
     }
 
     #[test]

@@ -54,11 +54,7 @@ pub trait GpuReader: Send + Sync {
     /// Returns `None` when no device with `uuid` is currently visible to this
     /// reader (e.g., the device was removed, the driver lost it, or the UUID
     /// belongs to a different reader's domain).
-    // `#[allow(dead_code)]`: the default body is dispatched into via
-    // `AllSmi::get_gpu_by_uuid`. The binary target does not exercise that
-    // call path directly, which triggers a spurious unused-warning on the
-    // trait method in `--bin all-smi --tests` builds.
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Called by the library's `AllSmi::get_gpu_by_uuid`; the binary never calls it.
     fn get_gpu_info_by_uuid(&self, uuid: &str) -> Option<GpuInfo> {
         self.get_gpu_info().into_iter().find(|g| g.uuid == uuid)
     }

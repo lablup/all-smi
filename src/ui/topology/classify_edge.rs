@@ -27,8 +27,7 @@
 use crate::device::{GpuInfo, NvLinkRemoteDevice, NvLinkRemoteType};
 
 /// Short topology label for a pair of endpoints, mirroring the
-/// `nvidia-smi topo -m` legend plus one ad-hoc variant (`NSW`) for
-/// NvSwitch mesh members.
+/// `nvidia-smi topo -m` legend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EdgeClass {
     /// Self-cell along the matrix diagonal.
@@ -37,24 +36,11 @@ pub enum EdgeClass {
     /// links between the endpoints; `generation` is the `NVn` bandwidth
     /// hint (None when unknown).
     NvLink { count: u32, generation: Option<u8> },
-    /// Remote is an NvSwitch (GPU → Switch on this row, or Switch → GPU).
-    ///
-    /// Reserved for a future classifier extension that materialises the
-    /// switch node as a first-class edge target; the current matrix
-    /// renderer still treats switch-mediated pairs as `NvSwitchMesh`
-    /// because NVML does not expose the remote GPU UUID.
-    #[allow(dead_code)]
-    NvSwitch { count: u32 },
     /// Two GPUs that share an NvSwitch mesh but do not have a direct link.
     /// nvidia-smi labels this `NV#` too; we keep a distinct variant so the
-    /// graph renderer can draw a dashed switch-mediated edge.
+    /// graph renderer can draw a dashed switch-mediated edge. Switch-mediated
+    /// pairs land here because NVML does not expose the remote GPU UUID.
     NvSwitchMesh,
-    /// Same NUMA node, same PCIe root complex (nvidia-smi `PXB`).
-    ///
-    /// Reserved for a future classifier extension that reads PCIe root
-    /// complex info from `detail` and distinguishes PXB from NODE.
-    #[allow(dead_code)]
-    PcieSameRoot,
     /// Same NUMA node but different PCIe root complexes (nvidia-smi `NODE`).
     PcieSameNuma,
     /// Different NUMA nodes — traversal goes through system fabric
@@ -80,9 +66,7 @@ impl EdgeClass {
                 count: _,
                 generation: None,
             } => "NV".to_string(),
-            Self::NvSwitch { .. } => "NSW".to_string(),
             Self::NvSwitchMesh => "NV".to_string(),
-            Self::PcieSameRoot => "PXB".to_string(),
             Self::PcieSameNuma => "NODE".to_string(),
             Self::SysInterconnect => "SYS".to_string(),
             Self::Unknown => "--".to_string(),

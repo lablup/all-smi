@@ -39,15 +39,6 @@ pub struct DataCollector {
 }
 
 impl DataCollector {
-    #[allow(dead_code)] // Available for callers that do not need event-driven wakeups
-    pub fn new(app_state: Arc<Mutex<AppState>>) -> Self {
-        Self {
-            app_state,
-            data_notify: None,
-            webhook_tx: std::sync::OnceLock::new(),
-        }
-    }
-
     /// Create a data collector with a notification handle for event-driven UI wakeups.
     pub fn with_notify(app_state: Arc<Mutex<AppState>>, notify: Arc<Notify>) -> Self {
         Self {

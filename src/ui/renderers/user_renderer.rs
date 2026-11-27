@@ -56,13 +56,11 @@ const DRILL_PIDS: usize = 6;
 
 /// Result of [`render_users_tab`].
 ///
-/// `visible_rows` tells the event handler how many row cursors Up/Down
-/// can traverse so selection stays in bounds.  Currently consumed via
-/// `AppState::users_aggregation()` directly rather than threaded back
-/// through the render result; kept on the struct for future callers
-/// that need per-frame bounds without re-running the aggregation.
+/// `visible_rows` is the number of rows the frame drew. The event handler
+/// reads its bounds from `AppState::users_aggregation()` directly, so only
+/// the tests read it here.
 pub struct UsersRenderResult {
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub visible_rows: usize,
 }
 
@@ -150,7 +148,10 @@ pub fn render_users_tab<W: Write>(
         render_empty_message(stdout, aggregation, cols as usize);
         // Even in the empty-state case, footer is still useful.
         render_footer(stdout, 0, 0, tab_state, cols as usize);
-        return UsersRenderResult { visible_rows: 0 };
+        return UsersRenderResult {
+            #[cfg(test)]
+            visible_rows: 0,
+        };
     }
 
     let visible_rows = rows.len().min(body_budget);
@@ -162,7 +163,10 @@ pub fn render_users_tab<W: Write>(
 
     render_footer(stdout, rows.len(), visible_rows, tab_state, cols as usize);
 
-    UsersRenderResult { visible_rows }
+    UsersRenderResult {
+        #[cfg(test)]
+        visible_rows,
+    }
 }
 
 /// Compute the exact height of the header area above the body so the
@@ -519,7 +523,10 @@ fn render_drill_down<W: Write>(
         queue!(stdout, Print("\r\n")).unwrap();
     }
 
-    UsersRenderResult { visible_rows }
+    UsersRenderResult {
+        #[cfg(test)]
+        visible_rows,
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -666,7 +673,10 @@ fn render_drill_processes<W: Write>(
         let msg = "  (no process rows for this user on this host)";
         print_colored_text(stdout, msg, Color::DarkGrey, None, None);
         queue!(stdout, Print("\r\n")).unwrap();
-        return UsersRenderResult { visible_rows: 0 };
+        return UsersRenderResult {
+            #[cfg(test)]
+            visible_rows: 0,
+        };
     }
 
     for row in rows.iter().take(visible_rows) {
@@ -699,7 +709,10 @@ fn render_drill_processes<W: Write>(
 
     let _ = tab_state; // reserved for future per-row selection
 
-    UsersRenderResult { visible_rows }
+    UsersRenderResult {
+        #[cfg(test)]
+        visible_rows,
+    }
 }
 
 /// Collapse an ordered set of GPU indices into a run-length string

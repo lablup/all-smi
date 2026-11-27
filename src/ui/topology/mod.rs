@@ -94,11 +94,10 @@ pub struct TopologyGpu {
     pub numa_node: Option<i32>,
     /// Active NvLinks as reported by the parent GPU.
     pub links: Vec<NvLinkRemoteDevice>,
-    /// PCIe generation/width best-effort. Empty string when absent.
-    /// Reserved for a future iteration of the graph header that
-    /// surfaces PCIe speed next to each GPU label; kept in the model
-    /// today so the reader-side contract is stable.
-    #[allow(dead_code)]
+    /// PCIe generation/width best-effort. Empty string when absent. The
+    /// graph does not render it yet; the tests use it to pin the
+    /// reader-side detail-key contract.
+    #[cfg(test)]
     pub pcie_display: String,
 }
 
@@ -160,6 +159,7 @@ impl TopologyModel {
                 name: gpu.name.clone(),
                 numa_node: gpu.numa_node_id,
                 links: gpu.nvlink_remote_devices.clone(),
+                #[cfg(test)]
                 pcie_display: format_pcie(gpu),
             })
             .collect();
@@ -256,6 +256,7 @@ fn looks_nvidia(gpu: &GpuInfo) -> bool {
 /// by their own spelling, so the reader cannot carry the Title Case ones),
 /// and the legacy `pcie_gen_current` / `pcie_width_current` no reader
 /// writes but a hand-built or old snapshot may.
+#[cfg(test)]
 fn format_pcie(gpu: &GpuInfo) -> String {
     let gen_str = gpu
         .detail

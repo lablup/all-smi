@@ -49,10 +49,6 @@ use crate::utils::RuntimeEnvironment;
 #[derive(Clone, Debug)]
 pub struct RenderDecisions {
     pub force_clear: bool,
-    #[allow(dead_code)] // Future caching: skip composition when nothing changed
-    pub should_render: bool,
-    #[allow(dead_code)] // Exposed for coordinator queries outside the main loop
-    pub animations_needed: bool,
 }
 
 /// Every collection the frame reads, copied out of `AppState` once per
@@ -319,9 +315,6 @@ impl ViewState for RenderSnapshot {
     fn tab_scroll_offset(&self) -> usize {
         self.tab_scroll_offset
     }
-    fn gpu_scroll_offset(&self) -> usize {
-        self.gpu_scroll_offset
-    }
     fn frame_counter(&self) -> u64 {
         self.frame_counter
     }
@@ -561,7 +554,6 @@ pub(crate) mod tests {
         assert_eq!(live.is_local_mode(), snap.is_local_mode());
         assert_eq!(live.tabs(), snap.tabs());
         assert_eq!(live.current_tab(), snap.current_tab());
-        assert_eq!(live.gpu_scroll_offset(), snap.gpu_scroll_offset());
         assert_eq!(live.sort_criteria(), snap.sort_criteria());
         assert_eq!(live.gpu_info().len(), snap.gpu_info().len());
         assert_eq!(live.gpu_info()[0].uuid, snap.gpu_info()[0].uuid);

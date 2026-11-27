@@ -43,7 +43,7 @@ impl BufferWriter {
     }
 
     /// Reset the buffer for reuse, keeping the allocated capacity.
-    #[allow(dead_code)] // Public API for frame-to-frame buffer reuse
+    #[cfg(test)]
     pub fn reset(&mut self) {
         self.buffer.clear();
         self.line_count = 0;

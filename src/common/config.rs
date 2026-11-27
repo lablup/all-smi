@@ -13,7 +13,6 @@
 // limitations under the License.
 
 /// Application configuration constants
-#[allow(dead_code)] // Many constants used across modules but clippy may not detect cross-module usage
 pub struct AppConfig;
 
 // One remote scrape attempt must end inside the tick budget (issue #500).
@@ -25,8 +24,6 @@ impl AppConfig {
     // Optimized for CPU efficiency: 10 FPS is sufficient for monitoring tools
     // This significantly reduces CPU usage while maintaining smooth visuals
     pub const MIN_RENDER_INTERVAL_MS: u64 = 100; // ~10 FPS (was 33ms/30 FPS)
-    #[allow(dead_code)] // Retained for configuration reference; replaced by TERMINAL_READER_POLL_MS in event-driven model
-    pub const EVENT_POLL_TIMEOUT_MS: u64 = 100; // Poll every 100ms (was 50ms)
     pub const SCROLL_UPDATE_FREQUENCY: u64 = 2; // Every N frames for text scrolling (2 = every 200ms at 10 FPS)
 
     // Event-driven UI constants
@@ -57,8 +54,6 @@ impl AppConfig {
     pub const RETRY_BASE_DELAY_MS: u64 = 50;
 
     // Data Collection
-    #[allow(dead_code)] // Future configuration option
-    pub const DEFAULT_UPDATE_INTERVAL_SECS: u64 = 2;
     /// Samples retained per history series.
     ///
     /// The braille graphs plot one sample per sub-column and hold a scrolling
@@ -70,20 +65,7 @@ impl AppConfig {
     pub const HISTORY_MAX_ENTRIES: usize = 1024;
     pub const CONNECTION_STAGGER_BASE_MS: u64 = 500;
 
-    // UI Layout Constants
-    #[allow(dead_code)] // Future UI configuration
-    pub const DASHBOARD_ITEM_WIDTH: usize = 15;
-    #[allow(dead_code)] // Default terminal fallback values for future use
-    pub const DEFAULT_TERMINAL_WIDTH: u16 = 80;
-    #[allow(dead_code)] // Default terminal fallback values for future use
-    pub const DEFAULT_TERMINAL_HEIGHT: u16 = 24;
-
-    // Memory and Performance
-    #[allow(dead_code)] // Future Linux-specific calculations
-    pub const LINUX_PAGE_SIZE_BYTES: u64 = 4096;
-    #[allow(dead_code)] // Future Linux-specific calculations
-    pub const LINUX_JIFFIES_PER_SECOND: u64 = 100;
-    #[allow(dead_code)] // Future notification system
+    // Notifications
     pub const NOTIFICATION_DURATION_SECS: u64 = 5;
 
     // Color Thresholds
@@ -286,7 +268,6 @@ impl EnergyConfig {
 }
 
 /// Environment-specific configuration
-#[allow(dead_code)] // Functions used across modules but clippy may not detect cross-module usage
 pub struct EnvConfig;
 
 impl EnvConfig {
@@ -322,11 +303,6 @@ impl EnvConfig {
     /// never spelled out as a literal there.
     pub fn local_interval() -> u64 {
         Self::adaptive_interval(0)
-    }
-
-    #[allow(dead_code)] // Future connection management
-    pub fn max_concurrent_connections(total_hosts: usize) -> usize {
-        std::cmp::min(total_hosts, AppConfig::MAX_CONCURRENT_CONNECTIONS)
     }
 
     pub fn connection_stagger_delay(host_index: usize, total_hosts: usize) -> u64 {
@@ -453,16 +429,6 @@ mod tests {
     }
 
     #[test]
-    fn test_max_concurrent_connections() {
-        assert_eq!(EnvConfig::max_concurrent_connections(10), 10);
-        assert_eq!(EnvConfig::max_concurrent_connections(50), 50);
-        assert_eq!(EnvConfig::max_concurrent_connections(64), 64);
-        assert_eq!(EnvConfig::max_concurrent_connections(100), 100);
-        assert_eq!(EnvConfig::max_concurrent_connections(128), 128);
-        assert_eq!(EnvConfig::max_concurrent_connections(200), 128);
-    }
-
-    #[test]
     fn test_connection_stagger_delay() {
         assert_eq!(EnvConfig::connection_stagger_delay(0, 10), 0);
         assert_eq!(EnvConfig::connection_stagger_delay(1, 10), 50);
@@ -557,14 +523,12 @@ mod tests {
     #[test]
     fn test_app_config_constants() {
         assert_eq!(AppConfig::MIN_RENDER_INTERVAL_MS, 100);
-        assert_eq!(AppConfig::EVENT_POLL_TIMEOUT_MS, 100);
         assert_eq!(AppConfig::MAX_CONCURRENT_CONNECTIONS, 128);
         assert_eq!(AppConfig::CONNECTION_TIMEOUT_SECS, 3);
         assert_eq!(AppConfig::CONNECT_TIMEOUT_MS, 1000);
         assert_eq!(AppConfig::REMOTE_SCRAPE_BUDGET_MS, 4000);
         assert_eq!(AppConfig::RETRY_ATTEMPTS, 3);
         assert_eq!(AppConfig::RETRY_BASE_DELAY_MS, 50);
-        assert_eq!(AppConfig::DEFAULT_UPDATE_INTERVAL_SECS, 2);
         assert_eq!(AppConfig::CONNECTION_STAGGER_BASE_MS, 500);
         assert_eq!(AppConfig::CRITICAL_THRESHOLD, 0.8);
         assert_eq!(AppConfig::WARNING_THRESHOLD, 0.7);

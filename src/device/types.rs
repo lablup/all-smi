@@ -15,22 +15,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-// Type aliases for complex return types
-#[allow(dead_code)]
-pub type ProcessInfoResult = Option<(
-    f64,
-    f64,
-    u64,
-    u64,
-    String,
-    String,
-    String,
-    u64,
-    String,
-    u32,
-    u32,
-)>;
-
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct GpuInfo {
     pub uuid: String,

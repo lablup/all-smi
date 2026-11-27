@@ -80,8 +80,6 @@ where
 /// JSON structures for Rebellions device information
 #[derive(Debug, Clone, Deserialize)]
 struct RblnPciInfo {
-    #[allow(dead_code)]
-    dev: String,
     bus_id: String,
     numa_node: String,
     link_speed: String,
@@ -133,8 +131,6 @@ struct RblnResponse {
 
 #[derive(Debug, Clone, Deserialize)]
 struct RblnContext {
-    #[allow(dead_code)]
-    ctx_id: String,
     /// Index of the device owning this context. `rbln-stat` 3.0.0 emits this as
     /// a JSON integer; a string is accepted too so other builds keep working.
     #[serde(deserialize_with = "deserialize_string_or_u32")]
@@ -1245,11 +1241,9 @@ mod loaded_node_tests {
         // npu is a JSON integer, pid a quoted string, and the process and
         // memory keys are `process` / `memalloc` -- all four differed from
         // what the struct used to declare.
-        let ctx = response
-            .contexts
-            .iter()
-            .find(|c| c.ctx_id == "10001")
-            .expect("vLLM engine context");
+        // The second context in the fixture (`ctx_id` 10001; the reader
+        // does not keep the id).
+        let ctx = response.contexts.get(1).expect("vLLM engine context");
         assert_eq!(ctx.npu, 0);
         assert_eq!(ctx.pid, 2733390);
         assert_eq!(ctx.process, "VLLM::EngineCore");

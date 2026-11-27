@@ -35,8 +35,6 @@ pub mod parser;
 
 pub use eval::DeviceRowView;
 pub use parser::{Expr, parse};
-#[allow(unused_imports)]
-pub use parser::{Field, ParseError, Value};
 
 /// Row-level helper used by renderers. Returns `true` when the row should
 /// be rendered at full strength (either no filter is active, or the filter

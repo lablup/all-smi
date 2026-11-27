@@ -18,10 +18,8 @@ use std::fmt;
 use std::io;
 
 #[derive(Debug)]
-#[allow(dead_code)]
 pub enum DeviceError {
     Io(io::Error),
-    Timeout(String),
     CommandFailed {
         command: String,
         code: Option<i32>,
@@ -37,7 +35,6 @@ impl fmt::Display for DeviceError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             DeviceError::Io(e) => write!(f, "IO error: {e}"),
-            DeviceError::Timeout(msg) => write!(f, "Timeout: {msg}"),
             DeviceError::CommandFailed {
                 command,
                 code,

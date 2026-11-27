@@ -115,7 +115,7 @@ impl SshFallbackPolicy {
     }
 
     /// True if at least one fallback shim is enabled.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn any_enabled(&self) -> bool {
         self.try_nvidia_smi || self.try_rocm_smi
     }

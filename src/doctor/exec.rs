@@ -69,21 +69,6 @@ pub fn try_exec(cmd: &str, args: &[&str], timeout: Duration) -> Option<ExecOutpu
     }
 }
 
-/// Convenience wrapper that strips the `ExecOutput` down to stdout when the
-/// process succeeded, or returns `None` on failure / missing binary /
-/// timeout. Kept around for checks that only care about the stdout of a
-/// best-effort probe (no current caller — new check authors often reach
-/// for this first, so leaving it exposed avoids re-adding later).
-#[allow(dead_code)]
-pub fn exec_stdout_ok(cmd: &str, args: &[&str], timeout: Duration) -> Option<String> {
-    let out = try_exec(cmd, args, timeout)?;
-    if out.success() {
-        Some(out.stdout)
-    } else {
-        None
-    }
-}
-
 /// Return `true` when `cmd` resolves to an existing executable on PATH or
 /// is an absolute/relative path that exists on disk. Bounded by a tiny
 /// internal timeout via the probe-command approach (`which cmd` /

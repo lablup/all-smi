@@ -16,7 +16,7 @@
 //!
 //! The module is organised as:
 //!
-//! * [`types`] — `Check`, `CheckCtx`, `CheckResult`, `Severity`.
+//! * [`types`] — `Check`, `CheckCtx`, `CheckResult`.
 //! * [`exec`] — bounded-timeout child-process helpers.
 //! * [`redact`] — hostname / IP / MAC / username / kptr scrubbers.
 //! * [`report`] — human-readable and JSON renderers.
@@ -44,10 +44,6 @@ pub mod report;
 pub mod types;
 
 pub use types::{Check, CheckCtx, CheckResult};
-// Re-exported so external callers can match on the severity classifier
-// returned by a custom `Check` definition.
-#[allow(unused_imports)]
-pub use types::Severity;
 
 /// JSON report schema version. Bumped when the shape of [`Report`] breaks
 /// backwards-compatibility for scripted consumers.
@@ -96,7 +92,6 @@ impl DoctorOptions {
     pub fn to_ctx(&self) -> CheckCtx {
         CheckCtx {
             verbose: self.verbose,
-            include_identifiers: self.include_identifiers,
             remote_checks: self.remote_checks.clone(),
             // Leave ~500ms headroom under the hard per-check ceiling so
             // exec calls can wind down cleanly.
@@ -333,15 +328,6 @@ fn id_matches_prefix(id: &str, prefix: &str) -> bool {
         return true;
     }
     id.starts_with(prefix) && id[prefix.len()..].starts_with('.')
-}
-
-/// Resolve the bundle path — returns `None` when `--bundle` was not
-/// supplied, otherwise the pre-normalised [`PathBuf`]. Kept around so
-/// library callers that embed the doctor can introspect whether a bundle
-/// will be written without re-reading [`DoctorOptions::bundle_path`].
-#[allow(dead_code)]
-pub fn bundle_path(opts: &DoctorOptions) -> Option<&std::path::Path> {
-    opts.bundle_path.as_deref()
 }
 
 /// CLI-facing driver: run the report, print it, optionally write the

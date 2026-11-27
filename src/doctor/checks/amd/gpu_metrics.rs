@@ -21,12 +21,11 @@
 //! only the four-byte table header from sysfs, so it reports the mismatch
 //! without linking libdrm into the main binary.
 
-use crate::doctor::types::{Check, CheckCtx, CheckResult, Severity};
+use crate::doctor::types::{Check, CheckCtx, CheckResult};
 
 pub(super) static GPU_METRICS_REVISION: Check = Check {
     id: "amd.gpu_metrics.revision",
     title: "AMD gpu_metrics table revision",
-    severity_on_fail: Severity::Warn,
     run: check_gpu_metrics_revision,
 };
 

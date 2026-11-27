@@ -45,11 +45,11 @@ pub struct NativeMetricsData {
     pub cpu_power_mw: f64,
 
     // Per-core metrics (optional, for detailed reporting)
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Collected for detail; no in-crate reader yet.
     pub core_active_residencies: Vec<f64>,
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Collected for detail; no in-crate reader yet.
     pub core_frequencies: Vec<u32>,
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Collected for detail; no in-crate reader yet.
     pub core_cluster_types: Vec<CoreType>,
 
     // GPU metrics
@@ -69,9 +69,9 @@ pub struct NativeMetricsData {
     // Additional metrics from SMC sensors
     pub cpu_temperature: Option<f64>,
     pub gpu_temperature: Option<f64>,
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Collected for detail; no in-crate reader yet.
     pub system_power_watts: Option<f64>,
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Collected for detail; no in-crate reader yet.
     pub fan_speeds: Vec<(String, u32)>,
 }
 
@@ -187,7 +187,7 @@ impl NativeMetricsData {
 
     /// Get CPU utilization as a percentage (0-100)
     /// Uses weighted average of cluster utilization
-    #[allow(dead_code)]
+    #[allow(dead_code)] // macOS-only accessor with no caller; not verifiable on a Linux build.
     pub fn cpu_utilization(&self) -> f64 {
         if self.s_cluster_active_residency > 0.0 {
             // M5 Pro/Max: Super + Performance (no Efficiency)
@@ -201,13 +201,13 @@ impl NativeMetricsData {
     }
 
     /// Get GPU utilization as a percentage (0-100)
-    #[allow(dead_code)]
+    #[allow(dead_code)] // macOS-only accessor with no caller; not verifiable on a Linux build.
     pub fn gpu_utilization(&self) -> f64 {
         self.gpu_active_residency
     }
 
     /// Check if native APIs returned valid data
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), allow(dead_code))] // Only the tests call it.
     pub fn is_valid(&self) -> bool {
         // Check that we got some meaningful power data
         self.combined_power_mw > 0.0 || self.cpu_power_mw > 0.0 || self.gpu_power_mw > 0.0

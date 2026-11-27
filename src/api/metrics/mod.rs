@@ -46,7 +46,7 @@ pub trait MetricExporter {
     /// Standalone form for one exporter. The live render path goes through
     /// [`MetricExporter::export_into`], so the binary target itself never
     /// calls this; library callers and the tests do.
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Library API used by tests/mig_integration_test.rs and tests/users_tab_integration_test.rs.
     fn export_metrics(&self) -> String {
         let mut builder = MetricBuilder::new();
         self.export_into(&mut builder);
@@ -140,7 +140,6 @@ struct Family {
 /// "absence means no data" convention (issue #325) only declare a family
 /// when a row has a reading, so those still emit nothing at all.
 pub struct MetricBuilder {
-    comments: String,
     families: Vec<Family>,
     index: HashMap<String, usize>,
     /// Family touched by the previous call. Exporters call `help`, `type_`
@@ -152,7 +151,6 @@ pub struct MetricBuilder {
 impl MetricBuilder {
     pub fn new() -> Self {
         Self {
-            comments: String::new(),
             families: Vec::new(),
             index: HashMap::new(),
             last: 0,
@@ -208,15 +206,6 @@ impl MetricBuilder {
             }
         }
         self.family(name)
-    }
-
-    /// Add a comment line. Comments are written before every family.
-    #[allow(dead_code)]
-    pub fn comment(&mut self, text: &str) -> &mut Self {
-        self.comments.push_str("# ");
-        self.comments.push_str(text);
-        self.comments.push('\n');
-        self
     }
 
     /// Declare a family's HELP text. The first description for a name wins.
@@ -298,14 +287,12 @@ impl MetricBuilder {
 
     /// Build the final metric string, one contiguous block per family.
     pub fn build(self) -> String {
-        let capacity = self.comments.len()
-            + self
-                .families
-                .iter()
-                .map(|f| f.samples.len() + 2 * f.name.len() + 64)
-                .sum::<usize>();
+        let capacity = self
+            .families
+            .iter()
+            .map(|f| f.samples.len() + 2 * f.name.len() + 64)
+            .sum::<usize>();
         let mut out = String::with_capacity(capacity);
-        out.push_str(&self.comments);
         for family in &self.families {
             if let Some(help) = &family.help {
                 out.push_str("# HELP ");

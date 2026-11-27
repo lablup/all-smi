@@ -26,7 +26,7 @@ pub struct GpuMetrics {
     pub power_consumption_watts: f32,
     pub frequency_mhz: u32,
     pub ane_utilization_watts: f32, // ANE power consumption in watts (Apple Silicon only)
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Not read by the mock server; left for a mock-specific cleanup.
     pub thermal_pressure_level: Option<String>, // Thermal pressure level (Apple Silicon only)
 }
 

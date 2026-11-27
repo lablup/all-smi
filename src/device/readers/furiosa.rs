@@ -34,11 +34,20 @@ use furiosa_smi_rs::list_devices;
 
 /// Collection method for Furiosa NPU metrics
 #[derive(Debug, Clone, Copy)]
-#[allow(dead_code)]
 pub enum CollectionMethod {
     /// Use furiosa-smi command-line tool
+    // Constructed by the tests and when the furiosa-smi-rs backend is absent.
+    #[cfg_attr(
+        all(target_os = "linux", feature = "furiosa-smi-rs", not(test)),
+        allow(dead_code)
+    )]
     FuriosaSmi,
     /// Use furiosa-smi-rs crate
+    // Constructed only when the furiosa-smi-rs backend is compiled in.
+    #[cfg_attr(
+        not(all(target_os = "linux", feature = "furiosa-smi-rs")),
+        allow(dead_code)
+    )]
     FuriosaSmiRs,
 }
 
@@ -47,10 +56,6 @@ pub enum CollectionMethod {
 /// and RNGD format with --format flag
 #[derive(Debug, Deserialize)]
 struct FuriosaSmiInfoJson {
-    /// Warboy uses numeric "index" (e.g., "0"), RNGD omits this field
-    #[serde(default)]
-    #[allow(dead_code)]
-    index: String,
     arch: String,
     dev_name: String,
     device_uuid: String,
@@ -69,19 +74,7 @@ struct FuriosaSmiInfoJson {
 
 #[derive(Debug, Deserialize)]
 struct FuriosaSmiStatusJson {
-    /// Warboy uses "index", RNGD omits this field
-    #[serde(default)]
-    #[allow(dead_code)]
-    index: String,
-    #[allow(dead_code)]
-    arch: String,
     device: String,
-    #[allow(dead_code)]
-    liveness: String,
-    /// Warboy only
-    #[serde(default)]
-    #[allow(dead_code)]
-    cores: Vec<FuriosaCoreInfo>,
     /// RNGD provides per-device memory info
     #[serde(default)]
     memory: Option<FuriosaStatusMemory>,
@@ -99,25 +92,10 @@ struct FuriosaStatusMemory {
 struct FuriosaDramInfo {
     used_size: u64,
     total_size: u64,
-    #[allow(dead_code)]
-    used_ratio: f64,
-}
-
-#[derive(Debug, Deserialize)]
-#[allow(dead_code)]
-struct FuriosaCoreInfo {
-    idx: u32,
-    status: String,
 }
 
 #[derive(Debug, Deserialize)]
 struct FuriosaPeUtilization {
-    #[allow(dead_code)]
-    pe_core: u32,
-    /// RNGD has pe_occupancy field
-    #[serde(default)]
-    #[allow(dead_code)]
-    pe_occupancy: bool,
     /// Warboy uses "utilization", RNGD uses "pe_utilization"
     #[serde(alias = "pe_utilization")]
     utilization: f64,
@@ -134,7 +112,6 @@ struct FuriosaPsOutputJson {
     cmd: String,
     /// Warboy has memory field, RNGD omits it
     #[serde(default)]
-    #[allow(dead_code)]
     memory: String,
 }
 

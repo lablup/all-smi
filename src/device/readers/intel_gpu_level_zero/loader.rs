@@ -172,9 +172,6 @@ pub enum SysmanRoute {
 /// [`initialize_runtime`] ran rather than re-derived afterwards.
 #[derive(Debug, Clone)]
 pub struct LevelZeroProbe {
-    /// `cfg!(all_smi_level_zero)`. Always true where this type exists; the
-    /// field carries the answer to callers that are compiled either way.
-    pub compiled_in: bool,
     /// Every candidate this target would try, in order.
     pub searched_paths: &'static [&'static str],
     /// The entry that loaded with all mandatory symbols resolved.
@@ -215,7 +212,6 @@ pub fn probe() -> LevelZeroProbe {
             .copied()
             .unwrap_or((None, LevelZeroInit::LoaderMissing, None));
     LevelZeroProbe {
-        compiled_in: true,
         searched_paths: LIBZE_PATHS,
         loaded_path,
         init,
@@ -438,22 +434,7 @@ pub(crate) fn format_pci_bdf(addr: &ffi::zes_pci_address_t) -> String {
 /// Normalise the PCI bus string we get from sysfs / WMI to the format
 /// produced by [`format_pci_bdf`] so map lookups succeed regardless of
 /// case differences across kernels.
+#[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))] // Only the Linux reader uses it.
 pub fn normalise_pci_bdf(raw: &str) -> String {
     raw.to_ascii_lowercase()
-}
-
-/// Test-only helper. Injects a synthetic device map so [`with_runtime`]
-/// can be exercised without a real Level Zero loader. Calling this in
-/// production is unsupported.
-///
-/// NOTE: Because `LZ_RUNTIME` is a process-wide `OnceCell`, the test
-/// runner serialises through this entry point. The helper is a no-op
-/// if the runtime has already been initialised by some other test or
-/// by production code.
-#[cfg(test)]
-pub(crate) fn install_test_runtime(_map: HashMap<String, zes_device_handle_t_send>) {
-    // No-op placeholder: full mock substitution requires a feature
-    // flag the issue scope explicitly skipped (synthetic L0 runtime is
-    // a follow-up). The presence of this hook reserves the public
-    // shape for future tests.
 }

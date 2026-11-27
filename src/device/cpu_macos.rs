@@ -563,37 +563,6 @@ impl MacOsCpuReader {
         gpu_core_count_from_ioreg(&output, cpu_model).unwrap_or(0)
     }
 
-    // These methods are no longer used since we fetch both values in a single sysctl call
-    #[allow(dead_code)]
-    fn get_p_core_count(&self) -> Result<u32, Box<dyn std::error::Error>> {
-        let output = new_command("sysctl")
-            .arg("hw.perflevel0.physicalcpu")
-            .output()?;
-
-        let output_str = String::from_utf8_lossy(&output.stdout);
-        if let Some(value_str) = output_str.split(':').nth(1) {
-            let count = value_str.trim().parse::<u32>()?;
-            Ok(count)
-        } else {
-            Err("Failed to parse P-core count".into())
-        }
-    }
-
-    #[allow(dead_code)]
-    fn get_e_core_count(&self) -> Result<u32, Box<dyn std::error::Error>> {
-        let output = new_command("sysctl")
-            .arg("hw.perflevel1.physicalcpu")
-            .output()?;
-
-        let output_str = String::from_utf8_lossy(&output.stdout);
-        if let Some(value_str) = output_str.split(':').nth(1) {
-            let count = value_str.trim().parse::<u32>()?;
-            Ok(count)
-        } else {
-            Err("Failed to parse E-core count".into())
-        }
-    }
-
     #[allow(dead_code)] // Kept as fallback, but get_gpu_core_count_ioreg() is preferred
     fn get_gpu_core_count(&self) -> Result<u32, Box<dyn std::error::Error>> {
         let output = new_command("system_profiler")

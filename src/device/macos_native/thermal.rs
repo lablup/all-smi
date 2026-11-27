@@ -74,7 +74,7 @@ impl ThermalState {
     }
 
     /// Check if the system is under thermal pressure
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), allow(dead_code))] // Only the tests call it.
     pub fn is_throttling(&self) -> bool {
         matches!(self, ThermalState::Serious | ThermalState::Critical)
     }

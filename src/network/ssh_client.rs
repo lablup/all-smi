@@ -36,19 +36,18 @@
 //! Host-key policy: the supplied [`HostKeyVerifier`] receives the
 //! server's public key on every connect and returns `Ok(true)` /
 //! `Ok(false)`. Three built-in verifiers are shipped, one per policy
-//! (see [`StrictHostKey`]).
+//! (see [`StrictHostKey`](crate::network::ssh_transport::StrictHostKey)).
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use russh::ChannelMsg;
 use russh::client::{self, Handle};
 use russh::keys::{PrivateKeyWithHashAlg, PublicKeyOrCertificate, load_secret_key, ssh_key};
-use russh::{ChannelMsg, Disconnect};
 
 use crate::network::ssh_target::SshTarget;
-use crate::network::ssh_transport::StrictHostKey;
 
 /// Hard ceiling on the size of a single command's stdout we are
 /// willing to buffer. Prevents a misbehaving remote from forcing the
@@ -131,21 +130,13 @@ pub trait HostKeyVerifier: Send + Sync + 'static {
 
 /// Convenience holder passed to [`SshSession::connect`].
 ///
-/// `strict_host_key` and `known_hosts` are carried through the params
-/// struct so higher layers can inspect / log them, even though the
-/// actual verification decision is made inside the pre-constructed
-/// [`HostKeyVerifier`]. `#[allow(dead_code)]` on those fields keeps
-/// clippy happy while preserving the public surface for future wiring
-/// (e.g. diagnostics logging in `view --doctor`).
+/// Host-key policy is not part of the params: the verification decision is
+/// made inside the pre-constructed [`HostKeyVerifier`].
 pub struct ConnectParams {
     pub target: SshTarget,
     pub explicit_key: Option<PathBuf>,
-    #[allow(dead_code)]
-    pub strict_host_key: StrictHostKey,
     pub connect_timeout: Duration,
     pub inactivity: Duration,
-    #[allow(dead_code)]
-    pub known_hosts: Option<PathBuf>,
 }
 
 impl Default for ConnectParams {
@@ -157,10 +148,8 @@ impl Default for ConnectParams {
                 port: 22,
             },
             explicit_key: None,
-            strict_host_key: StrictHostKey::Yes,
             connect_timeout: Duration::from_secs(10),
             inactivity: DEFAULT_INACTIVITY,
-            known_hosts: None,
         }
     }
 }
@@ -357,31 +346,6 @@ impl SshSession {
             Err(_) => Err(SshClientError::ExecTimeout(timeout)),
             Ok(result) => result,
         }
-    }
-
-    /// Tear down the session cleanly. Best-effort: errors are logged
-    /// but swallowed because the connection is likely already gone by
-    /// the time a caller reaches this code path.
-    #[allow(dead_code)]
-    pub async fn close(&self) {
-        if let Err(e) = self
-            .inner
-            .disconnect(Disconnect::ByApplication, "view --ssh shutting down", "en")
-            .await
-        {
-            tracing::debug!(
-                host = %self.target.host,
-                port = self.target.port,
-                error = %e,
-                "ssh disconnect returned an error"
-            );
-        }
-    }
-
-    /// Accessor for the [`SshTarget`] this session was opened against.
-    #[allow(dead_code)]
-    pub fn target(&self) -> &SshTarget {
-        &self.target
     }
 }
 

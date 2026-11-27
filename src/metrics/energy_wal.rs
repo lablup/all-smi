@@ -256,8 +256,6 @@ impl WalReplayIndex {
 /// Append-only writer for the energy WAL.
 #[derive(Debug)]
 pub struct WalWriter {
-    #[allow(dead_code)] // Kept for callers that want to display the resolved path.
-    path: PathBuf,
     writer: Option<BufWriter<File>>,
 }
 
@@ -274,7 +272,6 @@ impl WalWriter {
         }
         let file = open_secure_append(&path)?;
         Ok(Self {
-            path,
             writer: Some(BufWriter::new(file)),
         })
     }
@@ -312,12 +309,6 @@ impl WalWriter {
         writer.flush()?;
         writer.get_ref().sync_data()?;
         Ok(())
-    }
-
-    /// Return the resolved on-disk path (with `~` expanded).
-    #[allow(dead_code)] // Helper surface for future diagnostics.
-    pub fn path(&self) -> &Path {
-        &self.path
     }
 }
 
@@ -475,10 +466,7 @@ fn reopen_after_panic(wal_path: &Path, e: &tokio::task::JoinError) -> WalWriter 
             tracing::error!(
                 "energy WAL: reopen after panic failed: {open_err}; subsequent flushes are no-ops until restart"
             );
-            WalWriter {
-                path: wal_path.to_path_buf(),
-                writer: None,
-            }
+            WalWriter { writer: None }
         }
     }
 }
@@ -626,10 +614,7 @@ fn compact_wal(
             tracing::error!(
                 "energy WAL: reopen after compaction failure also failed: {reopen_err}"
             );
-            WalWriter {
-                path: wal_path.to_path_buf(),
-                writer: None,
-            }
+            WalWriter { writer: None }
         });
         return Err((recovered, e));
     }
@@ -638,13 +623,7 @@ fn compact_wal(
         Ok(w) => Ok(w),
         Err(e) => {
             tracing::error!("energy WAL: post-compaction reopen failed: {e}");
-            Err((
-                WalWriter {
-                    path: wal_path.to_path_buf(),
-                    writer: None,
-                },
-                e,
-            ))
+            Err((WalWriter { writer: None }, e))
         }
     }
 }

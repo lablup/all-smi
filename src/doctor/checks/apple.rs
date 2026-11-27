@@ -20,7 +20,7 @@ use std::time::Duration;
 
 #[cfg(target_os = "macos")]
 use crate::doctor::exec::try_exec;
-use crate::doctor::types::{Check, CheckCtx, CheckResult, Severity};
+use crate::doctor::types::{Check, CheckCtx, CheckResult};
 
 static CHECKS: &[&Check] = &[&MACOS_VERSION, &APPLE_SILICON, &SMC_ROOT];
 
@@ -31,21 +31,18 @@ pub fn checks() -> &'static [&'static Check] {
 static MACOS_VERSION: Check = Check {
     id: "apple.macos.version",
     title: "macOS version",
-    severity_on_fail: Severity::Info,
     run: check_macos_version,
 };
 
 static APPLE_SILICON: Check = Check {
     id: "apple.silicon",
     title: "Apple Silicon detection",
-    severity_on_fail: Severity::Info,
     run: check_apple_silicon,
 };
 
 static SMC_ROOT: Check = Check {
     id: "apple.smc",
     title: "SMC accessibility",
-    severity_on_fail: Severity::Warn,
     run: check_smc_root,
 };
 

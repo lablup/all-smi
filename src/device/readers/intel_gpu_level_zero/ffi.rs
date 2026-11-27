@@ -39,7 +39,7 @@
 //! optional extensions cannot mis-interpret our smaller struct.
 
 #![allow(non_camel_case_types)]
-#![allow(dead_code)]
+#![allow(dead_code)] // FFI mirror of the Level Zero headers; not every declared symbol is called.
 
 use std::ffi::c_void;
 

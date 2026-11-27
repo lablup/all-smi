@@ -29,7 +29,6 @@ mod process;
 mod store;
 
 // Re-export public types and functions
-#[allow(unused_imports)]
 pub use manager::{
     get_hlsmi_manager, has_hlsmi_data, initialize_hlsmi_manager, shutdown_hlsmi_manager,
 };

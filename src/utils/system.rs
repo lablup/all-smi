@@ -83,24 +83,7 @@ pub fn has_sudo_privileges() -> bool {
         .unwrap_or(false)
 }
 
-#[allow(dead_code)] // Used in runner_old.rs (backup file)
-pub fn calculate_adaptive_interval(node_count: usize) -> u64 {
-    // Adaptive interval based on node count to prevent overwhelming the network
-    // For 1-10 nodes: 2 seconds
-    // For 11-50 nodes: 3 seconds
-    // For 51-100 nodes: 4 seconds
-    // For 101-200 nodes: 5 seconds
-    // For 201+ nodes: 6 seconds
-    match node_count {
-        0..=10 => 2,
-        11..=50 => 3,
-        51..=100 => 4,
-        101..=200 => 5,
-        _ => 6,
-    }
-}
-
-#[allow(dead_code)] // Used conditionally based on platform and feature flags
+#[cfg_attr(target_os = "macos", allow(dead_code))] // main.rs skips the sudo check on macOS.
 pub fn ensure_sudo_permissions() {
     if cfg!(target_os = "macos") {
         // macOS uses native APIs (IOReport, SMC) that don't require sudo
@@ -173,7 +156,7 @@ pub fn ensure_sudo_permissions_for_api() -> bool {
     }
 }
 
-#[allow(dead_code)] // Used conditionally based on platform and feature flags
+#[cfg_attr(target_os = "macos", allow(dead_code))] // main.rs skips the sudo check on macOS.
 pub fn ensure_sudo_permissions_with_fallback() -> bool {
     if cfg!(target_os = "macos") {
         // macOS uses native APIs (IOReport, SMC) that don't require sudo
@@ -207,13 +190,13 @@ pub fn ensure_sudo_permissions_with_fallback() -> bool {
 
 /// Platform-specific sudo messages (Linux only - macOS uses native APIs without sudo)
 #[derive(Copy, Clone)]
-#[allow(dead_code)] // Used conditionally based on platform
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))] // Only the Linux sudo path uses it.
 enum SudoPlatform {
     Linux,
 }
 
 /// Get platform-specific sudo explanation messages (Linux only)
-#[allow(dead_code)] // Used conditionally based on platform
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))] // Only the Linux sudo path uses it.
 fn get_sudo_messages(
     _platform: SudoPlatform,
 ) -> (
@@ -243,7 +226,7 @@ fn get_sudo_messages(
 }
 
 /// Unified function to request sudo with platform-specific explanations
-#[allow(dead_code)] // Used conditionally based on platform and feature flags
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))] // Only the Linux sudo path uses it.
 fn request_sudo_with_explanation(platform: SudoPlatform, return_bool: bool) -> bool {
     // Check if we already have sudo privileges
     if has_sudo_privileges() {
@@ -347,26 +330,6 @@ fn request_sudo_with_explanation(platform: SudoPlatform, return_bool: bool) -> b
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_calculate_adaptive_interval() {
-        assert_eq!(calculate_adaptive_interval(0), 2);
-        assert_eq!(calculate_adaptive_interval(1), 2);
-        assert_eq!(calculate_adaptive_interval(5), 2);
-        assert_eq!(calculate_adaptive_interval(10), 2);
-        assert_eq!(calculate_adaptive_interval(11), 3);
-        assert_eq!(calculate_adaptive_interval(25), 3);
-        assert_eq!(calculate_adaptive_interval(50), 3);
-        assert_eq!(calculate_adaptive_interval(51), 4);
-        assert_eq!(calculate_adaptive_interval(75), 4);
-        assert_eq!(calculate_adaptive_interval(100), 4);
-        assert_eq!(calculate_adaptive_interval(101), 5);
-        assert_eq!(calculate_adaptive_interval(150), 5);
-        assert_eq!(calculate_adaptive_interval(200), 5);
-        assert_eq!(calculate_adaptive_interval(201), 6);
-        assert_eq!(calculate_adaptive_interval(500), 6);
-        assert_eq!(calculate_adaptive_interval(1000), 6);
-    }
 
     #[test]
     fn test_get_hostname() {

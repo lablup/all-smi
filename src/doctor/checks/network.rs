@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 
 use url::Url;
 
-use crate::doctor::types::{Check, CheckCtx, CheckResult, Severity};
+use crate::doctor::types::{Check, CheckCtx, CheckResult};
 
 static CHECKS: &[&Check] = &[&DNS, &TCP, &HTTP];
 
@@ -33,21 +33,18 @@ pub fn checks() -> &'static [&'static Check] {
 static DNS: Check = Check {
     id: "network.dns",
     title: "DNS resolution for --remote-check targets",
-    severity_on_fail: Severity::Warn,
     run: check_dns,
 };
 
 static TCP: Check = Check {
     id: "network.tcp",
     title: "TCP reachability for --remote-check targets",
-    severity_on_fail: Severity::Warn,
     run: check_tcp,
 };
 
 static HTTP: Check = Check {
     id: "network.http",
     title: "HTTP /metrics probe for --remote-check targets",
-    severity_on_fail: Severity::Warn,
     run: check_http,
 };
 

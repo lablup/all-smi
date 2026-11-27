@@ -14,8 +14,6 @@
 
 // Input validation utilities for command execution
 
-use std::path::Path;
-
 /// Validates a command name is safe to execute
 /// Returns true if the command is allowed, false otherwise
 pub fn validate_command(command: &str) -> bool {
@@ -62,45 +60,6 @@ pub fn validate_args(args: &[&str]) -> bool {
     true
 }
 
-/// Validates a path is safe to use as a command
-/// Returns true if the path is safe, false otherwise
-#[allow(dead_code)]
-pub fn validate_command_path(path: &Path) -> bool {
-    // Must be an absolute path
-    if !path.is_absolute() {
-        eprintln!("Non-absolute command path rejected: {path:?}");
-        return false;
-    }
-
-    // Must not contain path traversal
-    if let Some(path_str) = path.to_str()
-        && path_str.contains("..")
-    {
-        eprintln!("Command path with traversal rejected: {path_str}");
-        return false;
-    }
-
-    // Should exist and be executable (on Unix)
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if let Ok(metadata) = path.metadata() {
-            let permissions = metadata.permissions();
-            // Check if any execute bit is set
-            if permissions.mode() & 0o111 == 0 {
-                eprintln!("Non-executable command path: {path:?}");
-                return false;
-            }
-        } else {
-            // Path doesn't exist
-            eprintln!("Command path does not exist: {path:?}");
-            return false;
-        }
-    }
-
-    true
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -130,31 +89,5 @@ mod tests {
         assert!(!validate_args(&["; rm -rf /"]));
         assert!(!validate_args(&["$(whoami)"]));
         assert!(!validate_args(&["file.txt | cat"]));
-    }
-
-    #[test]
-    fn test_validate_command_path() {
-        use std::path::PathBuf;
-
-        // Absoluteness is spelled differently per platform: a leading
-        // slash carries no drive letter, so `/bin/ls` is not absolute on
-        // Windows and was rejected for the wrong reason. The traversal
-        // case is per-platform for the same reason: a Unix-shaped path
-        // would be refused on Windows before the `..` check is reached,
-        // so the branch this test exists for would go unexercised.
-        #[cfg(unix)]
-        let (valid, traversal) = ("/bin/ls", "/usr/../etc/passwd");
-        #[cfg(windows)]
-        let (valid, traversal) = (
-            r"C:\Windows\System32\cmd.exe",
-            r"C:\Windows\..\Windows\System32\cmd.exe",
-        );
-
-        // Valid paths
-        assert!(validate_command_path(&PathBuf::from(valid)));
-
-        // Invalid paths
-        assert!(!validate_command_path(&PathBuf::from("relative/path")));
-        assert!(!validate_command_path(&PathBuf::from(traversal)));
     }
 }

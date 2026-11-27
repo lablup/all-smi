@@ -116,11 +116,6 @@ impl TenstorrentReader {
         }
     }
 
-    #[allow(dead_code)]
-    pub fn with_config(config: TenstorrentConfig) -> Self {
-        Self { _config: config }
-    }
-
     /// Get or initialize chips with caching
     fn ensure_chips_initialized() {
         let mut chips_guard = match INITIALIZED_CHIPS.lock() {
@@ -207,20 +202,6 @@ impl TenstorrentReader {
         }
 
         *chips_guard = Some(cached_chips);
-    }
-
-    /// Invalidate cache to force re-detection on next access
-    #[allow(dead_code)]
-    pub fn invalidate_cache() {
-        match INITIALIZED_CHIPS.lock() {
-            Ok(mut chips_guard) => {
-                *chips_guard = None;
-                set_detect_retry_at(None);
-            }
-            _ => {
-                eprintln!("Failed to acquire lock to invalidate Tenstorrent cache");
-            }
-        }
     }
 
     /// Get NPU processes (currently returns empty - Tenstorrent doesn't provide process info)
@@ -343,7 +324,6 @@ fn grayskull_present() -> bool {
 }
 
 /// Get a user-friendly message about Tenstorrent status
-#[allow(dead_code)]
 pub fn get_tenstorrent_status_message() -> Option<String> {
     TENSTORRENT_STATUS.lock().ok()?.clone()
 }

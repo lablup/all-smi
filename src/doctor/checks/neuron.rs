@@ -22,7 +22,7 @@
 
 #[cfg(target_os = "linux")]
 use crate::doctor::exec::try_exec;
-use crate::doctor::types::{Check, CheckCtx, CheckResult, Severity};
+use crate::doctor::types::{Check, CheckCtx, CheckResult};
 
 static CHECKS: &[&Check] = &[&DEV_NODE, &DRIVER_MODULE, &SYSFS, &TOOLS];
 
@@ -45,28 +45,24 @@ const SYSFS_NEURON_ROOT: &str = "/sys/devices/virtual/neuron_device";
 static DEV_NODE: Check = Check {
     id: "neuron.dev_node",
     title: "/dev/neuron* device nodes",
-    severity_on_fail: Severity::Warn,
     run: check_dev_node,
 };
 
 static DRIVER_MODULE: Check = Check {
     id: "neuron.driver",
     title: "aws-neuronx-dkms kernel module",
-    severity_on_fail: Severity::Warn,
     run: check_driver,
 };
 
 static SYSFS: Check = Check {
     id: "neuron.sysfs",
     title: "Neuron driver sysfs tree",
-    severity_on_fail: Severity::Info,
     run: check_sysfs,
 };
 
 static TOOLS: Check = Check {
     id: "neuron.tools",
     title: "aws-neuronx-tools binaries",
-    severity_on_fail: Severity::Warn,
     run: check_tools,
 };
 

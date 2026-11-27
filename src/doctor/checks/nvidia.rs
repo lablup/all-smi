@@ -20,7 +20,7 @@ use std::time::Duration;
 use crate::device::platform_detection::has_nvidia;
 use crate::device::readers::nvml_handle::probe_shared_nvml;
 use crate::doctor::exec::{try_exec, which};
-use crate::doctor::types::{Check, CheckCtx, CheckResult, Severity};
+use crate::doctor::types::{Check, CheckCtx, CheckResult};
 
 static CHECKS: &[&Check] = &[
     &NVML_LOADABLE,
@@ -37,35 +37,30 @@ pub fn checks() -> &'static [&'static Check] {
 static NVML_LOADABLE: Check = Check {
     id: "nvidia.nvml.loadable",
     title: "NVML library loadable",
-    severity_on_fail: Severity::Error,
     run: check_nvml_loadable,
 };
 
 static SMI_BINARY: Check = Check {
     id: "nvidia.smi.binary",
     title: "nvidia-smi binary",
-    severity_on_fail: Severity::Warn,
     run: check_smi,
 };
 
 static DRIVER_VERSION: Check = Check {
     id: "nvidia.driver.version",
     title: "Driver version",
-    severity_on_fail: Severity::Warn,
     run: check_driver_version,
 };
 
 static VISIBLE_ENV: Check = Check {
     id: "nvidia.env.visible_devices",
     title: "NVIDIA_VISIBLE_DEVICES / CUDA_VISIBLE_DEVICES",
-    severity_on_fail: Severity::Info,
     run: check_visible_env,
 };
 
 static MIG_MODE: Check = Check {
     id: "nvidia.mig.mode",
     title: "MIG mode",
-    severity_on_fail: Severity::Info,
     run: check_mig,
 };
 

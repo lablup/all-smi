@@ -18,7 +18,7 @@
 use std::time::Duration;
 
 use crate::doctor::exec::try_exec;
-use crate::doctor::types::{Check, CheckCtx, CheckResult, Severity};
+use crate::doctor::types::{Check, CheckCtx, CheckResult};
 
 use super::cpu_temp::CPU_TEMP;
 
@@ -31,42 +31,36 @@ pub fn checks() -> &'static [&'static Check] {
 static OS: Check = Check {
     id: "platform.os",
     title: "Operating system",
-    severity_on_fail: Severity::Warn,
     run: check_os,
 };
 
 static RUNTIME: Check = Check {
     id: "platform.runtime",
     title: "Build target / runtime",
-    severity_on_fail: Severity::Info,
     run: check_runtime,
 };
 
 static CPU: Check = Check {
     id: "platform.cpu",
     title: "CPU summary",
-    severity_on_fail: Severity::Warn,
     run: check_cpu,
 };
 
 static MEMORY: Check = Check {
     id: "platform.memory",
     title: "System memory",
-    severity_on_fail: Severity::Warn,
     run: check_memory,
 };
 
 static UPTIME: Check = Check {
     id: "platform.uptime",
     title: "System uptime",
-    severity_on_fail: Severity::Info,
     run: check_uptime,
 };
 
 static HARDWARE: Check = Check {
     id: "platform.hardware",
     title: "Detected accelerator inventory",
-    severity_on_fail: Severity::Info,
     run: check_hardware,
 };
 

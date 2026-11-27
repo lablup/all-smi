@@ -19,7 +19,7 @@ pub const DEFAULT_NVIDIA_GPU_NAME: &str = "NVIDIA B200 192GB HBM3";
 pub const DEFAULT_NVIDIA_DRIVER_VERSION: &str = "580.82.07";
 pub const DEFAULT_CUDA_VERSION: &str = "13.0";
 pub const DEFAULT_AMD_GPU_NAME: &str = "AMD Instinct MI355X 288GB HBM3";
-#[allow(dead_code)]
+#[allow(dead_code)] // Not used by the mock server; left for a mock-specific cleanup.
 pub const DEFAULT_AMD_INSTINCT_NAME: &str = "AMD Instinct MI300X 192GB";
 pub const DEFAULT_AMD_DRIVER_VERSION: &str = "30.10.1";
 pub const DEFAULT_AMD_ROCM_VERSION: &str = "7.0.2";
@@ -48,37 +48,37 @@ pub const DISK_SIZE_4TB: u64 = 4 * 1024 * 1024 * 1024 * 1024;
 pub const DISK_SIZE_12TB: u64 = 12 * 1024 * 1024 * 1024 * 1024;
 
 // CPU placeholders
-#[allow(dead_code)]
+#[allow(dead_code)] // Not used by the mock server; left for a mock-specific cleanup.
 pub const PLACEHOLDER_CPU_UTIL: &str = "{{CPU_UTIL}}";
-#[allow(dead_code)]
+#[allow(dead_code)] // Not used by the mock server; left for a mock-specific cleanup.
 pub const PLACEHOLDER_CPU_SOCKET0_UTIL: &str = "{{CPU_SOCKET0_UTIL}}";
-#[allow(dead_code)]
+#[allow(dead_code)] // Not used by the mock server; left for a mock-specific cleanup.
 pub const PLACEHOLDER_CPU_SOCKET1_UTIL: &str = "{{CPU_SOCKET1_UTIL}}";
-#[allow(dead_code)]
+#[allow(dead_code)] // Not used by the mock server; left for a mock-specific cleanup.
 pub const PLACEHOLDER_CPU_P_CORE_UTIL: &str = "{{CPU_P_CORE_UTIL}}";
-#[allow(dead_code)]
+#[allow(dead_code)] // Not used by the mock server; left for a mock-specific cleanup.
 pub const PLACEHOLDER_CPU_E_CORE_UTIL: &str = "{{CPU_E_CORE_UTIL}}";
-#[allow(dead_code)]
+#[allow(dead_code)] // Not used by the mock server; left for a mock-specific cleanup.
 pub const PLACEHOLDER_CPU_TEMP: &str = "{{CPU_TEMP}}";
-#[allow(dead_code)]
+#[allow(dead_code)] // Not used by the mock server; left for a mock-specific cleanup.
 pub const PLACEHOLDER_CPU_POWER: &str = "{{CPU_POWER}}";
 
 // System memory placeholders
-#[allow(dead_code)]
+#[allow(dead_code)] // Not used by the mock server; left for a mock-specific cleanup.
 pub const PLACEHOLDER_SYS_MEMORY_USED: &str = "{{SYS_MEMORY_USED}}";
-#[allow(dead_code)]
+#[allow(dead_code)] // Not used by the mock server; left for a mock-specific cleanup.
 pub const PLACEHOLDER_SYS_MEMORY_AVAILABLE: &str = "{{SYS_MEMORY_AVAILABLE}}";
-#[allow(dead_code)]
+#[allow(dead_code)] // Not used by the mock server; left for a mock-specific cleanup.
 pub const PLACEHOLDER_SYS_MEMORY_FREE: &str = "{{SYS_MEMORY_FREE}}";
-#[allow(dead_code)]
+#[allow(dead_code)] // Not used by the mock server; left for a mock-specific cleanup.
 pub const PLACEHOLDER_SYS_MEMORY_UTIL: &str = "{{SYS_MEMORY_UTIL}}";
-#[allow(dead_code)]
+#[allow(dead_code)] // Not used by the mock server; left for a mock-specific cleanup.
 pub const PLACEHOLDER_SYS_SWAP_USED: &str = "{{SYS_SWAP_USED}}";
-#[allow(dead_code)]
+#[allow(dead_code)] // Not used by the mock server; left for a mock-specific cleanup.
 pub const PLACEHOLDER_SYS_SWAP_FREE: &str = "{{SYS_SWAP_FREE}}";
-#[allow(dead_code)]
+#[allow(dead_code)] // Not used by the mock server; left for a mock-specific cleanup.
 pub const PLACEHOLDER_SYS_MEMORY_BUFFERS: &str = "{{SYS_MEMORY_BUFFERS}}";
-#[allow(dead_code)]
+#[allow(dead_code)] // Not used by the mock server; left for a mock-specific cleanup.
 pub const PLACEHOLDER_SYS_MEMORY_CACHED: &str = "{{SYS_MEMORY_CACHED}}";
 
 // Disk placeholders

@@ -36,7 +36,6 @@ pub trait ViewState {
     fn tabs(&self) -> &[String];
     fn current_tab(&self) -> usize;
     fn tab_scroll_offset(&self) -> usize;
-    fn gpu_scroll_offset(&self) -> usize;
     fn frame_counter(&self) -> u64;
 
     fn gpu_info(&self) -> &[GpuInfo];
@@ -81,9 +80,6 @@ impl ViewState for AppState {
     }
     fn tab_scroll_offset(&self) -> usize {
         self.tab_scroll_offset
-    }
-    fn gpu_scroll_offset(&self) -> usize {
-        self.gpu_scroll_offset
     }
     fn frame_counter(&self) -> u64 {
         self.frame_counter

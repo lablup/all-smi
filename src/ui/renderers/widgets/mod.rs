@@ -13,14 +13,3 @@
 // limitations under the License.
 
 pub mod gauges;
-pub mod tables;
-
-// Re-export commonly used items
-#[allow(unused_imports)]
-pub use gauges::get_utilization_block;
-
-// Re-export for future use
-#[allow(unused_imports)]
-pub use gauges::render_gauge;
-#[allow(unused_imports)]
-pub use tables::{TableRow, close_bordered_box, render_bordered_box, render_info_table};
