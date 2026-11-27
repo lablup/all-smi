@@ -64,9 +64,9 @@ pub(crate) fn cap_handle_count(reported: u32, what: &'static str) -> (usize, u32
 /// every refresh tick if a host genuinely exceeds the cap.
 static L0_CAP_WARN: Once = Once::new();
 
-// Library search paths. We mirror tpu_pjrt.rs by trying the SONAME
-// first (so the dynamic linker can do its usual search), then a small
-// set of well-known absolute paths. dlopen handles `LD_LIBRARY_PATH`
+// Library search paths. We try the SONAME first (so the dynamic linker
+// can do its usual search), then a small set of well-known absolute
+// paths. dlopen handles `LD_LIBRARY_PATH`
 // itself when the SONAME-only forms are passed.
 #[cfg(target_os = "linux")]
 pub(crate) const LIBZE_PATHS: &[&str] = &[

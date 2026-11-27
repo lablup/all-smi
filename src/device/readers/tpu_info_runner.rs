@@ -15,10 +15,10 @@
 use crate::utils::command::new_command;
 use regex::Regex;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tracing::debug;
 
 static RUNNER: OnceLock<TpuInfoRunner> = OnceLock::new();
@@ -31,10 +31,6 @@ const POLL_INTERVAL_IDLE_SECS: u64 = 30;
 /// CLI polling interval when gRPC IS available
 /// This is rarely used since gRPC handles metrics directly
 const POLL_INTERVAL_ACTIVE_SECS: u64 = 5;
-
-/// Minimum time between CLI executions to prevent hammering
-#[allow(dead_code)]
-const MIN_CLI_INTERVAL_SECS: u64 = 5;
 
 pub fn get_runner() -> &'static TpuInfoRunner {
     RUNNER.get_or_init(TpuInfoRunner::new)
@@ -58,8 +54,6 @@ pub struct TpuInfoRunner {
     pub status: Arc<Mutex<String>>,
     /// Whether gRPC is currently available (set by tpu_grpc module)
     grpc_available: Arc<AtomicBool>,
-    /// Last CLI execution timestamp (unix seconds)
-    last_cli_run: Arc<AtomicU64>,
 }
 
 impl Default for TpuInfoRunner {
@@ -74,7 +68,6 @@ impl TpuInfoRunner {
             device_metrics: Arc::new(RwLock::new(HashMap::new())),
             status: Arc::new(Mutex::new("Initializing tpu-info...".to_string())),
             grpc_available: Arc::new(AtomicBool::new(false)),
-            last_cli_run: Arc::new(AtomicU64::new(0)),
         };
         runner.start_background_thread();
         runner
@@ -85,33 +78,14 @@ impl TpuInfoRunner {
         self.grpc_available.store(available, Ordering::Relaxed);
     }
 
-    /// Check if gRPC is currently available
-    #[allow(dead_code)]
-    pub fn is_grpc_available(&self) -> bool {
-        self.grpc_available.load(Ordering::Relaxed)
-    }
-
-    /// Force an immediate CLI refresh (within rate limits)
-    #[allow(dead_code)]
-    pub fn request_refresh(&self) {
-        let now = Instant::now().elapsed().as_secs();
-        let last = self.last_cli_run.load(Ordering::Relaxed);
-
-        // Only allow refresh if enough time has passed
-        if now.saturating_sub(last) >= MIN_CLI_INTERVAL_SECS {
-            self.run_cli_once();
-        }
-    }
-
     fn start_background_thread(&self) {
         let metrics_store = self.device_metrics.clone();
         let status = self.status.clone();
         let grpc_available = self.grpc_available.clone();
-        let last_cli_run = self.last_cli_run.clone();
 
         thread::spawn(move || {
             // Run once immediately at startup
-            Self::run_cli_internal(&metrics_store, &status, &last_cli_run);
+            Self::run_cli_internal(&metrics_store, &status);
 
             loop {
                 // Determine polling interval based on gRPC availability
@@ -128,28 +102,16 @@ impl TpuInfoRunner {
                 // Skip CLI execution if gRPC is available
                 // (gRPC provides real-time metrics, CLI is just for fallback)
                 if !grpc_available.load(Ordering::Relaxed) {
-                    Self::run_cli_internal(&metrics_store, &status, &last_cli_run);
+                    Self::run_cli_internal(&metrics_store, &status);
                 }
             }
         });
     }
 
-    fn run_cli_once(&self) {
-        Self::run_cli_internal(&self.device_metrics, &self.status, &self.last_cli_run);
-    }
-
     fn run_cli_internal(
         metrics_store: &Arc<RwLock<HashMap<u32, HashMap<String, f64>>>>,
         status: &Arc<Mutex<String>>,
-        last_cli_run: &Arc<AtomicU64>,
     ) {
-        // Update last run timestamp
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        last_cli_run.store(now, Ordering::Relaxed);
-
         // Run tpu-info in normal mode (NOT streaming mode)
         // Streaming mode uses Rich's Live display which doesn't work with pipes
         let output_res = new_command("tpu-info")
