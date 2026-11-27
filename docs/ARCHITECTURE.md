@@ -70,11 +70,11 @@ The architecture extensively leverages proven design patterns:
 
 ```
 src/
-├── traits/           # Core trait definitions (Strategy interfaces)
+├── traits/           # Mock generator interface for the mock server
 ├── device/           # Hardware abstraction layer
 │   ├── readers/      # Platform-specific implementations
 │   └── common/       # Shared device utilities
-├── metrics/          # Data aggregation and analysis
+├── metrics/          # Energy accounting and GPU reading helpers
 ├── view/             # TUI orchestration and lifecycle
 │   └── data_collection/  # Strategy pattern implementation
 ├── ui/               # Rendering and widget system
@@ -89,7 +89,7 @@ src/
 ### Module Responsibilities
 
 - **Device Layer**: Hardware abstraction through traits (`GpuReader`, `CpuReader`, `MemoryReader`)
-- **Metrics Layer**: Data aggregation, trend analysis, and health monitoring
+- **Metrics Layer**: Energy accounting, its write-ahead log, and aggregations over GPU fields that can be absent
 - **View Layer**: Application lifecycle management and async task coordination
 - **UI Layer**: Terminal rendering with differential updates
 - **Network Layer**: Robust HTTP client with retry logic and security validations
@@ -156,13 +156,9 @@ The architecture uses `Arc<Mutex<AppState>>` for thread-safe state sharing:
 
 ### Primary Trait Definitions
 
-```rust
-// Core data collection abstraction
-pub trait DataCollector: Send + Sync {
-    type Data;
-    async fn collect(&self) -> Result<Self::Data>;
-}
+The device readers in `src/device/traits.rs` are the core abstraction. Each platform backend implements them, and local collection in both the TUI and the API server goes through them.
 
+```rust
 // Device-specific readers
 pub trait GpuReader: Send + Sync {
     fn get_gpu_info(&self) -> Vec<GpuInfo>;
@@ -177,18 +173,17 @@ pub trait MemoryReader: Send + Sync {
     fn get_memory_info(&self) -> Vec<MemoryInfo>;
 }
 
-// Export formatting strategy
-pub trait MetricsExporter: Send + Sync {
-    fn export(&self, data: &MetricsData, format: ExportFormat) -> Result<String>;
+pub trait ChassisReader: Send + Sync {
+    fn get_chassis_info(&self) -> Option<ChassisInfo>;
 }
 ```
 
+Local and remote collection share the `DataCollectionStrategy` trait in `src/view/data_collection/strategy.rs`, described under [Strategy Pattern for Data Collection](#strategy-pattern-for-data-collection).
+
 ### Trait Design Principles
 
-- **Associated Types**: Enable zero-cost abstractions while maintaining type safety
 - **Send + Sync Bounds**: Ensure thread safety for async environments
 - **Strategy Composition**: Traits can be combined for complex behaviors
-- **Error Propagation**: Consistent Result types for error handling
 
 ## Platform-Specific Implementations
 

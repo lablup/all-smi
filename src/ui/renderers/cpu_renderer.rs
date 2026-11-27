@@ -48,23 +48,6 @@ fn get_cached_cpuset() -> &'static (bool, Option<String>) {
     })
 }
 
-/// CPU renderer struct implementing the DeviceRenderer trait
-#[allow(dead_code)]
-pub struct CpuRenderer;
-
-impl Default for CpuRenderer {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[allow(dead_code)]
-impl CpuRenderer {
-    pub fn new() -> Self {
-        Self
-    }
-}
-
 /// Helper function to format hostname with scrolling
 fn format_hostname_with_scroll(hostname: &str, scroll_offset: usize) -> String {
     if hostname.len() > 9 {

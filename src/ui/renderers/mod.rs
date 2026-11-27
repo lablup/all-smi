@@ -37,15 +37,3 @@ pub use memory_renderer::print_memory_info;
 pub use mig_renderer::print_mig_section;
 pub use storage_renderer::print_storage_info;
 pub use vgpu_renderer::print_vgpu_section;
-
-// Re-export renderer structs if needed in the future
-#[allow(unused_imports)]
-pub use chassis_renderer::ChassisRenderer;
-#[allow(unused_imports)]
-pub use cpu_renderer::CpuRenderer;
-#[allow(unused_imports)]
-pub use gpu_renderer::GpuRenderer;
-#[allow(unused_imports)]
-pub use memory_renderer::MemoryRenderer;
-#[allow(unused_imports)]
-pub use storage_renderer::StorageRenderer;

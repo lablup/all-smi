@@ -12,37 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Base traits for the all-smi refactoring
+//! Mock generator interface for the all-smi mock server.
 //!
-//! This module contains foundational traits that will be used to refactor
-//! the all-smi codebase into smaller, more maintainable modules while
-//! eliminating code duplication.
+//! [`mock_generator`](crate::traits::mock_generator) defines the
+//! [`MockGenerator`](crate::traits::MockGenerator) trait and its support
+//! types, which the platform templates under `src/mock/templates/` implement
+//! and import through `all_smi::traits::mock_generator`.
 
-pub mod collector;
-pub mod exporter;
 pub mod mock_generator;
-pub mod renderer;
-
-// Re-export main traits for convenience
-pub use collector::{
-    AggregatedCollector, CachedCollector, CollectorBuilder, CollectorError, CollectorFactory,
-    CollectorResult, CollectorState, DataCollector, LocalCollector, RemoteCollector,
-    StreamingCollector, SystemData,
-};
-
-pub use exporter::{
-    BoxedCompositeExporter, CompositeExporter, CpuMetricsExporter, ExportFormat, ExporterBuilder,
-    ExporterError, ExporterFactory, ExporterResult, GpuMetricsExporter, MemoryMetricsExporter,
-    MetricCollection, MetricMetadata, MetricType, MetricValue, MetricsExporter,
-    StorageMetricsExporter,
-};
 
 pub use mock_generator::{
-    DynamicMockGenerator, MockConfig, MockData, MockError, MockGenerator, MockGeneratorBuilder,
-    MockGeneratorFactory, MockPlatform, MockProcess, MockResult, ProcessMockGenerator,
-    TemplateEngine, ValueGenerator,
-};
-
-pub use renderer::{
-    CpuRenderer, DeviceRenderer, GpuRenderer, MemoryRenderer, MultiDeviceRenderer, StorageRenderer,
+    MockConfig, MockData, MockError, MockGenerator, MockPlatform, MockResult,
 };

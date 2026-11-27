@@ -20,23 +20,6 @@ use crate::device::MemoryInfo;
 use crate::ui::text::print_colored_text;
 use crate::ui::widgets::{BarSegment, draw_bar_multi};
 
-/// Memory renderer struct implementing the DeviceRenderer trait
-#[allow(dead_code)]
-pub struct MemoryRenderer;
-
-impl Default for MemoryRenderer {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[allow(dead_code)]
-impl MemoryRenderer {
-    pub fn new() -> Self {
-        Self
-    }
-}
-
 /// Helper function to format hostname with scrolling
 fn format_hostname_with_scroll(hostname: &str, scroll_offset: usize) -> String {
     if hostname.len() > 9 {

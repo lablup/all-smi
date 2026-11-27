@@ -28,8 +28,6 @@ pub mod http_hosts;
 #[cfg(feature = "cli")]
 pub mod paths;
 #[cfg(feature = "cli")]
-pub mod progress_bar;
-#[cfg(feature = "cli")]
 pub mod secure_write;
 #[cfg(test)]
 pub(crate) mod test_env;

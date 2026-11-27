@@ -2,6 +2,10 @@
 
 [Home](README.md) · [Release downloads](https://github.com/lablup/all-smi/releases)
 
+## Unreleased
+
+- Breaking (library API): removed the unused architecture scaffolding that had no implementations. The removed paths are `all_smi::traits::{collector, exporter, renderer}` with their re-exports from `all_smi::traits`; `DynamicMockGenerator`, `ProcessMockGenerator`, `MockProcess`, `MockGeneratorFactory`, `MockGeneratorBuilder`, `TemplateEngine` and `ValueGenerator` from `all_smi::traits::mock_generator`; `all_smi::metrics::{coordinator, aggregator}`; the empty `all_smi::ui::renderers::{CpuRenderer, GpuRenderer, MemoryRenderer, StorageRenderer, ChassisRenderer}` structs; and `all_smi::common::config::AppConfig::{PROGRESS_BAR_LABEL_WIDTH, PROGRESS_BAR_BRACKET_WIDTH, PROGRESS_BAR_TEXT_WIDTH}`, which only the binary's deleted `common::progress_bar` module read. `MockGenerator` and its support types stay (#522).
+
 ## v0.29.1 (2026/11/24)
 
 v0.29.0 became the latest release without its Windows ARM64 and Intel macOS archives, and its Homebrew and Debian package updates never ran because its Release run ended cancelled. This release is the first 0.29 release on Homebrew and carries every change listed under v0.29.0 below.

@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod aggregator;
-pub mod coordinator;
 pub mod energy;
 pub mod energy_wal;
 pub mod gpu_readings;

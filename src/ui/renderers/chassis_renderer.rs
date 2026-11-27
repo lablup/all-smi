@@ -24,23 +24,6 @@ use crate::ui::widgets::draw_bar;
 
 use super::gpu_renderer::format_hostname_with_scroll;
 
-/// Chassis renderer struct
-#[allow(dead_code)]
-pub struct ChassisRenderer;
-
-impl Default for ChassisRenderer {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[allow(dead_code)]
-impl ChassisRenderer {
-    pub fn new() -> Self {
-        Self
-    }
-}
-
 /// Render the "Energy session" row below the chassis header (issue #191).
 ///
 /// Emits nothing when no energy has accumulated yet — the renderer is
@@ -275,12 +258,6 @@ mod tests {
     use crate::device::ChassisInfo;
     use crate::metrics::energy::{EnergyKey, PowerIntegrator};
     use std::time::{Duration, Instant};
-
-    #[test]
-    fn test_chassis_renderer_new() {
-        let renderer = ChassisRenderer::new();
-        let _ = renderer;
-    }
 
     #[test]
     fn test_print_chassis_info_basic() {
