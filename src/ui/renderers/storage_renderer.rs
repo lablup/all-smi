@@ -20,23 +20,6 @@ use crate::storage::info::StorageInfo;
 use crate::ui::text::{print_colored_text, truncate_to_width};
 use crate::ui::widgets::draw_bar;
 
-/// Storage renderer struct implementing the DeviceRenderer trait
-#[allow(dead_code)]
-pub struct StorageRenderer;
-
-impl Default for StorageRenderer {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[allow(dead_code)]
-impl StorageRenderer {
-    pub fn new() -> Self {
-        Self
-    }
-}
-
 /// Helper function to format hostname with scrolling
 fn format_hostname_with_scroll(hostname: &str, scroll_offset: usize) -> String {
     if hostname.len() > 9 {

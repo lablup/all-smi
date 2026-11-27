@@ -159,11 +159,10 @@ pub mod service_cmd;
 #[cfg(feature = "cli")]
 pub mod doctor;
 
-/// Cluster metrics aggregation, coordination, and energy accounting.
+/// Energy accounting and GPU reading helpers for the CLI.
 ///
-/// Gated on `cli` because `coordinator` and `energy` both depend on
-/// [`app_state`], and the Prometheus / TUI callers only exist in that
-/// feature tree.
+/// Gated on `cli` because `energy` depends on [`app_state`], and the
+/// Prometheus / TUI callers only exist in that feature tree.
 #[cfg(feature = "cli")]
 pub mod metrics;
 
@@ -174,7 +173,7 @@ pub mod network;
 /// Storage monitoring.
 pub mod storage;
 
-/// Common traits for collectors and exporters.
+/// Mock generator interface used by the mock server.
 pub mod traits;
 
 /// Terminal UI components.

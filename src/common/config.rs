@@ -71,9 +71,6 @@ impl AppConfig {
     pub const CONNECTION_STAGGER_BASE_MS: u64 = 500;
 
     // UI Layout Constants
-    pub const PROGRESS_BAR_LABEL_WIDTH: usize = 5;
-    pub const PROGRESS_BAR_BRACKET_WIDTH: usize = 4; // ": [" + "]"
-    pub const PROGRESS_BAR_TEXT_WIDTH: usize = 8;
     #[allow(dead_code)] // Future UI configuration
     pub const DASHBOARD_ITEM_WIDTH: usize = 15;
     #[allow(dead_code)] // Default terminal fallback values for future use

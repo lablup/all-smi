@@ -26,23 +26,6 @@ use crate::ui::renderers::utils::SUB_ITEM_INDENT;
 use crate::ui::text::print_colored_text;
 use crate::ui::widgets::draw_bar;
 
-/// GPU renderer struct implementing the DeviceRenderer trait
-#[allow(dead_code)]
-pub struct GpuRenderer;
-
-impl Default for GpuRenderer {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[allow(dead_code)]
-impl GpuRenderer {
-    pub fn new() -> Self {
-        Self
-    }
-}
-
 /// Compute the number of terminal lines [`print_gpu_info`] will emit for a
 /// single GPU, including any optional thermal/fan/P-state row, the extended
 /// hardware-details row (issue #132), and any nested vGPU / MIG section.
@@ -859,13 +842,6 @@ mod tests {
             format_hostname_with_scroll(long_hostname, scroll_len),
             format_hostname_with_scroll(long_hostname, 0)
         );
-    }
-
-    #[test]
-    fn test_gpu_renderer_new() {
-        let renderer = GpuRenderer::new();
-        // Just verify it can be created
-        let _ = renderer;
     }
 
     /// Render a row and return the plain text, stripped of the ANSI colour
