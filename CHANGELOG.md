@@ -4,7 +4,7 @@
 
 ## Unreleased
 
-- Breaking (library API): removed the unused architecture scaffolding that had no implementations. The removed paths are `all_smi::traits::{collector, exporter, renderer}` with their re-exports from `all_smi::traits`; `DynamicMockGenerator`, `ProcessMockGenerator`, `MockProcess`, `MockGeneratorFactory`, `MockGeneratorBuilder`, `TemplateEngine` and `ValueGenerator` from `all_smi::traits::mock_generator`; `all_smi::metrics::{coordinator, aggregator}`; and the empty `all_smi::ui::renderers::{CpuRenderer, GpuRenderer, MemoryRenderer, StorageRenderer, ChassisRenderer}` structs. `MockGenerator` and its support types stay. The binary's unused `common::progress_bar` module is gone, and with it the `AppConfig::PROGRESS_BAR_LABEL_WIDTH`, `PROGRESS_BAR_BRACKET_WIDTH` and `PROGRESS_BAR_TEXT_WIDTH` constants it alone read (#522).
+- Breaking (library API): removed the unused architecture scaffolding that had no implementations. The removed paths are `all_smi::traits::{collector, exporter, renderer}` with their re-exports from `all_smi::traits`; `DynamicMockGenerator`, `ProcessMockGenerator`, `MockProcess`, `MockGeneratorFactory`, `MockGeneratorBuilder`, `TemplateEngine` and `ValueGenerator` from `all_smi::traits::mock_generator`; `all_smi::metrics::{coordinator, aggregator}`; the empty `all_smi::ui::renderers::{CpuRenderer, GpuRenderer, MemoryRenderer, StorageRenderer, ChassisRenderer}` structs; and `all_smi::common::config::AppConfig::{PROGRESS_BAR_LABEL_WIDTH, PROGRESS_BAR_BRACKET_WIDTH, PROGRESS_BAR_TEXT_WIDTH}`, which only the binary's deleted `common::progress_bar` module read. `MockGenerator` and its support types stay (#522).
 
 ## v0.29.1 (2026/11/24)
 
