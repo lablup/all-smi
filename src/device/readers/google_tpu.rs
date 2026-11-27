@@ -54,13 +54,11 @@ use crate::utils::get_hostname;
 #[cfg(target_os = "linux")]
 use chrono::Local;
 #[cfg(target_os = "linux")]
-use once_cell::sync::Lazy;
-#[cfg(target_os = "linux")]
 use serde::Deserialize;
 #[cfg(target_os = "linux")]
 use std::collections::HashMap;
 #[cfg(target_os = "linux")]
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::OnceLock;
 
 /// TPU generation enumeration with specifications
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -227,23 +225,6 @@ struct TpuDeviceInfo {
     hlo_exec_p999_us: Option<f64>,
 }
 
-/// JSON structure for TPU process information
-#[derive(Debug, Deserialize)]
-#[allow(dead_code)]
-#[cfg(target_os = "linux")]
-struct TpuProcessInfo {
-    /// Device index
-    device_index: u32,
-    /// Process ID
-    pid: u32,
-    /// Command line
-    #[serde(default)]
-    command: String,
-    /// Memory used by the process
-    #[serde(default)]
-    memory_used: u64,
-}
-
 /// Static metadata for a TPU device (does not change during runtime)
 #[derive(Debug, Clone)]
 #[cfg(target_os = "linux")]
@@ -254,15 +235,7 @@ struct TpuDeviceMetadata {
     core_count: u32,
     memory_total: u64,
     accelerator_type: String,
-    #[allow(dead_code)]
-    source: String,
 }
-
-/// Cache for TPU Python script availability
-#[cfg(target_os = "linux")]
-#[allow(dead_code)]
-static TPU_SCRIPT_AVAILABLE: Lazy<Arc<Mutex<Option<bool>>>> =
-    Lazy::new(|| Arc::new(Mutex::new(None)));
 
 /// Google TPU Reader implementation
 pub struct GoogleTpuReader {
@@ -530,7 +503,6 @@ impl GoogleTpuReader {
                     core_count: 1,
                     memory_total: generation.hbm_size_bytes(),
                     accelerator_type: accel_type,
-                    source: "sysfs".to_string(),
                 });
             }
         }
@@ -617,7 +589,6 @@ impl GoogleTpuReader {
                     core_count: 1,
                     memory_total: generation.hbm_size_bytes(),
                     accelerator_type: accel_type,
-                    source: "vfio".to_string(),
                 }
             })
             .collect();
@@ -731,7 +702,6 @@ impl GoogleTpuReader {
             core_count: chip_count,
             memory_total: generation.hbm_size_bytes() * chip_count as u64,
             accelerator_type: accel_type,
-            source: "env".to_string(),
         };
 
         Some(device)
@@ -763,40 +733,6 @@ impl GoogleTpuReader {
             // Return the original type if we can't parse it
             accel_type.to_string()
         }
-    }
-
-    /// Validate TPU device data schema
-    #[cfg(target_os = "linux")]
-    #[allow(dead_code)]
-    fn validate_tpu_device_schema(devices: &[TpuDeviceInfo]) -> Option<()> {
-        if devices.is_empty() {
-            return None;
-        }
-
-        // Perform basic validation on the device data
-        for device in devices {
-            // Ensure utilization is within valid range
-            if !(0.0..=100.0).contains(&device.utilization) {
-                return None;
-            }
-
-            // Ensure memory values are reasonable
-            if device.memory_used > device.memory_total && device.memory_total > 0 {
-                return None;
-            }
-
-            // Ensure power values are non-negative
-            if device.power_draw < 0.0 || device.power_max < 0.0 {
-                return None;
-            }
-
-            // Ensure temperature is in a reasonable range (0-200 C)
-            if device.temperature > 200 {
-                return None;
-            }
-        }
-
-        Some(())
     }
 
     /// Get TPU process information

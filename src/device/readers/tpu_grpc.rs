@@ -20,10 +20,7 @@
 //! The gRPC server is only available when a TPU workload (JAX/TensorFlow)
 //! is actively running.
 
-#![allow(unused)]
-
 use once_cell::sync::OnceCell;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
@@ -299,15 +296,6 @@ fn update_grpc_status(available: bool) {
     }
 }
 
-/// Fetch all TPU usage metrics via gRPC
-///
-/// Returns None if the gRPC server is not available (no workload running)
-pub async fn get_tpu_metrics_grpc() -> Option<Vec<TpuUsageMetrics>> {
-    let link = default_link();
-    let channel = link.channel(true, Instant::now()).await;
-    usage_metrics(link, channel).await
-}
-
 /// Usage metrics over an already resolved channel (`None`: no connection).
 async fn usage_metrics(link: &GrpcLink, channel: Option<Channel>) -> Option<Vec<TpuUsageMetrics>> {
     let channel = match channel {
@@ -384,11 +372,6 @@ async fn usage_metrics(link: &GrpcLink, channel: Option<Channel>) -> Option<Vec<
     }
 }
 
-/// Check if the gRPC metrics server is available
-pub async fn is_grpc_server_available() -> bool {
-    default_link().channel(true, Instant::now()).await.is_some()
-}
-
 /// Everything one collection tick reads from the metrics server.
 #[derive(Debug, Clone, Default)]
 pub struct TpuGrpcSnapshot {
@@ -452,17 +435,6 @@ pub fn collect_tpu_grpc_sync() -> TpuGrpcSnapshot {
     block_on_grpc(|cache| collect_snapshot(default_link(), cache)).unwrap_or_default()
 }
 
-/// Synchronous wrapper for get_tpu_metrics_grpc
-/// Uses the tokio runtime to run the async function
-pub fn get_tpu_metrics_grpc_sync() -> Option<Vec<TpuUsageMetrics>> {
-    block_on_grpc(|cache| async move {
-        let link = default_link();
-        let channel = link.channel(cache, Instant::now()).await;
-        usage_metrics(link, channel).await
-    })
-    .flatten()
-}
-
 /// Extract device_ordinal from kvlist_attr attributes
 fn extract_device_ordinal(attr: &tpu_proto::Attribute) -> Option<i64> {
     let value = attr.value.as_ref()?;
@@ -522,12 +494,6 @@ fn calculate_percentile(
     scale * growth_factor.powi(bucket_counts.len() as i32 - 1)
 }
 
-/// Fetch HLO Queue Size metrics via gRPC
-pub async fn get_hlo_queue_size() -> Option<Vec<HloQueueSize>> {
-    let channel = default_link().channel(true, Instant::now()).await?;
-    hlo_queue_size(channel).await
-}
-
 /// HLO queue sizes over an already connected channel.
 async fn hlo_queue_size(channel: Channel) -> Option<Vec<HloQueueSize>> {
     let mut client = RuntimeMetricServiceClient::new(channel);
@@ -584,12 +550,6 @@ async fn hlo_queue_size(channel: Channel) -> Option<Vec<HloQueueSize>> {
     } else {
         Some(results)
     }
-}
-
-/// Fetch HLO Execution Timing metrics via gRPC
-pub async fn get_hlo_execution_timing() -> Option<Vec<HloExecutionTiming>> {
-    let channel = default_link().channel(true, Instant::now()).await?;
-    hlo_execution_timing(channel).await
 }
 
 /// HLO execution timings over an already connected channel.
@@ -692,34 +652,9 @@ async fn hlo_execution_timing(channel: Channel) -> Option<Vec<HloExecutionTiming
     }
 }
 
-/// Synchronous wrapper for get_hlo_queue_size
-pub fn get_hlo_queue_size_sync() -> Option<Vec<HloQueueSize>> {
-    block_on_grpc(|cache| async move {
-        let channel = default_link().channel(cache, Instant::now()).await?;
-        hlo_queue_size(channel).await
-    })
-    .flatten()
-}
-
-/// Synchronous wrapper for get_hlo_execution_timing
-pub fn get_hlo_execution_timing_sync() -> Option<Vec<HloExecutionTiming>> {
-    block_on_grpc(|cache| async move {
-        let channel = default_link().channel(cache, Instant::now()).await?;
-        hlo_execution_timing(channel).await
-    })
-    .flatten()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[tokio::test]
-    async fn test_grpc_connection() {
-        // This test will pass if no TPU workload is running (expected to fail gracefully)
-        let result = get_tpu_metrics_grpc().await;
-        println!("gRPC metrics result: {result:?}");
-    }
 
     #[test]
     fn connect_backoff_covers_the_retry_interval_only() {

@@ -53,27 +53,8 @@ pub mod furiosa {
 
 /// Google TPU-specific constants
 pub mod google_tpu {
-    /// TPU v2 HBM memory size in bytes (8 GB)
-    pub const TPU_V2_HBM_BYTES: u64 = 8 * 1024 * 1024 * 1024;
-    /// TPU v3 HBM memory size in bytes (16 GB)
-    pub const TPU_V3_HBM_BYTES: u64 = 16 * 1024 * 1024 * 1024;
-    /// TPU v4 HBM memory size in bytes (32 GB)
-    pub const TPU_V4_HBM_BYTES: u64 = 32 * 1024 * 1024 * 1024;
-    /// TPU v5e HBM memory size in bytes (16 GB)
-    pub const TPU_V5E_HBM_BYTES: u64 = 16 * 1024 * 1024 * 1024;
-    /// TPU v5p HBM memory size in bytes (95 GB)
-    pub const TPU_V5P_HBM_BYTES: u64 = 95 * 1024 * 1024 * 1024;
-    /// TPU v6e HBM memory size in bytes (16 GB, cost-optimized)
-    pub const TPU_V6E_HBM_BYTES: u64 = 16 * 1024 * 1024 * 1024;
-    /// TPU v6 Trillium HBM memory size in bytes (32 GB)
-    pub const TPU_V6_TRILLIUM_HBM_BYTES: u64 = 32 * 1024 * 1024 * 1024;
-    /// TPU v7 Ironwood HBM3e memory size in bytes (192 GB)
-    pub const TPU_V7_IRONWOOD_HBM_BYTES: u64 = 192 * 1024 * 1024 * 1024;
-
     /// Google vendor ID for PCI devices
     pub const GOOGLE_VENDOR_ID: &str = "0x1ae0";
-    /// Google vendor ID without 0x prefix (for lspci -n output)
-    pub const GOOGLE_VENDOR_ID_SHORT: &str = "1ae0";
 
     /// Common system-wide libtpu library paths (static)
     pub const LIBTPU_PATHS: &[&str] = &[

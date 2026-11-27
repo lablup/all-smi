@@ -16,23 +16,17 @@
 //!
 //! This module reads TPU information directly from the Linux sysfs interface,
 //! providing a lightweight and dependency-free way to get basic TPU metrics
-//! like presence, temperature, and chip version.
+//! like presence and chip version.
 
 use crate::device::common::constants::google_tpu::GOOGLE_VENDOR_ID;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// Struct to hold raw sysfs data
 #[derive(Debug, Clone)]
 pub struct SysfsTpuInfo {
     pub index: u32,
-    #[allow(dead_code)]
-    pub path: PathBuf,
-    #[allow(dead_code)]
-    pub vendor_id: String,
     pub device_id: String,
-    #[allow(dead_code)]
-    pub temperature: Option<f64>,
 }
 
 /// Scans /sys/class/accel and /sys/bus/pci/devices for Google TPU devices
@@ -120,16 +114,7 @@ fn parse_pci_device(path: &Path, index: u32) -> Option<SysfsTpuInfo> {
     let device_id_path = path.join("device");
     let device_id = read_sysfs_string(&device_id_path).unwrap_or_else(|| "unknown".to_string());
 
-    // Get Temperature (Likely not available for VFIO devices via sysfs)
-    let temperature = read_temperature(path);
-
-    Some(SysfsTpuInfo {
-        index,
-        path: path.to_path_buf(),
-        vendor_id: vendor,
-        device_id,
-        temperature,
-    })
+    Some(SysfsTpuInfo { index, device_id })
 }
 
 fn is_known_tpu_device_id(device_id: &str) -> bool {
@@ -161,43 +146,9 @@ fn parse_accel_device(path: &Path, index: u32) -> Option<SysfsTpuInfo> {
     let device_id_path = device_dir.join("device");
     let device_id = read_sysfs_string(&device_id_path).unwrap_or_else(|| "unknown".to_string());
 
-    // Get Temperature
-    let temperature = read_temperature(&device_dir);
-
-    Some(SysfsTpuInfo {
-        index,
-        path: path.to_path_buf(),
-        vendor_id: vendor,
-        device_id,
-        temperature,
-    })
-}
-
-fn read_temperature(device_dir: &Path) -> Option<f64> {
-    // Try standard hwmon path: device/hwmon/hwmonX/temp1_input
-    let hwmon_dir = device_dir.join("hwmon");
-    if let Ok(entries) = fs::read_dir(hwmon_dir) {
-        for entry in entries.flatten() {
-            let temp_input = entry.path().join("temp1_input");
-            if temp_input.exists()
-                && let Some(val) = read_sysfs_int(&temp_input)
-            {
-                return Some(val as f64 / 1000.0);
-            }
-        }
-    }
-
-    // Sometimes TPUs might be registered in thermal zones
-    // This is less common for PCIe TPUs but possible for some embedded/SoC variations
-    None
+    Some(SysfsTpuInfo { index, device_id })
 }
 
 fn read_sysfs_string(path: &Path) -> Option<String> {
     fs::read_to_string(path).ok().map(|s| s.trim().to_string())
-}
-
-fn read_sysfs_int(path: &Path) -> Option<i64> {
-    fs::read_to_string(path)
-        .ok()
-        .and_then(|s| s.trim().parse::<i64>().ok())
 }
