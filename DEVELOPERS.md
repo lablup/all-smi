@@ -352,6 +352,23 @@ The project enforces these Clippy lints (see `Cargo.toml`):
 - `module_inception`: Avoid module naming confusion
 - `bool_comparison`: Use idiomatic boolean checks
 
+### Finding Dead Code
+
+The `all-smi` binary (`src/main.rs`) is a thin entry point over the `all_smi` library: it declares only its own `config_cmd` module and reaches everything else through `use all_smi::...`, the same way `src/bin/all-smi-mock-server.rs` does. Every module is compiled once, its unit tests run once (in the library test target), and an item used only by the binary no longer needs an `allow(dead_code)` to silence the library build. Modules that only the binary drives (`view`, `record`, `common::cache_migration`) live in the library behind `#[cfg(feature = "cli")]` and `#[doc(hidden)]`.
+
+The cost is a lost signal: rustc treats every `pub` item reachable from the crate root as used, so deleting the last caller of a `pub` function produces no warning. `cargo clippy` still reports dead `pub(crate)` and private items, so prefer the narrowest visibility that compiles. Before each minor release, run this check by hand:
+
+```bash
+# Unused dependencies (needs a nightly toolchain and `cargo install cargo-udeps`)
+cargo +nightly udeps --all-targets
+
+# Review the public API surface against the previous release
+# (needs `cargo install cargo-public-api`)
+cargo public-api diff latest
+```
+
+For a module you suspect has unused items, temporarily narrow its `pub` items (or the `pub mod` declaration) to `pub(crate)` and read the `dead_code` warnings from `cargo check --all-targets`; an item that warns is used by nothing in the crate, its tests or the binary. Check the integration tests under `tests/` before deleting it, since they link against the public API. Do not add a new `allow(dead_code)` to make such a warning go away: scope it to the targets that need it (`cfg_attr(not(target_os = "linux"), allow(dead_code))`) or move the item behind `cfg(test)` when only tests use it.
+
 ## Configuration Architecture
 
 Issue #192 introduced TOML config file support. The runtime configuration flows through three layers:

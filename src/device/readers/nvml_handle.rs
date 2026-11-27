@@ -243,7 +243,6 @@ impl<T> NvmlSlot<T> {
     }
 
     /// Whether the slot currently caches a handle.
-    #[allow(dead_code)] // used by `shared_nvml_present` and tests; the bin target skips both
     fn has_handle(&self) -> bool {
         self.lock().handle.is_some()
     }
@@ -335,7 +334,6 @@ pub(crate) fn probe_shared_nvml() -> Result<Arc<Nvml>, SharedNvmlError> {
 /// Lets integration tests tell a real NVML host from one that fell back to
 /// another reader.
 #[doc(hidden)]
-#[allow(dead_code)] // consumed by the library's public re-export, not the bin target
 pub fn shared_nvml_present() -> bool {
     SHARED_NVML.has_handle()
 }

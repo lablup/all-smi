@@ -492,7 +492,6 @@ pub fn compare_users(a: &UserAggregate, b: &UserAggregate, key: UserSortKey) -> 
 /// Sort a `UserAggregate` slice in place according to `key` (see
 /// [`compare_users`]). Library API; the TUI itself sorts indices through
 /// [`visible_user_order`] so it never clones rows.
-#[allow(dead_code)] // Unused by the binary; kept for library callers.
 pub fn sort_users(users: &mut [UserAggregate], key: UserSortKey) {
     users.sort_by(|a, b| compare_users(a, b, key));
 }

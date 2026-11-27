@@ -16,7 +16,7 @@
 //!
 //! One parser and one set of bounds serve the startup load, the per-tick
 //! reload in the remote view, and the recorder (issue #500). The reload goes
-//! through [`HostfileWatcher`], which costs one async `metadata` call per
+//! through `HostfileWatcher`, which costs one async `metadata` call per
 //! tick and re-reads the file only when its modification time or length
 //! changed.
 

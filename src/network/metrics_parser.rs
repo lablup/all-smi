@@ -155,7 +155,6 @@ impl MetricsParser {
     /// [`crate::parsing::prometheus::split_prometheus_line`], which accepts
     /// exactly what the former regex did. The parameter stays for source
     /// compatibility.
-    #[allow(dead_code)] // Public library API; the binary uses the chassis-aware internal variant.
     pub fn parse_metrics(&self, text: &str, host: &str, re: &Regex) -> ParsedMetrics {
         let _ = re;
         self.parse_metrics_with_chassis(text, host).metrics

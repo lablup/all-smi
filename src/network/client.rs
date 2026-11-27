@@ -124,7 +124,6 @@ pub(crate) struct RemoteScrapeData {
     pub(crate) cpu_info: Vec<CpuInfo>,
     pub(crate) memory_info: Vec<MemoryInfo>,
     pub(crate) storage_info: Vec<StorageInfo>,
-    #[allow(dead_code)] // Read by the binary's RemoteCollector; the lib has no `view`.
     pub(crate) chassis_info: Vec<ChassisInfo>,
     pub(crate) vgpu_info: Vec<crate::device::VgpuHostInfo>,
     pub(crate) mig_info: Vec<crate::device::MigGpuInfo>,
@@ -193,7 +192,6 @@ impl NetworkClient {
 
     /// Client with explicit scrape time bounds, for tests that cannot wait
     /// out the production budget.
-    #[allow(dead_code)] // Used by the binary's remote-view tests.
     pub(crate) fn with_timeouts(timeouts: ScrapeTimeouts) -> Self {
         Self::build(None, timeouts)
     }
@@ -338,7 +336,7 @@ impl NetworkClient {
     /// and is kept only for source compatibility.
     // The library's only entry point to the scrape pipeline; the binary
     // calls `fetch_remote_metrics` directly.
-    #[allow(clippy::type_complexity, dead_code)] // Library API; the binary does not call it.
+    #[allow(clippy::type_complexity)]
     pub async fn fetch_remote_data(
         &self,
         hosts: &[String],

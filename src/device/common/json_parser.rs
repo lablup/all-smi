@@ -26,7 +26,6 @@ pub fn parse_csv_line(line: &str) -> Vec<String> {
 }
 
 /// Parse u64 from string with error context.
-#[allow(dead_code)] // Library helper (tests/device_tests.rs); the binary does not call it.
 pub fn parse_u64(s: &str) -> DeviceResult<u64> {
     s.trim()
         .parse::<u64>()
@@ -34,7 +33,6 @@ pub fn parse_u64(s: &str) -> DeviceResult<u64> {
 }
 
 /// Parse u32 from string with error context.
-#[allow(dead_code)] // Library helper (tests/device_tests.rs); the binary does not call it.
 pub fn parse_u32(s: &str) -> DeviceResult<u32> {
     s.trim()
         .parse::<u32>()
@@ -42,7 +40,6 @@ pub fn parse_u32(s: &str) -> DeviceResult<u32> {
 }
 
 /// Parse f64 from string with error context.
-#[allow(dead_code)] // Library helper (tests/device_tests.rs); the binary does not call it.
 pub fn parse_f64(s: &str) -> DeviceResult<f64> {
     s.trim()
         .parse::<f64>()
@@ -50,14 +47,12 @@ pub fn parse_f64(s: &str) -> DeviceResult<f64> {
 }
 
 /// Get a JSON field by key, returning a DeviceError if not found.
-#[allow(dead_code)] // Library helper (tests/device_tests.rs); the binary does not call it.
 pub fn json_get<'a>(v: &'a Value, key: &str) -> DeviceResult<&'a Value> {
     v.get(key)
         .ok_or_else(|| DeviceError::ParseError(format!("Missing JSON key '{key}'")))
 }
 
 /// Parse a JSON field into a concrete type using Serde.
-#[allow(dead_code)] // Library helper (tests/device_tests.rs); the binary does not call it.
 pub fn json_parse<T: DeserializeOwned>(v: &Value, key: &str) -> DeviceResult<T> {
     let field = json_get(v, key)?;
     serde_json::from_value(field.clone()).map_err(|e| {
@@ -68,7 +63,6 @@ pub fn json_parse<T: DeserializeOwned>(v: &Value, key: &str) -> DeviceResult<T> 
 }
 
 /// Extract string from JSON, returning ParseError on failure.
-#[allow(dead_code)] // Library helper (tests/device_tests.rs); the binary does not call it.
 pub fn json_string(v: &Value, key: &str) -> DeviceResult<String> {
     match json_get(v, key)? {
         Value::String(s) => Ok(s.clone()),
@@ -79,7 +73,6 @@ pub fn json_string(v: &Value, key: &str) -> DeviceResult<String> {
 }
 
 /// Extract u64 from JSON number or string.
-#[allow(dead_code)] // Library helper (tests/device_tests.rs); the binary does not call it.
 pub fn json_u64(v: &Value, key: &str) -> DeviceResult<u64> {
     match json_get(v, key)? {
         Value::Number(n) => n
@@ -93,7 +86,6 @@ pub fn json_u64(v: &Value, key: &str) -> DeviceResult<u64> {
 }
 
 /// Extract f64 from JSON number or string.
-#[allow(dead_code)] // Library helper (tests/device_tests.rs); the binary does not call it.
 pub fn json_f64(v: &Value, key: &str) -> DeviceResult<f64> {
     match json_get(v, key)? {
         Value::Number(n) => n

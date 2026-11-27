@@ -224,7 +224,6 @@ impl WalReplayIndex {
 
     /// Returns the replayed Joule total for a given `(host_hash,
     /// device_hash)` pair, or `None` if the WAL did not mention it.
-    #[allow(dead_code)] // Exercised by the integration tests.
     pub fn lookup(&self, host_hash: u64, device_hash: u64) -> Option<f64> {
         self.entries.get(&(host_hash, device_hash)).copied()
     }

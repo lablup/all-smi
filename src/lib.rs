@@ -123,6 +123,23 @@ pub mod device;
 #[macro_use]
 pub mod parsing;
 
+/// Terminal view, remote view and replay modes behind `all-smi local`,
+/// `all-smi view` and `all-smi view --replay`.
+///
+/// Public only so the `all-smi` binary can reach it; it is not a stable
+/// library API.
+#[cfg(feature = "cli")]
+#[doc(hidden)]
+pub mod view;
+
+/// `all-smi record` recorder and the replay reader used by `view`.
+///
+/// Public only so the `all-smi` binary can reach it; it is not a stable
+/// library API.
+#[cfg(feature = "cli")]
+#[doc(hidden)]
+pub mod record;
+
 /// Application state management.
 #[cfg(feature = "cli")]
 pub mod app_state;
@@ -204,30 +221,4 @@ pub use snapshot::{
 pub mod utils;
 
 /// Configuration module.
-pub mod common {
-    /// Configuration management.
-    pub mod config;
-    /// File-level merge helpers for the TOML config (issue #192).
-    #[cfg(feature = "cli")]
-    pub mod config_apply;
-    /// Environment-variable overlay for the TOML config (issue #192).
-    #[cfg(feature = "cli")]
-    pub mod config_env;
-    /// TOML configuration file loader (issue #192).
-    #[cfg(feature = "cli")]
-    pub mod config_file;
-    /// On-disk schema types for the TOML configuration file.
-    #[cfg(feature = "cli")]
-    pub mod config_schema;
-    /// HTTP remote-host list normalization and syntax validation.
-    #[cfg(feature = "cli")]
-    pub mod http_hosts;
-    /// Platform-aware configuration path resolution.
-    #[cfg(feature = "cli")]
-    pub mod paths;
-    /// Shared secure file-write helper (O_NOFOLLOW + 0o600).
-    #[cfg(feature = "cli")]
-    pub mod secure_write;
-    #[cfg(test)]
-    pub(crate) mod test_env;
-}
+pub mod common;

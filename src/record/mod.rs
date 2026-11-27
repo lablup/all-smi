@@ -18,7 +18,7 @@
 //! the same serializer as the `snapshot` subcommand, plus an optional
 //! header frame and sparse index frames every 1000 data frames.
 //!
-//! The replay side ([`replay::Replayer`]) streams those frames back so the
+//! The replay side ([`Replayer`](crate::record::replay::Replayer)) streams those frames back so the
 //! `view` TUI can reconstruct the exact `RenderSnapshot` the operator
 //! would have seen live. Compression (`.zst`, `.gz`) is auto-detected from
 //! the file extension.

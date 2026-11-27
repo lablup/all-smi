@@ -115,7 +115,6 @@ pub struct AlertTransition {
     /// Unique "card key" used by the renderer to decide which GPU tile
     /// should flash. For GPU alerts this is the UUID; for future CPU /
     /// memory alerts it can be extended by building a different key.
-    #[allow(dead_code)] // Consumed by the binary-side border-flash renderer
     pub card_key: String,
 }
 
@@ -141,7 +140,6 @@ impl Alerter {
 
     /// Replace the active config. Existing state machines are kept so that
     /// a running hysteresis window is not lost on reload.
-    #[allow(dead_code)] // Future config-reload wiring (issue #192)
     pub fn set_config(&mut self, config: AlertConfig) {
         self.config = config;
     }

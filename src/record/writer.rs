@@ -15,7 +15,7 @@
 //! Rotating, compression-aware writer for `all-smi record`.
 //!
 //! Stateful wrapper that owns the current output segment, counts bytes
-//! written, and when a segment exceeds [`RotatingWriter::max_size`] closes
+//! written, and when a segment exceeds `RotatingWriter::max_size` closes
 //! the encoder cleanly, renames the file to a numbered sibling, and opens
 //! the next segment. Callers treat it as a `Write`.
 //!
