@@ -184,7 +184,6 @@ Local and remote collection share the `DataCollectionStrategy` trait in `src/vie
 
 - **Send + Sync Bounds**: Ensure thread safety for async environments
 - **Strategy Composition**: Traits can be combined for complex behaviors
-- **Error Propagation**: Consistent Result types for error handling
 
 ## Platform-Specific Implementations
 
