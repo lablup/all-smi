@@ -16,7 +16,7 @@
 //! LibreHardwareMonitor availability. On non-Windows hosts these all
 //! Skip with a clear message.
 
-use crate::doctor::types::{Check, CheckCtx, CheckResult, Severity};
+use crate::doctor::types::{Check, CheckCtx, CheckResult};
 
 static CHECKS: &[&Check] = &[&WMI, &GPU_PERF_COUNTERS, &RYZEN_MASTER, &INTEL_WMI, &LHM];
 
@@ -27,35 +27,30 @@ pub fn checks() -> &'static [&'static Check] {
 static WMI: Check = Check {
     id: "windows.wmi",
     title: "WMI thermal-zone access",
-    severity_on_fail: Severity::Warn,
     run: check_wmi,
 };
 
 static GPU_PERF_COUNTERS: Check = Check {
     id: "windows.gpu.perf_counters",
     title: "GPU performance counters (DXGI / PDH)",
-    severity_on_fail: Severity::Info,
     run: check_gpu_perf_counters,
 };
 
 static RYZEN_MASTER: Check = Check {
     id: "windows.amd_ryzen_master",
     title: "AMD Ryzen Master SDK",
-    severity_on_fail: Severity::Info,
     run: check_ryzen_master,
 };
 
 static INTEL_WMI: Check = Check {
     id: "windows.intel_wmi",
     title: "Intel WMI temperature provider",
-    severity_on_fail: Severity::Info,
     run: check_intel_wmi,
 };
 
 static LHM: Check = Check {
     id: "windows.libre_hardware_monitor",
     title: "LibreHardwareMonitor service",
-    severity_on_fail: Severity::Info,
     run: check_lhm,
 };
 

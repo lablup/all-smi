@@ -32,7 +32,7 @@
 //! and a host with no Intel GPU reports `Skip` rather than complaining about
 //! hardware it does not have.
 
-use crate::doctor::types::{Check, CheckCtx, CheckResult, Severity};
+use crate::doctor::types::{Check, CheckCtx, CheckResult};
 
 static CHECKS: &[&Check] = &[&BUILD, &LOADER, &INIT, &DEVICES];
 
@@ -43,28 +43,24 @@ pub fn checks() -> &'static [&'static Check] {
 static BUILD: Check = Check {
     id: "level_zero.build",
     title: "Level Zero build-time availability",
-    severity_on_fail: Severity::Info,
     run: check_build,
 };
 
 static LOADER: Check = Check {
     id: "level_zero.loader",
     title: "Level Zero loader library",
-    severity_on_fail: Severity::Warn,
     run: check_loader,
 };
 
 static INIT: Check = Check {
     id: "level_zero.init",
     title: "Level Zero runtime initialisation",
-    severity_on_fail: Severity::Warn,
     run: check_init,
 };
 
 static DEVICES: Check = Check {
     id: "level_zero.devices",
     title: "Level Zero device visibility",
-    severity_on_fail: Severity::Info,
     run: check_devices,
 };
 
@@ -272,7 +268,6 @@ mod tests {
         bdfs: &[&str],
     ) -> l0::LevelZeroProbe {
         l0::LevelZeroProbe {
-            compiled_in: true,
             searched_paths: &["libze_loader.so.1", "/usr/lib64/libze_loader.so.1"],
             loaded_path,
             init,

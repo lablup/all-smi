@@ -44,10 +44,6 @@ impl RemoteCollector {
     /// per configured host, so the effective concurrency is
     /// `min(current host count, max_connections)` and follows hostfile
     /// reloads without rebuilding the semaphore.
-    pub fn new(max_connections: usize) -> Self {
-        Self::with_network_client(NetworkClient::new(), max_connections)
-    }
-
     pub(crate) fn with_network_client(
         network_client: NetworkClient,
         max_connections: usize,
@@ -57,12 +53,6 @@ impl RemoteCollector {
             semaphore: Arc::new(tokio::sync::Semaphore::new(max_connections.max(1))),
             aggregator: DataAggregator::new(),
         }
-    }
-
-    #[allow(dead_code)]
-    pub fn with_hosts(hosts: Vec<String>) -> Self {
-        let _ = hosts;
-        Self::new(AppConfig::MAX_CONCURRENT_CONNECTIONS)
     }
 
     fn deduplicate_storage_info(storage_info: Vec<StorageInfo>) -> Vec<StorageInfo> {
@@ -270,10 +260,6 @@ impl DataCollectionStrategy for RemoteCollector {
         // collector-keyed caches (e.g. Users-tab aggregation).
         state.mark_collector_data_changed();
     }
-
-    fn strategy_type(&self) -> &str {
-        "remote"
-    }
 }
 
 pub struct RemoteCollectorBuilder {
@@ -299,14 +285,14 @@ impl RemoteCollectorBuilder {
         self
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn with_max_connections(mut self, max_connections: usize) -> Self {
         self.max_connections = Some(max_connections);
         self
     }
 
     /// Override the scrape time bounds (tests use short ones).
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn with_timeouts(mut self, timeouts: ScrapeTimeouts) -> Self {
         self.timeouts = Some(timeouts);
         self

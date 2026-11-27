@@ -286,31 +286,6 @@ pub fn draw_bar_multi<W: Write>(
 
 // Helper functions for common use cases
 impl BarSegment {
-    // CPU usage helpers (reserved for future use)
-    #[allow(dead_code)]
-    pub fn cpu_low_priority(value: f64) -> Self {
-        // nice
-        Self::new(value, Color::Blue).with_label("low")
-    }
-
-    #[allow(dead_code)]
-    pub fn cpu_normal(value: f64) -> Self {
-        // user
-        Self::new(value, Color::Green).with_label("normal")
-    }
-
-    #[allow(dead_code)]
-    pub fn cpu_kernel(value: f64) -> Self {
-        // system
-        Self::new(value, Color::Red).with_label("kernel")
-    }
-
-    #[allow(dead_code)]
-    pub fn cpu_virtualized(value: f64) -> Self {
-        // steal + guest
-        Self::new(value, Color::DarkBlue).with_label("virtual")
-    }
-
     // Memory usage helpers
     pub fn memory_used(value: f64) -> Self {
         Self::new(value, Color::Green).with_label("used")
@@ -322,19 +297,6 @@ impl BarSegment {
 
     pub fn memory_cache(value: f64) -> Self {
         Self::new(value, Color::Yellow).with_label("cache")
-    }
-
-    /// Swap-used segment in its idle color (Magenta).
-    ///
-    /// Use this when `swap_total_bytes > 0` but no swap is currently in
-    /// use; renderers should call [`Self::swap_used_active`] when
-    /// `swap_used_bytes > 0` to emphasize the pressure signal. Kept
-    /// public alongside `swap_used_active` so external renderers can
-    /// distinguish "swap configured" from "swap pressure" without
-    /// re-implementing the color choice.
-    #[allow(dead_code)]
-    pub fn swap_used(value: f64) -> Self {
-        Self::new(value, Color::Magenta).with_label("swap")
     }
 
     /// Swap-used segment in its emphasized color (Red).

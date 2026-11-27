@@ -14,7 +14,7 @@
 
 //! `tpu.*` checks — libtpu presence, TPU_NAME, accel device vendor check.
 
-use crate::doctor::types::{Check, CheckCtx, CheckResult, Severity};
+use crate::doctor::types::{Check, CheckCtx, CheckResult};
 
 static CHECKS: &[&Check] = &[&LIBTPU, &TPU_NAME, &ACCEL_VENDOR];
 
@@ -25,21 +25,18 @@ pub fn checks() -> &'static [&'static Check] {
 static LIBTPU: Check = Check {
     id: "tpu.libtpu",
     title: "libtpu presence",
-    severity_on_fail: Severity::Warn,
     run: check_libtpu,
 };
 
 static TPU_NAME: Check = Check {
     id: "tpu.env.name",
     title: "TPU_NAME environment",
-    severity_on_fail: Severity::Info,
     run: check_tpu_name,
 };
 
 static ACCEL_VENDOR: Check = Check {
     id: "tpu.accel.vendor",
     title: "/dev/accel* Google vendor ID",
-    severity_on_fail: Severity::Info,
     run: check_accel_vendor,
 };
 

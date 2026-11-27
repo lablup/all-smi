@@ -47,12 +47,9 @@ pub struct Notification {
 
 #[derive(Clone, Debug)]
 pub enum NotificationType {
-    #[allow(dead_code)]
     Info,
     Warning,
-    #[allow(dead_code)]
     Error,
-    #[allow(dead_code)]
     Status,
 }
 
@@ -94,7 +91,6 @@ impl Notification {
         }
     }
 
-    #[allow(dead_code)]
     pub fn remaining_time(&self) -> Result<Duration, NotificationError> {
         let elapsed = self.get_elapsed_time()?;
         Ok(Duration::from_secs(self.duration_seconds).saturating_sub(elapsed))
@@ -130,7 +126,6 @@ impl NotificationManager {
         Ok(())
     }
 
-    #[allow(dead_code)]
     pub fn show_with_duration(
         &mut self,
         message: String,
@@ -143,7 +138,6 @@ impl NotificationManager {
         Ok(())
     }
 
-    #[allow(dead_code)]
     pub fn clear(&mut self) {
         self.current_notification = None;
     }
@@ -167,7 +161,6 @@ impl NotificationManager {
         self.current_notification.as_ref()
     }
 
-    #[allow(dead_code)]
     pub fn has_notification(&self) -> bool {
         self.current_notification.is_some()
     }
@@ -175,7 +168,6 @@ impl NotificationManager {
 
 // Helper functions for common notification types
 impl NotificationManager {
-    #[allow(dead_code)]
     pub fn info(&mut self, message: String) -> Result<(), NotificationError> {
         self.show(message, NotificationType::Info)
     }
@@ -184,17 +176,14 @@ impl NotificationManager {
         self.show(message, NotificationType::Warning)
     }
 
-    #[allow(dead_code)]
     pub fn error(&mut self, message: String) -> Result<(), NotificationError> {
         self.show(message, NotificationType::Error)
     }
 
-    #[allow(dead_code)]
     pub fn status(&mut self, message: String) -> Result<(), NotificationError> {
         self.show(message, NotificationType::Status)
     }
 
-    #[allow(dead_code)]
     pub fn persistent_status(&mut self, message: String) -> Result<(), NotificationError> {
         // Use a very long duration instead of u64::MAX to avoid overflow issues
         const PERSISTENT_DURATION: u64 = 365 * 24 * 60 * 60; // 1 year in seconds

@@ -36,9 +36,8 @@ struct LhmSensor {
     /// Sensor name (e.g., "CPU Package", "CPU Core #1")
     name: Option<String>,
     /// Sensor type (e.g., "Temperature", "Voltage", "Clock")
-    /// Note: This field is required for WMI deserialization but not used in code
-    /// because we filter by SensorType='Temperature' in the query.
-    #[allow(dead_code)]
+    /// The query already filters on SensorType='Temperature'.
+    #[allow(dead_code)] // WMI deserialization needs the field; nothing reads it.
     sensor_type: Option<String>,
     /// Current sensor value
     value: Option<f32>,

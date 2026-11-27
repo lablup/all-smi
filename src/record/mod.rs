@@ -75,9 +75,8 @@ impl RecorderOptions {
     /// Convert parsed CLI args into orchestrator options. All human-facing
     /// errors are raised here so the `record` subcommand fails fast before
     /// opening any files. Thin wrapper over
-    /// [`Self::from_args_with_settings`] with no config layer — kept
-    /// for library consumers and tests.
-    #[allow(dead_code)]
+    /// [`Self::from_args_with_settings`] with no config layer, for tests.
+    #[cfg(test)]
     pub fn from_args(args: &RecordArgs) -> Result<Self> {
         Self::from_args_with_settings(args, None)
     }
@@ -565,8 +564,8 @@ fn codec_extension_mismatch(path: &Path, compress: Option<RecordCompression>) ->
 }
 
 /// Allow the CLI layer to re-expose `SnapshotOptions` via this module for
-/// discovery, without making it a required re-export.
-#[allow(dead_code)]
+/// discovery, without making it a required re-export. The leading
+/// underscore keeps it out of the dead-code lint.
 fn _type_check_snapshot_reexport(_: SnapshotOptions) {}
 
 #[cfg(test)]

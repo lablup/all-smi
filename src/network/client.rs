@@ -124,9 +124,8 @@ pub(crate) struct RemoteScrapeData {
     pub(crate) cpu_info: Vec<CpuInfo>,
     pub(crate) memory_info: Vec<MemoryInfo>,
     pub(crate) storage_info: Vec<StorageInfo>,
-    // The library target does not compile the binary-only `view` module, but
-    // the main target consumes this field in RemoteCollector.
     #[allow(dead_code)]
+    // Read by the binary's RemoteCollector; the lib target has no `view` module.
     pub(crate) chassis_info: Vec<ChassisInfo>,
     pub(crate) vgpu_info: Vec<crate::device::VgpuHostInfo>,
     pub(crate) mig_info: Vec<crate::device::MigGpuInfo>,
@@ -190,11 +189,6 @@ impl NetworkClient {
         if auth_token.is_some() {
             eprintln!("Using authentication token from ALL_SMI_AUTH_TOKEN environment variable");
         }
-        Self::build(auth_token, ScrapeTimeouts::default())
-    }
-
-    #[allow(dead_code)]
-    pub fn with_auth_token(auth_token: Option<String>) -> Self {
         Self::build(auth_token, ScrapeTimeouts::default())
     }
 
@@ -343,7 +337,9 @@ impl NetworkClient {
     ///
     /// `re` is unused since issue #500 (the parser no longer runs a regex)
     /// and is kept only for source compatibility.
-    #[allow(clippy::type_complexity, dead_code)]
+    // The library's only entry point to the scrape pipeline; the binary
+    // calls `fetch_remote_metrics` directly.
+    #[allow(clippy::type_complexity, dead_code)] // Library API; the binary does not call it.
     pub async fn fetch_remote_data(
         &self,
         hosts: &[String],

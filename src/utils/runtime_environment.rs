@@ -254,7 +254,6 @@ fn read_k8s_namespace() -> Option<String> {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-#[allow(dead_code)]
 pub enum VirtualizationType {
     VMware,
     VirtualBox,

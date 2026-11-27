@@ -18,7 +18,11 @@ use crate::device::types::{GpuInfo, MAX_GPU_FAN_RPM};
 
 #[derive(Debug, Clone, Copy)]
 pub enum ApplyPlatform {
+    // Constructed by the Linux reader and by the tests.
+    #[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
     Linux,
+    // Constructed by the Windows reader and by the tests.
+    #[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
     Windows,
 }
 

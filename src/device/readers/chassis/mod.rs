@@ -36,7 +36,7 @@ pub use apple_silicon_native::AppleSiliconNativeChassisReader;
 #[cfg(target_os = "macos")]
 pub use intel_mac::IntelMacChassisReader;
 
-#[allow(unused_imports)]
+#[cfg_attr(target_os = "macos", allow(unused_imports))] // macOS uses the native readers.
 pub use generic::GenericChassisReader;
 
 use crate::device::ChassisReader;

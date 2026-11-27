@@ -43,7 +43,6 @@
 //! per-card `Mutex` so concurrent invocation is safe (just serialised
 //! per card).
 
-#![allow(dead_code)] // Some helpers are unused on the non-target OS half.
 #![allow(non_camel_case_types)] // FFI handle wrappers mirror C type names.
 
 mod api;
@@ -57,8 +56,7 @@ mod refresh;
 mod tests;
 
 pub use apply::{ApplyPlatform, apply_to_gpu_info};
-#[allow(unused_imports)]
-// `normalise_pci_bdf` is consumed by the per-OS readers wired in commits 3-4.
+#[cfg_attr(not(target_os = "linux"), allow(unused_imports))] // Only the Linux reader uses it.
 pub use loader::normalise_pci_bdf;
 pub use loader::prepare_sysman_env_for_legacy_runtime;
 pub(crate) use loader::with_runtime;
@@ -341,6 +339,7 @@ pub(crate) fn primary_utilization(engines: &[(&'static str, f64)]) -> Option<f64
 /// Convenience used by external diagnostics — surfaced as a `detail`
 /// entry when callers want to expose the raw enumerated engine count
 /// without invoking a full refresh.
+#[allow(dead_code)] // Library API exercised by tests/level_zero_stub.rs.
 pub fn engine_count(state: &LevelZeroState) -> usize {
     state.engine_samples.len()
 }
@@ -353,6 +352,7 @@ pub fn engine_count(state: &LevelZeroState) -> usize {
 /// stable, parseable form across driver versions).
 ///
 /// Returns an empty list when the L0 runtime is unavailable.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))] // Only the Windows reader uses it.
 pub fn enumerated_pci_bdfs() -> Vec<String> {
     with_runtime(|runtime| {
         let mut keys: Vec<String> = runtime.devices_by_pci.keys().cloned().collect();
@@ -364,12 +364,14 @@ pub fn enumerated_pci_bdfs() -> Vec<String> {
 
 /// Convenience for diagnostics: number of power domains the L0 layer
 /// discovered for this card.
+#[allow(dead_code)] // Library API exercised by tests/level_zero_stub.rs.
 pub fn power_domain_count(state: &LevelZeroState) -> usize {
     state.power_samples.len()
 }
 
 /// Convenience for diagnostics: did the L0 layer bind this card to a
 /// device handle?
+#[allow(dead_code)] // Library API exercised by tests/level_zero_stub.rs.
 pub fn is_bound(state: &LevelZeroState) -> bool {
     state.device.is_some()
 }
@@ -377,6 +379,7 @@ pub fn is_bound(state: &LevelZeroState) -> bool {
 /// Build a stable, deterministic ordering of engine labels for the
 /// detail map. Exposed via `Vec<(&'static str, f64)>` everywhere; this
 /// helper is exported only for testability.
+#[cfg(test)]
 pub(crate) fn sort_engine_entries(engines: &mut [(&'static str, f64)]) {
     engines.sort_by(|a, b| label_order(a.0).cmp(&label_order(b.0)).then(a.0.cmp(b.0)));
 }

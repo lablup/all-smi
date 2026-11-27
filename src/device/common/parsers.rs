@@ -98,23 +98,6 @@ pub fn parse_frequency_mhz(freq_str: &str) -> Option<u32> {
     freq_str.trim_end_matches("MHz").trim().parse::<u32>().ok()
 }
 
-/// Parse a string with a default value if parsing fails
-/// Logs the parse error for debugging
-#[allow(dead_code)]
-pub fn parse_with_default<T, E>(value_str: &str, default: T, context: &str) -> T
-where
-    T: std::str::FromStr<Err = E>,
-    E: std::fmt::Display,
-{
-    match value_str.parse::<T>() {
-        Ok(val) => val,
-        Err(e) => {
-            eprintln!("Parse error in {context}: {e} (input: '{value_str}')");
-            default
-        }
-    }
-}
-
 /// Parse a device ID from a string like "npu0" or "gpu1"
 /// Returns None if parsing fails
 pub fn parse_device_id(device_str: &str) -> Option<usize> {

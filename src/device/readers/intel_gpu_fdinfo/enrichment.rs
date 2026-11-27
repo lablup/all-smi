@@ -26,14 +26,15 @@
 //! a consistent `ProcessInfo` shape.
 
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
 
-use super::{GpuProcessUsage, collect_intel_gpu_processes};
+use super::GpuProcessUsage;
 use crate::device::types::ProcessInfo;
 
-/// Walk `/proc` for Intel-GPU-using processes, enrich them with
-/// sysinfo metadata, and assemble the full `Vec<ProcessInfo>` the
-/// [`crate::device::traits::GpuReader`] contract expects.
+/// Enrich per-process Intel GPU usages with sysinfo metadata and assemble
+/// the full `Vec<ProcessInfo>` the [`crate::device::traits::GpuReader`]
+/// contract expects. The caller passes usages it already has, so a reader
+/// that shares one `/proc` walk between its device rows and its process
+/// rows does not walk again here.
 ///
 /// `card_uuids` maps each Intel card index to the same UUID the
 /// reader emits from `get_gpu_info` so consumers correlating
@@ -42,27 +43,6 @@ use crate::device::types::ProcessInfo;
 ///
 /// Only the GPU PIDs are refreshed and turned into rows (issue #504):
 /// the rest of the process table is never read.
-///
-/// `proc_root` is normally `/proc`; the parameter exists so callers
-/// can drive a synthetic procfs in integration tests.
-// The reader shares one scan between its entry points and calls
-// `intel_process_infos_from_usages`; this walk-then-build form stays for
-// library consumers.
-#[allow(dead_code)]
-pub fn build_intel_process_infos(
-    intel_drm_basenames: &HashMap<String, usize>,
-    card_uuids: &HashMap<usize, String>,
-    proc_root: &Path,
-) -> Vec<ProcessInfo> {
-    intel_process_infos_from_usages(
-        collect_intel_gpu_processes(intel_drm_basenames, proc_root),
-        card_uuids,
-    )
-}
-
-/// [`build_intel_process_infos`] for per-process usages the caller already
-/// has, so a reader that shares one `/proc` walk between its device rows
-/// and its process rows does not walk again here.
 pub fn intel_process_infos_from_usages(
     usages: Vec<GpuProcessUsage>,
     card_uuids: &HashMap<usize, String>,
@@ -96,20 +76,6 @@ pub fn intel_process_infos_from_usages(
 /// The collector merges these into its own process pass, which fills name,
 /// CPU, memory and user exactly as it does for NVIDIA, so refreshing sysinfo
 /// here would only duplicate that pass under the global `System` lock.
-// See `build_intel_process_infos` on why this is not called by the reader.
-#[allow(dead_code)]
-pub fn build_intel_gpu_rows(
-    intel_drm_basenames: &HashMap<String, usize>,
-    card_uuids: &HashMap<usize, String>,
-    proc_root: &Path,
-) -> Vec<ProcessInfo> {
-    intel_gpu_rows_from_usages(
-        collect_intel_gpu_processes(intel_drm_basenames, proc_root),
-        card_uuids,
-    )
-}
-
-/// [`build_intel_gpu_rows`] for per-process usages the caller already has.
 pub fn intel_gpu_rows_from_usages(
     usages: Vec<GpuProcessUsage>,
     card_uuids: &HashMap<usize, String>,

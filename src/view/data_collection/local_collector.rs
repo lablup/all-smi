@@ -934,14 +934,6 @@ impl DataCollectionStrategy for LocalCollector {
         // Always clear loading state in local mode after first iteration
         state.loading = false;
     }
-
-    fn strategy_type(&self) -> &str {
-        "local"
-    }
-
-    async fn is_ready(&self) -> bool {
-        *self.initialized.lock().await
-    }
 }
 
 impl LocalCollector {

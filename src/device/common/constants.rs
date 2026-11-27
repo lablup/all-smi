@@ -14,49 +14,23 @@
 
 // Common constants for device readers
 
-#![allow(dead_code)]
-
 /// Memory conversion constants
 pub const BYTES_PER_KB: u64 = 1024;
 pub const BYTES_PER_MB: u64 = BYTES_PER_KB * 1024;
 pub const BYTES_PER_GB: u64 = BYTES_PER_MB * 1024;
-pub const BYTES_PER_TB: u64 = BYTES_PER_GB * 1024;
 
 /// Default memory sizes for specific devices
 pub const FURIOSA_HBM3_MEMORY_GB: u64 = 48;
 pub const FURIOSA_HBM3_MEMORY_BYTES: u64 = FURIOSA_HBM3_MEMORY_GB * BYTES_PER_GB;
 
-/// Power conversion constants
-pub const MILLIWATTS_PER_WATT: f64 = 1000.0;
-
-/// Temperature constants
-pub const ABSOLUTE_ZERO_CELSIUS: i32 = -273;
-pub const MAX_SAFE_TEMPERATURE_C: u32 = 100;
-
-/// Frequency constants
-pub const MHZ_PER_GHZ: u32 = 1000;
-
-/// Default values for missing data
-pub const DEFAULT_TEMPERATURE: u32 = 0;
-pub const DEFAULT_POWER: f64 = 0.0;
-pub const DEFAULT_FREQUENCY: u32 = 0;
-pub const DEFAULT_UTILIZATION: f64 = 0.0;
-pub const DEFAULT_MEMORY: u64 = 0;
-
-/// Device-specific constants
-pub mod furiosa {
-    pub const CORE_COUNT: u32 = 8;
-    pub const PE_COUNT_STR: &str = "64K";
-    pub const MEMORY_BANDWIDTH: &str = "1.63TB/s";
-    pub const ON_CHIP_SRAM: &str = "256MB";
-}
-
 /// Google TPU-specific constants
 pub mod google_tpu {
     /// Google vendor ID for PCI devices
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))] // Read by the Linux TPU readers.
     pub const GOOGLE_VENDOR_ID: &str = "0x1ae0";
 
     /// Common system-wide libtpu library paths (static)
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))] // Read by the Linux TPU readers.
     pub const LIBTPU_PATHS: &[&str] = &[
         "/usr/local/lib/libtpu.so",
         "/usr/lib/libtpu.so",
@@ -204,19 +178,3 @@ pub mod google_tpu {
         !find_libtpu_paths().is_empty()
     }
 }
-
-/// Process information defaults
-pub const DEFAULT_PID: u32 = 0;
-pub const DEFAULT_CPU_PERCENT: f64 = 0.0;
-pub const DEFAULT_PRIORITY: i32 = 0;
-pub const DEFAULT_NICE_VALUE: i32 = 0;
-
-/// String parsing constants
-pub const DEVICE_ID_PREFIX_NPU: &str = "npu";
-pub const DEVICE_ID_PREFIX_GPU: &str = "gpu";
-pub const TEMPERATURE_SUFFIX_C: char = 'C';
-pub const POWER_SUFFIX_W: char = 'W';
-pub const PERCENTAGE_SUFFIX: char = '%';
-pub const MEMORY_SUFFIX_MB: &str = "MB";
-pub const MEMORY_SUFFIX_MIB: &str = "MiB";
-pub const FREQUENCY_SUFFIX_MHZ: &str = "MHz";

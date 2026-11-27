@@ -12,12 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::io::Write;
-
 use crossterm::style::Color;
-
-// Re-export the draw_bar function from the main widgets module
-pub use crate::ui::widgets::draw_bar;
 
 /// Get utilization block character and color based on usage percentage
 pub fn get_utilization_block(utilization: f64) -> (&'static str, Color) {
@@ -35,29 +30,9 @@ pub fn get_utilization_block(utilization: f64) -> (&'static str, Color) {
     }
 }
 
-/// Helper function to render a simple gauge bar
-#[allow(dead_code)]
-pub fn render_gauge<W: Write>(
-    stdout: &mut W,
-    label: &str,
-    value: f64,
-    max_value: f64,
-    width: usize,
-    _label_color: Color,
-    show_text: Option<String>,
-) {
-    draw_bar(stdout, label, value, max_value, width, show_text);
-}
-
 /// Gauge style constants
-#[allow(dead_code)]
 pub const GAUGE_HIGH_COLOR: Color = Color::Red;
-#[allow(dead_code)]
 pub const GAUGE_MEDIUM_COLOR: Color = Color::Yellow;
-#[allow(dead_code)]
-pub const GAUGE_LOW_COLOR: Color = Color::Green;
-#[allow(dead_code)]
-pub const GAUGE_MINIMAL_COLOR: Color = Color::Blue;
 
 #[cfg(test)]
 mod tests {
@@ -100,25 +75,5 @@ mod tests {
         let (block, color) = get_utilization_block(0.0);
         assert_eq!(block, "▁");
         assert_eq!(color, Color::DarkGrey);
-    }
-
-    #[test]
-    fn test_render_gauge() {
-        use std::io::Cursor;
-
-        let mut buffer = Cursor::new(Vec::new());
-        render_gauge(
-            &mut buffer,
-            "Test",
-            50.0,
-            100.0,
-            20,
-            Color::Blue,
-            Some("50%".to_string()),
-        );
-
-        // Just verify it doesn't panic
-        let output = String::from_utf8(buffer.into_inner()).unwrap();
-        assert!(output.contains("Test"));
     }
 }

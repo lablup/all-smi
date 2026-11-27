@@ -24,9 +24,9 @@ pub mod reader;
 // Re-export commonly used items for the public library API.
 // These exports are used by the prelude module and external library users,
 // even though internal code may import from submodules directly.
-#[allow(unused_imports)]
+#[allow(unused_imports)] // Library API used by tests/perf_tick_stages.rs.
 pub use disk_cache::DiskCache;
-#[allow(unused_imports)]
+#[allow(unused_imports)] // Library API re-exported by the prelude and used by `AllSmi`.
 pub use info::StorageInfo;
-#[allow(unused_imports)]
+#[allow(unused_imports)] // Library API used by `AllSmi` and re-exported by the prelude.
 pub use reader::{LocalStorageReader, StorageReader, create_storage_reader};

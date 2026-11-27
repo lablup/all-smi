@@ -46,7 +46,6 @@ use std::os::raw::c_uint;
 use std::sync::Mutex;
 
 use nvml_wrapper::Nvml;
-use nvml_wrapper::enum_wrappers::nv_link::IntDeviceType;
 use nvml_wrapper::error::{NvmlError, nvml_try};
 
 use crate::device::types::{GpmMetrics, NvLinkRemoteDevice, NvLinkRemoteType};
@@ -125,7 +124,7 @@ impl HardwareDetailCache {
 
     /// GPM metrics for `index`, probing `gpm_support()` only until it gives
     /// a definite answer. A transient NVML error is not cached, so the next
-    /// poll probes again; see [`collect_gpm_metrics`] for what is returned.
+    /// poll probes again; see [`gpm_metrics_for`] for what is returned.
     pub fn gpm_metrics(&self, device: &nvml_wrapper::Device, index: u32) -> Option<GpmMetrics> {
         let supported = self
             .get_or_fetch_field(&self.gpm_supported, index, || device.gpm_support())
@@ -338,18 +337,6 @@ fn map_remote_device_type(value: c_uint) -> NvLinkRemoteType {
     }
 }
 
-/// Same mapping as [`map_remote_device_type`] but for the wrapper's enum.
-/// Kept as a utility for tests that construct an `IntDeviceType` directly.
-#[allow(dead_code)]
-pub(crate) fn nvlink_remote_type_from_wrapper(value: IntDeviceType) -> NvLinkRemoteType {
-    match value {
-        IntDeviceType::Gpu => NvLinkRemoteType::Gpu,
-        IntDeviceType::Ibmnpu => NvLinkRemoteType::IbmNpu,
-        IntDeviceType::Switch => NvLinkRemoteType::Switch,
-        IntDeviceType::Unknown => NvLinkRemoteType::Unknown,
-    }
-}
-
 /// Device indices whose capability probe answered `NotSupported`.
 ///
 /// `vgpu_host_mode()` on a bare-metal GPU and `mig_mode()` on a GPU without
@@ -399,36 +386,21 @@ fn note_probe_result<T>(
     }
 }
 
-/// Return `true` when the device reports GPM support via NVML's probe.
-/// Any error (symbol missing, `NotSupported`, `InvalidArg`) degrades to
-/// `false` so the caller never emits GPM metrics for a non-GPM device.
-pub fn gpm_is_supported(device: &nvml_wrapper::Device) -> bool {
-    device.gpm_support().unwrap_or(false)
-}
-
-/// Placeholder GPM metric collection.
+/// The GPM value for a device whose support flag is already known.
 ///
 /// The GPM API requires two time-separated samples passed to
 /// `gpm_metrics_get`, which is incompatible with all-smi's single-poll
 /// reader contract: we would have to cache the previous sample per device
 /// and wait N seconds before the first reading is meaningful. That work is
-/// tracked as a follow-up. For now we:
-///
-/// * detect support via [`gpm_is_supported`] so the TUI and exporter can
-///   show a "GPM-capable" hint without emitting potentially wrong numbers;
-/// * return `None` from the collection path so the gauge metrics are
-///   omitted entirely (Prometheus convention for "no data") rather than
-///   silently publishing zeros.
+/// tracked as a follow-up. For now a supported device yields an empty
+/// [`GpmMetrics`] so the TUI and exporter can show a "GPM-capable" hint
+/// without emitting potentially wrong numbers, and an unsupported one
+/// yields `None` so the gauge metrics are omitted entirely (Prometheus
+/// convention for "no data") rather than silently publishing zeros.
 ///
 /// When the two-sample implementation lands we will populate
 /// [`GpmMetrics::sm_occupancy`] and
 /// [`GpmMetrics::memory_bandwidth_utilization`] here.
-#[allow(dead_code)] // The reader goes through `HardwareDetailCache::gpm_metrics`.
-pub fn collect_gpm_metrics(device: &nvml_wrapper::Device) -> Option<GpmMetrics> {
-    gpm_metrics_for(gpm_is_supported(device))
-}
-
-/// The GPM value for a device whose support flag is already known.
 fn gpm_metrics_for(supported: bool) -> Option<GpmMetrics> {
     if !supported {
         return None;
@@ -437,14 +409,6 @@ fn gpm_metrics_for(supported: bool) -> Option<GpmMetrics> {
     // follow-up. Return a populated struct so the TUI can indicate
     // "GPM-capable" without pretending specific numeric values are known.
     Some(GpmMetrics::default())
-}
-
-/// Attempt to fetch a GPM support signal without going through the NVML
-/// API, failing closed. Used exclusively by unit tests that need a
-/// deterministic "unsupported" reading without a real device handle.
-#[allow(dead_code)]
-fn err_unsupported() -> NvmlError {
-    NvmlError::NotSupported
 }
 
 #[cfg(test)]
@@ -655,28 +619,5 @@ mod tests {
         // canary that will fail if we forget to bump this constant when a
         // future NVML release raises the cap.
         assert_eq!(NVML_NVLINK_MAX_LINKS, 18);
-    }
-
-    #[test]
-    fn wrapper_enum_mapping_covers_every_variant() {
-        // Guard against new IntDeviceType variants silently collapsing to
-        // Unknown. If nvml-wrapper introduces a new variant, this test
-        // fails until we extend `nvlink_remote_type_from_wrapper`.
-        assert_eq!(
-            nvlink_remote_type_from_wrapper(IntDeviceType::Gpu),
-            NvLinkRemoteType::Gpu
-        );
-        assert_eq!(
-            nvlink_remote_type_from_wrapper(IntDeviceType::Ibmnpu),
-            NvLinkRemoteType::IbmNpu
-        );
-        assert_eq!(
-            nvlink_remote_type_from_wrapper(IntDeviceType::Switch),
-            NvLinkRemoteType::Switch
-        );
-        assert_eq!(
-            nvlink_remote_type_from_wrapper(IntDeviceType::Unknown),
-            NvLinkRemoteType::Unknown
-        );
     }
 }

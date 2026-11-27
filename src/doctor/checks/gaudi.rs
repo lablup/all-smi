@@ -19,7 +19,7 @@ use std::time::Duration;
 
 #[cfg(target_os = "linux")]
 use crate::doctor::exec::{try_exec, which};
-use crate::doctor::types::{Check, CheckCtx, CheckResult, Severity};
+use crate::doctor::types::{Check, CheckCtx, CheckResult};
 
 static CHECKS: &[&Check] = &[&HLSMI_BINARY, &DEVICE_NODES, &DRIVER];
 
@@ -30,21 +30,18 @@ pub fn checks() -> &'static [&'static Check] {
 static HLSMI_BINARY: Check = Check {
     id: "gaudi.hlsmi",
     title: "hl-smi binary",
-    severity_on_fail: Severity::Warn,
     run: check_hlsmi,
 };
 
 static DEVICE_NODES: Check = Check {
     id: "gaudi.devices",
     title: "Gaudi device nodes",
-    severity_on_fail: Severity::Warn,
     run: check_devices,
 };
 
 static DRIVER: Check = Check {
     id: "gaudi.driver",
     title: "Habana driver version",
-    severity_on_fail: Severity::Info,
     run: check_driver,
 };
 

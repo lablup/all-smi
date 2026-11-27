@@ -148,8 +148,8 @@ pub fn list_hwmon_dirs(device_dir: &Path) -> Vec<PathBuf> {
 /// absent), so we try temp1 first then fall back sequentially through
 /// temp21 to cover both i915 (temp1 = package) and xe (temp2 = package)
 /// without driver-specific branching.
-// Lists the directory itself; the reader uses the `_in` form over a held list.
-#[allow(dead_code)]
+// The reader uses the `_in` form over a held list; tests list the directory here.
+#[cfg(test)]
 pub fn read_temperature_celsius(device_dir: &Path) -> u32 {
     read_temperature_celsius_in(&list_hwmon_dirs(device_dir))
 }
@@ -171,8 +171,8 @@ pub fn read_temperature_celsius_in(hwmon_dirs: &[PathBuf]) -> u32 {
 /// Walk `device/hwmon/hwmon*/power1_average` (microwatts). Returns the
 /// first parseable value divided by 1_000_000 (W). On absence returns
 /// `0.0`.
-// Lists the directory itself; the reader uses the `_in` form over a held list.
-#[allow(dead_code)]
+// The reader uses the `_in` form over a held list; tests list the directory here.
+#[cfg(test)]
 pub fn read_power_watts(device_dir: &Path) -> f64 {
     read_power_watts_in(&list_hwmon_dirs(device_dir))
 }
@@ -190,8 +190,8 @@ pub fn read_power_watts_in(hwmon_dirs: &[PathBuf]) -> f64 {
 /// first parseable value. The xe driver exposes cumulative energy
 /// counters instead of instantaneous power — the caller delta-tracks
 /// across samples to derive watts.
-// Lists the directory itself; the reader uses the `_in` form over a held list.
-#[allow(dead_code)]
+// The reader uses the `_in` form over a held list; tests list the directory here.
+#[cfg(test)]
 pub fn read_energy_uj(device_dir: &Path) -> u64 {
     read_energy_uj_in(&list_hwmon_dirs(device_dir))
 }
@@ -207,8 +207,8 @@ pub fn read_energy_uj_in(hwmon_dirs: &[PathBuf]) -> u64 {
 
 /// Walk `device/hwmon/hwmon*/fan1_input` (RPM). Returns the first
 /// parseable non-zero value.
-// Lists the directory itself; the reader uses the `_in` form over a held list.
-#[allow(dead_code)]
+// The reader uses the `_in` form over a held list; tests list the directory here.
+#[cfg(test)]
 pub fn read_fan_rpm(device_dir: &Path) -> Option<u32> {
     read_fan_rpm_in(&list_hwmon_dirs(device_dir))
 }

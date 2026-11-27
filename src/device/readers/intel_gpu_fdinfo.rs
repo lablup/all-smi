@@ -376,9 +376,9 @@ pub struct GpuProcessUsage {
 /// with two `read_dir` and one `read_link` per fd. On a busy host
 /// with 1k processes and ~10 fds each this is well under 10ms; matches
 /// what the AMD reader does via `libamdgpu_top::FdInfoStat`.
-// Walk-then-fold form of `fold_process_usage`, kept for library consumers
-// and the fixture tests; the reader folds a scan it shares across a tick.
-#[allow(dead_code)]
+// Walk-then-fold form of `fold_process_usage` for the fixture tests; the
+// reader folds a scan it shares across a tick.
+#[cfg(test)]
 pub fn collect_intel_gpu_processes(
     intel_drm_basenames: &HashMap<String, usize>,
     proc_root: &Path,
@@ -406,9 +406,9 @@ pub fn collect_intel_gpu_processes(
 /// correct for per-process rows but would double count a card-level
 /// total. Fds without a client id cannot be deduped and are credited
 /// per fdinfo path, matching the collector's safety net.
-// Walk-then-fold form of `fold_vram_by_card`; see
+// Walk-then-fold form of `fold_vram_by_card` for the fixture tests; see
 // `collect_intel_gpu_processes`.
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn sum_vram_by_card_from_fdinfo(
     intel_drm_basenames: &HashMap<String, usize>,
     proc_root: &Path,
@@ -424,11 +424,7 @@ pub use scan::{DrmFdRecord, fold_process_usage, fold_vram_by_card, scan_intel_dr
 
 #[path = "intel_gpu_fdinfo/enrichment.rs"]
 mod enrichment;
-#[allow(unused_imports)] // `build_*` are for library consumers only.
-pub use enrichment::{
-    build_intel_gpu_rows, build_intel_process_infos, intel_gpu_rows_from_usages,
-    intel_process_infos_from_usages,
-};
+pub use enrichment::{intel_gpu_rows_from_usages, intel_process_infos_from_usages};
 
 #[cfg(test)]
 #[path = "intel_gpu_fdinfo/tests.rs"]

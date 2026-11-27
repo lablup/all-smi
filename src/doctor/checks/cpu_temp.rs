@@ -19,14 +19,13 @@
 use crate::device::cpu_linux::{
     ASUS_WMI_SENSORS_DRIVER, CpuTempResolution, TempRule, cpu_temp_status,
 };
-use crate::doctor::types::{Check, CheckCtx, CheckResult, Severity};
+use crate::doctor::types::{Check, CheckCtx, CheckResult};
 #[cfg(target_os = "linux")]
 use crate::parsing::common::strip_control_chars;
 
 pub(super) static CPU_TEMP: Check = Check {
     id: "platform.cpu_temp",
     title: "CPU temperature sensor",
-    severity_on_fail: Severity::Info,
     run: check_cpu_temp,
 };
 

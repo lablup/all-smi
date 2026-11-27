@@ -76,12 +76,6 @@ pub struct GraphLayout {
     /// should walk them. Outer Vec is the NUMA zone, inner Vec is the
     /// GPU slots inside that zone (row-major, `numa_column_count` wide).
     pub numa_groups: Vec<NumaGroup>,
-    /// Width cells the graph will actually use. Reserved for a future
-    /// iteration that centres the summary footer under the drawn boxes
-    /// or right-aligns the mode indicator; kept in the plan today so
-    /// the layout-to-render contract is already in place.
-    #[allow(dead_code)]
-    pub used_width: u16,
 }
 
 /// GPUs assigned to a single NUMA zone.
@@ -121,29 +115,17 @@ impl GraphLayout {
             .collect();
 
         // Horizontal stacking: sum the box widths plus inter-box gaps.
-        // Guard `sum` against an empty list so `used_width` stays at 0.
         let horizontal_width: u16 = numa_groups
             .iter()
             .map(|grp| numa_box_width_cells(grp.gpu_slots.len() as u32))
             .sum::<u16>()
             + numa_groups.len().saturating_sub(1) as u16 * 3;
 
-        let (stacking, used_width) =
-            if numa_groups.len() <= 1 || horizontal_width <= available_width {
-                (
-                    BoxStacking::Horizontal,
-                    horizontal_width.min(available_width),
-                )
-            } else {
-                // Vertical stacking: width is the widest single NUMA box.
-                let max_width = numa_groups
-                    .iter()
-                    .map(|grp| numa_box_width_cells(grp.gpu_slots.len() as u32))
-                    .max()
-                    .unwrap_or(0)
-                    .min(available_width);
-                (BoxStacking::Vertical, max_width)
-            };
+        let stacking = if numa_groups.len() <= 1 || horizontal_width <= available_width {
+            BoxStacking::Horizontal
+        } else {
+            BoxStacking::Vertical
+        };
 
         // Deterministic ordering for repeatable rendering and tests:
         // by numeric NUMA id, with `None` last.
@@ -157,7 +139,6 @@ impl GraphLayout {
         Self {
             stacking,
             numa_groups,
-            used_width,
         }
     }
 }
@@ -263,14 +244,6 @@ mod tests {
         let layout = GraphLayout::plan(&model, 200);
         let numa_order: Vec<_> = layout.numa_groups.iter().map(|g| g.numa_node).collect();
         assert_eq!(numa_order, vec![Some(0), Some(1), None]);
-    }
-
-    #[test]
-    fn used_width_never_exceeds_available_width() {
-        let gpus: Vec<_> = (0..8).map(|i| mk_gpu(i, Some((i as i32) / 4))).collect();
-        let model = TopologyModel::from_host("h", &gpus);
-        let layout = GraphLayout::plan(&model, 50);
-        assert!(layout.used_width <= 50, "{}", layout.used_width);
     }
 
     #[test]

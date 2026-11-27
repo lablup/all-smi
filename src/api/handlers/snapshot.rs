@@ -37,10 +37,6 @@ use crate::snapshot::{SNAPSHOT_SCHEMA_VERSION, Snapshot};
 
 #[cfg(test)]
 pub(crate) use super::snapshot_filter::SERIALIZE_COUNT;
-// `filter_snapshot_value` stays exported for library callers; the binary
-// target, whose module tree is private, has no use for it.
-#[allow(unused_imports)]
-pub use super::snapshot_filter::filter_snapshot_value;
 pub use super::snapshot_filter::{SectionFilter, parse_include, serialize_filtered};
 
 /// Per-reader timeout used when `/snapshot` forces a fresh collection.

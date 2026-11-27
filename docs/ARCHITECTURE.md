@@ -648,8 +648,6 @@ pub trait DataCollectionStrategy: Send + Sync {
         data: CollectionData,
         config: &CollectionConfig
     );
-    fn strategy_type(&self) -> &str;
-    async fn is_ready(&self) -> bool;
 }
 ```
 
@@ -657,7 +655,6 @@ The trait defines a unified interface for all data collection strategies, enabli
 - Polymorphic behavior through dynamic dispatch
 - Consistent error handling via `CollectionResult`
 - Flexible state updates
-- Strategy identification for logging
 
 ##### 2. Concrete Strategy Implementations
 

@@ -17,7 +17,7 @@
 use std::time::Duration;
 
 use crate::doctor::exec::{try_exec, which};
-use crate::doctor::types::{Check, CheckCtx, CheckResult, Severity};
+use crate::doctor::types::{Check, CheckCtx, CheckResult};
 
 static CHECKS: &[&Check] = &[&RBLNSTAT, &DRIVER];
 
@@ -28,14 +28,12 @@ pub fn checks() -> &'static [&'static Check] {
 static RBLNSTAT: Check = Check {
     id: "rebellions.rblnstat",
     title: "rbln-stat binary",
-    severity_on_fail: Severity::Warn,
     run: check_rblnstat,
 };
 
 static DRIVER: Check = Check {
     id: "rebellions.driver",
     title: "Rebellions driver",
-    severity_on_fail: Severity::Info,
     run: check_driver,
 };
 

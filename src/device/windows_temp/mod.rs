@@ -50,7 +50,6 @@ use std::time::Instant;
 
 /// HRESULT error code for WBEM_E_NOT_FOUND (0x8004100C)
 /// This error indicates the WMI class doesn't exist in the namespace.
-#[allow(dead_code)]
 const WBEM_E_NOT_FOUND: i32 = -0x7FFBEFEC_i32; // 0x8004100C as signed
 
 /// Cached CPU vendor, determined once at startup.

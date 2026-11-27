@@ -20,7 +20,7 @@ use std::time::Duration;
 
 #[cfg(target_os = "linux")]
 use crate::doctor::exec::try_exec;
-use crate::doctor::types::{Check, CheckCtx, CheckResult, Severity};
+use crate::doctor::types::{Check, CheckCtx, CheckResult};
 
 mod gpu_metrics;
 
@@ -43,21 +43,18 @@ pub fn checks() -> &'static [&'static Check] {
 static ROCM_VERSION: Check = Check {
     id: "amd.rocm.version",
     title: "ROCm version",
-    severity_on_fail: Severity::Warn,
     run: check_rocm,
 };
 
 static LIBAMDGPU_TOP_ABI: Check = Check {
     id: "amd.libamdgpu_top.abi",
     title: "AMD runtime plugin",
-    severity_on_fail: Severity::Warn,
     run: check_libamdgpu_top,
 };
 
 static DRI_PERMS: Check = Check {
     id: "amd.dri.perms",
     title: "/dev/dri permissions",
-    severity_on_fail: Severity::Warn,
     run: check_dri_perms,
 };
 
@@ -66,35 +63,30 @@ static DRI_PERMS: Check = Check {
 static BUILD_GATE: Check = Check {
     id: "amd.build.target_env",
     title: "AMD build-time availability",
-    severity_on_fail: Severity::Warn,
     run: check_build_gate,
 };
 
 static ADL_LIBRARY: Check = Check {
     id: "amd.adl.library",
     title: "AMD ADL library (atiadlxx.dll)",
-    severity_on_fail: Severity::Info,
     run: check_adl_library,
 };
 
 static ADL_SENSORS: Check = Check {
     id: "amd.adl.sensors",
     title: "AMD ADL PMLog sensors",
-    severity_on_fail: Severity::Info,
     run: check_adl_sensors,
 };
 
 static ADL_ADAPTERS: Check = Check {
     id: "amd.adl.adapters",
     title: "AMD ADL adapter inventory",
-    severity_on_fail: Severity::Info,
     run: check_adl_adapters,
 };
 
 static ADL_PER_ADAPTER: Check = Check {
     id: "amd.adl.per_adapter",
     title: "AMD ADL per-adapter PMLog sampling",
-    severity_on_fail: Severity::Info,
     run: check_adl_per_adapter,
 };
 

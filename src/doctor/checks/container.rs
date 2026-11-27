@@ -21,7 +21,7 @@
 #[cfg(target_os = "linux")]
 use std::path::Path;
 
-use crate::doctor::types::{Check, CheckCtx, CheckResult, Severity};
+use crate::doctor::types::{Check, CheckCtx, CheckResult};
 #[cfg(target_os = "linux")]
 use crate::utils::runtime_environment::{ContainerRuntime, detect_container_environment};
 
@@ -34,21 +34,18 @@ pub fn checks() -> &'static [&'static Check] {
 static RUNTIME: Check = Check {
     id: "container.runtime",
     title: "Container runtime",
-    severity_on_fail: Severity::Info,
     run: check_runtime,
 };
 
 static CGROUP: Check = Check {
     id: "container.cgroup",
     title: "cgroup version + limits",
-    severity_on_fail: Severity::Info,
     run: check_cgroup,
 };
 
 static K8S_SA: Check = Check {
     id: "container.k8s_serviceaccount",
     title: "Kubernetes ServiceAccount token",
-    severity_on_fail: Severity::Info,
     run: check_k8s_sa,
 };
 

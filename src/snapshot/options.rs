@@ -74,16 +74,6 @@ impl Default for SnapshotOptions {
 }
 
 impl SnapshotOptions {
-    /// Construct options from parsed CLI args.
-    ///
-    /// Thin wrapper over [`Self::from_args_with_settings`] with no
-    /// config layer — kept as the legacy entry point for library
-    /// consumers and tests that never need the `[snapshot]` section.
-    #[allow(dead_code)]
-    pub fn from_args(args: &SnapshotArgs) -> Result<Self> {
-        Self::from_args_with_settings(args, None)
-    }
-
     /// Construct options merging CLI args with `[snapshot]` config
     /// defaults. Precedence (highest → lowest):
     ///
@@ -93,9 +83,8 @@ impl SnapshotOptions {
     /// * Compiled defaults (json, auto-TTY pretty)
     ///
     /// Called from `main.rs` once the merged [`SnapshotSettings`] are
-    /// available. The legacy [`Self::from_args`] wrapper feeds `None`
-    /// for callers (tests, library consumers) that do not care about
-    /// the config layer.
+    /// available. Callers that do not care about the config layer pass
+    /// `None`.
     pub fn from_args_with_settings(
         args: &SnapshotArgs,
         settings: Option<&SnapshotSettings>,

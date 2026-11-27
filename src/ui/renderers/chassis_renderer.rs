@@ -34,7 +34,10 @@ use super::gpu_renderer::format_hostname_with_scroll;
 /// `price_per_kwh` comes from the runtime [`EnergyConfig`].  When
 /// `cost_visible()` is false the renderer drops the `|  $cost` half
 /// of the line.
-#[allow(dead_code)] // Public hostname-keyed API retained for downstream callers.
+///
+/// Hostname-keyed form of [`print_chassis_energy_row_for_host`], used by
+/// the tests.
+#[cfg(test)]
 pub fn print_chassis_energy_row<W: Write>(
     stdout: &mut W,
     info: &ChassisInfo,
@@ -46,9 +49,9 @@ pub fn print_chassis_energy_row<W: Write>(
 
 /// Render the energy row for an explicitly selected accounting host.
 ///
-/// Remote collection keys chassis energy by its configured endpoint, while
-/// the public [`print_chassis_energy_row`] keeps its established hostname
-/// behavior for local/API callers.
+/// Remote collection keys chassis energy by its configured endpoint rather
+/// than by the chassis hostname.
+#[allow(dead_code)] // Called by the binary-only `view` module; the lib target has none.
 pub(crate) fn print_chassis_energy_row_for_host<W: Write>(
     stdout: &mut W,
     integrator: &PowerIntegrator,

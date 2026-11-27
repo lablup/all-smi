@@ -18,15 +18,13 @@ use rand::{RngExt, rng};
 
 #[derive(Clone)]
 pub struct CpuMetrics {
-    #[allow(dead_code)]
     pub model: String,
     pub utilization: f32,
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Not read by the mock server; left for a mock-specific cleanup.
     pub socket_count: u32,
     pub core_count: u32,
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Not read by the mock server; left for a mock-specific cleanup.
     pub thread_count: u32,
-    #[allow(dead_code)]
     pub frequency_mhz: u32,
     pub temperature_celsius: Option<u32>,
     pub power_consumption_watts: Option<f32>,
@@ -35,7 +33,7 @@ pub struct CpuMetrics {
     // Apple Silicon specific fields
     pub p_core_count: Option<u32>,
     pub e_core_count: Option<u32>,
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Not read by the mock server; left for a mock-specific cleanup.
     pub gpu_core_count: Option<u32>,
     pub p_core_utilization: Option<f32>,
     pub e_core_utilization: Option<f32>,

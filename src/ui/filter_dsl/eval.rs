@@ -29,7 +29,6 @@ use super::parser::{Expr, Field, Value};
 ///
 /// Implementations must stick to read-only accessors so the evaluator
 /// can be called during rendering without synchronisation.
-#[allow(dead_code)]
 pub trait DeviceRowView {
     fn temp_field(&self) -> Option<f64> {
         None

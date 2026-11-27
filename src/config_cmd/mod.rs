@@ -26,7 +26,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::cli::{ConfigAction, ConfigPrintArgs, ConfigPrintFormat, ConfigValidateArgs};
-use crate::common::config_file::{self, ConfigError, Settings, SocketSetting, escape_printable};
+use crate::common::config_file::{self, ConfigError, escape_printable};
 use crate::common::paths;
 use crate::common::secure_write;
 
@@ -198,30 +198,5 @@ fn exit_code_for(err: &ConfigError) -> i32 {
         ConfigError::SchemaVersion { .. } => 2,
         ConfigError::Semantic(_) => 2,
         ConfigError::UnknownKey(_) => 2,
-    }
-}
-
-/// Redact secrets in-place for `print` output. Idempotent on missing
-/// values. Callers clone `Settings` before invoking this — the loader
-/// keeps the original intact. Currently unused (the TOML/JSON
-/// renderers redact inline); kept for future call sites (e.g. a
-/// structured-log dump of the merged config).
-#[allow(dead_code)]
-pub fn redact_secrets(s: &mut Settings) {
-    if !s.alerts.webhook_url.is_empty() {
-        s.alerts.webhook_url = "<redacted>".to_string();
-    }
-}
-
-/// Helper for callers who need only the socket setting as a displayable
-/// string. Returns `"false"`, `"true"`, or the explicit path. Currently
-/// unused; kept as a deliberate helper for future CLI echo / doctor
-/// callers that need the same formatting the renderer uses.
-#[allow(dead_code)]
-pub fn socket_display(s: &SocketSetting) -> String {
-    match s {
-        SocketSetting::Unset => "false".to_string(),
-        SocketSetting::Bool(b) => b.to_string(),
-        SocketSetting::Path(p) => format!("\"{p}\""),
     }
 }

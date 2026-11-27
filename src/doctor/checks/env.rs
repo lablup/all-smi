@@ -15,7 +15,7 @@
 //! `env.*` checks — summarise which of the relevant environment-variable
 //! families (ALL_SMI_*, CUDA_*, ROCR_*, TPU_*, HL_*) are present.
 
-use crate::doctor::types::{Check, CheckCtx, CheckResult, Severity};
+use crate::doctor::types::{Check, CheckCtx, CheckResult};
 
 static CHECKS: &[&Check] = &[&ALL_SMI, &CUDA, &ROCR, &TPU, &HL];
 
@@ -26,35 +26,30 @@ pub fn checks() -> &'static [&'static Check] {
 static ALL_SMI: Check = Check {
     id: "env.all_smi",
     title: "ALL_SMI_* environment variables",
-    severity_on_fail: Severity::Info,
     run: check_all_smi,
 };
 
 static CUDA: Check = Check {
     id: "env.cuda",
     title: "CUDA_* environment variables",
-    severity_on_fail: Severity::Info,
     run: check_cuda,
 };
 
 static ROCR: Check = Check {
     id: "env.rocr",
     title: "ROCR_* / HIP_* environment variables",
-    severity_on_fail: Severity::Info,
     run: check_rocr,
 };
 
 static TPU: Check = Check {
     id: "env.tpu",
     title: "TPU_* environment variables",
-    severity_on_fail: Severity::Info,
     run: check_tpu,
 };
 
 static HL: Check = Check {
     id: "env.hl",
     title: "HL_* / HABANA_* environment variables",
-    severity_on_fail: Severity::Info,
     run: check_hl,
 };
 

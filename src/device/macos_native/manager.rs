@@ -232,7 +232,7 @@ pub struct NativeMetricsConfig {
     /// Number of samples to average (smooths out transient variations)
     pub sample_count: usize,
     /// Enable SMC temperature collection
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Read by `collector_loop`, which only the binary starts.
     pub enable_smc: bool,
 }
 
@@ -281,7 +281,6 @@ pub struct CollectionTimings {
 /// Manages native metrics collection for Apple Silicon
 pub struct NativeMetricsManager {
     config: NativeMetricsConfig,
-    #[allow(dead_code)]
     ioreport: Mutex<Option<IOReport>>,
     /// The previous IOReport sample and when it was taken. Only touched under
     /// `collection_lock`.
@@ -339,7 +338,7 @@ impl NativeMetricsManager {
     }
 
     /// Start background collection
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Used on the binary's macOS path; the library target never starts the manager.
     pub fn start(&self) -> Result<(), Box<dyn std::error::Error>> {
         if self.is_running.load(Ordering::Acquire) {
             return Ok(());
@@ -385,7 +384,7 @@ impl NativeMetricsManager {
     }
 
     /// Background collection loop
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Used on the binary's macOS path; the library target never starts the manager.
     fn collector_loop(
         mut ioreport: IOReport,
         config: NativeMetricsConfig,
@@ -495,20 +494,20 @@ impl NativeMetricsManager {
     }
 
     /// Get the latest collected metrics
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Used on the binary's macOS path; the library target never starts the manager.
     pub fn get_latest_data(&self) -> Result<NativeMetricsData, Box<dyn std::error::Error>> {
         let guard = self.latest_data.read().map_err(|_| "Lock poisoned")?;
         guard.clone().ok_or_else(|| "No data available yet".into())
     }
 
     /// Get the latest data as a Result for consistent API usage
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Used on the binary's macOS path; the library target never starts the manager.
     pub fn get_latest_data_result(&self) -> Result<NativeMetricsData, Box<dyn std::error::Error>> {
         self.get_latest_data()
     }
 
     /// Check if data is available
-    #[allow(dead_code)]
+    #[allow(dead_code)] // macOS-only API with no caller; not verifiable on a Linux build.
     pub fn has_data(&self) -> bool {
         self.latest_data
             .read()
@@ -700,7 +699,7 @@ impl NativeMetricsManager {
     /// cache, or `None` before the first one.
     ///
     /// Read by `tests/perf_tick_stages.rs`; the binary never asks.
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Library API read by tests/perf_tick_stages.rs.
     pub fn last_collection_timings(&self) -> Option<CollectionTimings> {
         self.last_timings.lock().ok().and_then(|guard| *guard)
     }
@@ -764,7 +763,6 @@ pub fn initialize_native_metrics_manager(
 ///
 /// Unused by the binary, which owns the manager for the whole process and
 /// tears it down with [`shutdown_native_metrics_manager`] instead.
-#[allow(dead_code)]
 pub fn acquire_native_metrics_manager(interval_ms: u64) -> Result<(), Box<dyn std::error::Error>> {
     let mut slot = NATIVE_METRICS_MANAGER.lock().map_err(|_| "Lock poisoned")?;
     ensure_manager(&mut slot, interval_ms)?;
@@ -774,7 +772,6 @@ pub fn acquire_native_metrics_manager(interval_ms: u64) -> Result<(), Box<dyn st
 
 /// Release an owning handle taken by [`acquire_native_metrics_manager`],
 /// tearing the manager down once the last one is gone.
-#[allow(dead_code)]
 pub fn release_native_metrics_manager() {
     let Ok(mut slot) = NATIVE_METRICS_MANAGER.lock() else {
         return;
@@ -840,7 +837,7 @@ pub fn get_native_metrics_manager() -> Option<Arc<NativeMetricsManager>> {
 /// handle, so it belongs at process exit rather than at the end of one owner's
 /// life. Owners with a defined lifetime should use
 /// [`acquire_native_metrics_manager`] / [`release_native_metrics_manager`].
-#[allow(dead_code)]
+#[allow(dead_code)] // Called by main.rs; the library target never calls it.
 pub fn shutdown_native_metrics_manager() {
     let manager = match NATIVE_METRICS_MANAGER.lock() {
         Ok(mut slot) => {
@@ -864,7 +861,7 @@ fn finish_shutdown(manager: Option<Arc<NativeMetricsManager>>) {
 }
 
 /// Check if native metrics have received first data
-#[allow(dead_code)]
+#[allow(dead_code)] // macOS-only API with no caller; not verifiable on a Linux build.
 pub fn has_native_metrics_data() -> bool {
     FIRST_DATA_RECEIVED.load(Ordering::Relaxed)
 }

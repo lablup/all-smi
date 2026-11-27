@@ -16,7 +16,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// Maximum number of devices supported per platform
@@ -232,16 +232,6 @@ pub struct DeviceStaticInfo {
 }
 
 impl DeviceStaticInfo {
-    /// Creates a new DeviceStaticInfo instance
-    #[allow(dead_code)]
-    pub fn new(name: String, uuid: Option<String>) -> Self {
-        Self {
-            name,
-            uuid,
-            detail: HashMap::new(),
-        }
-    }
-
     /// Creates a new DeviceStaticInfo with pre-populated details
     pub fn with_details(
         name: String,
@@ -249,38 +239,6 @@ impl DeviceStaticInfo {
         detail: HashMap<String, String>,
     ) -> Self {
         Self { name, uuid, detail }
-    }
-}
-
-/// Trait for platform-specific extensions to DeviceStaticInfo
-#[allow(dead_code)]
-pub trait StaticDeviceInfoExt {
-    /// Creates a DeviceStaticInfo from platform-specific data
-    fn from_platform_specific(data: &impl PlatformData) -> Self;
-
-    /// Returns the library/driver name for this platform
-    fn get_library_name() -> &'static str;
-
-    /// Extracts the library/driver version if available
-    fn get_library_version(&self) -> Option<String>;
-}
-
-/// Marker trait for platform-specific data structures
-#[allow(dead_code)]
-pub trait PlatformData {}
-
-/// Helper trait for initializing static caches
-#[allow(dead_code)]
-pub trait CacheInitializer {
-    /// Ensures the static cache is initialized, returning an error if initialization fails
-    fn ensure_static_cache_initialized(&self) -> Result<(), Box<dyn std::error::Error>>;
-
-    /// Validates the device count against MAX_DEVICES limit
-    fn validate_device_count(count: usize) -> Result<(), Box<dyn std::error::Error>> {
-        if count > MAX_DEVICES {
-            return Err(format!("Too many devices detected: {count} (max: {MAX_DEVICES})").into());
-        }
-        Ok(())
     }
 }
 
@@ -342,107 +300,6 @@ impl DetailBuilder {
     }
 }
 
-/// Helper function for getting or initializing a library version cache
-///
-/// This function ensures that expensive version extraction operations are performed
-/// only once, caching the result for subsequent calls.
-///
-/// # Examples
-///
-/// ```ignore
-/// static DRIVER_VERSION: OnceLock<Option<String>> = OnceLock::new();
-///
-/// let version = get_or_init_library_version(&DRIVER_VERSION, || {
-///     // Expensive operation to extract driver version
-///     extract_driver_version_from_system()
-/// });
-/// ```
-#[allow(dead_code)]
-pub fn get_or_init_library_version<F>(
-    cache: &OnceLock<Option<String>>,
-    extractor: F,
-) -> Option<String>
-where
-    F: FnOnce() -> Option<String>,
-{
-    cache.get_or_init(extractor).clone()
-}
-
-/// Helper function for parsing PCI bus information from various formats
-///
-/// Handles common PCI bus ID formats:
-/// - "0000:03:00.0" (standard format)
-/// - "03:00.0" (short format)
-/// - "PCI:0:3:0" (alternative format)
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-pub struct PciInfo {
-    pub bus_id: String,
-    pub domain: Option<u16>,
-    pub bus: u8,
-    pub device: u8,
-    pub function: u8,
-}
-
-impl PciInfo {
-    /// Parses a PCI bus ID string into structured information
-    #[allow(dead_code)]
-    pub fn parse(pci_string: &str) -> Result<Self, String> {
-        // Handle standard format: "0000:03:00.0" or "03:00.0"
-        if pci_string.contains(':') && pci_string.contains('.') {
-            let parts: Vec<&str> = pci_string.split(':').collect();
-
-            let (domain, bus_str, dev_func) = if parts.len() == 3 {
-                // Format: "0000:03:00.0"
-                let domain = u16::from_str_radix(parts[0], 16)
-                    .map_err(|_| format!("Invalid PCI domain: {}", parts[0]))?;
-                (Some(domain), parts[1], parts[2])
-            } else if parts.len() == 2 {
-                // Format: "03:00.0"
-                (None, parts[0], parts[1])
-            } else {
-                return Err(format!("Invalid PCI format: {pci_string}"));
-            };
-
-            let bus = u8::from_str_radix(bus_str, 16)
-                .map_err(|_| format!("Invalid PCI bus: {bus_str}"))?;
-
-            let dev_func_parts: Vec<&str> = dev_func.split('.').collect();
-            if dev_func_parts.len() != 2 {
-                return Err(format!("Invalid PCI device.function: {dev_func}"));
-            }
-
-            let device = u8::from_str_radix(dev_func_parts[0], 16)
-                .map_err(|_| format!("Invalid PCI device: {}", dev_func_parts[0]))?;
-            let function = u8::from_str_radix(dev_func_parts[1], 16)
-                .map_err(|_| format!("Invalid PCI function: {}", dev_func_parts[1]))?;
-
-            Ok(Self {
-                bus_id: pci_string.to_string(),
-                domain,
-                bus,
-                device,
-                function,
-            })
-        } else {
-            Err(format!("Unsupported PCI format: {pci_string}"))
-        }
-    }
-
-    /// Formats the PCI info as a standard bus ID string
-    #[allow(dead_code)]
-    pub fn to_standard_format(&self) -> String {
-        if let Some(domain) = self.domain {
-            format!(
-                "{domain:04x}:{:02x}:{:02x}.{}",
-                self.bus, self.device, self.function
-            )
-        } else {
-            format!("{:02x}:{:02x}.{}", self.bus, self.device, self.function)
-        }
-    }
-}
-
 /// Macro for building a detail HashMap with optional values
 ///
 /// This macro simplifies the common pattern of building a HashMap where
@@ -489,8 +346,6 @@ macro_rules! build_detail_map {
 #[macro_export]
 macro_rules! cache_device_static_info {
     ($cache:expr_2021, $key_type:ty, $discovery_fn:expr_2021) => {{
-        use $crate::device::readers::common_cache::CacheInitializer;
-
         if $cache.get().is_some() {
             return Ok(());
         }
@@ -498,7 +353,11 @@ macro_rules! cache_device_static_info {
         let devices = $discovery_fn?;
 
         // Validate device count
-        CacheInitializer::validate_device_count(devices.len())?;
+        let count = devices.len();
+        let max = $crate::device::readers::common_cache::MAX_DEVICES;
+        if count > max {
+            return Err(format!("Too many devices detected: {count} (max: {max})").into());
+        }
 
         let cache_map = devices.into_iter().collect::<std::collections::HashMap<
             $key_type,
@@ -513,15 +372,6 @@ macro_rules! cache_device_static_info {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_device_static_info_creation() {
-        let info = DeviceStaticInfo::new("Test Device".to_string(), Some("uuid-123".to_string()));
-
-        assert_eq!(info.name, "Test Device");
-        assert_eq!(info.uuid, Some("uuid-123".to_string()));
-        assert!(info.detail.is_empty());
-    }
 
     #[test]
     fn test_detail_builder() {
@@ -540,28 +390,6 @@ mod tests {
         assert_eq!(details.get("PCI Bus ID"), Some(&"00:03.0".to_string()));
         assert_eq!(details.get("PCIe Generation"), Some(&"4".to_string()));
         assert_eq!(details.get("PCIe Link Width"), Some(&"x16".to_string()));
-    }
-
-    #[test]
-    fn test_pci_info_parsing() {
-        // Test standard format
-        let pci = PciInfo::parse("0000:03:00.0").unwrap();
-        assert_eq!(pci.domain, Some(0));
-        assert_eq!(pci.bus, 3);
-        assert_eq!(pci.device, 0);
-        assert_eq!(pci.function, 0);
-        assert_eq!(pci.to_standard_format(), "0000:03:00.0");
-
-        // Test short format
-        let pci = PciInfo::parse("03:00.1").unwrap();
-        assert_eq!(pci.domain, None);
-        assert_eq!(pci.bus, 3);
-        assert_eq!(pci.device, 0);
-        assert_eq!(pci.function, 1);
-        assert_eq!(pci.to_standard_format(), "03:00.1");
-
-        // Test invalid format
-        assert!(PciInfo::parse("invalid").is_err());
     }
 
     #[test]
@@ -698,5 +526,45 @@ mod tests {
         assert_eq!(details.get("Name"), Some(&"Device".to_string()));
         assert_eq!(details.get("UUID"), None);
         assert_eq!(details.get("Temperature"), Some(&"75°C".to_string()));
+    }
+
+    type Cache = std::sync::OnceLock<HashMap<u32, DeviceStaticInfo>>;
+    type MacroResult = Result<(), Box<dyn std::error::Error>>;
+
+    fn info(i: u32) -> (u32, DeviceStaticInfo) {
+        (
+            i,
+            DeviceStaticInfo {
+                name: format!("dev{i}"),
+                uuid: None,
+                detail: HashMap::new(),
+            },
+        )
+    }
+
+    fn fill(cache: &Cache, count: u32) -> MacroResult {
+        crate::cache_device_static_info!(
+            cache,
+            u32,
+            Ok::<_, Box<dyn std::error::Error>>((0..count).map(info).collect::<Vec<_>>())
+        )
+    }
+
+    #[test]
+    fn cache_macro_fills_the_cache_once() {
+        let cache = Cache::new();
+        fill(&cache, 2).unwrap();
+        assert_eq!(cache.get().map(HashMap::len), Some(2));
+        // A second call returns early and keeps the first map.
+        fill(&cache, 5).unwrap();
+        assert_eq!(cache.get().map(HashMap::len), Some(2));
+    }
+
+    #[test]
+    fn cache_macro_rejects_too_many_devices() {
+        let cache = Cache::new();
+        let err = fill(&cache, MAX_DEVICES as u32 + 1).unwrap_err();
+        assert!(err.to_string().contains("Too many devices detected"));
+        assert!(cache.get().is_none());
     }
 }

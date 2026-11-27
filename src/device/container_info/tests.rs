@@ -117,9 +117,6 @@ fn test_container_detection() {
         if let Some(mem_limit) = info.memory_limit_bytes {
             println!("Memory limit: {} MB", mem_limit / 1024 / 1024);
         }
-        if let Some(mem_usage) = info.memory_usage_bytes {
-            println!("Memory usage: {} MB", mem_usage / 1024 / 1024);
-        }
     } else {
         println!("Not running in a container");
     }

@@ -49,10 +49,6 @@ const VALUE_WIDTH: usize = 7;
 /// Fixed spacing (separators between columns).
 const SPACING: usize = 3;
 
-/// Number of rows the remote sparkline panel occupies (header + 3 stat rows).
-#[allow(dead_code)]
-pub const PANEL_ROWS: usize = 4;
-
 /// Render the full-width remote Live Statistics sparkline panel.
 ///
 /// The panel occupies 4 terminal rows:

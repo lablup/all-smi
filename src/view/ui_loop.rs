@@ -269,11 +269,7 @@ impl UiLoop {
                 self.previous_tab_scroll_offset = state.tab_scroll_offset;
                 self.resize_occurred = false;
 
-                let decisions = RenderDecisions {
-                    force_clear,
-                    should_render: true,
-                    animations_needed,
-                };
+                let decisions = RenderDecisions { force_clear };
 
                 (snapshot, decisions)
                 // `state` is dropped here -- lock released before frame composition
