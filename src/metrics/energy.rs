@@ -329,7 +329,6 @@ impl PowerIntegrator {
 
     /// Accumulated Joules for `key` in the current session (zeroed by
     /// [`PowerIntegrator::reset_session`]).
-    #[allow(dead_code)] // Consumed by the chassis / top-consumer panels (issue #191).
     pub fn session_joules(&self, key: &EnergyKey) -> f64 {
         self.devices
             .get(key)
@@ -339,7 +338,6 @@ impl PowerIntegrator {
 
     /// Accumulated Joules for `key` across the lifetime of the process
     /// (including any seed from the WAL replay). Used for Prometheus.
-    #[allow(dead_code)] // Consumed by the Prometheus exporter (issue #191).
     pub fn lifetime_joules(&self, key: &EnergyKey) -> f64 {
         self.devices
             .get(key)
@@ -462,12 +460,10 @@ impl EnergyAccountant {
         &self.integrator
     }
 
-    #[allow(dead_code)] // Consumed by the top-consumer panel (issue #191).
     pub fn session_started_at(&self) -> Instant {
         self.session_started_at
     }
 
-    #[allow(dead_code)] // Consumed by the top-consumer panel (issue #191).
     pub fn session_elapsed(&self) -> Duration {
         self.session_started_at.elapsed()
     }
@@ -483,7 +479,6 @@ impl EnergyAccountant {
     /// Seed the lifetime counter for `key` directly, used by the WAL
     /// replay path when a live sample arrives whose hash matches a
     /// previously-recorded entry.
-    #[allow(dead_code)] // Called via EnergyAccountant::integrator_mut() in tests.
     pub fn seed_lifetime(&mut self, key: EnergyKey, joules: f64) {
         self.integrator.seed_lifetime(key, joules);
     }

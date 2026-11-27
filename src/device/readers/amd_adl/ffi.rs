@@ -684,7 +684,6 @@ pub type Adl2MainControlCreate = unsafe extern "C" fn(
 /// point. Destroying it on a static's drop would run at an unspecified
 /// time relative to the driver unloading.
 #[cfg(target_os = "windows")]
-#[allow(dead_code)] // Declared for completeness; the context is never destroyed (see above).
 pub type Adl2MainControlDestroy = unsafe extern "C" fn(context: AdlContextHandle) -> c_int;
 
 /// `ADL2_Adapter_NumberOfAdapters_Get`.

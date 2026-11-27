@@ -12,26 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod api;
-mod app_state;
-mod cli;
-mod cli_config;
-mod cli_service;
-mod common;
 mod config_cmd;
-mod device;
-mod doctor;
-mod service_cmd;
-#[macro_use]
-mod parsing;
-mod metrics;
-mod network;
-mod record;
-mod snapshot;
-mod storage;
-mod ui;
-mod utils;
-mod view;
+
+use all_smi::{api, cli, common, device, doctor, record, service_cmd, snapshot, utils, view};
 
 use api::run_api_mode;
 use clap::FromArgMatches;

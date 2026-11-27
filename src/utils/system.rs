@@ -83,7 +83,6 @@ pub fn has_sudo_privileges() -> bool {
         .unwrap_or(false)
 }
 
-#[cfg_attr(target_os = "macos", allow(dead_code))] // main.rs skips the sudo check on macOS.
 pub fn ensure_sudo_permissions() {
     if cfg!(target_os = "macos") {
         // macOS uses native APIs (IOReport, SMC) that don't require sudo
@@ -156,7 +155,6 @@ pub fn ensure_sudo_permissions_for_api() -> bool {
     }
 }
 
-#[cfg_attr(target_os = "macos", allow(dead_code))] // main.rs skips the sudo check on macOS.
 pub fn ensure_sudo_permissions_with_fallback() -> bool {
     if cfg!(target_os = "macos") {
         // macOS uses native APIs (IOReport, SMC) that don't require sudo

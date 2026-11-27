@@ -46,7 +46,6 @@ pub trait MetricExporter {
     /// Standalone form for one exporter. The live render path goes through
     /// [`MetricExporter::export_into`], so the binary target itself never
     /// calls this; library callers and the tests do.
-    #[allow(dead_code)] // Library API used by tests/mig_integration_test.rs and tests/users_tab_integration_test.rs.
     fn export_metrics(&self) -> String {
         let mut builder = MetricBuilder::new();
         self.export_into(&mut builder);

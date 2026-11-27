@@ -20,7 +20,7 @@
 use serde_json::{Value as JsonValue, json};
 use std::fmt::Write;
 
-use crate::common::config_file::{Settings, SocketSetting};
+use all_smi::common::config_file::{Settings, SocketSetting};
 
 /// Convert a [`Settings`] into a TOML string that parses back into an
 /// equivalent `Settings`. Redacts `webhook_url` unless `show_secrets`
@@ -36,7 +36,7 @@ pub fn render_toml(settings: &Settings, show_secrets: bool) -> std::io::Result<S
     writeln!(
         &mut out,
         "schema_version = {}",
-        crate::common::config_file::SUPPORTED_SCHEMA_VERSION
+        all_smi::common::config_file::SUPPORTED_SCHEMA_VERSION
     )
     .ok();
     writeln!(&mut out).ok();
@@ -146,7 +146,7 @@ pub fn render_toml(settings: &Settings, show_secrets: bool) -> std::io::Result<S
     // unlikely event no home-like directory is resolvable.
     let wal_path_rendered = match &settings.energy.wal_path {
         Some(s) => s.clone(),
-        None => crate::metrics::energy_wal::resolve_wal_path(None)
+        None => all_smi::metrics::energy_wal::resolve_wal_path(None)
             .map(|p| p.display().to_string())
             .unwrap_or_default(),
     };
@@ -192,7 +192,7 @@ pub fn render_toml(settings: &Settings, show_secrets: bool) -> std::io::Result<S
     // print` reflects exactly where recordings land (issue #229).
     let output_dir_rendered = match &settings.record.output_dir {
         Some(s) => s.clone(),
-        None => crate::common::paths::cache_dir()
+        None => all_smi::common::paths::cache_dir()
             .map(|d| d.join("records").display().to_string())
             .unwrap_or_default(),
     };
@@ -244,7 +244,7 @@ pub fn render_json(settings: &Settings, show_secrets: bool) -> std::io::Result<S
     };
 
     let doc = json!({
-        "schema_version": crate::common::config_file::SUPPORTED_SCHEMA_VERSION,
+        "schema_version": all_smi::common::config_file::SUPPORTED_SCHEMA_VERSION,
         "general": {
             "default_mode": settings.general.default_mode,
             "theme": settings.general.theme,
@@ -284,7 +284,7 @@ pub fn render_json(settings: &Settings, show_secrets: bool) -> std::io::Result<S
             // lands rather than a sentinel `null`.
             "wal_path": match &settings.energy.wal_path {
                 Some(s) => s.clone(),
-                None => crate::metrics::energy_wal::resolve_wal_path(None)
+                None => all_smi::metrics::energy_wal::resolve_wal_path(None)
                     .map(|p| p.display().to_string())
                     .unwrap_or_default(),
             },
@@ -302,7 +302,7 @@ pub fn render_json(settings: &Settings, show_secrets: bool) -> std::io::Result<S
             // on-disk path so JSON consumers see where recordings land.
             "output_dir": match &settings.record.output_dir {
                 Some(s) => s.clone(),
-                None => crate::common::paths::cache_dir()
+                None => all_smi::common::paths::cache_dir()
                     .map(|d| d.join("records").display().to_string())
                     .unwrap_or_default(),
             },
@@ -325,7 +325,7 @@ pub fn render_json(settings: &Settings, show_secrets: bool) -> std::io::Result<S
 /// * `\n`, `\r`, `\t`, `\b`, `\f` (control characters with shorthand
 ///   escapes; without them the rendered file would contain raw control
 ///   bytes that most TOML parsers reject and that fail to round-trip
-///   through [`parse_toml`](crate::common::config_file::parse_toml)).
+///   through [`parse_toml`](all_smi::common::config_file::parse_toml)).
 /// * Any other `U+0000`–`U+001F` codepoint and `U+007F`, emitted as
 ///   `\u{XXXX}`. A `webhook_url` or `wal_path` set via the TOML file
 ///   could contain arbitrary bytes; without this branch the renderer
@@ -378,7 +378,7 @@ mod tests {
         s.alerts.webhook_url = "https://hooks.example/bot".to_string();
 
         let toml_str = render_toml(&s, true).unwrap();
-        let (raw, unknown) = crate::common::config_file::parse_toml(&toml_str).unwrap();
+        let (raw, unknown) = all_smi::common::config_file::parse_toml(&toml_str).unwrap();
         assert!(unknown.is_empty(), "rendered toml should be clean");
         assert_eq!(raw.api.as_ref().and_then(|a| a.port), Some(9191));
         assert_eq!(raw.alerts.as_ref().and_then(|a| a.temp_warn_c), Some(77));
@@ -444,7 +444,7 @@ mod tests {
         s.alerts.webhook_url = nasty.to_string();
 
         let toml_str = render_toml(&s, true).unwrap();
-        let (raw, unknown) = crate::common::config_file::parse_toml(&toml_str).unwrap();
+        let (raw, unknown) = all_smi::common::config_file::parse_toml(&toml_str).unwrap();
         assert!(
             unknown.is_empty(),
             "rendered toml with control chars must still parse clean, unknown: {unknown:?}"

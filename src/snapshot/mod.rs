@@ -49,7 +49,6 @@ pub use collector::{
     DefaultSnapshotCollector, SectionGate, SnapshotCollector, collect_once, collect_once_gated,
 };
 // Re-exports that form the public library surface (src/lib.rs re-exports them).
-#[allow(unused_imports)] // `SnapshotError` is library API; the binary does not name it.
 pub use options::{
     SNAPSHOT_SCHEMA_VERSION, Snapshot, SnapshotError, SnapshotHardFailure, SnapshotOptions,
 };

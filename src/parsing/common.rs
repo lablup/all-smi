@@ -18,7 +18,6 @@ use std::str::FromStr;
 
 /// Parse a number from a string after sanitizing by removing commas, underscores, and trimming.
 /// Returns None if parsing fails.
-#[allow(dead_code)] // Expanded by the exported `parse_metric!` macro; nothing in the crate expands it.
 pub fn parse_number<T: FromStr>(s: &str) -> Option<T> {
     let cleaned = s.trim().replace([',', '_'], "");
     cleaned.parse::<T>().ok()
@@ -87,7 +86,6 @@ pub fn sanitize_label_name(s: &str) -> String {
 
 /// Extract the substring that appears after the first ':' character, trimmed.
 /// Returns None if ':' is not present.
-#[allow(dead_code)] // Expanded by the exported `parse_metric!` macro; nothing in the crate expands it.
 pub fn after_colon_trimmed(line: &str) -> Option<&str> {
     line.split_once(':').map(|x| x.1).map(|s| s.trim())
 }

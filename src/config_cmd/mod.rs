@@ -25,10 +25,10 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::cli::{ConfigAction, ConfigPrintArgs, ConfigPrintFormat, ConfigValidateArgs};
-use crate::common::config_file::{self, ConfigError, escape_printable};
-use crate::common::paths;
-use crate::common::secure_write;
+use all_smi::cli::{ConfigAction, ConfigPrintArgs, ConfigPrintFormat, ConfigValidateArgs};
+use all_smi::common::config_file::{self, ConfigError, escape_printable};
+use all_smi::common::paths;
+use all_smi::common::secure_write;
 
 mod example;
 mod path;

@@ -23,7 +23,6 @@
 /// ANSI SGR sequence that selects `DarkGrey` (bright-black) as the
 /// foreground color. This is byte-for-byte equivalent to
 /// `crossterm::style::SetForegroundColor(Color::DarkGrey)`.
-#[allow(dead_code)] // Used by the `dim_ansi` binary-side path which is gated by `view/`.
 const DARK_GREY_FG: &[u8] = b"\x1b[90m";
 
 /// Rewrite `input` so that every SGR foreground color is replaced with
@@ -36,7 +35,6 @@ const DARK_GREY_FG: &[u8] = b"\x1b[90m";
 /// forms prefixed with `48;`) is passed through unchanged. Anything else
 /// — foreground colors, intensity modifiers, reset — is collapsed into a
 /// single `\x1b[90m` so the rendered output visibly loses saturation.
-#[allow(dead_code)] // Called from `view/frame_renderer.rs` which is binary-side only.
 pub fn dim_ansi(input: &str) -> String {
     let bytes = input.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());

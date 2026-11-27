@@ -471,7 +471,6 @@ impl SMC {
     ///
     /// Part of this module's public surface; discovery itself compares the
     /// undecoded codes from [`get_key_code_from_index`](Self::get_key_code_from_index).
-    #[allow(dead_code)] // macOS-only SMC API with no caller; not verifiable on a Linux build.
     pub fn get_key_from_index(&self, index: u32) -> Result<String, &'static str> {
         Ok(fourcc_to_string(self.get_key_code_from_index(index)?))
     }
@@ -1078,7 +1077,6 @@ impl SMCMetrics {
     /// [`collect_from`](Self::collect_from), or keep an [`SmcSampler`]:
     /// opening a connection costs an IOKit handshake, and key info is looked
     /// up again on every new connection.
-    #[allow(dead_code)] // Public API for library consumers; the manager uses `SmcSampler`
     pub fn collect() -> Self {
         match SMC::new() {
             Ok(mut smc) => Self::collect_from(&mut smc),

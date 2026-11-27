@@ -512,7 +512,7 @@ impl Replayer {
     /// touching disk. When it is, we read one more line (skipping
     /// metadata) and extend the cache, evicting the head to stay under
     /// `FRAME_CACHE_MAX`.
-    pub fn next(&mut self) -> Result<Option<&ReplayFrame>, ReplayError> {
+    pub(crate) fn next(&mut self) -> Result<Option<&ReplayFrame>, ReplayError> {
         match self.cursor {
             Some(c) if c + 1 < self.cache.len() => {
                 self.cursor = Some(c + 1);

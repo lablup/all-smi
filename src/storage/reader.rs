@@ -39,7 +39,6 @@ use crate::utils::get_hostname;
 ///     }
 /// }
 /// ```
-#[allow(dead_code)] // Public API trait - used by library consumers
 pub trait StorageReader: Send + Sync {
     /// Get information about all detected storage devices.
     ///
@@ -82,7 +81,6 @@ pub trait StorageReader: Send + Sync {
 ///     println!("{}: {:.1}% used", storage.mount_point, usage_percent);
 /// }
 /// ```
-#[allow(dead_code)] // Public API struct - used by library consumers
 pub struct LocalStorageReader {
     hostname: String,
     disks: Mutex<DiskCache>,
@@ -92,7 +90,6 @@ impl LocalStorageReader {
     /// Create a new local storage reader.
     ///
     /// The hostname is cached at creation time to avoid repeated lookups.
-    #[allow(dead_code)] // Public API constructor - used by library consumers
     pub fn new() -> Self {
         Self {
             hostname: get_hostname(),
@@ -132,7 +129,6 @@ impl StorageReader for LocalStorageReader {
 /// let storage_info = reader.get_storage_info();
 /// println!("Found {} storage device(s)", storage_info.len());
 /// ```
-#[allow(dead_code)] // Public API factory function - used by library consumers
 pub fn create_storage_reader() -> Box<dyn StorageReader> {
     Box::new(LocalStorageReader::new())
 }

@@ -315,7 +315,7 @@ pub struct LocalCollector {
 }
 
 impl LocalCollector {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             gpu_readers: Arc::new(RwLock::new(Vec::new())),
             cpu_readers: Arc::new(RwLock::new(Vec::new())),

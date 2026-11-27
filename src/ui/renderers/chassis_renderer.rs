@@ -51,7 +51,6 @@ pub fn print_chassis_energy_row<W: Write>(
 ///
 /// Remote collection keys chassis energy by its configured endpoint rather
 /// than by the chassis hostname.
-#[allow(dead_code)] // Called by the binary-only `view` module; the lib target has none.
 pub(crate) fn print_chassis_energy_row_for_host<W: Write>(
     stdout: &mut W,
     integrator: &PowerIntegrator,

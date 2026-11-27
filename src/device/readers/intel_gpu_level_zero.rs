@@ -339,7 +339,6 @@ pub(crate) fn primary_utilization(engines: &[(&'static str, f64)]) -> Option<f64
 /// Convenience used by external diagnostics — surfaced as a `detail`
 /// entry when callers want to expose the raw enumerated engine count
 /// without invoking a full refresh.
-#[allow(dead_code)] // Library API exercised by tests/level_zero_stub.rs.
 pub fn engine_count(state: &LevelZeroState) -> usize {
     state.engine_samples.len()
 }
@@ -364,14 +363,12 @@ pub fn enumerated_pci_bdfs() -> Vec<String> {
 
 /// Convenience for diagnostics: number of power domains the L0 layer
 /// discovered for this card.
-#[allow(dead_code)] // Library API exercised by tests/level_zero_stub.rs.
 pub fn power_domain_count(state: &LevelZeroState) -> usize {
     state.power_samples.len()
 }
 
 /// Convenience for diagnostics: did the L0 layer bind this card to a
 /// device handle?
-#[allow(dead_code)] // Library API exercised by tests/level_zero_stub.rs.
 pub fn is_bound(state: &LevelZeroState) -> bool {
     state.device.is_some()
 }

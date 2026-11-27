@@ -358,6 +358,11 @@ mod tests {
     // UiEventCoordinator: TerminalClosed path
     // -----------------------------------------------------------------------
 
+    // Unix only: the test relies on `event::poll` failing when the test has no
+    // controlling terminal, which ends the reader loop and closes the channel.
+    // On Windows the runner's console makes `poll` succeed with no events, so
+    // the reader never exits and the 2-second timeout fires.
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_next_event_terminal_closed_when_channel_drops() {
         let notify = Arc::new(Notify::new());

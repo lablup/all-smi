@@ -39,14 +39,11 @@ use all_smi::snapshot::SNAPSHOT_SCHEMA_VERSION;
 use flate2::Compression;
 use flate2::write::GzEncoder;
 
-// The record & replay modules live behind the binary crate (see
-// src/main.rs). Re-declaring them here as path-style modules is
-// impractical, so these tests target the shared serializer (which IS
-// public via the library) plus a thin replayer exported through the
-// binary-crate's library reach-in. Because the binary crate re-exports
-// nothing, we instead read the resulting NDJSON bytes ourselves for the
-// write path, and we construct a Replayer via its public `open` API for
-// the read path.
+// These tests target the shared serializer, which is public in the
+// library. The record module is also reachable as the hidden
+// `all_smi::record` under the `cli` feature, but the tests stay on the
+// wire format: they read the resulting NDJSON bytes themselves rather
+// than going through the recorder's internals.
 
 /// Minimal snapshot fixture with just enough detail for replay to have
 /// something to serialize.
@@ -134,10 +131,9 @@ fn write_ndjson_zst(path: &Path, n: u64) {
     enc.finish().unwrap();
 }
 
-// The Replayer type is only reachable via the binary crate, not the
-// library. Tests that need a Replayer parse the file through a
-// minimal re-impl: use `serde_json` to walk each line and assert the
-// frame count / timestamps match what we wrote.
+// Tests here parse the file through a minimal re-impl instead of the
+// Replayer: use `serde_json` to walk each line and assert the frame
+// count / timestamps match what we wrote.
 //
 // This is deliberately lightweight: the Replayer's full behaviour
 // (cache eviction, seek fast-path) is exercised by the unit tests in

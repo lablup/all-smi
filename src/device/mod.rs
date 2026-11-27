@@ -17,7 +17,6 @@
 pub use readers::google_tpu::get_tpu_status_message;
 pub use readers::nvidia::get_nvml_status_message;
 #[doc(hidden)]
-#[allow(unused_imports)] // Library API read by tests/nvml_fd_leak_test.rs.
 pub use readers::nvml_handle::shared_nvml_present;
 #[cfg(target_os = "linux")]
 pub use readers::tenstorrent::get_tenstorrent_status_message;

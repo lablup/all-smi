@@ -595,6 +595,8 @@ level_zero = []
    required-features = ["mock"]
    ```
 
+Both binaries link the `all_smi` library instead of compiling their own copy of the module tree. `src/main.rs` declares only the `config_cmd` module and imports everything else with `use all_smi::...`; the modules only it drives (`view`, `record`, `common::cache_migration`) are compiled into the library behind the `cli` feature and hidden from the rendered docs with `#[doc(hidden)]`. `src/bin/all-smi-mock-server.rs` keeps its `mock` module local the same way.
+
 ### Platform Dependencies
 
 ```toml

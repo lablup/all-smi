@@ -31,8 +31,8 @@ use std::path::Path;
 
 use serde_json::json;
 
-use crate::cli::ConfigPathArgs;
-use crate::common::paths;
+use all_smi::cli::ConfigPathArgs;
+use all_smi::common::paths;
 
 /// Entry point for `all-smi config path`. Returns a process exit code
 /// (0 on success, 1 only on writer failure — we never produce an error
