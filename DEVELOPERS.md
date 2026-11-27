@@ -363,11 +363,11 @@ The cost is a lost signal: rustc treats every `pub` item reachable from the crat
 cargo +nightly udeps --all-targets
 
 # Review the public API surface against the previous release
-# (needs `cargo install cargo-public-api`)
+# (needs `cargo install cargo-public-api` and an installed nightly toolchain)
 cargo public-api diff latest
 ```
 
-For a module you suspect has unused items, temporarily narrow its `pub` items (or the `pub mod` declaration) to `pub(crate)` and read the `dead_code` warnings from `cargo check --all-targets`; an item that warns is used by nothing in the crate, its tests or the binary. Check the integration tests under `tests/` before deleting it, since they link against the public API. Do not add a new `allow(dead_code)` to make such a warning go away: scope it to the targets that need it (`cfg_attr(not(target_os = "linux"), allow(dead_code))`) or move the item behind `cfg(test)` when only tests use it.
+For a module you suspect has unused items, temporarily narrow its `pub` items (or the `pub mod` declaration) to `pub(crate)` and run `cargo check --all-targets`. A `dead_code` warning from the library target means no non-test code in the library uses the item; a privacy error means `src/main.rs` or an integration test under `tests/` does, and the item has to stay `pub`. Check the library test target's warnings too, since an item only unit tests call belongs behind `cfg(test)`. Do not add a new `allow(dead_code)` to make such a warning go away: scope it to the targets that need it (`cfg_attr(not(target_os = "linux"), allow(dead_code))`) or move the item behind `cfg(test)` when only tests use it.
 
 ## Configuration Architecture
 
