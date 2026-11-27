@@ -111,6 +111,9 @@ async fn transient_failure_keeps_previous_host_list() {
     assert_eq!(watcher.refresh().await, strings(&["b:9090"]).as_slice());
 }
 
+// `dirs::home_dir` reads `HOME` only on Unix; on Windows it asks the shell
+// for the profile folder, so overriding `HOME` cannot redirect `~/`.
+#[cfg(unix)]
 #[tokio::test]
 async fn tilde_prefixed_hostfile_reloads() {
     let home = tempfile::tempdir().unwrap();
