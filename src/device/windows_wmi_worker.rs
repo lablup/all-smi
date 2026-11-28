@@ -371,6 +371,13 @@ mod tests {
             ran
         });
 
+        // Park the worker in `recv` first, so the 200 ms clock below cannot
+        // run out before a slow-starting thread dequeues the job.
+        assert_eq!(
+            submit(&jobs, Duration::from_secs(10), |_: &mut u32| ()),
+            Some(())
+        );
+
         let (release_tx, release_rx) = mpsc::channel::<()>();
         let started = Instant::now();
         let answer = submit(&jobs, Duration::from_millis(200), move |ran: &mut u32| {
@@ -412,6 +419,15 @@ mod tests {
             });
             run_jobs(rx, &mut cache);
         });
+
+        // Park the worker in `recv` first (this job leaves the cache alone),
+        // so the first caller's clock cannot run out before the open starts.
+        let warm_up = submit(
+            &jobs,
+            Duration::from_secs(10),
+            |_: &mut ConnectionCache<String>| (),
+        );
+        assert_eq!(warm_up, Some(()));
 
         let first_jobs = jobs.clone();
         let first_caller = std::thread::spawn(move || {
