@@ -1072,6 +1072,8 @@ mod tests {
     /// a label every NeuronCore started a fresh `all_smi_gpu_info` series on
     /// each scrape, even with the device completely idle. This renders two
     /// polls through the real exporter and pins the label set.
+    // Renders through the Prometheus exporter, which only exists with `cli`.
+    #[cfg(feature = "cli")]
     #[test]
     fn the_raw_power_line_never_moves_the_neuron_identity_label_set() {
         use crate::api::metrics::MetricExporter;

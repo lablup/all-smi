@@ -21,6 +21,8 @@
 //! the first. This file holds a single test so no other test thread
 //! allocates while it counts.
 
+#![cfg(feature = "cli")]
+
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
 

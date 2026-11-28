@@ -22,6 +22,8 @@
 //! trip. If the exporter changes metric names, label ordering, or the
 //! numeric encoding, update these strings in lockstep with that change.
 
+#![cfg(feature = "cli")]
+
 use all_smi::device::NvLinkRemoteType;
 use all_smi::network::metrics_parser::MetricsParser;
 use regex::Regex;

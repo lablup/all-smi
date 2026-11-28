@@ -38,6 +38,8 @@
 //! PERF_TICKS=30 cargo test --release --test perf_tick_stages -- --ignored --nocapture
 //! ```
 
+#![cfg(feature = "cli")]
+
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 

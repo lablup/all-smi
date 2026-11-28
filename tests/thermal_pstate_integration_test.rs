@@ -21,6 +21,8 @@
 //! exporter changes metric names or label ordering, update these strings in
 //! lockstep.
 
+#![cfg(feature = "cli")]
+
 use all_smi::network::metrics_parser::MetricsParser;
 use regex::Regex;
 

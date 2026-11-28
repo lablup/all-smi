@@ -16,6 +16,7 @@
 //! ASUS ProArt P14 (RTX Spark N1X, driver 616.62).
 
 use super::*;
+#[cfg(feature = "cli")]
 use crate::metrics::gpu_readings::mean_utilization;
 use std::collections::HashMap;
 
@@ -259,9 +260,13 @@ fn folded_dla_fills_the_gpu_row_and_keeps_mean_utilization() {
 
     // The idle NPU used to be a second row averaging 0 % into the mean,
     // halving the GPU's 8 %. Folded, there is one row and the mean is 8 %.
-    let rows = vec![gpu];
-    assert_eq!(rows.len(), 1);
-    assert_eq!(mean_utilization(&rows), Some(8.0));
+    // `mean_utilization` lives in the cli-only `metrics` module.
+    #[cfg(feature = "cli")]
+    {
+        let rows = vec![gpu];
+        assert_eq!(rows.len(), 1);
+        assert_eq!(mean_utilization(&rows), Some(8.0));
+    }
 }
 
 #[test]

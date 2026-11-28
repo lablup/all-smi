@@ -22,6 +22,8 @@
 //! shelling out to the compiled binary so they stay fast and avoid
 //! spawning a child process for each assertion.
 
+#![cfg(feature = "cli")]
+
 use all_smi::cli::{build_command_with_runtime_help, config_help_block};
 use all_smi::common::paths;
 

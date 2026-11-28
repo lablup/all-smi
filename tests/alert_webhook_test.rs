@@ -20,6 +20,8 @@
 //! which keeps the test dependency-free beyond the existing `tokio` +
 //! `serde_json` set.
 
+#![cfg(feature = "cli")]
+
 use std::time::Duration;
 
 use all_smi::network::webhook::{enqueue, spawn_webhook_worker};

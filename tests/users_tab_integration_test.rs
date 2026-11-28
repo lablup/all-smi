@@ -22,6 +22,8 @@
 //! in isolation (every unit test passes) but the wire format changes
 //! break integration.
 
+#![cfg(feature = "cli")]
+
 use all_smi::api::metrics::MetricExporter;
 use all_smi::api::metrics::process::ProcessMetricExporter;
 use all_smi::device::ProcessInfo;

@@ -20,6 +20,8 @@
 //! itself is covered by the unit tests inside
 //! `src/network/ssh_client.rs`.
 
+#![cfg(feature = "cli")]
+
 use all_smi::app_state::ConnectionStatus;
 use all_smi::network::nvidia_smi_shim::parse_nvidia_smi_csv;
 use all_smi::network::rocm_smi_shim::parse_rocm_smi_json;
