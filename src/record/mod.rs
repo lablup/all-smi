@@ -196,8 +196,23 @@ impl RecorderOptions {
     }
 }
 
+/// Shortest interval the recorder ticks at. The CLI path already clamps
+/// `--interval` to whole seconds of at least one, but [`RecorderOptions`]
+/// has public fields, and a directly constructed zero interval would keep
+/// every tick target at `start` and spin the loop (issue #530).
+const MIN_INTERVAL: Duration = Duration::from_millis(100);
+
+/// The interval the recorder actually uses: `interval`, raised to
+/// [`MIN_INTERVAL`] when shorter.
+fn effective_interval(interval: Duration) -> Duration {
+    interval.max(MIN_INTERVAL)
+}
+
 /// Entry point for the `record` subcommand.
-pub async fn run(opts: RecorderOptions) -> Result<()> {
+pub async fn run(mut opts: RecorderOptions) -> Result<()> {
+    // Normalize before anything reads it, so the header's `interval_ms`
+    // reports the cadence the loop really runs at.
+    opts.interval = effective_interval(opts.interval);
     let stop = Arc::new(StopSignal::default());
     install_signal_handlers(stop.clone());
 
@@ -609,6 +624,56 @@ mod tests {
         let before = tokio::time::Instant::now();
         sleep_until_or_stopped(before + Duration::from_secs(10), &stop).await;
         assert_eq!(before.elapsed(), Duration::ZERO);
+    }
+
+    /// Issue #530: a zero interval is raised to the minimum at the point
+    /// of use, and longer intervals pass through unchanged.
+    #[test]
+    fn a_zero_interval_is_raised_to_the_minimum() {
+        assert_eq!(effective_interval(Duration::ZERO), MIN_INTERVAL);
+        assert_eq!(effective_interval(Duration::from_nanos(1)), MIN_INTERVAL);
+        assert_eq!(
+            effective_interval(Duration::from_millis(300)),
+            Duration::from_millis(300)
+        );
+        assert_eq!(
+            effective_interval(Duration::from_secs(3)),
+            Duration::from_secs(3)
+        );
+    }
+
+    /// With the clamped interval, consecutive tick targets advance, so
+    /// `sleep_until_next` actually sleeps instead of returning at once.
+    #[tokio::test(start_paused = true)]
+    async fn a_clamped_zero_interval_still_advances_the_tick() {
+        let opts = RecorderOptions {
+            output: PathBuf::from("unused.ndjson"),
+            interval: effective_interval(Duration::ZERO),
+            duration: None,
+            source: RecordSource::Local,
+            hosts: Vec::new(),
+            hostfile: None,
+            includes: SnapshotIncludes {
+                gpu: true,
+                cpu: false,
+                memory: false,
+                chassis: false,
+                process: false,
+                storage: false,
+            },
+            max_size: 0,
+            max_files: 1,
+            codec: Codec::Plain,
+        };
+        let stop = Arc::new(StopSignal::default());
+        let start = std::time::Instant::now();
+        let before = tokio::time::Instant::now();
+        sleep_until_next(&opts, start, 3, &stop).await;
+        assert!(
+            before.elapsed() >= MIN_INTERVAL * 2,
+            "{:?}",
+            before.elapsed()
+        );
     }
 
     #[test]
