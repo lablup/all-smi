@@ -164,6 +164,20 @@ mod worker {
     pub const OPEN_HARDWARE_MONITOR: &str = "root\\OpenHardwareMonitor";
 
     /// How long [`with_wmi`] waits for the worker to answer.
+    ///
+    /// The wait starts when the job is queued, so it also covers time spent
+    /// behind earlier jobs and, for the first job of a namespace, the cold
+    /// open of its connection (COM initialisation plus connect, usually well
+    /// under a second, several seconds on a heavily loaded host). The first
+    /// reading gets no extra allowance; that is a deliberate choice (issue
+    /// #530). A job is only cancelled while it is still queued, so a caller
+    /// that gives up during the cold open loses that one reading while the
+    /// worker finishes the open and caches the connection for the next call
+    /// (covered by `a_caller_timing_out_during_a_cold_open_still_caches_it`).
+    /// The readers retry a missed static probe on their own schedule
+    /// (`PROCESSOR_INFO_RETRY`, `CONTROLLER_RETRY`). A longer first-use
+    /// budget would instead stretch the first collection tick by the same
+    /// amount whenever the provider is wedged at startup.
     pub const REPLY_TIMEOUT: Duration = Duration::from_secs(5);
 
     /// The worker's connections, one per namespace.
@@ -343,15 +357,132 @@ mod tests {
         assert_eq!(calls.get(), 2, "a failure is not cached");
     }
 
+    /// A job that outlives its caller's timeout answers `None` promptly
+    /// instead of blocking the caller for as long as the job runs. It runs
+    /// on a private worker, so it never delays jobs on the shared one.
+    #[test]
+    fn a_hung_job_returns_none_after_the_timeout() {
+        use std::time::Instant;
+
+        let (jobs, rx) = mpsc::channel::<CancellableJob<u32>>();
+        let worker = std::thread::spawn(move || {
+            let mut ran = 0;
+            run_jobs(rx, &mut ran);
+            ran
+        });
+
+        // Park the worker in `recv` first, so the 200 ms clock below cannot
+        // run out before a slow-starting thread dequeues the job.
+        assert_eq!(
+            submit(&jobs, Duration::from_secs(10), |_: &mut u32| ()),
+            Some(())
+        );
+
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let started = Instant::now();
+        let answer = submit(&jobs, Duration::from_millis(200), move |ran: &mut u32| {
+            // Bounded: the test releases it, and a lost release ends it too.
+            let _ = release_rx.recv_timeout(Duration::from_secs(10));
+            *ran += 1;
+            1
+        });
+        let waited = started.elapsed();
+        assert_eq!(answer, None);
+        assert!(waited < Duration::from_secs(2), "waited {waited:?}");
+
+        let _ = release_tx.send(());
+        drop(jobs);
+        assert_eq!(worker.join().unwrap(), 1, "a started job runs to the end");
+    }
+
+    /// Issue #530: the first job of a namespace pays the cold open. A caller
+    /// that times out meanwhile loses only that reading: the job had already
+    /// started, so it finishes the open and the next call reuses the
+    /// connection instead of opening (and timing out) again.
+    #[test]
+    fn a_caller_timing_out_during_a_cold_open_still_caches_it() {
+        use std::sync::atomic::AtomicUsize;
+
+        const NAMESPACE: &str = "ROOT\\CIMV2";
+        let opens = Arc::new(AtomicUsize::new(0));
+        let (opening_tx, opening_rx) = mpsc::channel::<()>();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let (jobs, rx) = mpsc::channel::<CancellableJob<ConnectionCache<String>>>();
+        let counter = Arc::clone(&opens);
+        let worker = std::thread::spawn(move || {
+            let mut cache = ConnectionCache::with_factory(move |namespace: &str| {
+                counter.fetch_add(1, Ordering::Relaxed);
+                let _ = opening_tx.send(());
+                // Bounded: the test releases it, and a lost release ends it too.
+                let _ = release_rx.recv_timeout(Duration::from_secs(10));
+                Some(format!("conn:{namespace}"))
+            });
+            run_jobs(rx, &mut cache);
+        });
+
+        // Park the worker in `recv` first (this job leaves the cache alone),
+        // so the first caller's clock cannot run out before the open starts.
+        let warm_up = submit(
+            &jobs,
+            Duration::from_secs(10),
+            |_: &mut ConnectionCache<String>| (),
+        );
+        assert_eq!(warm_up, Some(()));
+
+        let first_jobs = jobs.clone();
+        let first_caller = std::thread::spawn(move || {
+            submit(
+                &first_jobs,
+                Duration::from_secs(1),
+                |cache: &mut ConnectionCache<String>| cache.get(NAMESPACE).cloned(),
+            )
+        });
+        opening_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("worker started the cold open");
+        assert_eq!(
+            first_caller.join().unwrap(),
+            None,
+            "the cold open outlasts the first caller"
+        );
+
+        release_tx.send(()).unwrap();
+        drop(release_tx);
+        let second = submit(
+            &jobs,
+            Duration::from_secs(5),
+            |cache: &mut ConnectionCache<String>| cache.get(NAMESPACE).cloned(),
+        );
+        assert_eq!(second, Some(Some(format!("conn:{NAMESPACE}"))));
+        assert_eq!(
+            opens.load(Ordering::Relaxed),
+            1,
+            "the connection was reopened"
+        );
+        drop(jobs);
+        worker.join().unwrap();
+    }
+
     /// The worker itself: one thread, one connection per namespace, shared
     /// by every caller.
+    ///
+    /// This checks sharing, not latency, so every call gets a generous
+    /// timeout: the shared worker runs jobs serially, other tests' readers
+    /// queue on it in parallel, and the first job pays the cold CIMV2 open
+    /// (issue #530). A warm-up call opens the connection before the
+    /// concurrent callers race for it.
     #[cfg(target_os = "windows")]
     #[test]
     fn calls_from_different_threads_share_one_connection() {
+        const GENEROUS: Duration = Duration::from_secs(60);
+        let warmed =
+            worker::with_wmi_timeout(GENEROUS, |connections| connections.get(CIMV2).is_some());
+        assert_eq!(warmed, Some(true), "cimv2 connection opened");
+
         let results: Vec<_> = (0..4)
             .map(|_| {
                 std::thread::spawn(|| {
-                    with_wmi(|connections| {
+                    worker::with_wmi_timeout(GENEROUS, |connections| {
                         let address = connections
                             .get(CIMV2)
                             .map(|c| std::ptr::from_ref(c) as usize);
@@ -361,22 +492,8 @@ mod tests {
             })
             .map(|handle| handle.join().unwrap().expect("worker answered"))
             .collect();
-        assert!(results[0].0.is_some(), "cimv2 connection opened");
+        assert!(results[0].0.is_some(), "cimv2 connection still cached");
         assert!(results.iter().all(|r| *r == results[0]), "{results:?}");
         assert_ne!(results[0].1, std::thread::current().id());
-    }
-
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn a_hung_job_returns_none_after_the_timeout() {
-        use std::time::{Duration, Instant};
-        let started = Instant::now();
-        let answer = worker::with_wmi_timeout(Duration::from_millis(200), |_| {
-            std::thread::sleep(Duration::from_millis(1500));
-            1
-        });
-        assert_eq!(answer, None);
-        let waited = started.elapsed();
-        assert!(waited < Duration::from_millis(1200), "waited {waited:?}");
     }
 }
