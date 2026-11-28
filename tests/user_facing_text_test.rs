@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![cfg(feature = "cli")]
+
 use all_smi::cli::build_command_with_runtime_help;
 use clap::Command;
 use regex::Regex;

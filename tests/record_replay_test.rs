@@ -29,6 +29,8 @@
 // * The replayer reads a very large stream without loading the whole
 //   file into memory (line-iterator discipline).
 
+#![cfg(feature = "cli")]
+
 use std::fs::File;
 use std::io::Write;
 use std::path::Path;

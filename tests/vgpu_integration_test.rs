@@ -18,6 +18,8 @@
 //! mirror what `api::metrics::vgpu::VgpuMetricExporter` emits) through the
 //! remote metrics parser, asserting that every field survives unchanged.
 
+#![cfg(feature = "cli")]
+
 use all_smi::prelude::*;
 use regex::Regex;
 

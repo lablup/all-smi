@@ -1188,6 +1188,11 @@ jobs:
       - name: Build library-only (no default features)
         run: cargo build --no-default-features --lib
 
+      # Keeps the library-only configuration's test suite compiling and
+      # passing; tests that need cli-only modules are gated on `cli`.
+      - name: Test library-only (no default features)
+        run: cargo test --no-default-features --lib --tests
+
       # Guards PR #519: the binary-only dependencies stay behind `cli`, so a
       # `default-features = false` consumer does not compile them. The default
       # tree must still contain them, or the check would pass vacuously.

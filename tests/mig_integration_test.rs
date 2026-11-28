@@ -20,6 +20,8 @@
 //! Using the live exporter output — rather than hand-crafted text — keeps the
 //! integration test honest whenever the exporter's label set drifts.
 
+#![cfg(feature = "cli")]
+
 use all_smi::api::metrics::MetricExporter;
 use all_smi::api::metrics::mig::MigMetricExporter;
 use all_smi::prelude::*;

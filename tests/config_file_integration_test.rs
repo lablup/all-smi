@@ -20,6 +20,8 @@
 //! The tests avoid shelling out to the compiled binary so they can run
 //! under `cargo test --lib` (no extra build step needed).
 
+#![cfg(feature = "cli")]
+
 use all_smi::common::config_file::{self, ConfigError};
 
 /// Shared mutex to serialise env-var mutation across tests. Cargo runs
